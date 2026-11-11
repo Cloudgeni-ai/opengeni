@@ -365,7 +365,10 @@ describe("app actions for a person in an embedded chat", () => {
       // route checks through a helper or inside a measured phase.
       "getUsage",
       "getWorkspaceInsights",
+      // The workspace budget is for people signed in to Opengeni; the route
+      // refuses anyone acting through another product.
       "getWorkspaceAllowance",
+      "getWorkspaceAllowanceState",
     ])
       expect(offered).not.toContain(id);
     for (const id of offered) {
@@ -378,7 +381,7 @@ describe("app actions for a person in an embedded chat", () => {
 
     // Organization-wide actions and other workspaces are refused in one step,
     // before anything runs, naming the one workspace they can use and no page.
-    const reach = `Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace (workspaceId ${workspaceId}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`;
+    const reach = `Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace (workspaceId ${workspaceId}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`;
     for (const outside of [
       { id: "listOrganizationAdministrationMembers", pathParameters: { organizationId } },
       { id: "listWorkspaces", pathParameters: {} },
@@ -409,6 +412,18 @@ describe("app actions for a person in an embedded chat", () => {
       hint: "This isn't available to this person here. Tell them plainly, without pointing them to a page.",
     });
 
+    // The workspace budget is for people signed in to Opengeni: called
+    // directly, without searching first, the route refuses it the same way.
+    for (const id of ["getWorkspaceAllowance", "getWorkspaceAllowanceState"]) {
+      const budget = JSON.parse(
+        textOf(await embedded.call({ id, pathParameters: { workspaceId }, query: {} })),
+      );
+      expect(budget, id).toMatchObject({
+        status: 403,
+        hint: "This isn't available to this person here. Tell them plainly, without pointing them to a page.",
+      });
+    }
+
     // Changes stay off from an embed, said without naming a page.
     const change = await embedded.call({
       id: "updateWorkspace",
@@ -417,7 +432,7 @@ describe("app actions for a person in an embedded chat", () => {
       body: { name: "Renamed" },
     });
     expect(textOf(change)).toBe(
-      "Nothing was run: this person uses Opengeni through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.",
+      "Nothing was run: this person uses this chat through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.",
     );
 
     // A person signed in to Opengeni itself is offered everything, as before.
@@ -471,6 +486,8 @@ describe("app actions for a person in an embedded chat", () => {
     expect(textOf(trustedElsewhere)).toBe(reach);
     const otherWorkspaceChat = await reachSessionInOtherWorkspace({
       reach: trusted.reach,
+      db,
+      here: { accountId: organizationId, workspaceId },
       workspaceId: sharedWorkspaceId,
       toolName: "session_get",
       arguments: { sessionId: crypto.randomUUID() },

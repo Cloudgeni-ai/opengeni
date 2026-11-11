@@ -23,7 +23,7 @@ import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { SpeechToTextDeployment } from "./transcription-service/deployment";
-import type { ModelCallService } from "./model-call";
+import type { ModelCallService, DecisionCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
@@ -33,11 +33,6 @@ import type {
 } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
-  triggerAutomationRun?: (input: {
-    accountId: string;
-    workspaceId: string;
-    runId: string;
-  }) => Promise<void>;
   signalUserMessage: (input: {
     sessionId: string;
     eventId: string;
@@ -114,6 +109,34 @@ export type SessionWorkflowClient = {
     deleteAfter: Date;
   }) => Promise<void>;
   /**
+   * Durably runs the step after an Archive's undo window (stopping the chat's
+   * remaining work so it can be stored) at `runAt`. Repeating one Archive is a
+   * no-op. Optional for embedded clients; without it an archived chat is
+   * stored once it goes idle on its own.
+   */
+  scheduleSessionArchive?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    archivedAt: string;
+    runAt: Date;
+  }) => Promise<void>;
+  /**
+   * Durably restores the stored content of a chat (and the sub-chats
+   * archived with it) whose restore was just requested. Repeating one
+   * request is a no-op. Optional for embedded clients; without it the
+   * maintenance pass restores them a few minutes later.
+   */
+  scheduleSessionArchiveRestore?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    /** Who restored it: the chats it brings back are resumed as them. */
+    subjectId: string;
+    requestedAt: string;
+  }) => Promise<void>;
+  /**
    * Start a recording's transcript or deletion workflow. Starting one that is
    * already running does nothing. Optional for embedded clients; the worker's
    * recovery sweep starts any it misses.
@@ -124,6 +147,17 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     recordingId: string;
     versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Tell a meeting's speakers apart while it is still being recorded. Starting
+   * it while it runs does nothing. Optional: without it the speakers are told
+   * apart only after the meeting ends, which takes longer.
+   */
+  startRecordingSpeakerScan?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
     ownerSubjectId: string;
   }) => Promise<void>;
   /**
@@ -161,6 +195,7 @@ export type ManagedEmailMessage = {
     | "password_reset"
     | "organization_user_setup"
     | "sign_in_method_changed"
+    | "billing_credit_notification"
     | "site_abuse_notice";
   from: string;
   to: string;
@@ -241,7 +276,6 @@ export type AppDependencies = {
    */
   githubAppApi?: GitHubAppApiPort;
   /** Optional provider seam for the separately registered Opengeni Lens App. */
-  prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
@@ -292,9 +326,19 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /**
+   * Injectable MCP auto-connect transport (issuer discovery and key sets,
+   * Client ID Metadata Documents, and redeeming ID-JAGs at an app), still
+   * network-policy checked. For tests.
+   */
+  mcpAutoConnectFetch?: typeof fetch;
   /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
   mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
+  /** Injectable Microsoft sign-in transport for Teams self-serve setup tests. */
+  teamsAdminSignInFetch?: typeof fetch;
+  /** Injectable calendar transport for naming meetings after calendar events, for tests. */
+  meetingCalendarFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
@@ -310,6 +354,7 @@ export type AppDependencies = {
   transcriptionSegmenter?: TranscriptionSegmenter | null;
   /** Stateless single model calls (chat completions); built from settings when omitted. */
   modelCalls?: ModelCallService | null;
+  decisions?: DecisionCallService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

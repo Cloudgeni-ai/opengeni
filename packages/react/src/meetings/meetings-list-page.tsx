@@ -42,7 +42,7 @@ import { RelativeTime } from "../ui/relative-time";
 import { StatusBadge } from "../ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
-import { RecorderPanel, useOnline } from "./recorder-panel";
+import { nothingRecording, RecorderPanel, useOnline } from "./recorder-panel";
 import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
 
@@ -316,7 +316,18 @@ function MeetingsListPageContent({
                     leading={<LogoTile icon={<AudioLinesIcon />} />}
                     title={meetingTitle(recording, msg)}
                     titleAddon={
-                      recording.visibility === "private" ? (
+                      recording.sourceWorkspace ? (
+                        // The person's own Only me meeting, stored in another
+                        // workspace of the organization: say which.
+                        <MetaChip icon={<LockIcon />}>
+                          <span className="sr-only">
+                            {msg("meetings.listPage.onlyMeRecordedIn", {
+                              workspace: recording.sourceWorkspace.name,
+                            })}
+                          </span>
+                          <span aria-hidden="true">{recording.sourceWorkspace.name}</span>
+                        </MetaChip>
+                      ) : recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
                           <span className={narrow ? "sr-only" : undefined}>
                             {msg("meetings.listPage.onlyMe")}
@@ -329,6 +340,11 @@ function MeetingsListPageContent({
                         here === "paused" ? (
                           <StatusBadge variant="dot" tone="neutral">
                             {msg("meetings.recorderPanel.paused")}
+                          </StatusBadge>
+                        ) : recorder && nothingRecording(recorder) ? (
+                          // Every source went away: the clock runs, but nothing is heard.
+                          <StatusBadge variant="dot" tone="attention">
+                            {msg("meetings.recorderPanel.notRecording")}
                           </StatusBadge>
                         ) : (
                           <StatusBadge variant="dot" tone="danger" pulse>

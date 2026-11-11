@@ -197,6 +197,8 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
         }) as never,
     });
     const observed: number[] = [];
+    let streamRecoveries = 0;
+    const stopStream = bus.getOpStreamConnection!().subscribeReconnect!(() => streamRecoveries++);
     const capability = requireSessionEventDurableFanoutCapability(bus);
     expect(capability.version).toBe(SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION);
     const unsubscribe = capability.subscribeRecovery((generation) => observed.push(generation));
@@ -204,16 +206,20 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
     statuses.push("disconnect");
     await Bun.sleep(0);
     expect(observed).toEqual([]);
+    expect(streamRecoveries).toBe(0);
 
     statuses.push("reconnect");
     statuses.push("reconnect");
     await waitFor(() => observed.length === 2);
     expect(observed).toEqual([1, 2]);
+    expect(streamRecoveries).toBe(2);
 
     unsubscribe();
+    stopStream();
     statuses.push("reconnect");
     await Bun.sleep(0);
     expect(observed).toEqual([1, 2]);
+    expect(streamRecoveries).toBe(2);
     await bus.close();
   });
 

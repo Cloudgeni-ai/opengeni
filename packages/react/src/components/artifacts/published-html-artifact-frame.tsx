@@ -1,6 +1,10 @@
 import {
   SiteBridgeHost,
   injectSiteBridgeBootstrap,
+  openGeniSiteLocationHref,
+  resolveOpenGeniSiteLocation,
+  type OpenGeniSiteLocationValue,
+  type SiteBridgeLocationHandlers,
   type SiteBridgeToolHandlers,
   type SiteBridgeViewerHandlers,
 } from "@opengeni/sdk/site-bridge-host";
@@ -54,6 +58,18 @@ export type PublishedHtmlArtifactFrameProps = {
    * the default resolves `{ started: false }`.
    */
   onSignIn?: () => Promise<OpenGeniSiteSignInResult> | OpenGeniSiteSignInResult;
+  /**
+   * The Site's own address in this page (`/admin?tab=2#top`), answered to
+   * `site.location`; defaults to `/`. Changing it moves the Site there (the
+   * Site hears it through `site.onLocationChange`) without reloading it.
+   */
+  location?: string;
+  /**
+   * The Site moved itself with `site.navigate`: a host that keeps the
+   * address (for example in its own URL) stores `href` and passes it back as
+   * `location`. `replace` asks not to add a history entry.
+   */
+  onLocationChange?: (href: string, options: { replace: boolean }) => void;
 };
 
 /** Host handlers for Site tools and the Site HTTP channel (see `@opengeni/sdk/site-bridge-host`). */
@@ -62,6 +78,13 @@ export type PublishedHtmlArtifactToolBridge = SiteBridgeToolHandlers;
 export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: boolean): string {
   if (!toolBridgeEnabled) return html;
   return injectSiteBridgeBootstrap(resolveSiteClientScript(html));
+}
+
+const SITE_ROOT: OpenGeniSiteLocationValue = { path: "/", search: "", hash: "" };
+
+/** A host-kept Site address as a location; anything unusable is the Site's root. */
+export function siteFrameLocation(href: string | undefined): OpenGeniSiteLocationValue {
+  return (href ? resolveOpenGeniSiteLocation(SITE_ROOT, href) : null) ?? SITE_ROOT;
 }
 
 /**
@@ -99,6 +122,9 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   }, [props.theme]);
   const bridgeRef = useRef(props.toolBridge);
   const viewerRef = useRef(siteViewerHandlers(props.viewer, props.onSignIn));
+  const hostRef = useRef<SiteBridgeHost | null>(null);
+  const locationRef = useRef(siteFrameLocation(props.location));
+  const onLocationChangeRef = useRef(props.onLocationChange);
   const onFrameLoadRef = useRef<() => void>(() => undefined);
   const frameLoadPendingRef = useRef(false);
   // The bridge (and its bootstrap script) exists only when the host offers
@@ -111,11 +137,32 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     viewerRef.current = siteViewerHandlers(props.viewer, props.onSignIn);
   }, [props.viewer, props.onSignIn]);
   useEffect(() => {
+    onLocationChangeRef.current = props.onLocationChange;
+  }, [props.onLocationChange]);
+  // The host moved the Site (its Back/Forward, a link): tell the Site.
+  useEffect(() => {
+    const next = siteFrameLocation(props.location);
+    if (openGeniSiteLocationHref(next) === openGeniSiteLocationHref(locationRef.current)) return;
+    locationRef.current = next;
+    hostRef.current?.notifyLocation(next);
+  }, [props.location]);
+  const locationHandlers = useRef<SiteBridgeLocationHandlers>({
+    get: () => locationRef.current,
+    navigate: (to, { replace }) => {
+      locationRef.current = to;
+      hostRef.current?.notifyLocation(to);
+      onLocationChangeRef.current?.(openGeniSiteLocationHref(to), { replace });
+      return to;
+    },
+  }).current;
+  useEffect(() => {
     if (!toolBridgeEnabled || typeof window === "undefined") return;
     const host = new SiteBridgeHost({
       tools: () => bridgeRef.current,
       viewer: () => viewerRef.current,
+      location: () => locationHandlers,
     });
+    hostRef.current = host;
     const onFrameLoad = () => {
       frameLoadPendingRef.current = false;
       const frameWindow = frameRef.current?.contentWindow ?? null;
@@ -129,9 +176,10 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     }
     return () => {
       onFrameLoadRef.current = () => undefined;
+      if (hostRef.current === host) hostRef.current = null;
       host.close();
     };
-  }, [props.html, toolBridgeEnabled]);
+  }, [props.html, toolBridgeEnabled, locationHandlers]);
   return (
     <iframe
       ref={frameRef}

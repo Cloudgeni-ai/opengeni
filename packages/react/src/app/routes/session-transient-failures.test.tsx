@@ -6,7 +6,7 @@
    Definitive errors stay exactly as visible as before.
    -------------------------------------------------------------------------- */
 import { describe, expect, mock, test } from "bun:test";
-import { OpenGeniApiError, type AccessContext, type Session } from "@opengeni/sdk";
+import { OpenGeniApiError, type AccessContext, type ChatSession as Session } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import * as SonnerPackage from "sonner";
 

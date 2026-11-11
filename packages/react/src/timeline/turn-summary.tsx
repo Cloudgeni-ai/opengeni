@@ -25,11 +25,15 @@ import {
   resolveTurnSummaryFacets,
   selectTurnSummaryFacets,
   turnSummaryFallbackLabel,
+  turnSummaryLiveMarkState,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryOptions,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "../components/load-failure-notice";
 import { ShimmerText } from "./shimmer-text";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
@@ -39,6 +43,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryStatus,
 } from "./turn-summary-model";
@@ -131,6 +136,8 @@ export type TurnSummaryProps = {
    * marker and the duration facet; a settled `worked` row reads as a separator.
    */
   status?: TurnSummaryStatus | undefined;
+  /** The host's mark at the leading edge of a live status row (`TurnSummaryOptions.renderLiveMark`). */
+  renderLiveMark?: TurnSummaryOptions["renderLiveMark"];
   /**
    * False when the fold has nothing to reveal: the row renders without a
    * chevron and is not a disclosure control. Defaults to true.
@@ -164,6 +171,7 @@ export function TurnSummary({
   copyText,
   contextCompactionCount,
   status,
+  renderLiveMark,
   expandable = true,
   unloadedSteps,
   onOpenStateChange,
@@ -377,6 +385,9 @@ export function TurnSummary({
   // The chip names the failure (the projection already replaced diagnostic
   // text with its outcome); recorded technical text stays a hover title.
   const failure = outcome === "failed" ? failureText?.trim() || null : null;
+  // A failure shown elsewhere (the host's failed banner, or the step that
+  // failed) keeps only this quiet status on the turn's row.
+  const failedQuietly = outcome === "failed" && !failure && !bare;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -389,6 +400,7 @@ export function TurnSummary({
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
   const statusLine = status ? turnSummaryStatusLine(t, status) : null;
+  const liveMarkState = renderLiveMark ? turnSummaryLiveMarkState(status) : null;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.
@@ -446,6 +458,16 @@ export function TurnSummary({
       ) : (
         <span aria-hidden className="size-3.5 shrink-0" />
       )}
+      {/* The host's own mark leads the live row; decorative, the words say it. */}
+      {renderLiveMark && liveMarkState ? (
+        <span
+          aria-hidden
+          data-og-live-mark={liveMarkState.kind}
+          className="inline-flex h-5 shrink-0 items-center"
+        >
+          {renderLiveMark(liveMarkState)}
+        </span>
+      ) : null}
       {/* Completion is the quiet default and needs no repeated glyph. Failed,
       cancelled, and still-running folds retain a visible state marker. */}
       {status || outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
@@ -475,7 +497,11 @@ export function TurnSummary({
         {statusLine}
         {liveHeader && !open && !status
           ? liveHeader
-          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+          : !statusLine &&
+              facets.length === 0 &&
+              !failure &&
+              !failedQuietly &&
+              outcome !== "cancelled"
             ? turnSummaryFallbackLabel(t, context.items, unloadedSteps)
             : facets.map(({ facet, result }, index) => (
                 <FacetRenderBoundary key={facet.id}>
@@ -496,6 +522,12 @@ export function TurnSummary({
           <span className="text-og-status-failed" title={failureDetail}>
             {" "}
             · {failure}
+          </span>
+        ) : null}
+        {failedQuietly ? (
+          <span className="text-og-status-failed">
+            {statusLine || facets.length > 0 ? " · " : null}
+            {t("timeline.turnSummary.failed")}
           </span>
         ) : null}
         {outcome === "cancelled" ? (
@@ -595,8 +627,9 @@ export function TurnSummary({
 }
 
 /**
- * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", or "Worked for 4m 10s";
- * null when a settled span is too short to state.
+ * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", "Paused · 2m 14s" (its
+ * clock stopped), or "Worked for 4m 10s"; null when a settled span is too
+ * short to state.
  */
 function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): ReactNode {
   if (status.kind === "worked") {
@@ -607,6 +640,18 @@ function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): Reac
         {status.label ?? t("timeline.turnSummary.workedFor")} {formatElapsed(t, status.durationMs)}
       </span>
     ) : null;
+  }
+  if (status.kind === "paused") {
+    return (
+      <span data-og-exchange-status="paused">
+        {status.label ?? t("timeline.turnSummary.paused")}
+        {status.durationMs !== undefined &&
+        Number.isFinite(status.durationMs) &&
+        status.durationMs >= 1000 ? (
+          <span className="tabular-nums">{` · ${formatElapsed(t, status.durationMs)}`}</span>
+        ) : null}
+      </span>
+    );
   }
   const label =
     status.label ??
@@ -636,14 +681,19 @@ function LiveElapsed({ since }: { since: string }) {
   );
 }
 
-class FacetRenderBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
+class FacetRenderBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean; notLoaded: boolean }
+> {
+  state = { failed: false, notLoaded: false };
 
-  static getDerivedStateFromError(): { failed: boolean } {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): { failed: boolean; notLoaded: boolean } {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   render(): ReactNode {
-    return this.state.failed ? null : this.props.children;
+    if (!this.state.failed) return this.props.children;
+    // A facet that can't render is left out; one whose code didn't download says so.
+    return this.state.notLoaded ? <LoadFailureNotice /> : null;
   }
 }

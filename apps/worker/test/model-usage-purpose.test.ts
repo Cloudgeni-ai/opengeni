@@ -39,6 +39,7 @@ const SETTLED_PAYLOAD_KEYS = [
   "outputTokens",
   "pricedCostMicros",
   "pricingSource",
+  "processingResidency",
   "provider",
   "providerApi",
   "purpose",
@@ -189,7 +190,12 @@ test("main, compaction and session-title usage each record their purpose on the 
   });
 
   expect([main, compaction, title]).toEqual([
-    { status: "processed", sourceKey: "msg_main", authoritative: true, usageReported: true },
+    {
+      status: "processed",
+      sourceKey: "msg_main",
+      authoritative: true,
+      usageReported: true,
+    },
     { status: "processed", sourceKey: "dispatch-A:compaction-1", authoritative: true },
     { status: "processed", sourceKey: "dispatch-A:session-title-1", authoritative: true },
   ]);

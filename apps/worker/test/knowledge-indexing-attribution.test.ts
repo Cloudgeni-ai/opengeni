@@ -8,6 +8,7 @@ const debit = mock(async (_db: unknown, _input: unknown) => undefined);
 const preflight = mock(async (_db: unknown, _input: unknown) => refusal);
 const defer = mock(async () => undefined);
 const embed = mock(async () => [[1, 0, 0]]);
+const spendable = mock(async (..._args: unknown[]) => ({ balanceMicros: 100 }));
 
 // mock.module is process-wide and survives mock.restore(). Each replacement
 // below is active only while this file runs; afterwards, later files in the
@@ -25,6 +26,7 @@ function scoped(real: Record<string, unknown>, fakes: Record<string, unknown>) {
   }
   return replacements;
 }
+let embeddingRouteAllowed = true;
 const realCore: Record<string, unknown> = { ...(await import("@opengeni/core")) };
 const realDocuments: Record<string, unknown> = { ...(await import("@opengeni/documents")) };
 const realDb: Record<string, unknown> = { ...(await import("@opengeni/db")) };
@@ -33,6 +35,8 @@ mock.module("@opengeni/core", () =>
     paidDocumentEmbedding: () => true,
     documentEmbeddingCostMicros: () => 20,
     workspaceCreditsDisabled: async () => false,
+    // EU-only inference: the embedding route may run unless a test says not.
+    sideFeatureAllowedForWorkspace: async () => embeddingRouteAllowed,
   }),
 );
 mock.module("@opengeni/documents", () =>
@@ -67,7 +71,15 @@ mock.module("@opengeni/db", () =>
       mode: "credits",
       rateMicrosPerMillionBytes: 1,
     }),
-    getSpendableCreditBalance: async () => ({ balanceMicros: 100 }),
+    getSpendableCreditBalance: spendable,
+    // The billing record's own origin; the real one reads a turn's in PostgreSQL.
+    billingOriginForAttribution: async (
+      _db: unknown,
+      input: { attribution?: CreditDebitAttribution | null },
+    ) =>
+      input.attribution && input.attribution.kind !== "unknown"
+        ? (input.attribution.billingOrigin ?? "app")
+        : "app",
     checkWorkspaceAllowance: preflight,
     guardPaidKnowledgeIndexPublication: async () => "published",
     appendKnowledgeIndexChunks: async () => ({ status: "running" }),
@@ -139,6 +151,15 @@ test("index debit/preflight reuse claimed frozen initiator, never the async work
   }
 });
 
+test("a document added with an API key is indexed on credits", async () => {
+  attribution = { kind: "service", billingOrigin: "api" };
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(spendable.mock.calls.at(-1)?.[5]).toBe("api");
+  attribution = { kind: "human", initiatingHumanSubjectId: "human:root" };
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(spendable.mock.calls.at(-1)?.[5]).toBe("app");
+});
+
 test("unknown attribution and exhausted allowance defer before paid provider use", async () => {
   const calls = embed.mock.calls.length;
   const debits = debit.mock.calls.length;
@@ -154,4 +175,20 @@ test("unknown attribution and exhausted allowance defer before paid provider use
   } finally {
     refusal = null;
   }
+});
+
+test("an EU-only workspace without an EU embedding route defers before any text is sent", async () => {
+  const calls = embed.mock.calls.length;
+  const debits = debit.mock.calls.length;
+  attribution = { kind: "human", initiatingHumanSubjectId: "human:root" };
+  embeddingRouteAllowed = false;
+  try {
+    expect((await worker().indexKnowledge()).deferred).toBe(1);
+    expect(embed.mock.calls.length).toBe(calls);
+    expect(debit.mock.calls.length).toBe(debits);
+  } finally {
+    embeddingRouteAllowed = true;
+  }
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(embed.mock.calls.length).toBe(calls + 1);
 });

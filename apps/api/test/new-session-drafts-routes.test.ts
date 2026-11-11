@@ -17,12 +17,17 @@ const realCore = await import("@opengeni/core");
 const realCoreFns = {
   getActorNewSessionDraft: realCore.getActorNewSessionDraft,
   resolveWorkspaceCatalogSettings: realCore.resolveWorkspaceCatalogSettings,
+  resolveMemberExecutionDefault: realCore.resolveMemberExecutionDefault,
   saveActorNewSessionDraft: realCore.saveActorNewSessionDraft,
 };
 let lastGetGrant: AccessGrant | null = null;
 let lastSaveGrant: AccessGrant | null = null;
 let lastSaveInput: Record<string, unknown> | null = null;
 let rejectSave = false;
+let memberDefault: Awaited<ReturnType<typeof realCore.resolveMemberExecutionDefault>> = {
+  target: null,
+  usable: false,
+};
 
 mock.module("@opengeni/core", () => ({
   ...realCore,
@@ -40,6 +45,16 @@ mock.module("@opengeni/core", () => ({
       version: null,
       modelNotes: {},
     };
+  },
+  resolveMemberExecutionDefault: async (
+    db: Parameters<typeof realCore.resolveMemberExecutionDefault>[0],
+    settings: Parameters<typeof realCore.resolveMemberExecutionDefault>[1],
+    access: Parameters<typeof realCore.resolveMemberExecutionDefault>[2],
+  ) => {
+    if (db !== fakeDb || access.workspaceId !== workspaceId) {
+      return await realCoreFns.resolveMemberExecutionDefault(db, settings, access);
+    }
+    return memberDefault;
   },
   getActorNewSessionDraft: async (
     deps: Parameters<typeof realCore.getActorNewSessionDraft>[0],
@@ -116,6 +131,7 @@ beforeEach(() => {
   lastSaveGrant = null;
   lastSaveInput = null;
   rejectSave = false;
+  memberDefault = { target: null, usable: false };
 });
 
 async function bearer(permissions: string[]) {
@@ -170,6 +186,23 @@ describe("new-session draft routes", () => {
       { headers: { authorization: await bearer(["sessions:create"]) } },
     );
     expect(forbidden.status).toBe(403);
+  });
+
+  test("GET shows the caller's own default only while it is usable", async () => {
+    memberDefault = { target: { kind: "managed" }, usable: true };
+    const usable = await app().request(`http://x/v1/workspaces/${workspaceId}/new-session-draft`, {
+      headers: { authorization: await bearer(["sessions:read"]) },
+    });
+    expect(usable.status).toBe(200);
+    expect((await usable.json()).memberDefaultExecutionTarget).toEqual({ kind: "managed" });
+
+    memberDefault = { target: { kind: "managed" }, usable: false };
+    const unusable = await app().request(
+      `http://x/v1/workspaces/${workspaceId}/new-session-draft`,
+      { headers: { authorization: await bearer(["sessions:read"]) } },
+    );
+    expect(unusable.status).toBe(200);
+    expect(await unusable.json()).not.toHaveProperty("memberDefaultExecutionTarget");
   });
 
   test("PUT requires create permission and cannot accept a request actor override", async () => {

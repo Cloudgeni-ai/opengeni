@@ -1,10 +1,7 @@
 /**
  * The v2 accepted-authority writer at acceptance (M3 PR 2a, inventory
- * EP-T11..T15), for one provider on the shared core. Inert until the
- * account's cutover for that provider is enabled: the database function
- * returns NULL and the turn keeps no v2 value, so v1 stays authoritative.
- * With the cutover enabled it returns the immutable v2 value to freeze on the
- * accepted turn:
+ * EP-T11..T15), for one provider on the shared core. It returns the
+ * immutable v2 value to freeze on the accepted turn:
  *
  * - a personal entry for the provider only for exact owner-caused acceptance
  *   (the authenticated request subject, or the session's frozen creator in
@@ -29,30 +26,6 @@ import {
   subscriptionCoreProvider,
   subscriptionCoreProviderIds,
 } from "./subscription-core-providers";
-import { readSubscriptionProviderCutoverState } from "./subscription-core-repository";
-
-/**
- * Acceptance runs on every prompt, including against databases whose ledger
- * predates the shared subscription core (historical migration fixtures stage
- * old schemas and still accept prompts) or predates the writer itself (an
- * enabled cutover row cannot make acceptance call a routine that is not
- * there yet). Without the writer routine nothing is written, so v1 stays
- * authoritative. The presence is checked on the accepting connection every
- * time: a process can hold connections to databases at different ledger
- * positions (the test runner does), so a process-wide positive cache would
- * let an older database read a relation it does not have. The routine's
- * migration comes after the cutover relation's, so its presence also proves
- * the relation.
- */
-async function acceptanceWriterPresent(tx: Database): Promise<boolean> {
-  const [row] = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regprocedure(
-        'opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)'
-      ) is not null as present`,
-  );
-  return row?.present === true;
-}
 
 export async function subscriptionAuthorityV2ForAcceptanceInTransaction(
   tx: Database,
@@ -66,9 +39,6 @@ export async function subscriptionAuthorityV2ForAcceptanceInTransaction(
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
   subscriptionCoreProvider(provider);
-  // The common case (no enabled cutover) writes nothing and never
-  // reaches the database routine; it rechecks the gate itself.
-  if (!(await acceptanceWriterPresent(tx))) return null;
   return await providerAuthorityV2ForAcceptance(tx, provider, input);
 }
 
@@ -77,11 +47,6 @@ async function providerAuthorityV2ForAcceptance(
   provider: ProviderId,
   input: Parameters<typeof subscriptionAuthorityV2ForAcceptanceInTransaction>[2],
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  const cutover = await readSubscriptionProviderCutoverState(tx, {
-    accountId: input.accountId,
-    provider,
-  });
-  if (cutover !== "enabled") return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
     sql`select opengeni_private.subscription_core_acceptance_authority_v2(${provider},
@@ -114,52 +79,19 @@ function mergedAuthorityV2(
 
 /**
  * The v2 value a new acceptance freezes, for every provider on the shared
- * core: each registered provider's entry (its own cutover gate, owner and
- * generation rules), merged into the one value the carrier stores. A
- * provider whose cutover is not enabled for the account contributes nothing;
- * `null` when none does (v1 stays authoritative).
+ * core: each registered provider's entry (its own owner and generation
+ * rules), merged into the one value the carrier stores; `null` when no
+ * provider wrote one.
  */
 export async function coreSubscriptionAuthorityV2ForAcceptanceInTransaction(
   tx: Database,
   input: Parameters<typeof subscriptionAuthorityV2ForAcceptanceInTransaction>[2],
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  if (!(await acceptanceWriterPresent(tx))) return null;
   const values: (SubscriptionPersonalAuthorityV2 | null)[] = [];
   for (const provider of subscriptionCoreProviderIds()) {
     values.push(await providerAuthorityV2ForAcceptance(tx, provider as ProviderId, input));
   }
   return mergedAuthorityV2(values);
-}
-
-/** Whether any registered provider's accepted work carries v2 in this organization. */
-export async function coreSubscriptionAuthorityV2ActiveInTransaction(
-  tx: Database,
-  accountId: string,
-): Promise<boolean> {
-  if (!(await acceptanceWriterPresent(tx))) return false;
-  for (const provider of subscriptionCoreProviderIds()) {
-    const cutover = await readSubscriptionProviderCutoverState(tx, {
-      accountId,
-      provider: provider as ProviderId,
-    });
-    if (cutover === "enabled") return true;
-  }
-  return false;
-}
-
-/**
- * A derived carrier's value: its source's frozen value verbatim (every
- * provider's entries), or the empty value once any provider's v2 is active.
- */
-export async function coreSubscriptionAuthorityV2OrEmptyInTransaction(
-  tx: Database,
-  accountId: string,
-  frozen: SubscriptionPersonalAuthorityV2 | null | undefined,
-): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  if (frozen !== null && frozen !== undefined) return frozen;
-  return (await coreSubscriptionAuthorityV2ActiveInTransaction(tx, accountId))
-    ? EMPTY_SUBSCRIPTION_AUTHORITY_V2
-    : null;
 }
 
 /** The v2 value that grants no personal authority (shared capacity only). */
@@ -169,43 +101,20 @@ export const EMPTY_SUBSCRIPTION_AUTHORITY_V2: SubscriptionPersonalAuthorityV2 = 
 }) as SubscriptionPersonalAuthorityV2;
 
 /**
- * Whether accepted work in this organization carries a v2 value for the
- * provider: the
- * acceptance writer exists and the cutover is enabled. Carriers write nothing
- * otherwise (v1 stays authoritative).
+ * A carrier's frozen value verbatim (every provider's entries), or the empty
+ * value when it froze none: a missing value never widens to personal
+ * authority.
  */
-export async function subscriptionAuthorityV2ActiveInTransaction(
-  tx: Database,
-  provider: ProviderId,
-  accountId: string,
-): Promise<boolean> {
-  subscriptionCoreProvider(provider);
-  if (!(await acceptanceWriterPresent(tx))) return false;
-  return (await readSubscriptionProviderCutoverState(tx, { accountId, provider })) === "enabled";
-}
-
-/**
- * A carrier's frozen value, or (once the cutover is active) the empty value
- * when it froze none: work accepted after the cutover always carries v2, and
- * a missing value never widens to personal authority.
- */
-export async function subscriptionAuthorityV2OrEmptyInTransaction(
-  tx: Database,
-  provider: ProviderId,
-  accountId: string,
+export function subscriptionAuthorityV2OrEmpty(
   frozen: SubscriptionPersonalAuthorityV2 | null | undefined,
-): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  subscriptionCoreProvider(provider);
-  if (frozen !== null && frozen !== undefined) return frozen;
-  return (await subscriptionAuthorityV2ActiveInTransaction(tx, provider, accountId))
-    ? EMPTY_SUBSCRIPTION_AUTHORITY_V2
-    : null;
+): SubscriptionPersonalAuthorityV2 {
+  return frozen ?? EMPTY_SUBSCRIPTION_AUTHORITY_V2;
 }
 
 /**
  * A scheduled task's frozen v2 value at creation (M3 PR 3b, EP-T15), from
  * `subscription_core_task_authority_v2`: the acceptance rule for the exact
- * accepting human. `null` without an enabled cutover (or before 0688).
+ * accepting human.
  */
 export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
   tx: Database,
@@ -218,18 +127,7 @@ export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
   subscriptionCoreProvider(provider);
-  if (!(await taskWriterPresent(tx))) return null;
   return await providerTaskAuthorityV2(tx, provider, input);
-}
-
-async function taskWriterPresent(tx: Database): Promise<boolean> {
-  const [present] = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regprocedure(
-        'opengeni_private.subscription_core_task_authority_v2(text,uuid,uuid,uuid,text)'
-      ) is not null as present`,
-  );
-  return present?.present === true;
 }
 
 async function providerTaskAuthorityV2(
@@ -253,7 +151,6 @@ export async function coreSubscriptionAuthorityV2ForScheduledTaskInTransaction(
   tx: Database,
   input: Parameters<typeof subscriptionAuthorityV2ForScheduledTaskInTransaction>[2],
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  if (!(await taskWriterPresent(tx))) return null;
   const values: (SubscriptionPersonalAuthorityV2 | null)[] = [];
   for (const provider of subscriptionCoreProviderIds()) {
     values.push(await providerTaskAuthorityV2(tx, provider as ProviderId, input));
@@ -285,17 +182,9 @@ export type SubscriptionAuthorityCarrier = {
 /**
  * The providers whose own drained cutover holds compatibility records (a
  * receipt with a real commit time): empty while only providers cut over
- * before receipts (`-infinity`) are on the core, and
- * on historical ledgers without the routine. One read.
+ * before receipts (`-infinity`) are on the core. One read.
  */
 async function compatProvidersInTransaction(tx: Database): Promise<string[]> {
-  const [present] = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regprocedure(
-        'opengeni_private.subscription_authority_compat_providers()'
-      ) is not null as present`,
-  );
-  if (present?.present !== true) return [];
   const [row] = await rawRows<{ providers: string[] | null }>(
     tx,
     sql`select opengeni_private.subscription_authority_compat_providers() as providers`,
@@ -372,35 +261,11 @@ export async function copySubscriptionAuthorityCompatInTransaction(
 }
 
 /**
- * Whether the provider's drained cutover receipt exists (any commit time):
- * after it, no code computes the provider's v1 value from live state (design
- * 5.3, "v1 columns after a provider's cutover"). False on historical ledgers
- * without the receipt routine.
- */
-export async function subscriptionProviderCutoverCommittedInTransaction(
-  tx: Database,
-  provider: string,
-): Promise<boolean> {
-  const [present] = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regprocedure(
-        'opengeni_private.subscription_provider_cutover_committed(text)'
-      ) is not null as present`,
-  );
-  if (present?.present !== true) return false;
-  const [committed] = await rawRows<{ committed: boolean }>(
-    tx,
-    sql`select opengeni_private.subscription_provider_cutover_committed(${provider}) as committed`,
-  );
-  return committed?.committed === true;
-}
-
-/**
  * The effective accepted authority of each inbox carrier (0716's reader), per
  * provider whose own drained cutover holds compatibility records (design 5.3,
  * inbox batching): keyed `kind:id`, one value per provider. Empty while no
- * provider has a receipt with a real commit time, and on historical ledgers
- * without the reader, so batching keys are unchanged until then.
+ * provider has a receipt with a real commit time, so batching keys are
+ * unchanged until then.
  */
 export async function subscriptionAuthorityCompatForCarriersInTransaction(
   tx: Database,
@@ -408,13 +273,6 @@ export async function subscriptionAuthorityCompatForCarriersInTransaction(
 ): Promise<ReadonlyMap<string, Readonly<Record<string, unknown>>>> {
   const effective = new Map<string, Record<string, unknown>>();
   if (input.carriers.length === 0) return effective;
-  const [present] = await rawRows<{ present: boolean }>(
-    tx,
-    sql`select to_regprocedure(
-        'opengeni_private.subscription_authority_compat_providers()'
-      ) is not null as present`,
-  );
-  if (present?.present !== true) return effective;
   const carriers = sql.join(
     input.carriers.map((carrier) => sql`(${carrier.kind}::text, ${carrier.id}::uuid)`),
     sql`, `,

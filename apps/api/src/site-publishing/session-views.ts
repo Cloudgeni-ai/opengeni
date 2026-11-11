@@ -174,6 +174,7 @@ const QUESTION_FIELDS = [
   "helpText",
   "options",
   "required",
+  "confirm",
   "allowOther",
   "validation",
 ] as const;

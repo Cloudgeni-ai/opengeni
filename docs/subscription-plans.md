@@ -10,6 +10,16 @@ enrolls all organizations in Free, including embedded organizations; only actual
 verified-signup eligibility-receipt holders receive monthly Free credit. Enterprise is
 operator-assigned only.
 
+Free is a trial: eligible accounts receive $10 monthly app credit. Pro remains
+the $20/month entry plan. Pro, Max and Enterprise include connected AI
+subscriptions with no inference or platform fee, subject to the provider's
+own limits. Free, absent and past-due plans cannot use them. Connected
+subscriptions are for app use, not API/SDK or embedded-product requests;
+API use spends credits, never plan credit. Own provider API keys are separate:
+their fee follows `OPENGENI_BYOK_PLATFORM_FEE_BPS`, which is paused at `0` in
+production and staging. At zero, own keys need no paid credit for a fee.
+See [billing-origin.md](billing-origin.md) for admission and legacy terms.
+
 Migration 0797 is **maintenance**, despite adding only new structures: the
 preceding binary's closed readiness contract rejects unknown RLS tables and
 their runtime SELECT privileges. A rolling deployment would require an earlier
@@ -68,6 +78,25 @@ Max $100/$500/unlimited (5× prepaid credit on paid plans); apply it with
    phase can still reference them; never reuse a price ID for a different plan
    key. If rolling back to a previous current price, retain the displaced price
    as an alias too. Unknown prices and current-price amount mismatches still fail.
+
+## Promotion codes
+
+Plan checkout accepts one promotion code, typed in the console's Subscribe dialog
+or sent as `promotionCode` on `POST /v1/billing/subscription/checkout`. The API
+applies it up front; Stripe's own code field stays off because it cannot be limited
+to the right coupons.
+
+A coupon works on a plan only when its Stripe **Apply to specific products** list
+names that plan's product, so create plan coupons that way. Unrestricted coupons are
+refused because a plan pays out more credit than it costs: a $100 credit coupon would
+otherwise buy a first month of Max ($500 general credit) for nothing. The reverse is
+also refused, by Stripe: a coupon restricted to a plan product cannot apply to a credit
+top-up. Stripe still enforces first-purchase, customer and redemption limits.
+
+A discount changes the price only. Each paid invoice, including a $0 one, funds the
+plan's full monthly credit, so a coupon's **duration** decides how many discounted
+periods carry that credit. Upgrades go through the ordinary upgrade flow and take no
+new code.
 
 ## Database and worker contract
 
@@ -217,7 +246,9 @@ That increase expires immediately with workspace-less `plan_credit_expiry`
 receipts. Purchased portions survive. Video
 admission is prepaid, so video debits cannot create the opening debt repaid by
 a later grant. Promotional allocations are
-subtracted. Monthly plan credit pays **first**, before any other funding; only
+subtracted. Monthly plan credit pays **first** for app use, before any other funding (API
+use pays from credits only and is not counted as period usage; see
+[billing-origin.md](billing-origin.md)); only
 usage beyond the remaining monthly allowance allocates eligible promotional
 grants, then other general credit/top-ups. This overrides the original design's
 promotional-first order following Bendik's updated product decision. A single
@@ -260,6 +291,26 @@ canonical lock. Setup retries cannot issue another witness; additional organizat
 invited users and unverified people cannot obtain one. There is **no backfill**:
 old completed setups with no trial receipt remain ineligible, even on replay.
 
+### Signup cutoff (1119)
+
+An owner can additionally set a signup cutoff with
+`opengeni_private.set_free_credit_signup_cutoff(timestamptz, text, text, bigint)`
+(revision-fenced, audited, owner-only; see
+[signup abuse protection](signup-abuse-protection.md#free-credit-signup-cutoff)).
+While it is set, `free_plan_credit_eligible` and the Free branch of
+`list_subscription_plan_maintenance_accounts` also require the receipt owner's
+`auth_users.created_at` to be at or after the cutoff. Every Free issuance path
+(the sweep, `grant_plan_credit_period` and `replace_plan_credit_period`, which
+delegates to it) goes through that check. Exact replays of an existing receipt
+still return it, and existing periods stay spendable until their normal expiry.
+A `NULL` cutoff or no revision means no cutoff.
+
+Set the cutoff **before** re-enabling Free in the catalog. To roll back, turn
+Free off in the catalog; that does not remove issued periods. Clearing the cutoff is
+not a rollback: while Free is on it funds every older eligible owner on the next
+sweep. If the signup challenge is disabled, the cutoff alone no longer implies a
+CAPTCHA.
+
 The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
 `set_verified_signup_trial_credits_enabled` runtime switch no longer gate this
 non-monetary witness and cannot restore a bonus. No production config edit is
@@ -282,18 +333,50 @@ not a second seat during acceptance. `external_user:` and service subjects do
 not count. Triggers cover inserts, reactivations and invitation creation/renewal
 under the existing `organization-membership:<account>` advisory lock. Existing
 over-limit people remain; new additions fail. Previously reserved invitations
-may still be accepted without increasing seat usage. Unlimited and no-row
-organizations are uncapped.
+may still be accepted without increasing seat usage. Writes that take no new
+seat are never refused, even over the limit: binding or re-targeting a pending
+invitation that already holds a seat, and an `ON CONFLICT DO NOTHING` insert
+for someone with an active or provisioning row (migration 1125). Sign-in
+binding isolates each organization: if one organization's binding fails for
+any reason, its invitations stay pending and unbound (the next sign-in retries),
+the database logs the WARNING "organization invitation binding skipped" with
+the organization and SQLSTATE, and the person keeps every other organization.
+Unlimited and no-row organizations are uncapped.
 
 SQLSTATE `P0S01` maps through `rethrowMembershipError` and the common error
 middleware to HTTP 402 using `ErrorEnvelope`:
 `{ error: { status: 402, code: "seat_limit_reached", message, retryable: false,
-requestId, details: { action: { type: "upgrade", href: "/billing" } } } }`.
-The message is "Organization seat limit reached. Upgrade your plan to add people."
+requestId, details: { seatLimit?, seatsUsed?, upgradePlan?, upgradePlanLabel?,
+action?: { type: "upgrade", href: "/billing" }, askOwner? } } }`. `seatLimit` and `seatsUsed`
+come from the trigger's DETAIL when it parses.
+The refusal names one fix: the cheapest self-service plan above the current one
+with room for one more person, else Enterprise (`seatUpgradePlan` in
+`@opengeni/contracts/seat-upgrade`). The message is "Upgrade to Pro to add more
+people." (or Max) or "Talk to us about Enterprise to add more people.". It is
+"Organization seat limit reached. Upgrade your plan to add people." when
+subscription plans are off, billing is not Stripe, the catalog read fails, the
+DETAIL is missing or malformed, or no plan adds the seat.
+A caller without `billing:manage` in the organization (an admin who can invite)
+gets "Ask an organization owner to upgrade to Pro." (or Max; "Ask an
+organization owner about Enterprise."; "Ask an organization owner to upgrade
+the plan to add people." without a named plan), `details.askOwner: true` and no
+`action`. If the caller's permissions can't be read, the upgrade copy stays.
+A current plan whose price is unknown is only pointed at Enterprise.
+Accepting an invitation never needs a new seat; if it is ever refused, the
+invitee gets "This organization is full. Ask an organization owner to upgrade."
+with `details.askOwner: true`.
 The SDK exposes `code`, `details.action` and the request reference on
 `OpenGeniApiError`; this is a known, non-retryable refusal, not an unknown outcome.
 The people UI also recognizes the historical flat refusal and a generic 402
-when the verified plan's seat usage is at its limit.
+when the verified plan's seat usage is at its limit. The invite page shows the
+notice "Your plan's seat limit is reached" as soon as the plan is full and after
+a refusal. The plan named has room for everyone in the form (the server's plan
+is the fallback without a catalog). People who manage billing get one button
+that names it ("Upgrade to Pro", or "Talk to us about Enterprise"); everyone else is told to ask an organization
+owner to upgrade to it, also when restoring someone is refused. Other failures
+in the same batch are shown beside the notice. The seat count is re-read from
+the server whenever members or invitations change, keeping the previous plan
+until the read answers.
 
 ## Billing/UI contract
 
@@ -315,6 +398,27 @@ lock before admitting or recording fresh funding/usage, so late post-use
 charges cannot spend it or hide debt. The existing billing routes return this shared
 snapshot, and the SDK re-exports `BillingPlanBalance`, `SubscriptionPlan`, and
 `SubscriptionPlanCatalog` alongside `BillingBalance`.
+
+Own subscriptions (Codex, Claude, SuperGrok) need a plan that includes them
+(`planIncludesOwnSubscriptions`); Send is refused otherwise. So that people
+hear it before Send, `GET /v1/workspaces/:id/model-catalog` returns
+`ownSubscriptionPlan: { key, label, monthlyPriceMicros }` and the same
+`requiredPlan` on each own-subscription model while the organization's plan
+doesn't include them. The plan named is the cheapest self-service plan with a
+price that does (`ownSubscriptionUpgradePlan` in
+`@opengeni/contracts/billing-origin`), read from the runtime catalog. Both
+fields are absent when plans are off, the account is legacy, the plan already
+includes them (also while its payment has lapsed: upgrading isn't the fix, and
+Send still says why), the catalog sells no such plan, or the catalog can't be
+read. An organization without a plan row is named the plan, as admission
+refuses it too. Connect pages and
+onboarding then say "Using your own subscription needs Pro ($20/month).", the
+picker labels those models "Needs Pro" and keeps them selectable, and the new
+chat page shows a notice before Send when one is chosen. That notice has one
+action: "Upgrade to Pro" for people who manage billing, otherwise "Ask an
+organization owner to upgrade to Pro." When one is connected but not chosen,
+the same notice shows once and can be dismissed for that organization on that
+device.
 
 New endpoints use the existing selected-organization permissions and require
 Stripe billing plus the deployment switch:

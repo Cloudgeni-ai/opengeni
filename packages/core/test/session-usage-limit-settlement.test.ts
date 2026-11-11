@@ -33,7 +33,7 @@ function spyWrites(options: { settleFails?: boolean } = {}) {
       calls.push({ fn: "usage", input: input as unknown as Record<string, unknown> });
       return undefined as never;
     }),
-    spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (_db, input) => {
+    spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (_db, input) => {
       calls.push({ fn: "debit", input: input as unknown as Record<string, unknown> });
       return {
         balance: {
@@ -42,7 +42,7 @@ function spyWrites(options: { settleFails?: boolean } = {}) {
           currency: "usd",
           updatedAt: new Date().toISOString(),
         },
-        debitedMicros: input.requestedAmountMicros,
+        debitedMicros: input.amountMicros,
       } as never;
     }),
     spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(async (_db, input) => {
@@ -111,6 +111,94 @@ function nonReceiptWrites(calls: Call[]) {
       return { fn: call.fn, rest: JSON.stringify(rest, Object.keys(rest).sort()) };
     });
 }
+
+test("auxiliary provider costs retain reported versus estimated provenance without inventing credit prices", async () => {
+  active = spyWrites();
+  for (const source of ["provider-reported", "estimate"] as const) {
+    const receipt = await settleModelUsage(
+      testSettings(),
+      db,
+      settlementInput(
+        {
+          model: "decision/custom",
+          chargesOpenGeniCredits: false,
+          byok: false,
+          externalProviderCost: { costUsd: 0.003, source },
+          normalizedUsage: normalizeModelCallUsage({ inputTokens: 10 }),
+          sourceId: `model_call:${source}`,
+        },
+        "task",
+      ),
+    );
+    expect(receipt.estimatedProviderCostMicros).toBe(3000);
+    expect(receipt.pricedCostMicros).toBe(0);
+  }
+  expect(
+    active.calls.filter((call) => call.fn === "receipt").map((call) => call.input.amountMicros),
+  ).toEqual([3000, 3000]);
+  expect(
+    active.calls.filter((call) => call.fn === "usage").map((call) => call.input.eventType),
+  ).toContain("model.provider_cost");
+  expect(
+    active.calls.filter((call) => call.fn === "usage").map((call) => call.input.eventType),
+  ).toContain("model.estimated_provider_cost");
+  expect(active.calls.filter((call) => call.fn === "debit")).toHaveLength(0);
+});
+
+test("external provider cost cannot override a credit price or admit invalid money", async () => {
+  active = spyWrites();
+  for (const costUsd of [-1, NaN, Infinity]) {
+    await expect(
+      settleModelUsage(
+        testSettings(),
+        db,
+        settlementInput(
+          {
+            model: "decision/custom",
+            chargesOpenGeniCredits: false,
+            externalProviderCost: { costUsd, source: "provider-reported" },
+          },
+          "task",
+        ),
+      ),
+    ).rejects.toThrow("Invalid externally funded model cost");
+  }
+  await expect(
+    settleModelUsage(
+      testSettings(),
+      db,
+      settlementInput(
+        {
+          model: "decision/custom",
+          chargesOpenGeniCredits: true,
+          externalProviderCost: { costUsd: 1, source: "provider-reported" },
+        },
+        "task",
+      ),
+    ),
+  ).rejects.toThrow("Invalid externally funded model cost");
+  expect(active.calls).toHaveLength(0);
+});
+
+test("unknown auxiliary cost never borrows a same-named chat model price", async () => {
+  active = spyWrites();
+  const result = await settleModelUsage(
+    testSettings({ modelPricingJson: PRICED }),
+    db,
+    settlementInput(
+      {
+        model: "priced-model",
+        chargesOpenGeniCredits: false,
+        byok: false,
+        externalProviderCost: null,
+      },
+      "task",
+    ),
+  );
+  expect(result.estimatedProviderCostMicros).toBeNull();
+  expect(result.pricingSource).toBeNull();
+  expect(active.calls.find((call) => call.fn === "receipt")?.input.amountMicros).toBeNull();
+});
 
 const paths: Array<{
   name: string;
@@ -257,6 +345,39 @@ describe("per-task usage limit settlement across funding paths", () => {
     // Usage attribution (no sessionId on the usage event) is unchanged.
     const usageEvents = active.calls.filter((call) => call.fn === "usage");
     for (const event of usageEvents) expect(event.input.sessionId).toBeUndefined();
+  });
+
+  test("a passed processing residency is recorded on every usage event of the response", async () => {
+    active = spyWrites();
+    const processingResidency = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+    };
+    await settleModelUsage(
+      testSettings({ billingMode: "stripe", usageLimitsMode: "managed", modelPricingJson: PRICED }),
+      db,
+      { ...settlementInput({ model: "priced-model" }, null), processingResidency },
+    );
+    const usageEvents = active.calls.filter((call) => call.fn === "usage");
+    expect(usageEvents.map((event) => event.input.eventType).sort()).toEqual([
+      "model.cost",
+      "model.tokens",
+    ]);
+    for (const event of usageEvents) {
+      expect(event.input.processingResidency).toEqual(processingResidency);
+    }
+    // Without one, nothing is recorded (turns record it on their model call facts).
+    active.restore();
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({ billingMode: "disabled", modelPricingJson: PRICED }),
+      db,
+      settlementInput({ model: "priced-model" }, null),
+    );
+    for (const event of active.calls.filter((call) => call.fn === "usage")) {
+      expect(event.input).not.toHaveProperty("processingResidency");
+    }
   });
 
   test("a source identity past the receipt bound is recorded under a stable digest", async () => {

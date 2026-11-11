@@ -1,10 +1,10 @@
-import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
+import { historicalKnowledgeSql } from "./knowledge-historical";
 import type { ListingFixture } from "./knowledge-collection-listing";
 
 /** Current read and graph semantics, with only the historical scope evaluator restored. */
 export async function installScopeBaseline(admin: postgres.Sql, appUrl: string) {
-  const source = await readFile(new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url), "utf8");
+  const source = await historicalKnowledgeSql("knowledge_scope_visible");
   const start = source.indexOf("CREATE FUNCTION knowledge_scope_visible(");
   const end = source.indexOf("\n$$;", start);
   if (start < 0 || end < 0) throw new Error("Historical scope predicate missing");

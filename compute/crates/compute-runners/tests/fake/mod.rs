@@ -26,13 +26,20 @@ pub struct Sandbox {
     pub env: BTreeMap<String, String>,
 }
 
-/// A command run in a sandbox through its envd.
+/// A command run in a sandbox through its envd. It runs on whatever
+/// happens to the streams following it, until `ends`, and records in the
+/// guest that it started and then its exit code.
 #[derive(Clone, Debug)]
 pub struct Process {
     pub sandbox: String,
     pub user: String,
     pub script: String,
     pub env: BTreeMap<String, String>,
+    pub tag: String,
+    /// Where its wrapper records it.
+    pub record: String,
+    pub exit: i32,
+    pub ends: tokio::time::Instant,
 }
 
 /// What the fake holds.
@@ -57,6 +64,8 @@ pub struct World {
     pub refreshes: u32,
     /// The queue: a message stays until deleted.
     pub messages: VecDeque<Value>,
+    /// The jobs the last poll said the pool takes at most.
+    pub capacity: Option<u32>,
     pub deleted_messages: Vec<u64>,
     /// Acquisitions failing before one succeeds.
     pub acquire_failures: u32,
@@ -66,14 +75,35 @@ pub struct World {
     pub sandboxes: BTreeMap<String, Sandbox>,
     /// Sandbox creations failing (503) before one succeeds.
     pub create_failures: u32,
+    /// Sandbox creations whose answer is cut off after the sandbox was
+    /// made, as by the control service restarting.
+    pub create_cuts: u32,
+    /// How long a sandbox creation takes.
+    pub create_delay: Duration,
     pub killed: Vec<String>,
     /// The repository's default branch's head.
     pub head: String,
     pub processes: Vec<Process>,
+    /// How long a command takes to run.
+    pub process_delay: Duration,
     /// Commands containing this exit 1.
     pub failing: Option<String>,
+    /// Streams following a command cut after its start, as by the control
+    /// service restarting; the command runs on.
+    pub stream_cuts: u32,
+    /// Requests to envd the front door answers 503, as while the control
+    /// service restarts.
+    pub envd_away: u32,
+    /// Commands followed again by their tag.
+    pub follows: u32,
+    /// Commands' records read.
+    pub record_reads: u32,
     /// Templates saved from sandboxes: id, name, the sandbox.
     pub templates: Vec<(String, String, String)>,
+    /// Saves cut off before the template was made.
+    pub snapshot_cuts: u32,
+    /// Saves whose answer is cut off after the template was made.
+    pub snapshot_answers_lost: u32,
     /// Listings of templates failing (503) before one succeeds.
     pub listing_failures: u32,
     pub deleted_templates: Vec<String>,
@@ -140,6 +170,7 @@ impl Fake {
             .route("/repos/acme/web", get(repository))
             .route("/repos/acme/web/commits/{branch}", get(commit))
             .route("/process.Process/Start", post(start_process))
+            .route("/process.Process/Connect", post(connect_process))
             .route("/sandboxes/{id}/snapshots", post(snapshot))
             .route("/snapshots", get(snapshots))
             .route("/templates/{id}", delete(delete_template))
@@ -399,6 +430,9 @@ async fn poll(
     if headers["authorization"] != token.as_str() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    fake.world().capacity = headers
+        .get("x-scalesetmaxcapacity")
+        .and_then(|capacity| capacity.to_str().ok()?.parse().ok());
     let last = query
         .get("lastMessageId")
         .map_or(0, |last| last.parse().unwrap());
@@ -427,6 +461,8 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
 }
 
 async fn create(State(fake): State<Fake>, axum::Json(body): axum::Json<Value>) -> Response {
+    let delay = fake.world().create_delay;
+    tokio::time::sleep(delay).await;
     let mut world = fake.world();
     if world.create_failures > 0 {
         world.create_failures -= 1;
@@ -442,6 +478,10 @@ async fn create(State(fake): State<Fake>, axum::Json(body): axum::Json<Value>) -
             env: strings(&body["envVars"]),
         },
     );
+    if world.create_cuts > 0 {
+        world.create_cuts -= 1;
+        return cut(StatusCode::CREATED);
+    }
     (
         StatusCode::CREATED,
         axum::Json(json!({"sandboxID": id, "envdAccessToken": "envd"})),
@@ -510,12 +550,51 @@ fn envelope(flags: u8, message: &Value) -> Vec<u8> {
     frame
 }
 
-async fn start_process(
-    State(fake): State<Fake>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
+/// An answer whose body is cut off, as when the server answering goes.
+fn cut(status: StatusCode) -> Response {
+    let body = futures::stream::once(async {
+        Err::<Vec<u8>, _>(std::io::Error::other("the server went away"))
+    });
+    (status, axum::body::Body::from_stream(body)).into_response()
+}
+
+/// A command's events from its start: cut off after the start when `cut`,
+/// otherwise to its end.
+fn events(process: &Process, cut: bool) -> Response {
     use base64::engine::general_purpose::STANDARD;
+    use futures::StreamExt as _;
+    let mut first = envelope(0, &json!({"event": {"start": {"pid": 7}}}));
+    first.extend(envelope(
+        0,
+        &json!({"event": {"data": {"stdout": STANDARD.encode("working\n")}}}),
+    ));
+    let (ends, exit) = (process.ends, process.exit);
+    let rest = async move {
+        if cut {
+            return Err(std::io::Error::other("the front door went away"));
+        }
+        tokio::time::sleep_until(ends).await;
+        let mut last = envelope(
+            0,
+            &json!({"event": {"end": {"exitCode": exit, "exited": true}}}),
+        );
+        last.extend(envelope(2, &json!({})));
+        Ok(last)
+    };
+    let body = futures::stream::once(async move { Ok(first) }).chain(futures::stream::once(rest));
+    axum::body::Body::from_stream(body).into_response()
+}
+
+/// A call of envd's: its request and user, or `None` while the front door
+/// is away.
+fn envd_call(fake: &Fake, headers: &HeaderMap, body: &[u8]) -> Option<(Value, String)> {
+    use base64::engine::general_purpose::STANDARD;
+    assert_eq!(headers["e2b-sandbox-port"], "49983");
+    let mut world = fake.world();
+    if world.envd_away > 0 {
+        world.envd_away -= 1;
+        return None;
+    }
     let request: Value = serde_json::from_slice(&body[5..]).unwrap();
     let basic = headers["authorization"]
         .to_str()
@@ -523,32 +602,108 @@ async fn start_process(
         .strip_prefix("Basic ")
         .unwrap();
     let user = String::from_utf8(STANDARD.decode(basic).unwrap()).unwrap();
-    let process = Process {
-        sandbox: headers["e2b-sandbox-id"].to_str().unwrap().into(),
-        user: user.trim_end_matches(':').into(),
-        script: request["process"]["args"][2].as_str().unwrap().into(),
-        env: strings(&request["process"]["envs"]),
+    Some((request, user.trim_end_matches(':').to_owned()))
+}
+
+async fn start_process(
+    State(fake): State<Fake>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use base64::engine::general_purpose::STANDARD;
+    let Some((request, user)) = envd_call(&fake, &headers, &body) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    assert_eq!(headers["e2b-sandbox-port"], "49983");
+    let sandbox: String = headers["e2b-sandbox-id"].to_str().unwrap().into();
+    let args = &request["process"]["args"];
     let mut world = fake.world();
-    let exit = i32::from(
-        world
-            .failing
-            .as_ref()
-            .is_some_and(|failing| process.script.contains(failing.as_str())),
-    );
+    if request["process"]["cmd"] == "/bin/cat" {
+        // A command's record: what its wrapper wrote by now.
+        world.record_reads += 1;
+        let found = world
+            .processes
+            .iter()
+            .find(|process| process.sandbox == sandbox && process.record == args[0])
+            .map(|process| {
+                if tokio::time::Instant::now() >= process.ends {
+                    process.exit.to_string()
+                } else {
+                    "started".into()
+                }
+            });
+        let mut stream = envelope(0, &json!({"event": {"start": {"pid": 8}}}));
+        if let Some(found) = &found {
+            stream.extend(envelope(
+                0,
+                &json!({"event": {"data": {"stdout": STANDARD.encode(found)}}}),
+            ));
+        }
+        stream.extend(envelope(
+            0,
+            &json!({"event": {"end": {"exitCode": i32::from(found.is_none()), "exited": true}}}),
+        ));
+        stream.extend(envelope(2, &json!({})));
+        return stream.into_response();
+    }
+    assert_eq!(request["process"]["cmd"], "/bin/bash");
+    assert_eq!(request["stdin"], false, "nothing writes to it");
+    assert_eq!(args[0], "-c");
+    let script: String = args[4].as_str().unwrap().into();
+    let process = Process {
+        sandbox,
+        user,
+        exit: i32::from(
+            world
+                .failing
+                .as_ref()
+                .is_some_and(|failing| script.contains(failing.as_str())),
+        ),
+        script,
+        env: strings(&request["process"]["envs"]),
+        tag: request["tag"].as_str().unwrap().into(),
+        record: args[3].as_str().unwrap().into(),
+        ends: tokio::time::Instant::now() + world.process_delay,
+    };
+    let cut = world.stream_cuts > 0;
+    world.stream_cuts = world.stream_cuts.saturating_sub(1);
+    let answer = events(&process, cut);
     world.processes.push(process);
-    let mut stream = envelope(0, &json!({"event": {"start": {"pid": 7}}}));
-    stream.extend(envelope(
-        0,
-        &json!({"event": {"data": {"stdout": STANDARD.encode("working\n")}}}),
-    ));
-    stream.extend(envelope(
-        0,
-        &json!({"event": {"end": {"exitCode": exit, "exited": true}}}),
-    ));
-    stream.extend(envelope(2, &json!({})));
-    stream.into_response()
+    answer
+}
+
+/// Follows a command by its tag while it runs; envd keeps no exit of one
+/// that ended.
+async fn connect_process(
+    State(fake): State<Fake>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some((request, _)) = envd_call(&fake, &headers, &body) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let sandbox = headers["e2b-sandbox-id"].to_str().unwrap();
+    let tag = request["process"]["tag"].as_str().unwrap();
+    let mut world = fake.world();
+    world.follows += 1;
+    let running = world
+        .processes
+        .iter()
+        .find(|process| {
+            process.sandbox == sandbox
+                && process.tag == tag
+                && tokio::time::Instant::now() < process.ends
+        })
+        .cloned();
+    let Some(process) = running else {
+        return envelope(
+            2,
+            &json!({"error": {"code": "not_found", "message": format!("process with tag {tag} not found")}}),
+        )
+        .into_response();
+    };
+    let cut = world.stream_cuts > 0;
+    world.stream_cuts = world.stream_cuts.saturating_sub(1);
+    events(&process, cut)
 }
 
 async fn snapshot(
@@ -558,10 +713,25 @@ async fn snapshot(
 ) -> Response {
     assert_eq!(body["memory"], false);
     let mut world = fake.world();
+    if world.snapshot_cuts > 0 {
+        world.snapshot_cuts -= 1;
+        return cut(StatusCode::CREATED);
+    }
+    let name = body["name"].as_str().unwrap().to_owned();
+    if world.templates.iter().any(|(_, named, _)| *named == name) {
+        return (
+            StatusCode::CONFLICT,
+            format!("a template named {name} exists"),
+        )
+            .into_response();
+    }
     world.next += 1;
     let id = format!("tpl{}", world.next);
-    let name = body["name"].as_str().unwrap().to_owned();
     world.templates.push((id.clone(), name.clone(), sandbox));
+    if world.snapshot_answers_lost > 0 {
+        world.snapshot_answers_lost -= 1;
+        return cut(StatusCode::CREATED);
+    }
     (
         StatusCode::CREATED,
         axum::Json(json!({"snapshotID": id, "names": [name]})),

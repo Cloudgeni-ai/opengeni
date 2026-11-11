@@ -12,6 +12,8 @@ Each connected account has **Allow**, **Ask first**, and **Block** choices. Allo
 
 For Ask first, the session enters `requires_action`. The review shows the account, action, consequences and selection count, with full saved details available separately. Approving resumes that exact action; declining lets the agent adapt. A waiting review retains its original choice. Changed settings apply when work next starts or resumes. Only humans can approve tool calls.
 
+When a Site you are viewing in Opengeni calls a tool that needs approval, Opengeni asks you around the Site: it shows what will happen, from which of your accounts and to whom, with **Send** (or **Confirm**) and **Cancel**. The call always uses your own account, never another member's personal one; pick an account there when you have several, or connect one when you have none. **Always allow for this Site** skips the question next time for you, this Site and that tool on that account only. It does not change the account's Allow, Ask first or Block choice, which also governs agents, and Block still blocks.
+
 Programmatic calls also retain their exact arguments through the wait. Approval resumes the stored operation; it does not restart the earlier program. An unknown outcome means execution may have started and needs reconciliation before retrying.
 
 ## Structured human input

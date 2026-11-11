@@ -3,18 +3,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, ready};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use compute_fleet::{HostEpoch, HostId, HostState};
-use compute_protocol::fleet::{Register, Renew, Report, Ruling};
+use compute_fleet::{HostEpoch, HostId, HostState, Stamp};
+use compute_protocol::fleet::{Register, Renew, Report, Ruling, Verdict as Wire};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked, RequestRow,
-    Result, SandboxRow, Store, TemplateRow, Write, admits, rule,
+    Admission, Admits, Collector, Counted, Forsaken, Found, Gone, HostRow, Import, Imported,
+    Inserted, LifecycleRow, Linked, LostCopy, PointerRow, RequestRow, Result, SandboxRow, Store,
+    TemplateRow, Write, admits, rule,
 };
 
+mod pointers;
 mod templates;
 
 #[derive(Debug)]
@@ -46,6 +48,7 @@ struct Inner {
     templates: BTreeMap<(String, String), TemplateRow>,
     /// Every image captured for a template.
     captured: HashMap<ImageId, templates::Captured>,
+    pointers: pointers::Pointers,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -97,6 +100,26 @@ impl Inner {
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
     leader: Arc<AtomicBool>,
+    calls: Arc<Calls>,
+}
+
+/// How often a [`MemoryStore`] was asked for some things, for tests that
+/// count what a caller costs the store.
+#[derive(Debug, Default)]
+struct Calls {
+    sandbox_reads: AtomicU64,
+    sandbox_writes: AtomicU64,
+    /// Reads of each pointer, by name.
+    pointer_reads: Mutex<HashMap<String, u64>>,
+}
+
+/// What [`MemoryStore::calls`] counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Called {
+    /// Reads of one sandbox's row.
+    pub sandbox_reads: u64,
+    /// Inserts and replacements of a sandbox's row.
+    pub sandbox_writes: u64,
 }
 
 /// The leadership of a [`MemoryStore`], given up when dropped.
@@ -116,6 +139,31 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// How often it was asked for what [`Called`] counts, so far.
+    #[must_use]
+    pub fn calls(&self) -> Called {
+        Called {
+            sandbox_reads: self.calls.sandbox_reads.load(Ordering::Relaxed),
+            sandbox_writes: self.calls.sandbox_writes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// How often pointer `name` was read, so far.
+    #[must_use]
+    pub fn pointer_reads(&self, name: &str) -> u64 {
+        self.calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn count(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // Every write completes under the lock, so one that panicked left
         // nothing half done.
@@ -126,6 +174,9 @@ impl MemoryStore {
 
     fn register_now(&self, register: &Register) -> Admission {
         let mut inner = self.lock();
+        if inner.outdated(register.capacity.pointers_in_service) {
+            return Admission::Outdated;
+        }
         let known = inner.by_name.get(&register.info.name).copied();
         let row = known
             .and_then(|id| inner.hosts.get(&id))
@@ -150,14 +201,39 @@ impl MemoryStore {
         let epoch = HostEpoch(inner.next_host_epoch);
         let mut rulings = Vec::with_capacity(register.held.len());
         for held in &register.held {
-            let row = inner.sandboxes.get(&held.id).map(|row| row.ownership);
-            let (ruling, change) = rule(id, *held, row);
-            if let Some(change) = change {
-                let sandbox = inner.sandboxes.get_mut(&held.id).expect("ruled on a row");
-                sandbox.ownership = change.set;
-                sandbox.version += 1;
+            let row = inner.sandboxes.get(&held.id);
+            let ruled = row.map(|row| (row.ownership, row.lost.as_ref()));
+            let (ruling, change) = rule(id, *held, ruled, register.capacity.sets_aside);
+            if let Some(sandbox) = inner.sandboxes.get_mut(&held.id) {
+                match (change, ruling.verdict) {
+                    // A reclaim: nobody took it since, so nothing was lost.
+                    (Some(change), _) => {
+                        sandbox.ownership = change.set;
+                        sandbox.lost = None;
+                        sandbox.version += 1;
+                    }
+                    (None, Wire::SetAside) => {
+                        if let Some(lost) = &mut sandbox.lost {
+                            lost.set_aside_ms.get_or_insert(crate::service::now_ms());
+                        }
+                        sandbox.version += 1;
+                    }
+                    // Kept as it waited, under the same epoch: raised all
+                    // the same, so a write read before this is refused.
+                    _ if sandbox.ownership.owner == Some(id) => sandbox.version += 1,
+                    _ => {}
+                }
             }
             rulings.push(ruling);
+        }
+        // What waited for it that it no longer has goes on from the store.
+        for sandbox in inner.sandboxes.values_mut() {
+            if sandbox.ownership.owner == Some(id)
+                && !register.held.iter().any(|held| held.id == sandbox.id)
+            {
+                sandbox.ownership = sandbox.ownership.lose().set;
+                sandbox.version += 1;
+            }
         }
         let (renewals, drained) = inner
             .hosts
@@ -180,7 +256,7 @@ impl MemoryStore {
                     },
                     renewals,
                     seq: 0,
-                    capacity: register.capacity.clone(),
+                    capacity: register.capacity.split().0,
                     changed,
                 },
                 attempt: register.attempt,
@@ -201,6 +277,13 @@ impl MemoryStore {
 impl MemoryStore {
     fn renew_now(&self, renew: &Renew, names: &[String]) -> bool {
         let mut inner = self.lock();
+        if renew
+            .capacity
+            .as_ref()
+            .is_some_and(|capacity| inner.outdated(capacity.pointers_in_service))
+        {
+            return false;
+        }
         let changed = inner.changes + 1;
         let Some(row) = inner.current(renew.host, renew.epoch, names) else {
             return false;
@@ -209,7 +292,7 @@ impl MemoryStore {
         row.seq = row.seq.max(renew.seq);
         // A renewal without a capacity keeps the one last heard.
         if let Some(capacity) = &renew.capacity {
-            row.capacity = capacity.clone();
+            row.told(capacity);
         }
         row.changed = changed;
         inner.changes = changed;
@@ -218,11 +301,14 @@ impl MemoryStore {
 
     fn report_now(&self, report: &Report, names: &[String]) -> bool {
         let mut inner = self.lock();
+        if inner.outdated(report.capacity.pointers_in_service) {
+            return false;
+        }
         let changed = inner.changes + 1;
         let Some(row) = inner.current(report.host, report.epoch, names) else {
             return false;
         };
-        row.capacity = report.capacity.clone();
+        row.told(&report.capacity);
         row.changed = changed;
         inner.changes = changed;
         true
@@ -265,24 +351,60 @@ impl MemoryStore {
         entry.row.changed = changed;
         entry.gone_ms = Some(at_ms);
         inner.changes = changed;
-        let mut cleared = 0;
-        for sandbox in inner.sandboxes.values_mut() {
-            if sandbox.ownership.owner == Some(host) {
-                sandbox.ownership = sandbox.ownership.lose().set;
-                sandbox.version += 1;
-                cleared += 1;
-            }
+        // Its sandboxes wait for it.
+        Some(
+            inner
+                .sandboxes
+                .values()
+                .filter(|sandbox| sandbox.ownership.owner == Some(host))
+                .count(),
+        )
+    }
+
+    fn declare_gone_now(&self, host: HostId, why: Gone, at_ms: u64) -> Option<Vec<Forsaken>> {
+        let mut inner = self.lock();
+        let entry = inner.hosts.get(&host)?;
+        if entry.row.state != HostState::Lost {
+            return None;
         }
-        Some(cleared)
+        let name = entry.row.info.name.clone();
+        let owned: Vec<Id> = inner
+            .sandboxes
+            .values()
+            .filter(|sandbox| sandbox.ownership.owner == Some(host))
+            .map(|sandbox| sandbox.id)
+            .collect();
+        let mut forsaken = Vec::with_capacity(owned.len());
+        for id in owned {
+            let saved_ms = inner.saved_ms(&id.to_string());
+            let sandbox = inner.sandboxes.get_mut(&id).expect("listed above");
+            sandbox.ownership = sandbox.ownership.lose().set;
+            sandbox.lost = Some(LostCopy {
+                host: name.clone(),
+                why,
+                at_ms,
+                epoch: sandbox.ownership.epoch.0,
+                saved_ms,
+                set_aside_ms: None,
+            });
+            sandbox.version += 1;
+            forsaken.push(Forsaken { id, saved_ms });
+        }
+        Some(forsaken)
     }
 
     fn prune_hosts_now(&self, before_ms: u64) -> u64 {
         let mut inner = self.lock();
         let inner = &mut *inner;
         let before = inner.hosts.len();
-        inner
-            .hosts
-            .retain(|_, host| host.gone_ms.is_none_or(|at| at >= before_ms));
+        let sandboxes = &inner.sandboxes;
+        // One a sandbox still waits for is kept.
+        inner.hosts.retain(|id, host| {
+            host.gone_ms.is_none_or(|at| at >= before_ms)
+                || sandboxes
+                    .values()
+                    .any(|sandbox| sandbox.ownership.owner == Some(*id))
+        });
         let hosts = &inner.hosts;
         inner.by_name.retain(|_, id| hosts.contains_key(id));
         u64::try_from(before - inner.hosts.len()).unwrap_or(u64::MAX)
@@ -348,9 +470,28 @@ impl MemoryStore {
         if stored.version != row.version {
             return Write::Conflict;
         }
+        let lost = stored.lost.take();
         *stored = row.clone();
+        stored.lost = lost;
         stored.version += 1;
         Write::Done
+    }
+
+    fn respec_now(&self, row: &SandboxRow) -> bool {
+        let mut inner = self.lock();
+        let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
+            return false;
+        };
+        if stored.version != row.version
+            || stored.ownership.owner.is_some()
+            || row.ownership.owner.is_some()
+        {
+            return false;
+        }
+        stored.spec = row.spec.clone();
+        stored.ownership = row.ownership;
+        stored.version += 1;
+        true
     }
 
     fn delete_now(&self, id: Id, version: u64, retire_at: Option<u64>) -> bool {
@@ -546,6 +687,15 @@ impl Store for MemoryStore {
         ready(Ok(self.give_up_now(host, renewals, at_ms)))
     }
 
+    fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Forsaken>>>> + Send {
+        ready(Ok(self.declare_gone_now(host, why, at_ms)))
+    }
+
     fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
         ready(Ok(self.prune_hosts_now(before_ms)))
     }
@@ -568,10 +718,12 @@ impl Store for MemoryStore {
     }
 
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.insert_now(row)))
     }
 
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send {
+        Self::count(&self.calls.sandbox_reads);
         ready(Ok(self.sandbox_now(id)))
     }
 
@@ -580,6 +732,7 @@ impl Store for MemoryStore {
         row: &SandboxRow,
         request_id: &str,
     ) -> impl Future<Output = Result<Option<Write>>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.insert_requested_now(row, request_id)))
     }
 
@@ -600,7 +753,12 @@ impl Store for MemoryStore {
     }
 
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
         ready(Ok(self.replace_now(row)))
+    }
+
+    fn respec(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.respec_now(row)))
     }
 
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
@@ -774,5 +932,70 @@ impl Store for MemoryStore {
     ) -> impl Future<Output = Result<()>> + Send {
         self.lock().collected(image, collector);
         ready(Ok(()))
+    }
+
+    fn registered(
+        &self,
+        epoch: u64,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send {
+        let inner = self.lock();
+        ready(Ok(inner.hosts.values().any(|host| {
+            host.row.epoch == HostEpoch(epoch)
+                && host.row.state != HostState::Lost
+                && names.contains(&host.row.info.name)
+        })))
+    }
+
+    fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send {
+        *self
+            .calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(name.to_owned())
+            .or_default() += 1;
+        ready(Ok(self.lock().pointer(name)))
+    }
+
+    fn write_pointer(
+        &self,
+        name: &str,
+        owner: Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send {
+        ready(Ok(self.lock().write_pointer(name, owner, pointer, on)))
+    }
+
+    fn pointer_names(&self) -> impl Future<Output = Result<Vec<String>>> + Send {
+        ready(Ok(self.lock().pointer_names()))
+    }
+
+    fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send {
+        ready(Ok(self.lock().pointers_imported()))
+    }
+
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send {
+        ready(Ok(self.lock().adopt_pointers(found)))
+    }
+
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        ready(Ok(now))
+    }
+
+    fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> impl Future<Output = Result<Import>> + Send {
+        ready(Ok(self.lock().import_pointers(found, from, at_ms, seen)))
     }
 }

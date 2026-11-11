@@ -21,8 +21,7 @@ mode change.
 
 ## Authority and persistence
 
-Migration `packages/db/drizzle/0362_managed_auth_session_sets.sql` is a rolling
-migration. It stamps every Better Auth session with the exact canonical login
+The schema stamps every Better Auth session with the exact canonical login
 binding and its revision, then adds:
 
 - `managed_auth_browser_installations`: hash-only installation authority with a
@@ -227,7 +226,7 @@ Repository readiness and deployment activation are separate approvals:
 
 1. Keep `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply migration 0362
    through the owner migration job, provision the restricted runtime grants, and
-   require migration-ordinal/schema-contract and runtime-posture checks.
+   require migration-ordinal and runtime-posture checks.
 2. Deploy the same session-set-capable API and web generation to every replica.
    Verify client config still reports `legacy` and ordinary sign-in/onboarding.
 3. With a fresh deployment authorization, move every replica to `dual`. Exercise
@@ -275,8 +274,7 @@ Better Auth/Hono integration, API/SSE tests, and the `accounts` browser-acceptan
 CI lane. That lane must fail instead of skip when PostgreSQL, a migrated
 restricted role, production web build, or Chromium/Firefox/WebKit is absent.
 
-Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
-`packages/core/src/managed-auth-session-sets.ts`,
+Canonical source: `packages/core/src/managed-auth-session-sets.ts`,
 `packages/core/src/managed-session.ts`,
 `apps/api/src/routes/managed-auth-session-sets.ts`,
 `apps/api/src/auth/managed-auth-session-adapter.ts`,

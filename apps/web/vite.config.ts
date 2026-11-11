@@ -7,6 +7,7 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
+import { bootRecoveryPlugin } from "./vite-boot-recovery";
 import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
 import { eagerGraphPlugin } from "./vite-eager-graph";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
@@ -66,13 +67,56 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The shared subscription account display: the chat header's
+              // account menu and the Models settings rows both draw it. Its
+              // file sits beside the settings-only models pages, so without
+              // this leaf it joins settings-pages and a chat load fetches the
+              // whole management surface through the account menu.
+              name: "subscription-account-display",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]models[\\/]subscription-usage|lib[\\/]subscription-accounts)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // Startup's permission, organization and account-email helpers
+              // read these small pure modules. Entry-aware grouping can fold
+              // them into the app-context chunk, which imports the API chunk
+              // that in turn imports startup, a load-time cycle. Keep them in
+              // a leaf.
+              name: "startup-access-helpers",
+              test: /packages[\\/](?:contracts[\\/]src[\\/](?:personal-integration-setup|passkey-only-account)|react[\\/]src[\\/]organization-model)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The chat route reads chat-list display helpers. The chat
+              // beside a Site also reaches the command actions, so entry-aware
+              // grouping folds both into one chunk and a direct chat load
+              // downloads the actions for nothing. Keep the helpers in a leaf.
+              name: "session-list-model",
+              test: /packages[\\/]react[\\/]src[\\/]session-list-model\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The chat route lists the workspace's machines. Settings,
+              // schedules and the chat beside a Site read the same hooks, so
+              // entry-aware grouping can fold them in with the meeting
+              // settings, and a direct chat load then downloads the meeting
+              // and management UI for nothing. Keep the hooks in a leaf.
+              name: "workspace-machines-list",
+              test: /packages[\\/]react[\\/]src[\\/](?:app[\\/]lib[\\/]use-workspace-machines|hooks[\\/]shared-machines-list)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Relative times, disabled-control reasons and section variants
               // are shared by settings, sign-in methods and the session
               // retention control, never by the first page. The web host's
               // entry-aware merge otherwise folds them into a chunk startup
               // needs for the organization model, so keep them in a leaf.
               name: "row-detail-primitives",
-              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|disabled-reason|section-variant)\.tsx$/,
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|time-format|disabled-reason|section-variant)\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -322,7 +366,7 @@ export default defineConfig({
               // Session creation resolves the agent's capabilities, so their
               // helpers are startup code too.
               name: "startup-context",
-              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/](?:api-error\.tsx|error-reference\.ts|error-text\.tsx)|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|info|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -331,6 +375,16 @@ export default defineConfig({
               // them without promoting the shared chat route graph to startup.
               name: "session-list-titles",
               test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.tsx?$/,
+            },
+            {
+              // Session creation at startup and the app state both read the
+              // session tool helpers. Left to entry-aware grouping they can
+              // join the app-state chunk, which the startup context then
+              // imports back: a chunk cycle whose reads can run too early.
+              name: "session-tool-helpers",
+              test: /packages[\\/](?:react[\\/]src[\\/]app[\\/]lib[\\/]session-tools|contracts[\\/]src[\\/]github-repository)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
             },
             {
               // The SDK's error and wire-type runtime, and the attribution and
@@ -345,7 +399,7 @@ export default defineConfig({
               // The before-paint scrollbar entry is eager too; its shared probe
               // remains in the higher-priority ui-runtime group.
               name: "startup-sdk-runtime",
-              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.tsx?|packages[\\/]contracts[\\/]src[\\/]browser-storage\.tsx?|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.tsx?|vite[\\/]preload-helper\.js)$/,
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction|model-display)\.tsx?|packages[\\/]contracts[\\/]src[\\/](?:browser-storage|model-display)\.tsx?|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.tsx?|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -383,12 +437,35 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // A direct session load shows these icons (tool icons and the
+              // new-chat starters), and lazy pages use them too. Left to
+              // entry-aware grouping they can share a chunk with the recordings
+              // model and the meeting helpers, which pulls that lazy code into
+              // every direct session load.
+              name: "starter-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:blocks|code|graduation-cap)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // The session page shows these icons, and so does the default-machine
               // settings row. Left to entry-aware grouping they share a chunk with
               // that row, which pulls the settings and model pages into every
               // direct session load.
               name: "visibility-glyphs",
               test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:eye|eye-off)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
+              // A direct session load reads these small session helpers, and so
+              // do the settings pages. Left to entry-aware grouping they can
+              // share a chunk with the recordings model, the command-menu
+              // actions or the meeting settings (and through them the
+              // management UI primitives), which pulls that lazy code into
+              // every direct session load.
+              name: "session-read-helpers",
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:lib[\\/]client-config-read|timeline[\\/]tool-details|session-list-model|app[\\/]lib[\\/]session-capabilities|ui[\\/]tooltip)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/]lock-keyhole\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },
@@ -424,9 +501,20 @@ export default defineConfig({
               // reads the rail context, so those leaves (and the icons both
               // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search|zap|zap-off)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|mic|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|square|text-search|zap|zap-off)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
+            },
+            {
+              // The recording client: the chat's dictation (eager on a direct
+              // chat) and the lazy meeting recorder both use it, and the app's
+              // Start recording action reaches it too. Left to entry-aware
+              // merging it shares a chunk with the lazy action registry, which
+              // a direct chat load then downloads for nothing.
+              name: "recording-client",
+              test: /packages[\\/]sdk[\\/]src[\\/](?:recording-live|recording-owner|recordings)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
             },
             {
               // Payment and organization-identity glyphs are lazy-only, but
@@ -479,6 +567,39 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The dropdown menu is used by many lazy pages and the session
+              // header, but not by startup. Left to entry-aware merging it can
+              // share a chunk with a startup helper (model display), so every
+              // page would load it and, through it, the menu primitives.
+              name: "dropdown-menu",
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/]dropdown-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Meeting defaults are a Workspace settings section. Their theme
+              // wrapper reaches the embedded chat chunk, so if entry-aware
+              // merging folds them into a chunk a direct session loads (the
+              // sidebar row cache), the session waits on the optional
+              // conversation panels.
+              name: "meeting-settings",
+              test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/]meetings[\\/]meeting-defaults-section|packages[\\/]react[\\/]src[\\/]meetings[\\/]meeting-settings)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // The window bar (with the actions provider behind it) serves
+              // settings and full pages, not a direct session. Left to
+              // entry-aware merging it can join the small chunk a direct
+              // session loads for the rig hooks, together with the settings
+              // search, so the session would download the command actions
+              // graph unused.
+              name: "window-bar",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]window-bar|lib[\\/]window-bar-row)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Budget pages, Workspace settings > Usage and the member slider
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.
@@ -498,8 +619,11 @@ export default defineConfig({
               // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
-              // Workspace meeting defaults render only on the settings page, but
-              // entry-aware merging can fold them into a chunk direct sessions load.
+              // Workspace meeting defaults (the settings section and the shared
+              // meeting settings view it renders) appear only on the settings
+              // page, but entry-aware merging can fold them into a chunk direct
+              // sessions load; the view then drags the management primitives and
+              // the Meetings hooks into every chat.
               // Organization provider connections and Codex subscriptions are imported by the Models
               // pages above and by the lazy organization Models section; outside
               // this group they land in the section's chunk and form a cycle
@@ -513,7 +637,7 @@ export default defineConfig({
               // so the lazy agent consent route cannot read uninitialized data
               // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)$/,
+              test: /(?:(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:components[\\/](?:connection-access-settings|meetings[\\/]meeting-defaults-section|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.tsx?)|packages[\\/]react[\\/]src[\\/]meetings[\\/]meeting-settings\.tsx)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -552,6 +676,17 @@ export default defineConfig({
               // soon as a session opens, so it belongs to the session graph.
               name: "recordings",
               test: /packages[\\/]react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings)\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // The meetings model and the on-screen meeting signal are read by
+              // the Meetings pages, the lazy command-menu actions and dictation
+              // settings, never by a direct session load. Entry-aware merging
+              // otherwise folds them in beside the session's archive helpers, so
+              // a direct session downloads them for nothing.
+              name: "meetings-model",
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings-model|meetings[\\/]meeting-on-screen)\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -641,7 +776,7 @@ export default defineConfig({
             {
               // Keep customer model setup in its own lazy feature boundary.
               name: "customer-model-setup",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connection\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -698,6 +833,8 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    // A page whose code fails to download reloads once, then says so.
+    bootRecoveryPlugin(),
     chunkEvaluationOrderPlugin(),
     // Chats are opened directly from links and reloads. Allow a little
     // coalesced shell code, but fail when lazy-only code rides along.

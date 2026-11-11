@@ -22,7 +22,7 @@ jobs:
   publish:
     environment: package-release
     name: Publish latest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Admit protected main source
@@ -40,7 +40,7 @@ jobs:
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-stable.yml@refs/heads/main" ]]
 
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: "${{ github.sha }}"
           persist-credentials: false
@@ -67,7 +67,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -104,7 +105,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 

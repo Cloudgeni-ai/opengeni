@@ -4,6 +4,7 @@ import {
   ArtifactCatalogKind,
   ArtifactCatalogListQuery,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
   ArtifactPinResponse,
   UpdateArtifactPinRequest,
   retainedArtifactReferenceFromFile,
@@ -21,6 +22,7 @@ import {
   requireAccessGrantAuthorization,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorizations,
+  readSessionAttachmentFiles,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   siteViewerForGrant,
@@ -47,6 +49,10 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { artifactCatalogCursorCodec } from "../artifact-catalog-cursor";
 import {
+  editableArtifactAudienceViewer,
+  projectEditableArtifactAudience,
+} from "../editable-artifact-audience";
+import {
   editableArtifactActorForGrant,
   editableArtifactHttpError,
   isInvisibleListCandidate,
@@ -70,6 +76,58 @@ const position = (row: ArtifactCatalogCandidate): ArtifactCatalogPosition => ({
 });
 
 export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): void {
+  app.get("/v1/workspaces/:workspaceId/artifact-catalog/:artifactId/resolve", async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
+    const grant = authorization.grant;
+    const id = z.string().uuid().safeParse(context.req.param("artifactId"));
+    const query = parseRequestQuery(
+      z.object({ sessionId: z.string().uuid().optional() }).strict(),
+      context.req.query(),
+      { status: 422, message: "Invalid artifact link query" },
+    );
+    if (!id.success) throw new HTTPException(422, { message: "Invalid artifact ID" });
+    const artifactId = id.data.toLowerCase();
+    const filesAllowed = hasPermission(grant.permissions, "files:read");
+    const sitesAllowed = hasPermission(grant.permissions, "artifacts:read");
+    if (!filesAllowed && !sitesAllowed)
+      throw new HTTPException(403, { message: "Artifact read access required" });
+    const actor = filesAllowed
+      ? await fileOwnerContextForAccess(deps, authorization, "files:read")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+    context.header("cache-control", "private, no-store");
+    return withSessionRlsActorContext(actor, async () => {
+      const [files, siteVisible] = await Promise.all([
+        !filesAllowed
+          ? []
+          : query.sessionId
+            ? readSessionAttachmentFiles(deps, grant, query.sessionId, [artifactId])
+            : getFilesForSubject(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
+                fileIds: [artifactId],
+              }),
+        sitesAllowed
+          ? isWorkspaceArtifactVisible(
+              deps.db,
+              workspaceId,
+              await siteViewerForGrant(deps.db, grant),
+              artifactId,
+            )
+          : false,
+      ]);
+      // UUIDs are independent across domains. Historical artifact:UUID links
+      // meant files, so a readable file wins even if a Site has the same ID.
+      const kind = files.some((file) => file.status === "ready")
+        ? "file"
+        : siteVisible
+          ? "site"
+          : null;
+      if (!kind) throw new HTTPException(404, { message: "Artifact not found" });
+      return context.json(ArtifactLinkResolution.parse({ artifactId, kind }));
+    });
+  });
   app.put("/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin", async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -299,7 +357,8 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       let lastReturned: ArtifactCatalogPosition | undefined;
       let nextCursor: string | null = null;
       const fileSubject = includesFiles ? await fileAuthoritySubjectIdForGrant(deps, grant) : null;
-      const siteViewer = kinds.includes("site")
+      // Sites and documents list the workspace's and this person's own Only me ones.
+      const siteViewer = kinds.some((kind) => kind === "site" || editableKinds.has(kind))
         ? await siteViewerForGrant(deps.db, grant)
         : { subjectId: null };
       for (let batch = 0; batch < MAX_BATCHES; batch++) {
@@ -482,7 +541,7 @@ async function projectCandidate(
   };
   if (row.version_id) item.versionId = row.version_id;
   if (row.kind === "site")
-    item.visibility = row.site_visibility === "user_private" ? "private" : "workspace";
+    item.visibility = row.visibility === "user_private" ? "private" : "workspace";
   if (editableKinds.has(row.kind)) {
     const scope = editableArtifactScope({
       accountId: grant.accountId,
@@ -516,6 +575,14 @@ async function projectCandidate(
         status: artifact.lifecycle,
         createdAt: artifact.createdAt,
         updatedAt: artifact.updatedAt,
+        // Who can open it, and whether this viewer may change that.
+        ...projectEditableArtifactAudience(
+          {
+            visibility: row.visibility === "user_private" ? "user_private" : "workspace_shared",
+            ownerSubjectId: row.owner_subject_id ?? null,
+          },
+          editableArtifactAudienceViewer(grant),
+        ),
       };
     } catch (error) {
       if (isInvisibleListCandidate(error)) return null;

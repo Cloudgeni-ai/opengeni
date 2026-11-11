@@ -51,9 +51,9 @@ function fixture(options: Partial<SessionProxyHandlerOptions> = {}, policy: Poli
     text: value.text,
     annotations: value.annotations,
     resources: value.resources,
-    model: value.model,
-    reasoningEffort: value.reasoningEffort,
-    latencyMode: value.latencyMode,
+    model: value.model ?? sessionPolicy.model,
+    reasoningEffort: value.reasoningEffort ?? sessionPolicy.reasoningEffort,
+    latencyMode: value.latencyMode ?? sessionPolicy.latencyMode,
   });
   // Same parsed prompt-boundary fields as core/domain/sessions.ts, before mutable enrichment.
   const boundaryHash = (value: SubmitComposerDraftRequest) =>
@@ -376,7 +376,29 @@ describe("session proxy locked-model composer draft", () => {
     expect(f.requests.map(({ method }) => method)).toEqual(["GET", "PUT"]);
   });
 
+  test("locked save keeps a draft that follows the chat's settings following", async () => {
+    const f = fixture();
+    f.seedDraft({
+      revision: 0,
+      text: "",
+      annotations: [],
+      resources: [],
+      ...HOST_POLICY,
+      policyFollowsSession: true,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    });
+    await f.browser.saveComposerDraft(WORKSPACE_ID, SESSION_ID, saveInput());
+    const put = f.requests.find(({ method }) => method === "PUT");
+    expect(put?.body).toMatchObject({ text: "Draft text", expectedRevision: 0 });
+    expect(put?.body).not.toHaveProperty("model");
+    expect(put?.body).not.toHaveProperty("reasoningEffort");
+    expect(put?.body).not.toHaveProperty("latencyMode");
+  });
+
   test.each([
+    // A pick is whole: a partial policy is refused like a malformed one.
     { model: undefined },
     { reasoningEffort: undefined },
     { latencyMode: undefined },

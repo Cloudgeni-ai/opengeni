@@ -1,10 +1,13 @@
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConnectSetup } from "../connect-setup";
+import { organizationApprovalFor } from "../connect-setup-model";
 import { browserConnectWindowHost } from "../connect-window-host";
 import { connectionServicePresentation } from "../connection-service-presentation";
 import { useOpenGeniText } from "../messages/runtime";
+import { OrganizationApprovalHelp } from "../organization-approval-help";
 import { useIntegrationCapabilityConnect } from "./integration-capability-connect-flow";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
@@ -12,8 +15,10 @@ export { reconnectCandidate } from "./integration-capability-connect-flow";
 
 /** The client methods the card uses. Session proxies that do not forward
  * Connect and integration routes cannot render it. */
-export function supportsIntegrationCapabilityCard(client: unknown): client is OpenGeniClient {
-  const candidate = client as Partial<Record<keyof OpenGeniClient, unknown>> | null;
+export function supportsIntegrationCapabilityCard(
+  client: unknown,
+): client is ChatClient<OpenGeniClient> {
+  const candidate = client as Partial<Record<keyof ChatClient<OpenGeniClient>, unknown>> | null;
   return (
     !!candidate &&
     typeof candidate.connectTransport === "function" &&
@@ -24,7 +29,7 @@ export function supportsIntegrationCapabilityCard(client: unknown): client is Op
 }
 
 export type SessionIntegrationCapabilityCardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   /** `api:integration:<definition id>` from the agent's recommendation. */
@@ -64,7 +69,7 @@ function ScopedCard({
 }: SessionIntegrationCapabilityCardProps) {
   const t = useOpenGeniText();
   const definitionId = integrationDefinitionIdFromCapabilityId(capabilityId) ?? capabilityId;
-  const presentation = connectionServicePresentation({ id: definitionId, label: name });
+  const presentation = connectionServicePresentation({ id: definitionId, label: name }, t);
   const [windows] = useState(() => browserConnectWindowHost(window));
   const flow = useIntegrationCapabilityConnect({
     client,
@@ -77,17 +82,77 @@ function ScopedCard({
     onConfigured,
   });
   const { availability, attempt, busy, waiting, error, chatAccessFailed, notRequester } = flow;
+  // The button the person pressed disappears as the card changes step; move
+  // focus to the step's own control so keyboard and screen reader users don't
+  // land back at the top of the page. Only when focus was actually lost.
+  const setupRef = useRef<HTMLDivElement>(null);
+  // A message (a blocked pop-up, say) counts as a step: the button pressed
+  // may be gone even though the attempt itself didn't move.
+  const step = waiting
+    ? "waiting"
+    : busy
+      ? "busy"
+      : `${attempt?.state ?? "none"}${error ? ":error" : ""}`;
+  const shownStep = useRef(step);
+  useEffect(() => {
+    if (shownStep.current === step) return;
+    shownStep.current = step;
+    if (step === "busy") return;
+    const region = setupRef.current;
+    const active = region?.ownerDocument.activeElement;
+    if (!region || (active && active !== region.ownerDocument.body)) return;
+    // While waiting, focus the status line: a second Enter on a button there
+    // would open another window or cancel.
+    const target =
+      region.querySelector<HTMLElement>(".og-session-capability-waiting [role=status]") ??
+      region.querySelector<HTMLElement>(
+        ".og-session-capability-primary, .og-connect-setup-primary, button:not([disabled])",
+      );
+    (target ?? region).focus({ preventScroll: true });
+  }, [step]);
+  // Connecting replaces the setup controls with "Your account is connected";
+  // keep keyboard focus on the card by moving it to that line.
+  const shell = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (setupRef.current) shell.current = setupRef.current.closest(".og-session-capability-shell");
+  });
+  const connected = availability.kind === "connected";
+  useEffect(() => {
+    const card = shell.current;
+    if (!connected || !card) return;
+    const active = card.ownerDocument.activeElement;
+    if (active && active !== card.ownerDocument.body && active.isConnected) return;
+    card
+      .querySelector<HTMLElement>(".og-session-capability-copy[role=status]")
+      ?.focus({ preventScroll: true });
+  }, [connected]);
+  const retrySignIn = flow.signInClosed || Boolean(error);
+  // After a sign-in the person never came back from (here or on an earlier
+  // visit), the card offers organization approval help above its sign-in.
+  const approval = flow.organizationApproval;
+  // The provider said an administrator must approve: messaging IT is the
+  // step, and signing in again becomes the help's own secondary action.
+  const blockedOnApproval = !!attempt && organizationApprovalFor(attempt) !== null;
   const setup =
-    availability.kind === "ready" && (attempt || busy || error) ? (
-      <>
+    availability.kind === "ready" && (attempt || busy || error || approval) ? (
+      <div ref={setupRef} tabIndex={-1} className="og-session-capability-step">
         {error ? <p role="alert">{error}</p> : null}
-        {flow.notice ? <p role="status">{flow.notice}</p> : null}
-        {attempt ? (
+        {flow.notice && flow.signInClosed && !approval ? <p role="status">{flow.notice}</p> : null}
+        {approval ? (
+          <OrganizationApprovalHelp approval={approval} serviceName={presentation.name} />
+        ) : null}
+        {/* While the sign-in window is open, the card says so and offers one way
+            out, which ends the attempt; the sign-in controls return if the
+            window closes or the provider moves setup elsewhere. */}
+        {waiting ? null : attempt ? (
           <ConnectSetup
             className="og-connect"
             controller={flow.controller}
+            inChat
+            serviceName={presentation.name}
+            onRetry={blockedOnApproval ? flow.start : undefined}
             authorizeLabel={
-              flow.signInClosed
+              retrySignIn
                 ? t("connectSetup.trySigningInAgain")
                 : t("sessionIntegrationCapabilityCard.signIn")
             }
@@ -96,20 +161,51 @@ function ScopedCard({
         ) : busy ? (
           <p role="status">{t("sessionIntegrationCapabilityCard.preparing")}</p>
         ) : null}
-        {waiting ? (
-          <p role="status" className="og-session-capability-progress">
-            {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}{" "}
-            <button type="button" className="og-session-capability-stop" onClick={flow.stopWaiting}>
-              {t("sessionIntegrationCapabilityCard.stopWaiting")}
-            </button>
+        {/* After Cancel: a sign-in window the browser wouldn't let the card close. */}
+        {flow.notice && !flow.signInClosed ? (
+          <p role="status" className="og-session-capability-reminder">
+            {flow.notice}
           </p>
         ) : null}
-        {!busy && !waiting && (flow.restartable || error) ? (
+        {waiting ? (
+          <div className="og-session-capability-waiting">
+            <span aria-hidden className="og-session-capability-spinner" />
+            <p role="status" tabIndex={-1}>
+              {flow.signInWindowGone
+                ? t("sessionIntegrationCapabilityCard.signInWindowGone", {
+                    name: presentation.name,
+                  })
+                : t("sessionIntegrationCapabilityCard.finishSigningIn", {
+                    name: presentation.name,
+                  })}
+            </p>
+            <span className="og-session-capability-waiting-actions">
+              <button type="button" onClick={flow.reopenSignIn}>
+                {flow.signInWindowGone
+                  ? t("sessionIntegrationCapabilityCard.openSignInAgain")
+                  : t("sessionIntegrationCapabilityCard.reopenSignIn")}
+              </button>
+              <button
+                type="button"
+                className="og-session-capability-stop"
+                onClick={flow.stopWaiting}
+              >
+                {t("sessionIntegrationCapabilityCard.stopWaiting")}
+              </button>
+            </span>
+          </div>
+        ) : null}
+        {!busy &&
+        !waiting &&
+        !blockedOnApproval &&
+        (flow.restartable || ((error || approval) && !attempt)) ? (
           <button type="button" className="og-session-capability-primary" onClick={flow.start}>
-            {t("sessionIntegrationCapabilityCard.tryAgain")}
+            {approval && !attempt
+              ? t("connectSetup.trySigningInAgain")
+              : t("sessionIntegrationCapabilityCard.tryAgain")}
           </button>
         ) : null}
-      </>
+      </div>
     ) : undefined;
 
   return (
@@ -119,6 +215,7 @@ function ScopedCard({
       logo={presentation.logo}
       typeLabel={t("sessionIntegrationCapabilityCard.integration")}
       description={rationale}
+      clampDescription
       skill={false}
       expanded={false}
       complete={availability.kind === "connected"}

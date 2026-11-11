@@ -13,10 +13,12 @@ import {
   prepareConnectorActionApproval,
   recordTurnAppActionGrant,
   resolveSessionAppActionAuthority,
+  resolveSessionAdminAuthority,
   sessionStartedByPerson,
   setOrganizationAgentAdminAccess,
   submitHumanPromptInTransaction,
   turnCanChangeWorkspaceSettings,
+  turnWorkspaceSettingsAccess,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
   type Database,
@@ -294,6 +296,100 @@ describe("app actions in a chat", () => {
     });
   });
 
+  test("full access runs as the person who gave it only in turns they caused", async () => {
+    if (!client) return;
+    const db = client.db;
+    const org = await organization("app-actions-full-access-sender");
+    await setOrganizationAgentAdminAccess(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      sessionAdminAccessAllowed: true,
+    });
+    const keyOf = (turn: Awaited<ReturnType<typeof claimedTurn>>) => ({
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+    });
+    const giveFullAccess = async (sessionId: string) =>
+      await grantSessionAdminAccess(db, {
+        organizationId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId,
+        actorSubjectId: org.owner,
+        durationHours: 1,
+      });
+
+    // The owner's own message in their full-access chat runs as them.
+    const own = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.owner,
+    });
+    await giveFullAccess(own.sessionId);
+    expect(await resolveSessionAppActionAuthority(db, keyOf(own))).toEqual({
+      kind: "full_access",
+      subjectId: org.owner,
+    });
+
+    // Another member's message in the owner's shared full-access chat runs as
+    // that member, exactly as it would without full access, while the session
+    // itself (its grant state and tool listing) still has full access.
+    const others = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.member,
+    });
+    expect(others.initiator).toMatchObject({ kind: "subject", subjectId: org.member });
+    await giveFullAccess(others.sessionId);
+    expect(await resolveSessionAdminAuthority(db, keyOf(others))).toMatchObject({
+      subjectId: org.owner,
+    });
+    expect(await resolveSessionAppActionAuthority(db, keyOf(others))).toEqual({
+      kind: "confirm",
+      subjectId: org.member,
+      permissions: [...SENT_PERMISSIONS],
+    });
+    expect(await turnWorkspaceSettingsAccess(db, keyOf(others))).toBeNull();
+
+    // A message claiming the owner's identity without the owner's own frozen
+    // grant (a key, a service, or someone else's sign-in) gets none either.
+    const unsigned = await claimedTurn(org, {
+      createdBy: { kind: "subject", subjectId: org.owner },
+      sender: org.owner,
+      frozen: null,
+    });
+    await giveFullAccess(unsigned.sessionId);
+    expect(await resolveSessionAppActionAuthority(db, keyOf(unsigned))).toEqual({
+      kind: "unavailable",
+      reason: "not_signed_in_person",
+    });
+
+    // A continuation (a goal, schedule or inbox delivery) runs as the owner
+    // only when the person recorded as causing it is the owner.
+    const continuation = async (causalPerson: string | null) => {
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          update session_turns
+          set source = 'goal', initiator_kind = 'service', initiator_subject_id = 'scheduler',
+            initiating_human_subject_id = ${causalPerson}
+          where id = ${others.turnId}`;
+      });
+      return await resolveSessionAppActionAuthority(db, keyOf(others));
+    };
+    expect(await continuation(org.member)).toEqual({
+      kind: "unavailable",
+      reason: "no_person_present",
+    });
+    expect(await continuation(null)).toEqual({
+      kind: "unavailable",
+      reason: "no_person_present",
+    });
+    expect(await continuation(org.owner)).toEqual({
+      kind: "full_access",
+      subjectId: org.owner,
+    });
+  });
+
   test("what the message could do is frozen with its turn: where it came from and its access", async () => {
     if (!client) return;
     const db = client.db;
@@ -531,19 +627,26 @@ describe("app actions in a chat", () => {
           durationHours: null,
         });
       }
-      return await turnCanChangeWorkspaceSettings(db, {
+      const scope = {
         accountId: org.accountId,
         workspaceId,
         sessionId: turn.sessionId,
         turnId: turn.turnId,
-      });
+      };
+      lastAccess = await turnWorkspaceSettingsAccess(db, scope);
+      const can = await turnCanChangeWorkspaceSettings(db, scope);
+      expect(can).toBe(lastAccess !== null);
+      return can;
     };
+    // Typed by assertion so the closure's assignments aren't narrowed away to null.
+    let lastAccess = null as Awaited<ReturnType<typeof turnWorkspaceSettingsAccess>>;
     const admin = ["workspace:admin"] as const;
 
     // An admin signed in to the app, whose changes they confirm in the chat.
     expect(
       await canChange(org.owner, { subjectId: org.owner, changes: "confirm", permissions: admin }),
     ).toBe(true);
+    expect(lastAccess).toBe("confirm");
     // The same admin, but the message's recorded access leaves settings out.
     expect(
       await canChange(org.owner, {
@@ -577,6 +680,7 @@ describe("app actions in a chat", () => {
     expect(
       await canChange(org.owner, { subjectId: org.owner, ...none }, org.workspaceId, true),
     ).toBe(true);
+    expect(lastAccess).toBe("full_access");
     // A Personal workspace's owner holds no admin grant there, but its settings
     // are theirs: with full access, or a confirmed turn that recorded them.
     const [own] = await shared!.admin<{ id: string }[]>`

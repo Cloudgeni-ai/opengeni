@@ -70,6 +70,7 @@ import {
 import { type MicrophoneAccess, useMicrophoneAccess } from "./microphone-access";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { errorMessage } from "@opengeni/contracts/values";
+import { isRegionRestricted, regionRestrictedText } from "../inference-region";
 
 export {
   codexRealtimeAdmissionAllowed,
@@ -103,7 +104,7 @@ function realtimeRefusalLabel(t: OpenGeniText, code: string | null | undefined):
     case "credits_disabled":
       return t("realtime.realtimeControl.creditsOff");
     default:
-      return null;
+      return regionRestrictedText(t, code);
   }
 }
 
@@ -273,7 +274,6 @@ export function SessionRealtimeControl(props: {
       menuSide="top"
       modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={props.showDiagnostics}
-      audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}
       onSelectModel={realtime.lifecycleActive ? undefined : selection.selectModel}
@@ -366,7 +366,6 @@ function NewSessionRealtimeControlView(
 ) {
   const t = useOpenGeniText();
   const selection = props.selection;
-  const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const snapshot = useMemo<SessionRealtimeControllerSnapshot>(
@@ -406,7 +405,6 @@ function NewSessionRealtimeControlView(
       menuSide="bottom"
       modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={false}
-      audioRef={audioRef}
       selectedModel={selection.selectedModel}
       models={selection.models}
       onSelectModel={selection.selectModel}
@@ -444,7 +442,11 @@ export function RealtimeVoiceControl(props: {
   showDiagnostics?: boolean | undefined;
   /** Extra classes on the in-bar mute cluster (e.g. `max-sm:hidden` when mutes live in “+”). */
   muteControlsClassName?: string | undefined;
-  audioRef: RefObject<HTMLAudioElement | null>;
+  /**
+   * @deprecated Replies play through the realtime controller's own audio
+   * element; this control no longer renders one.
+   */
+  audioRef?: RefObject<HTMLAudioElement | null> | undefined;
   selectedModel?: RealtimeModelOption | undefined;
   models?: readonly RealtimeModelOption[] | undefined;
   onSelectModel?: ((modelId: string) => void) | undefined;
@@ -493,7 +495,9 @@ export function RealtimeVoiceControl(props: {
   const failureText =
     status.label === t("realtime.realtimeControl.voiceUnavailable")
       ? status.detail
-      : t("realtime.realtimeControl.labelDetail", { label: status.label, detail: status.detail });
+      : !status.detail
+        ? status.label
+        : t("realtime.realtimeControl.labelDetail", { label: status.label, detail: status.detail });
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
@@ -506,7 +510,9 @@ export function RealtimeVoiceControl(props: {
       : modeOwned
         ? t("realtime.realtimeControl.endVoiceConversation")
         : !startable && (status.phase === "unavailable" || status.phase === "checking")
-          ? `${status.label}: ${status.detail}`
+          ? status.detail
+            ? `${status.label}: ${status.detail}`
+            : status.label
           : startFailed
             ? t("realtime.realtimeControl.tryVoiceAgain")
             : t("realtime.realtimeControl.startVoice");
@@ -546,6 +552,25 @@ export function RealtimeVoiceControl(props: {
     if (!pickerOpen) setPickerProvider(selectedModel.provider);
   }, [pickerOpen, selectedModel.provider]);
 
+  // No voice model can run here yet (none is connected): show no control
+  // rather than a disabled one that explains a setup step to someone who
+  // never asked for voice. It appears once a voice model is available, and
+  // never hides a conversation or a failure that is still on screen, nor a
+  // catalog that failed to load. EU-only with every voice model switched off
+  // for its region: shown, switched off, saying "Not supported in EU".
+  const allRegionRestricted =
+    modelsKnown &&
+    models.length > 0 &&
+    models.every((model) => isRegionRestricted(model.unavailableCode ?? null));
+  if (
+    !models.some((model) => model.available) &&
+    !allRegionRestricted &&
+    (props.loadState ?? "ready") !== "failed" &&
+    props.snapshot.status === "idle" &&
+    !modeOwned
+  )
+    return null;
+
   return (
     <div
       ref={rootRef}
@@ -555,7 +580,6 @@ export function RealtimeVoiceControl(props: {
       data-model-menu={modelMenu}
       className="og-realtime-control inline-flex shrink-0 items-center"
     >
-      <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
       <RealtimeComposerGlow phase={status.phase} reduceMotion={reduceMotion === true} />
       <AnimatePresence initial={false}>
         {modeOwned ? (
@@ -643,6 +667,33 @@ export function RealtimeVoiceControl(props: {
           <span className="og-realtime-failure-label line-clamp-2 max-w-56">{failureText}</span>
           <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
         </button>
+      ) : null}
+      {audioBlocked ? (
+        // The browser refused to play the voice's replies until the person
+        // acts. Say so where they look, and let the same tap turn sound on.
+        <button
+          type="button"
+          data-realtime-attention=""
+          data-testid="realtime-audio-blocked"
+          onClick={() => void props.onRetryAudibleOutput().catch(() => undefined)}
+          className="og-realtime-audio-blocked mr-1.5 inline-flex min-w-0 items-center rounded-og-sm px-1 text-og-xs font-medium leading-tight text-og-status-waiting outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-og-accent/45"
+        >
+          <span className="line-clamp-2 max-w-40 text-right">
+            {t("realtime.realtimeControl.tapToHearReplies")}
+          </span>
+        </button>
+      ) : null}
+      {!audioBlocked && props.snapshot.status === "active" && status.phase === "blocked" ? (
+        // Connected but silent on one side (no microphone sound, or a reply
+        // that never played): say so where the person looks.
+        <span
+          data-realtime-attention=""
+          data-testid="realtime-audio-flow-issue"
+          title={status.detail}
+          className="og-realtime-audio-flow mr-1.5 inline-flex min-w-0 items-center px-1 text-og-xs font-medium leading-tight text-og-status-waiting"
+        >
+          <span className="line-clamp-2 max-w-40 text-right">{status.label}</span>
+        </span>
       ) : null}
       <div className="inline-flex shrink-0 items-center">
         <motion.button
@@ -740,7 +791,7 @@ export function RealtimeVoiceControl(props: {
               !(
                 status.phase === "unavailable" &&
                 pickerProvider === selectedModel.provider &&
-                selectedModel.unavailableReason === status.detail
+                (selectedModel.unavailableReason === status.detail || !status.detail)
               ) ? (
                 <>
                   {modelsKnown ? <DropdownMenuSeparator /> : null}
@@ -752,7 +803,9 @@ export function RealtimeVoiceControl(props: {
                       />
                       {status.label}
                     </div>
-                    <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+                    {status.detail ? (
+                      <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+                    ) : null}
                   </div>
                 </>
               ) : null}
@@ -789,7 +842,7 @@ export function RealtimeVoiceControl(props: {
       </div>
 
       <span className="sr-only" role="status" aria-live="polite">
-        {status.label}. {status.detail}
+        {status.detail ? `${status.label}. ${status.detail}` : status.label}
       </span>
       {props.snapshot.error ? (
         <span className="sr-only" role="alert">
@@ -1027,6 +1080,7 @@ export function RealtimeModelPickerMenu(props: {
                   key={model.id}
                   label={model.label}
                   hint={
+                    regionRestrictedText(t, model.unavailableCode) ??
                     model.unavailableReason ??
                     (model.recommended
                       ? t("realtime.realtimeControl.recommendedDescription", {
@@ -1035,7 +1089,11 @@ export function RealtimeModelPickerMenu(props: {
                       : model.description)
                   }
                   disabled={props.disabled || !model.available}
-                  title={model.unavailableReason ?? model.description}
+                  title={
+                    regionRestrictedText(t, model.unavailableCode) ??
+                    model.unavailableReason ??
+                    model.description
+                  }
                   active={selected}
                   showChevron={false}
                   trailing={
@@ -1226,6 +1284,21 @@ function statusContent(
         detail: t("realtime.realtimeControl.preparingYourMicrophoneAndLive"),
       };
     case "active":
+      // Connected, yet silent on one side: say so instead of "Listening".
+      if (snapshot.diagnostic?.kind === "no_input_audio" && !snapshot.inputMuted) {
+        return {
+          phase: "blocked",
+          label: t("realtime.realtimeControl.noMicrophoneSound"),
+          detail: t("realtime.realtimeControl.noMicrophoneSoundDetail"),
+        };
+      }
+      if (snapshot.diagnostic?.kind === "output_silent" && !snapshot.outputMuted) {
+        return {
+          phase: "blocked",
+          label: t("realtime.realtimeControl.replyNotPlayed"),
+          detail: t("realtime.realtimeControl.replyNotPlayedDetail"),
+        };
+      }
       return snapshot.bridge?.speaking
         ? {
             phase: "speaking",
@@ -1299,12 +1372,14 @@ function statusContent(
         };
       }
       if (!modelAvailable) {
+        const refusal = realtimeRefusalLabel(t, unavailableCode);
+        const detail = admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel");
         return {
           phase: "unavailable",
-          label:
-            realtimeRefusalLabel(t, unavailableCode) ??
-            t("realtime.realtimeControl.voiceModelUnavailable"),
-          detail: admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel"),
+          label: refusal ?? t("realtime.realtimeControl.voiceModelUnavailable"),
+          // Say it once: "Not supported in EU" needs no second line.
+          detail:
+            refusal !== null && (detail === refusal || isRegionRestricted(detail)) ? "" : detail,
         };
       }
       if (!canStart && admissionBlocker) {

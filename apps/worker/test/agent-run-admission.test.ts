@@ -32,23 +32,21 @@ function mockCodexBilled(active: boolean): () => void {
 }
 
 /** SuperGrok runs only on the shared core: its funding is the core's answer. */
-function mockXaiRoute(
-  answer: Awaited<ReturnType<typeof opengeniDb.readSubscriptionCoreRouteFunding>>,
+function mockXaiFunding(
+  answer: Awaited<ReturnType<typeof opengeniDb.readSubscriptionCoreFunding>>,
 ): () => void {
-  const spy = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue(answer);
+  const spy = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(answer);
   return () => spy.mockRestore();
 }
 
 describe("worker agent-run admission funding", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
-  // SuperGrok admission reads its provider route (one receipt read); these
-  // cases run on the legacy route unless a case says otherwise.
-  let routeFunding: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
+  // SuperGrok admission reads the core's funding answer; these cases run
+  // unfunded unless a case says otherwise.
+  let routeFunding: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreFunding">>;
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
-    routeFunding = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
-      route: "legacy",
-    });
+    routeFunding = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(false);
   });
   afterEach(() => {
     allowance.mockRestore();
@@ -77,9 +75,9 @@ describe("worker agent-run admission funding", () => {
         },
       );
     try {
-      routeFunding.mockResolvedValue({ route: "core", value: true });
+      routeFunding.mockResolvedValue(true);
       expect(await admit()).toBeNull();
-      routeFunding.mockResolvedValue({ route: "core", value: false });
+      routeFunding.mockResolvedValue(false);
       expect(await admit()).toBe("insufficient_credits");
       expect(routeFunding.mock.calls.at(-1)?.[1]).toMatchObject({
         provider: "xai",
@@ -161,7 +159,7 @@ describe("worker agent-run admission funding", () => {
   test("admits SuperGrok subscription runs the shared core funds with zero Opengeni credits", async () => {
     const restoreBalance = mockZeroBalance();
     const restoreCodex = mockCodexBilled(false);
-    const restoreRoute = mockXaiRoute({ route: "core", value: true });
+    const restoreFunding = mockXaiFunding(true);
     try {
       expect(
         await agentRunAdmissionDenial(
@@ -183,40 +181,63 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toBeNull();
     } finally {
-      restoreRoute();
+      restoreFunding();
       restoreCodex();
       restoreBalance();
     }
   });
 
-  test("keeps SuperGrok off the core route behind the credit gate", async () => {
-    const restoreBalance = mockZeroBalance();
+  test("API work without credits gets its own refusal; origin is read once even without credit billing", async () => {
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      accountId: ACCOUNT,
+      balanceMicros: 0,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+    });
     const restoreCodex = mockCodexBilled(false);
-    const restoreRoute = mockXaiRoute({ route: "legacy" });
+    const input = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      model: "gpt-6-luna",
+      requestedAgentRuns: 1,
+    };
+    const billed = {
+      db: {} as opengeniDb.Database,
+      entitlements: null,
+      settings: testSettings({ billingMode: "stripe" }),
+    };
     try {
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "api" })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "app" })).toBe(
+        "insufficient_credits",
+      );
+      // A lazily read origin decides the same way.
+      const resolve = async () => "api" as const;
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: resolve })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      // Origin still decides subscription eligibility without credit billing.
+      let reads = 0;
       expect(
         await agentRunAdmissionDenial(
+          { ...billed, settings: testSettings() },
           {
-            db: {} as opengeniDb.Database,
-            entitlements: null,
-            settings: testSettings({
-              billingMode: "stripe",
-              usageLimitsMode: "managed",
-              supergrokSubscriptionEnabled: true,
-            }),
-          },
-          {
-            accountId: ACCOUNT,
-            workspaceId: WORKSPACE,
-            model: "supergrok/grok-4.7",
-            requestedAgentRuns: 1,
+            ...input,
+            billingOrigin: async () => {
+              reads += 1;
+              return "api";
+            },
           },
         ),
-      ).toBe("insufficient_credits");
+      ).toBeNull();
+      expect(reads).toBe(1);
     } finally {
-      restoreRoute();
       restoreCodex();
-      restoreBalance();
+      balance.mockRestore();
     }
   });
 
@@ -322,7 +343,7 @@ describe("worker agent-run admission funding", () => {
     "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, active, ...overrides }) => {
       const restoreCodex = mockCodexBilled(active);
-      const restoreRoute = mockXaiRoute({ route: "core", value: true });
+      const restoreFunding = mockXaiFunding(true);
       // The real check admits credit-free work unless the allowance opts into
       // counting unbilled usage.
       allowance.mockImplementation(async (_db, check) =>
@@ -363,7 +384,7 @@ describe("worker agent-run admission funding", () => {
           fundedWithoutCredits: true,
         });
       } finally {
-        restoreRoute();
+        restoreFunding();
         restoreCodex();
       }
     },
@@ -409,6 +430,7 @@ describe("worker agent-run admission funding", () => {
 
   test("goal activity publishes an allowance pause using locked causal admission", async () => {
     const restoreCodex = mockCodexBilled(false);
+    const origin = spyOn(opengeniDb, "readSessionBillingOrigin").mockResolvedValue("app");
     const settings = testSettings({ billingMode: "disabled", usageLimitsMode: "none" });
     const sessionId = "00000000-0000-4000-8000-000000000004";
     const causalTurnId = "00000000-0000-4000-8000-000000000005";
@@ -504,6 +526,11 @@ describe("worker agent-run admission funding", () => {
         workspaceId: WORKSPACE,
         subjectId: "user:original-goal-human",
       });
+      expect(origin).toHaveBeenCalledWith(lockedDb, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId,
+      });
       expect(materialize).toHaveBeenCalledWith(
         services.db,
         expect.objectContaining({
@@ -520,6 +547,7 @@ describe("worker agent-run admission funding", () => {
       workspace.mockRestore();
       materialize.mockRestore();
       source.mockRestore();
+      origin.mockRestore();
       restoreCodex();
     }
   });

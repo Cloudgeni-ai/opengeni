@@ -54,7 +54,7 @@ function exactCall(node: any, values: object) {
       resolveWorkspaceModelBoundarySettings, resolveDefaultSessionModel,
       settingsWithEnabledCapabilityMcpServers, withWorkspaceSessionActivityRls,
       frozenInitiatorForCommandActor, initiatingHumanForAllowance, requireLimit,
-      createSessionWithIdempotencyKeyResult, createSession } = values;
+      createSessionWithIdempotencyKeyResult, createSession, billingOrigin } = values;
     ${code}
     return result;
   `,
@@ -143,6 +143,7 @@ for (const node of calls) {
       frozenCreatedByContext: null,
       beforeCreateCommit: undefined,
       initiatingHumanForAllowance: (v: any) => v.human,
+      billingOrigin: "app",
       [helper]: spy,
     };
     const result = { private: "unchanged result" };
@@ -171,6 +172,7 @@ for (const node of calls) {
             workspaceId: "workspace",
             subjectId: "subject",
             workspaceSettings: {},
+            billingOrigin: "app",
           },
         ]);
       if (phase === "capability_settings")
@@ -185,6 +187,7 @@ for (const node of calls) {
             action: "agent_run:create",
             quantity: 1,
             model: "model",
+            billingOrigin: "app",
           },
         ]);
       if (phase === "initiator_freeze") {

@@ -4,6 +4,7 @@ import {
   CreateCapabilityCatalogItemRequest,
   DiscoverMcpCapabilitiesResponse,
   EnableCapabilityRequest,
+  RemoveCapabilityInstallationResponse,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
   SessionMcpToolPermissionsQuery,
@@ -12,35 +13,40 @@ import {
 } from "@opengeni/contracts";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
 import {
+  canRemoveIntegration,
   ConnectorConnectionRequiredError,
+  hasIntegrationAdminPermission,
+  hasIntegrationSetupPermission,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireIntegrationSetupAuthorization,
   getConnectorToolPermissions,
   updateConnectorToolPermissions,
   getSessionMcpToolPermissions,
   updateSessionMcpToolPermissions,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildCapabilityCatalog,
   createCatalogItem,
+  customMcpServerRemovability,
   disableCapability,
   discoverMcpRegistryCapabilities,
   enableCapability,
   officialMcpRegistryUrl,
+  removeCustomMcpServer,
 } from "@opengeni/core";
+import { IntegrationChangeRequiresAdminError } from "@opengeni/db";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { boundedLimit } from "../http/common";
 import { z } from "zod";
-import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
-const discoverablePlugins = pluginSnapshot.sources
-  .flatMap((source) => source.entries.map((entry) => ({ ...entry, provider: source.provider })))
-  .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+import { discoverablePlugins } from "../integrations/marketplace-plugin-catalog";
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -92,25 +98,49 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    // Lets clients offer member setup only when the organization allows it.
+    // The routes enforce it either way, so a failed read just omits it.
+    const memberIntegrationSetup = await withOrganizationIntegrationPolicyFence(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      async (_tx, policy) => policy.personalIntegrationSetup,
+    ).catch(() => undefined);
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId,
+      settings,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+    });
+    const canRemove = await customMcpServerRemovability({
+      db,
+      workspaceId,
+      items: catalog.items,
+      admin: hasIntegrationAdminPermission(grant),
+      canRemove: (installerSubjectId) => canRemoveIntegration(grant, installerSubjectId),
+    });
     return c.json(
-      CapabilityCatalogResponse.parse(
-        await buildCapabilityCatalog({
-          db,
-          workspaceId,
-          settings,
-          subjectId: grant.subjectId,
-          accountId: grant.accountId,
-        }),
-      ),
+      CapabilityCatalogResponse.parse({
+        ...catalog,
+        items: catalog.items.map((item) => ({ ...item, canRemove: canRemove(item) })),
+        ...(memberIntegrationSetup ? { memberIntegrationSetup } : {}),
+      }),
     );
   });
 
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateCapabilityCatalogItemRequest);
     return c.json(
-      await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }),
+      await createCatalogItem({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        payload,
+        // Members add new servers; only admins change existing ones.
+        ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: { settings } }),
+      }),
       201,
     );
   });
@@ -225,23 +255,23 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
-    // Integration admins enable anything. The personal setup permission turns
-    // a reviewed OAuth integration on for personal accounts, create-only.
-    const personalSetup = !hasPermission(
-      grant.permissions,
-      "capabilities:manage",
-      grant.permissionMode,
-    );
+    // Integration admins enable or change anything. Members turn on any
+    // integration that is not on yet. The personal setup permission turns a
+    // reviewed OAuth integration on for personal accounts. Both are create-only.
+    const memberSetup =
+      !hasIntegrationAdminPermission(grant) && hasIntegrationSetupPermission(grant);
+    const personalSetup = !hasIntegrationSetupPermission(grant);
     if (
       personalSetup &&
       !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
     )
-      throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
+      throw new MissingPermissionRefusal("connections:write");
     const payload = await parseRequestJson(c, EnableCapabilityRequest);
     const installation = await enableCapability({
       db,
       grant,
       ...(personalSetup ? { personalSetup: true } : {}),
+      ...(memberSetup ? { memberSetup: true } : {}),
       accountId: grant.accountId,
       workspaceId,
       settings,
@@ -263,6 +293,29 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
       capabilityId: decodeURIComponent(c.req.param("capabilityId")),
     });
     return c.json(installation);
+  });
+
+  // Remove a custom MCP server added in this workspace. Integration admins
+  // remove any; a member removes one they turned on, while it is on.
+  app.delete("/v1/workspaces/:workspaceId/capabilities/:capabilityId/installation", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
+    try {
+      const removed = await removeCustomMcpServer({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        settings,
+        capabilityId: decodeURIComponent(c.req.param("capabilityId")),
+        subjectId: grant.subjectId,
+        ...(hasIntegrationAdminPermission(grant) ? {} : { memberRemoval: true }),
+      });
+      return c.json(RemoveCapabilityInstallationResponse.parse({ removed }));
+    } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
+      throw error;
+    }
   });
 }
 

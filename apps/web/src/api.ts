@@ -1,4 +1,5 @@
 import { teamsAuthReturnPath } from "@/lib/teams-connect";
+import type { ChatClient } from "@opengeni/sdk";
 // The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
 // and optional connector routes share this authenticated request helper so
 // connector-only code does not increase the core session bundle.
@@ -6,19 +7,24 @@ import {
   OpenGeniBrowserClient,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
 } from "@opengeni/sdk/browser";
-import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { isSignInLostRejection, type OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { desktopAppHeaders } from "@opengeni/react/app/lib/desktop";
 import { userActivityHeaders } from "./lib/user-activity";
 
 import type { AuthSession, ClientConfig } from "@opengeni/react/app/types";
 import { beginAnalyticsRequest } from "@opengeni/react/app/lib/analytics-observer";
+import { beginFeedbackRequest } from "@opengeni/react/app/lib/feedback-trail";
 import {
   ApiError,
   apiErrorFromResponseBody,
   isApiErrorStatus,
 } from "@opengeni/react/app/lib/app-api";
-import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import {
+  organizationSecurityReturnPath,
+  securityReauthenticationPath,
+} from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
@@ -70,6 +76,7 @@ let managedActorForegroundIdle: Promise<void> | null = null;
 let resolveManagedActorForegroundIdle: (() => void) | null = null;
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
+const signInLostListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
 const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
 const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
@@ -149,7 +156,9 @@ export class AuthApiError extends Error {
  * request (the stored access key can change at runtime) and cookies ride
  * along for managed-session deployments.
  */
-export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBrowserClient {
+export function createOpenGeniClient(
+  beginSharedRead?: () => number,
+): ChatClient<OpenGeniBrowserClient> {
   const createdAtActorRevision = managedActorRevision;
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
@@ -171,9 +180,32 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
         signal: init?.signal,
       });
       handleApiContractResponse(response);
+      noteSignInLost(response);
       return response;
     },
-  });
+  }).withSessionResponse("chat");
+}
+
+/**
+ * Hear when an API request is refused because this page's sign-in is gone
+ * (the server's 401 says the sign-in was missing or expired), so the app can
+ * stop its background reads and sign in again instead of polling on.
+ */
+export function subscribeSignInLost(listener: () => void): () => void {
+  signInLostListeners.add(listener);
+  return () => signInLostListeners.delete(listener);
+}
+
+function noteSignInLost(response: Response): void {
+  if (response.status !== 401 || signInLostListeners.size === 0) return;
+  void response
+    .clone()
+    .json()
+    .then((envelope: unknown) => {
+      if (!isSignInLostRejection(envelope)) return;
+      for (const listener of [...signInLostListeners]) listener();
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -229,9 +261,17 @@ export async function managedActorFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   let finishAnalytics: (status: number | null) => void = () => {};
+  // The latest requests go with a feedback report, each with its server reference.
+  let finishFeedback: ReturnType<typeof beginFeedbackRequest> = () => {};
   // Same-origin API path, for the content-free failed-request signal.
   let apiPathname: string | null = null;
   let responseReceived = false;
+  let receivedStatus: number | null = null;
+  let correlationId: string | null = null;
+  const finishRequest = (status: number) => {
+    finishAnalytics(status);
+    finishFeedback(status, { correlationId });
+  };
   try {
     const requestUrl = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
@@ -243,6 +283,7 @@ export async function managedActorFetch(
     ) {
       apiPathname = requestUrl.pathname;
       finishAnalytics = beginAnalyticsRequest(requestUrl.pathname, requestMethod(input, init));
+      finishFeedback = beginFeedbackRequest(requestMethod(input, init), requestUrl.pathname);
     }
   } catch {
     /* Telemetry must never affect transport. */
@@ -310,6 +351,8 @@ export async function managedActorFetch(
       signal: controller.signal,
     });
     responseReceived = true;
+    receivedStatus = response.status;
+    correlationId = response.headers.get(OPENGENI_CORRELATION_HEADER);
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -336,7 +379,7 @@ export async function managedActorFetch(
       response.status === 304
     ) {
       void response.body?.cancel().catch(() => undefined);
-      finishAnalytics(response.status);
+      finishRequest(response.status);
       return new Response(null, {
         status: response.status,
         statusText: response.statusText,
@@ -344,7 +387,7 @@ export async function managedActorFetch(
       });
     }
     if (!response.body) {
-      finishAnalytics(response.status);
+      finishRequest(response.status);
       return response;
     }
     // Finite JSON is consumed before it crosses the actor boundary. Returning
@@ -410,7 +453,7 @@ export async function managedActorFetch(
           actorBodyController.abort(reason);
         };
     responseOwnsCleanup = true;
-    finishAnalytics(response.status);
+    finishRequest(response.status);
     return managedActorTrackedResponse(
       actorResponse,
       actorBodyController.signal,
@@ -421,6 +464,10 @@ export async function managedActorFetch(
     );
   } catch (error) {
     finishAnalytics(null);
+    finishFeedback(receivedStatus, {
+      correlationId,
+      aborted: error instanceof Error && error.name === "AbortError",
+    });
     if (!responseReceived) noteClientRequestFailure(apiPathname, requestMethod(input, init), error);
     throw error;
   } finally {
@@ -931,7 +978,7 @@ export async function completeSelfServiceOrganizationSetup(input: {
   organizationName: string;
   operationId: string;
   /** The signup answer to "How do you want to use Opengeni?", kept on the organization. */
-  useCase?: "embed" | "cloud";
+  useCase?: "everyday" | "embed" | "cloud";
 }): Promise<{
   status: "complete";
   organizationId: string;
@@ -945,6 +992,21 @@ export async function completeSelfServiceOrganizationSetup(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/**
+ * The person went Back after their organization exists and chose again: their
+ * new answer becomes the current one, so the new-chat page follows it on every
+ * device.
+ */
+export async function changeSignupUseCase(input: {
+  organizationId: string;
+  useCase: "everyday" | "embed" | "cloud";
+}): Promise<{ useCase: "everyday" | "embed" | "cloud" }> {
+  return await authRequest<{ useCase: "everyday" | "embed" | "cloud" }>(
+    "/organization-onboarding/use-case",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
 }
 
 export async function completeOrganizationUserSetup(input: {
@@ -1029,6 +1091,11 @@ function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
   const teamsReturn = teamsAuthReturnPath(window.location);
   if (teamsReturn) return teamsReturn;
+  const organizationSecurity = organizationSecurityReturnPath(
+    window.location.pathname,
+    window.location.search,
+  );
+  if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === "/site-auth/authorize"
@@ -1295,9 +1362,8 @@ export function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  // A notice across the top of the app: in the desktop app it is the window's
-  // top row, so it keeps clear of the window controls and moves the window
-  // (apps/web/src/styles.css).
+  // A notice across the top of the app (styled in apps/web/src/styles.css);
+  // in the desktop app it sits below the window bar and also moves the window.
   notice.setAttribute("data-app-notice", "");
   notice.setAttribute("data-window-drag", "");
   const message = document.createElement("span");

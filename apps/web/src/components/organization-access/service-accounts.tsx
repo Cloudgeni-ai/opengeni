@@ -64,8 +64,13 @@ export type ServiceAccountsApi = {
 
 export type ServiceAccountsProps = {
   api: ServiceAccountsApi;
-  /** Only an organization administrator can make one an admin. */
+  /** Only the organization owner can make one an admin. */
   canMakeAdmin: boolean;
+  /**
+   * An organization admin who isn't the owner: admin service accounts stay
+   * read-only, as the server only lets the owner change or delete them.
+   */
+  memberLevelOnly?: boolean;
   location: ServiceAccountsLocation;
   onNavigate: (next: ServiceAccountsLocation) => void;
   /** Opens Create API key with this service account chosen. */
@@ -90,7 +95,7 @@ function roleOptions(canMakeAdmin: boolean): SelectOption<OrganizationServiceAcc
       description: "Can also manage people, keys and billing.",
       ...(canMakeAdmin
         ? {}
-        : { disabled: true, disabledReason: "Only organization admins can choose this." }),
+        : { disabled: true, disabledReason: "Only the organization owner can choose this." }),
     },
   ];
 }
@@ -334,6 +339,7 @@ function NewServiceAccountPage({
 function ServiceAccountPage({
   api,
   canMakeAdmin,
+  memberLevelOnly = false,
   account,
   loading,
   onClose,
@@ -409,6 +415,8 @@ function ServiceAccountPage({
   }
 
   const narrowing = account.role === "admin" && draft.role === "member" && held.length > 0;
+  // Only the owner changes, deletes or adds keys to an admin service account.
+  const locked = memberLevelOnly && account.role === "admin";
   return (
     <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
@@ -416,11 +424,13 @@ function ServiceAccountPage({
         title={account.name}
         meta={[`${ROLE_LABEL[account.role]} · ${keyCount(account.activeKeyCount)}`]}
         actions={
-          <MoreMenu label={`More for ${account.name}`}>
-            <DropdownMenuItem variant="destructive" onSelect={() => setConfirming(true)}>
-              Delete
-            </DropdownMenuItem>
-          </MoreMenu>
+          locked ? undefined : (
+            <MoreMenu label={`More for ${account.name}`}>
+              <DropdownMenuItem variant="destructive" onSelect={() => setConfirming(true)}>
+                Delete
+              </DropdownMenuItem>
+            </MoreMenu>
+          )
         }
       />
       <DetailPageBody
@@ -440,7 +450,7 @@ function ServiceAccountPage({
                   value={draft.name}
                   suppressAutofill
                   maxLength={200}
-                  disabled={saving}
+                  disabled={saving || locked}
                   onChange={(event) => {
                     setDraft({ ...draft, name: event.target.value });
                     setSaveError(null);
@@ -452,7 +462,7 @@ function ServiceAccountPage({
                   value={draft.description}
                   rows={2}
                   maxLength={500}
-                  disabled={saving}
+                  disabled={saving || locked}
                   onChange={(event) => {
                     setDraft({ ...draft, description: event.target.value });
                     setSaveError(null);
@@ -462,10 +472,12 @@ function ServiceAccountPage({
               <Field
                 label="Role"
                 hint={
-                  narrowing
-                    ? "Its keys lose administrator permissions when you save."
-                    : roleOptions(canMakeAdmin).find((each) => each.value === draft.role)
-                        ?.description
+                  locked
+                    ? "Only the organization owner can change an admin service account."
+                    : narrowing
+                      ? "Its keys lose administrator permissions when you save."
+                      : roleOptions(canMakeAdmin).find((each) => each.value === draft.role)
+                          ?.description
                 }
               >
                 <SelectMenu
@@ -475,7 +487,7 @@ function ServiceAccountPage({
                     setDraft({ ...draft, role });
                     setSaveError(null);
                   }}
-                  disabled={saving}
+                  disabled={saving || locked}
                   showMetaInTrigger={false}
                   className="w-full"
                 />
@@ -536,10 +548,12 @@ function ServiceAccountPage({
         <DetailSection
           title="API keys"
           action={
-            <RowButton onClick={() => onCreateKey(account.id)}>
-              <PlusIcon aria-hidden="true" />
-              Create key
-            </RowButton>
+            locked ? undefined : (
+              <RowButton onClick={() => onCreateKey(account.id)}>
+                <PlusIcon aria-hidden="true" />
+                Create key
+              </RowButton>
+            )
           }
         >
           {keys === null ? (

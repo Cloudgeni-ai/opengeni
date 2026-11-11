@@ -267,6 +267,37 @@ describe("context compaction rendering", () => {
     await r.unmount();
   });
 
+  test("rebuilding a Codex chat for another model reads as one short note", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Now write the backfill script." }),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+          }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+          timelineEvent("turn.started", {}),
+          timelineEvent("agent.message.completed", { text: "Here is the script." }),
+          timelineEvent("turn.completed", { output: "Here is the script." }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Earlier messages summarized for the new model");
+    // One note only: no compaction headline and no "compacted" turn facet.
+    expect(text).not.toMatch(/compacted/i);
+    expect(text).not.toContain("estimated history tokens");
+    expect(text).not.toContain("Auto");
+    await r.unmount();
+  });
+
   test("a provider-rejected compaction stays short and keeps diagnostics behind Details", async () => {
     const recorded =
       "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
@@ -347,6 +378,62 @@ describe("context compaction rendering", () => {
       expect(panel?.textContent).toContain("input[116].status");
       expect(panel?.textContent).toContain("req_7f3a");
       expect(panel?.textContent).toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a checkpoint that trimmed history reads as a recovery, with the provider's reason behind Details", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "deterministic_trim",
+            estimatedTokensBefore: 240_000,
+            estimatedTokensAfter: 9_000,
+            fallback: {
+              reason: "provider_rejected",
+              providerRejection: {
+                httpStatus: 400,
+                type: "invalid_request_error",
+                code: null,
+                param: null,
+                requestId: "req_trim",
+              },
+              providerMessage: "max_tokens exceeds the limit",
+            },
+          }),
+        ]}
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Older messages trimmed"),
+      );
+      expect(status?.textContent).toContain("Older messages trimmed · Auto");
+      expect(status?.textContent).toContain(
+        "The model couldn’t summarize them. Chat history above is unchanged.",
+      );
+      expect(status?.textContent).not.toContain("Couldn’t compact");
+      expect(status?.className).not.toContain("status-failed");
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("max_tokens exceeds the limit");
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      await act(async () => toggle?.click());
+      await flush();
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain("HTTP 400 · invalid_request_error");
+      expect(panel?.textContent).toContain("req_trim");
+      expect(panel?.textContent).toContain("max_tokens exceeds the limit");
+      expect(panel?.textContent).not.toContain("rejects this request the same way");
     } finally {
       await r.unmount();
     }
@@ -2614,7 +2701,7 @@ describe("MessageTimeline — settled turn folding", () => {
       afterExpand[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(r.container.textContent).toContain("bun test");
+    expect(r.container.textContent).toContain("Ran tests");
 
     await r.unmount();
   });
@@ -2980,7 +3067,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -2988,7 +3075,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
@@ -3006,9 +3093,9 @@ describe("MessageTimeline — settled turn folding", () => {
     // Settled activity stays neutral even while a later cluster is running.
     expect(settled?.querySelector(".animate-og-pulse")).toBeNull();
     // The live tail stays expanded: its command is visible without expanding.
-    expect(r.container.textContent).toContain("step two");
+    expect(r.container.textContent).toContain("step-two.md");
     // The folded cluster's contents are NOT in the DOM until expanded.
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -3020,7 +3107,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "terraform apply" },
+        arguments: { cmd: "cat deploy-plan.txt" },
       }),
       timelineEvent("session.requiresAction", {}),
     ];
@@ -3033,7 +3120,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(1);
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(r.container.textContent).toContain("terraform apply");
+    expect(r.container.textContent).toContain("deploy-plan.txt");
     expect(r.container.textContent).toContain("Approval needed");
 
     await r.unmount();
@@ -3047,7 +3134,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "terraform apply" },
+        arguments: { cmd: "cat deploy-plan.txt" },
       }),
       timelineEvent("session.requiresAction", {}),
     ];
@@ -3070,7 +3157,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -3079,7 +3166,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two running" },
+        arguments: { cmd: "cat step-two-running.md" },
       }),
       // The queued follow-up remains exclusively in the prompt queue. Its
       // absence from the timeline must not make the live cluster fold.
@@ -3097,7 +3184,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(2);
     expect(triggers.some((node) => node.getAttribute("data-state") === "open")).toBe(true);
-    expect(r.container.textContent).toContain("step two running");
+    expect(r.container.textContent).toContain("step-two-running.md");
     expect(r.container.textContent).not.toContain("queued follow-up");
 
     await r.unmount();
@@ -3110,7 +3197,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -3118,7 +3205,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -3145,14 +3232,14 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -3178,7 +3265,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers).toHaveLength(3);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).toContain("step one");
+    expect(r.container.textContent).toContain("step-one.md");
 
     // The outer fold closes after its beat but remains in settle choreography
     // through the slow collapse. Assert that durable state on the trigger, not
@@ -3205,7 +3292,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(expanded).toHaveLength(3);
     expect(expanded.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -3221,7 +3308,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
     ];
@@ -3247,7 +3334,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
     ];
@@ -3281,7 +3368,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     // Narration (visible pre-wrap) rides the beat; folded step rows do not.
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     // Through the collapse and after chrome clears: everything stays closed.
     await flush(2200);
@@ -3477,6 +3564,33 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     expect(text).toContain("Opened web page");
     expect(text).toContain("https://openai.com/research");
     expect(text).not.toContain("query unavailable");
+
+    await r.unmount();
+  });
+
+  test("shows an opened page without the tracking the hosted search tagged on", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "completed",
+        providerData: {
+          action: {
+            type: "open_page",
+            url: "https://example.com/rules/4-1?page=2&_t_q=which+rule&utm_source=openai",
+          },
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("https://example.com/rules/4-1?page=2");
+    expect(text).not.toContain("utm_source");
+    expect(text).not.toContain("_t_q");
 
     await r.unmount();
   });
@@ -4131,6 +4245,54 @@ describe("StartupPhaseRow", () => {
     await r.unmount();
   });
 
+  test("a running setup step names its environment and counts up while it runs", async () => {
+    setStartupDetails(true);
+    const startedAt = new Date(Date.now() - 41_500).toISOString();
+    const running: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rig-running",
+      turnId: "turn-setup",
+      phase: "rig",
+      status: "running",
+      subject: "cloudgeni",
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: null,
+      occurredAt: startedAt,
+    };
+    const r = await renderComponent(<ActivityRail items={[running]} />);
+    try {
+      await flush();
+      const text = () => r.container.textContent ?? "";
+      // The time runs in the title, as in the turn header; no gutter chip.
+      expect(text()).toContain("Setting up cloudgeni · 41s");
+      await flush(1_100);
+      expect(text()).toContain("Setting up cloudgeni · 42s");
+
+      // Settled, the step shows its recorded duration and the ordinary title.
+      await r.rerender(
+        <ActivityRail
+          items={[
+            {
+              ...running,
+              status: "complete",
+              completedAt: new Date().toISOString(),
+              durationMs: 66_400,
+            },
+          ]}
+        />,
+      );
+      await flush();
+      expect(text()).toContain("Sandbox Environment ready");
+      expect(text()).not.toContain("·");
+      expect(text()).toContain("1m 06s");
+    } finally {
+      await r.unmount();
+      setStartupDetails(false);
+    }
+  });
+
   beforeEach(() => setStartupDetails(true));
   afterEach(() => setStartupDetails(false));
 
@@ -4659,7 +4821,7 @@ describe("ask / run_on / exec collapsed previews", () => {
     );
     await flush();
     const text = r.container.textContent ?? "";
-    expect(text).toContain("$ pwd");
+    expect(text).toContain("Ran a command");
     expect(text).toContain("on studio-mac");
     expect(text).toContain("/workspace");
     await r.unmount();

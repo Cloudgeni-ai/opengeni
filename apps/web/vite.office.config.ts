@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { bootRecoveryPlugin } from "./vite-boot-recovery";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -13,7 +14,9 @@ export default defineConfig({
   base: "/office/",
   envDir: dirname,
   // The pane renders the published session app with its published stylesheet.
-  plugins: [viteReact()],
+  // Office opens it while the host is still starting, when a file can fail to
+  // download; the boot guard reloads once, then says so instead of a blank pane.
+  plugins: [viteReact(), bootRecoveryPlugin()],
   build: {
     outDir: path.resolve(dirname, "dist/office"),
     emptyOutDir: true,

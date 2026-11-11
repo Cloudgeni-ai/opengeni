@@ -1,4 +1,5 @@
 import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import type { SandboxSetupOperationObservation } from "./sandbox/operation-purpose";
 
 export const MCP_TOOL_CALL_OUTCOMES = [
@@ -105,7 +106,15 @@ export type RuntimeMetricsHooks = {
     provider: string;
     outcome: "completed" | "failed";
     durationSeconds: number;
+    httpStatus?: number;
+    /** Closed provider-account refusal read from the response body; attribution only. */
+    providerAccountRefusal?: ProviderAccountRefusal;
   }) => void;
+  /**
+   * A provider's 400 invalid-request answer to a model call, by the request
+   * path it names (indices collapsed) and its error code. Monitoring only.
+   */
+  onModelInvalidRequest?: (input: { provider: string; path: string; code: string }) => void;
   onSandboxCreate?: (input: {
     backend: string;
     imageSource: "logical" | "provider_immutable";

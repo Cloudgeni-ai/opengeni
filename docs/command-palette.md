@@ -34,8 +34,7 @@ Code wins over this doc. The canonical sources are:
   `CompactSessionContextRequest`.
 - `packages/db/src/index.ts` — `clearSessionContext` (the audited DB clear),
   `requestSessionCompaction` / `consumeSessionCompactionRequest`.
-- `packages/db/drizzle/0013_session_compact_requested.sql` — the
-  `sessions.compact_requested` column.
+- `packages/db/src/schema.ts` — the `sessions.compact_requested` column.
 
 This palette lives in the **shared** `@opengeni/react` `ChatComposer`, so both
 the Opengeni web console and the Geni product app get it from one component.

@@ -1,7 +1,9 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 
 import { apiBaseUrl } from "@/api";
+import type { AutoConnectApi } from "@/components/organization-access/auto-connect";
 import {
   ConnectedAgents,
   type ConnectedAgentsLocation,
@@ -18,7 +20,7 @@ export function OrganizationConnectedAgents({
   onNavigate,
   onCreateApiKey,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   organizationName: string;
   location: ConnectedAgentsLocation;
@@ -32,6 +34,18 @@ export function OrganizationConnectedAgents({
       update: async (id, change) =>
         await client.updateOrganizationMcpConnection(organizationId, id, { access: change.policy }),
       disconnect: async (id) => await client.deleteOrganizationMcpConnection(organizationId, id),
+    }),
+    [client, organizationId],
+  );
+  const autoConnect = useMemo<AutoConnectApi>(
+    () => ({
+      list: async () => await client.listMcpTrustedIssuers(organizationId),
+      check: async (request) => await client.checkMcpTrustedIssuer(organizationId, request),
+      create: async (request) => await client.createMcpTrustedIssuer(organizationId, request),
+      update: async (id, request) =>
+        await client.updateMcpTrustedIssuer(organizationId, id, request),
+      remove: async (id) => await client.deleteMcpTrustedIssuer(organizationId, id),
+      events: async (id) => await client.listMcpTrustedIssuerEvents(organizationId, id),
     }),
     [client, organizationId],
   );
@@ -61,6 +75,7 @@ export function OrganizationConnectedAgents({
       workspaces={workspaces}
       location={location}
       onNavigate={onNavigate}
+      autoConnect={{ organizationId, api: autoConnect }}
       {...(onCreateApiKey ? { onCreateApiKey } : {})}
     />
   );

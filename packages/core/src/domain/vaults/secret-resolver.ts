@@ -870,6 +870,7 @@ export function createSecretResolver(
         itemName: candidate.itemName,
         fieldId: candidate.fieldId,
         fieldName: candidate.fieldName ?? "",
+        fieldKind: candidate.fieldKind,
         version: candidate.version,
         material,
       });

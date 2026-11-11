@@ -1,7 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
   createApiKey,
@@ -16,10 +15,9 @@ import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { organizationReadApiKeyPermissions } from "../src/routes/api-keys";
 
-// Every response that returns a Session shows the Codex pointers by the
-// organization's cutover disposition (M3 PR 2b): legacy ids without a cutover
-// row, the core binding with an enabled one, nulls with a disabled one, and
-// never a failed read because of Codex state.
+// Every response that returns a Session shows the Codex pointers from the
+// shared subscription core binding, and never fails a read because of Codex
+// state.
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const DELEGATION_SECRET = "codex-core-session-pointers-delegation-secret";
@@ -29,8 +27,6 @@ const settings = testSettings({
   codexSubscriptionEnabled: true,
 });
 const SUBJECT = `user:codex-pointers-${crypto.randomUUID()}`;
-const LEGACY_PINNED = crypto.randomUUID();
-const LEGACY_LAST = crypto.randomUUID();
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -180,18 +176,6 @@ function expectEverywhere(
   }
 }
 
-async function setCutover(enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("codex-core-session-pointers");
@@ -250,13 +234,10 @@ beforeAll(async () => {
     permissions: organizationReadApiKeyPermissions,
     credentialKind: "organization",
   });
-  // Fixture rows written directly: the legacy pointer columns as legacy wrote
-  // them, a child link, and a core binding for the parent only.
+  // Fixture rows written directly: a child link and a core binding for the
+  // parent only.
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
-    await tx`update sessions set codex_pinned_credential_id = ${LEGACY_PINNED}::uuid,
-        codex_last_credential_id = ${LEGACY_LAST}::uuid
-      where id in (${parentId}::uuid, ${childId}::uuid)`;
     await tx`update sessions set parent_session_id = ${parentId}::uuid,
         root_session_id = ${parentId}::uuid, nested_agent_depth = 1
       where id = ${childId}::uuid`;
@@ -277,45 +258,15 @@ afterAll(async () => {
 const restores: Array<{ mockRestore(): void }> = [];
 afterEach(async () => {
   while (restores.length) restores.pop()!.mockRestore();
-  if (realDb) await setCutover(null);
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
-  test("without a cutover row every response clears the legacy pointers", async () => {
-    // Migration 0680 seeds every organization on the core; this case
-    // reproduces the pre-cutover world (no Codex row).
-    await setCutover(null);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
-  test("an enabled cutover projects the core binding everywhere", async () => {
-    await setCutover(true);
+  test("every Session response projects the core binding", async () => {
     expectEverywhere(
       await everySessionResponse(),
       { codexPinnedCredentialId: connectionId, codexLastCredentialId: connectionId },
-      // No core binding: nulls, never the legacy ids.
+      // No core binding: nulls.
       { codexPinnedCredentialId: null, codexLastCredentialId: null },
     );
-  });
-
-  test("a disabled cutover (maintenance) shows nulls everywhere", async () => {
-    await setCutover(false);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
-  test("an unreadable cutover never fails a session read", async () => {
-    await setCutover(true);
-    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-    restores.push(
-      warn,
-      spyOn(opengeniDb, "readCodexCutoverDisposition").mockImplementation(async () => {
-        throw new Error("cutover read failed");
-      }),
-    );
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-    expect(warn).toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@ import {
 import { encryptEnvironmentValue, getConnectionMetadata } from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
 import { HTTPException } from "hono/http-exception";
+import { connectOwnerStateFields } from "../connection-ownership";
 import {
   integrationBaseUrl,
   oauthStateTtlMs,
@@ -33,6 +34,10 @@ export async function startSlackBotInstall(
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    /** `isPersonalConnectionOwnerPrincipal` of the live start request. The bot
+     * is workspace-owned; the callback needs this claim only to re-check an
+     * owner in their own Personal workspace. */
+    personalOwnershipAllowed: boolean;
     requestUrl: string;
     connectionId?: string;
     connectAttemptId?: string;
@@ -53,9 +58,7 @@ export async function startSlackBotInstall(
   const redirectUri = `${integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl)}/v1/integrations/slack/callback`;
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
     kind: "slack_bot_install",
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
+    ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
     returnPath: `/workspaces/${input.workspaceId}/capabilities`,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(input.externalContinuation

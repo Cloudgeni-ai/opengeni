@@ -56,6 +56,7 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
       // No explicit workspace recovery adds a discontinuity notice here.
       spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
+      spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false),
       spyOn(modelUsage, "processSessionTitleModelUsageEvent").mockImplementation(async (input) => {
@@ -194,6 +195,8 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
           withSessionTitleProviderRequestContext: async (operation: () => Promise<unknown>) =>
             operation(),
           finalizeTurnOpStreamOps: async () => {},
+          compactionModeOptions: {},
+          searchRecords: { form: "assistant" },
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]),
       ).rejects.toBe(unavailable);
       expect(order).toEqual(

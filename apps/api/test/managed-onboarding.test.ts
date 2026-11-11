@@ -402,12 +402,17 @@ describe("managed organization onboarding", () => {
         organizationName: string;
         workspaces: number;
         sharedWorkspaceMemberships: number;
+        personalWorkspaceMembers: string[];
       }>
     >`
       select account.name as "organizationName",
         (select count(*)::int from workspaces where account_id = account.id) as workspaces,
-        (select count(*)::int from workspace_memberships where account_id = account.id)
-          as "sharedWorkspaceMemberships"
+        (select count(*)::int from workspace_memberships
+          where account_id = account.id and workspace_id <> ${completion.personalWorkspaceId})
+          as "sharedWorkspaceMemberships",
+        (select coalesce(array_agg(subject_id), '{}') from workspace_memberships
+          where account_id = account.id and workspace_id = ${completion.personalWorkspaceId})
+          as "personalWorkspaceMembers"
       from managed_accounts account where account.id = ${completion.organizationId}`;
     expect(provisioned?.organizationName).toBe("Orbital Mechanics");
     // The signup answer is kept once, for this person in this organization.
@@ -418,8 +423,75 @@ describe("managed organization onboarding", () => {
     expect(signupUseCases).toHaveLength(1);
     expect(signupUseCases[0]?.useCase).toBe("embed");
     expect(signupUseCases[0]?.subjectId).toStartWith("user:");
+    // The person's current answer comes back with their memberships, so the
+    // new-chat page follows it on any device.
+    const membershipsUseCase = async () => {
+      const response = await app.request("/v1/organization-memberships", {
+        headers: { cookie: sessionCookie },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        memberships: Array<{ organizationId: string; signupUseCase?: string | null }>;
+      };
+      return body.memberships.find(
+        (membership) => membership.organizationId === completion.organizationId,
+      )?.signupUseCase;
+    };
+    expect(await membershipsUseCase()).toBe("embed");
+    // Back, then "Get help with everyday things": the current answer changes,
+    // the first one stays as recorded.
+    const changeUseCase = (body: unknown) =>
+      app.request("/v1/auth/organization-onboarding/use-case", {
+        method: "PUT",
+        headers: { cookie: sessionCookie, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const changed = await changeUseCase({
+      organizationId: completion.organizationId,
+      useCase: "everyday",
+    });
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({ useCase: "everyday" });
+    expect(await membershipsUseCase()).toBe("everyday");
+    const [answers] = await shared.admin<Array<{ first: string; current: string }>>`
+      select first.use_case as first, current.use_case as current
+      from opengeni_private.organization_signup_use_cases first
+      join opengeni_private.organization_signup_current_use_cases current
+        using (account_id, subject_id)
+      where account_id = ${completion.organizationId}`;
+    expect(answers).toEqual({ first: "embed", current: "everyday" });
+    // Only for an organization the person belongs to, and only known answers.
+    const foreignOrganizationId = crypto.randomUUID();
+    await shared.admin`insert into managed_accounts(id, name) values (${foreignOrganizationId}, 'Elsewhere')`;
+    expect(
+      (await changeUseCase({ organizationId: foreignOrganizationId, useCase: "embed" })).status,
+    ).toBe(403);
+    expect(
+      (await changeUseCase({ organizationId: completion.organizationId, useCase: "hobby" })).status,
+    ).toBe(422);
+    const anonymous = await app.request("/v1/auth/organization-onboarding/use-case", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: completion.organizationId, useCase: "cloud" }),
+    });
+    expect(anonymous.status).toBe(401);
+    // A replayed setup keeps the changed answer.
+    const setupReplay = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        organizationName: "Orbital Mechanics",
+        operationId,
+        useCase: "embed",
+      }),
+    });
+    expect(setupReplay.status).toBe(200);
+    expect(await membershipsUseCase()).toBe("everyday");
     expect(provisioned?.workspaces).toBe(1);
     expect(provisioned?.sharedWorkspaceMemberships).toBe(0);
+    // Only the owner's own row sits in their Personal workspace (migration 1231).
+    expect(provisioned?.personalWorkspaceMembers).toHaveLength(1);
+    expect(provisioned?.personalWorkspaceMembers[0]).toStartWith("user:");
     expect(completion.personalWorkspaceId).toBeTruthy();
 
     const compatibilityReplay = await app.request("/v1/organizations", {

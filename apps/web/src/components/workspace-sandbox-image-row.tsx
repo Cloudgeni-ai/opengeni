@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -7,7 +8,7 @@ import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { apiErrorAdvice } from "@opengeni/react/ui/api-error";
 
 type SandboxImagesClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "listWorkspaceSandboxImages" | "updateWorkspaceSettings"
 >;
 

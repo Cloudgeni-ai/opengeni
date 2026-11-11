@@ -14,7 +14,6 @@ import {
   maintainSessionUsageLimits,
   setWorkspaceAllowance,
   grantWorkspaceCredits,
-  bootstrapWorkspace,
 } from "../src";
 import { rawRows } from "../src/database";
 
@@ -467,88 +466,3 @@ test("all eligibility sources re-arm their account and account deletion cleans t
     await fixture.admin`select * from opengeni_private.usage_allowance_membership_changes where account_id=${account}`,
   ).toHaveLength(0);
 });
-
-test("upgrade backfills configured policies and pending imports under a non-bypass owner", async () => {
-  const prior = await acquireOwnerMigratedTestDatabase("readonly-probe-upgrade");
-  if (!prior) throw new Error("PostgreSQL required");
-  const owner = postgres(prior.ownerUrl, { max: 1 });
-  let app: DbClient | undefined;
-  try {
-    await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values('0847_read_only_runtime_probes.sql')`;
-    await migrate(prior.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-    await provisionRoles(prior.adminUrl, {
-      appRole: "opengeni_app",
-      appPassword: prior.appPassword,
-      rlsStrategy: "force",
-    });
-    const url = new URL(prior.adminUrl);
-    url.username = "opengeni_app";
-    url.password = prior.appPassword;
-    app = createDb(url.toString());
-    const actor = `user:upgrade-${crypto.randomUUID()}`;
-    const access = await bootstrapWorkspace(app.db, {
-      accountExternalSource: "upgrade-test",
-      accountExternalId: crypto.randomUUID(),
-      accountName: "Upgrade",
-      workspaceExternalSource: "upgrade-test",
-      workspaceExternalId: crypto.randomUUID(),
-      workspaceName: "Upgrade",
-      subjectId: actor,
-    });
-    const grant = access.workspaceGrants[0]!;
-    const scope = {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actorSubjectId: actor,
-    };
-    const personal = crypto.randomUUID();
-    await prior.admin`insert into workspaces(id,account_id,name) values(${personal},${scope.accountId},'Personal')`;
-    await prior.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
-      values(${scope.accountId},${actor},'owner','active',${personal})`;
-    await setWorkspaceAllowance(app.db, {
-      ...scope,
-      includedCredits: 100,
-      period: "monthly",
-      expectedVersion: 0,
-    });
-    const session = await createSession(app.db, {
-      ...scope,
-      initialMessage: "Import fixture",
-      model: "test",
-      reasoningEffort: "low",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: actor },
-    });
-    const future = new Date(Date.now() + 3600000).toISOString();
-    await prior.admin`update opengeni_private.workspace_usage_allowances set maintenance_next_at=${future} where workspace_id=${scope.workspaceId}`;
-    await prior.admin`update opengeni_private.session_usage_limit_roots set history_state='preparing',import_next_at=${future}
-      where root_session_id=${session.id}`;
-    await owner`delete from schema_migrations where name='0847_read_only_runtime_probes.sql'`;
-    await migrate(prior.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-    const projections =
-      await prior.admin`select kind,due_at=${future}::timestamptz as exact_time from opengeni_private.usage_maintenance_due
-      where workspace_id=${scope.workspaceId} order by kind`;
-    expect(projections.map((row) => row.kind)).toEqual(["allowance", "session_import"]);
-    expect(projections.every((row) => row.exact_time)).toBe(true);
-    await app.db.transaction(
-      async (tx) => {
-        expect(await maintainWorkspaceAllowances(tx)).toBe(0);
-        await maintainSessionUsageLimits(tx);
-        const [state] = await rawRows<{ xid: string | null }>(
-          tx,
-          sql`select pg_current_xact_id_if_assigned()::text as xid`,
-        );
-        expect(state!.xid).toBeNull();
-      },
-      { accessMode: "read only" },
-    );
-  } finally {
-    await app?.close();
-    await owner.end();
-    await prior.release();
-  }
-}, 180_000);

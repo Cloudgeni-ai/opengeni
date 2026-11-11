@@ -17,7 +17,53 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-const { useRecorderPerson } = await import("./recorder-provider");
+const { LostTrackTabTitle, useRecorderPerson } = await import("./recorder-provider");
+const { createMeetingRecorderStore, MeetingRecorderStoreProvider } =
+  await import("@opengeni/react/meetings-recorder");
+
+describe("The tab's title while a source is gone", () => {
+  test("says the microphone is off, survives a page renaming the tab, and goes when it's back", async () => {
+    const store = createMeetingRecorderStore();
+    const recorder = (lost?: "reconnecting" | "stopped") =>
+      ({
+        state: "recording",
+        systemAudioKind: "display",
+        tracks: [
+          { trackNumber: 0, source: "microphone", label: "Mic", ...(lost ? { lost } : {}) },
+          { trackNumber: 1, source: "system", label: "Tab" },
+        ],
+      }) as unknown as Parameters<typeof store.set>[0];
+    document.title = "Meetings";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const settle = () => new Promise((done) => setTimeout(done, 0));
+    try {
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <LostTrackTabTitle />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      await act(async () => store.set(recorder()));
+      expect(document.title).toBe("Meetings");
+      await act(async () => store.set(recorder("reconnecting")));
+      expect(document.title).toBe("Microphone off · Meetings");
+      // Another page sets its own title.
+      await act(async () => {
+        document.title = "Weekly sync";
+        await settle();
+      });
+      expect(document.title).toBe("Microphone off · Weekly sync");
+      await act(async () => store.set(recorder()));
+      expect(document.title).toBe("Weekly sync");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
 
 describe("The recorder's person", () => {
   test("keeps the last person known while it is read again, and follows real changes", async () => {

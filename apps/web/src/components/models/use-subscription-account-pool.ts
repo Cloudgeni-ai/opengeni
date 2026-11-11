@@ -19,6 +19,11 @@ export type SubscriptionPoolAccount = {
   allocatorVersion: number;
   /** The organization's list only: who the account reaches. */
   reach?: import("@opengeni/sdk").SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there.
+   */
+  ownerWorkspaceId?: string | null | undefined;
 };
 export type SubscriptionAccountPoolData<Account extends SubscriptionPoolAccount> = {
   accounts: Account[];

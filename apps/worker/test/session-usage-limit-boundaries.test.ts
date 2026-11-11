@@ -145,6 +145,7 @@ test("a reached limit refuses the first request and the parallel title request b
   // No explicit workspace recovery adds a discontinuity notice here.
   const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
+  const gatewayRequests = spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]);
   const check = fresh(
     spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
       allowed: false,
@@ -207,6 +208,7 @@ test("a reached limit refuses the first request and the parallel title request b
         generateSessionTitleInParallel: true,
         groupBoxBackend: "none",
         agent: {},
+        compactionModeOptions: {},
       } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
     } catch (caught) {
       error = caught;
@@ -223,6 +225,7 @@ test("a reached limit refuses the first request and the parallel title request b
     position.mockRestore();
     recoveryNotice.mockRestore();
     operations.mockRestore();
+    gatewayRequests.mockRestore();
     check.mockRestore();
     allowance.mockRestore();
   }

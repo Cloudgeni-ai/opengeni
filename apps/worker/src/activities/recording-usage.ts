@@ -213,6 +213,19 @@ export async function readTail(
   return (text + decoder.decode()).slice(-limit);
 }
 
+/**
+ * Whether a program was stopped from outside rather than failing on its own:
+ * killed by a signal, or ffmpeg's own "received signal" exit. That happens
+ * when the worker stops mid-job (a deploy or a lost pod), so the step is
+ * retried on another worker instead of failing the recording.
+ */
+export function stoppedBySignal(child: { signalCode: unknown }, stderr: string): boolean {
+  return (
+    (child.signalCode !== null && child.signalCode !== undefined) ||
+    /received signal \d+/u.test(stderr)
+  );
+}
+
 /** Run a program for the current stage, the way the dictation segmenter expects. */
 export async function runMeasuredCommand(
   command: string,
@@ -254,6 +267,8 @@ export type RecordingProcessingReport = RecordingUsageLabels & {
   outcome: "complete" | "failed" | "retry" | "skipped";
   errorCode: string | null;
   audioSeconds: number;
+  /** Of the audio, what was sent to the model; less when long quiet stretches were left out. */
+  sentAudioSeconds: number | null;
   wallSeconds: number;
   queueSeconds: number | null;
   preparedBytes: number;
@@ -355,6 +370,14 @@ export function reportRecordingProcessing(
         labels,
         amount: report.audioSeconds,
       });
+      if (report.sentAudioSeconds !== null) {
+        observability.incrementCounter({
+          name: "opengeni_recording_sent_audio_seconds_total",
+          help: "Seconds of audio sent to the transcription model, without the quiet left out.",
+          labels,
+          amount: report.sentAudioSeconds,
+        });
+      }
       observability.observeHistogram({
         name: "opengeni_recording_audio_duration_seconds",
         help: "Length of the audio of each transcribed version.",
@@ -452,6 +475,9 @@ export function reportRecordingProcessing(
       outcome: report.outcome,
       ...(report.errorCode ? { errorCode: report.errorCode } : {}),
       audioSeconds: round(report.audioSeconds),
+      ...(report.sentAudioSeconds !== null
+        ? { sentAudioSeconds: round(report.sentAudioSeconds) }
+        : {}),
       wallSeconds: round(report.wallSeconds),
       ...(report.queueSeconds !== null ? { queueSeconds: round(report.queueSeconds) } : {}),
       ...stages,

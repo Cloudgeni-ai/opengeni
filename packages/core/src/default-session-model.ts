@@ -15,6 +15,7 @@ import {
   type BillingBalance,
   type ConnectionMetadata,
   type OrganizationModelDefaults,
+  type BillingOrigin,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
@@ -23,14 +24,14 @@ import {
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
   loadWorkspaceModelCatalogInputs,
-  readSubscriptionCoreRouteReadiness,
-  readSubscriptionCoreProviderRouteForWorkspace,
+  readSubscriptionCoreReadiness,
   readSubscriptionCoreClaudeCatalogReadiness,
-  SUBSCRIPTION_CORE_CLAUDE_NOT_READY,
   type SubscriptionCoreClaudeCatalogReadiness,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   getOrganizationModelDefaults,
+  chargeBillingOrigin,
+  readScheduledTaskBillingOrigin,
   spendableCreditMicros,
   type ConnectionModelRestrictions,
   type Database,
@@ -44,6 +45,13 @@ import {
 } from "./model-catalog";
 
 import { loadWorkspaceCodexCatalogReadiness } from "./codex-model-availability";
+import {
+  connectedSubscriptionsRefusedForOrigin,
+  ownModelFunding,
+  ownSubscriptionPlanAllows,
+  ownSubscriptionPlanRequired,
+} from "./billing/byok-platform-fee";
+import { fundedBillingOrigin } from "./billing-origin";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -286,6 +294,8 @@ export async function resolveDefaultSessionModelForSelections(
     organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
     /** Request-local ledger snapshot, shared with the catalog's funding projection. */
     creditBalance?: BillingBalance;
+    /** API work cannot choose a connected subscription, including saved defaults. */
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<DefaultModelSelection> {
   const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
@@ -293,9 +303,10 @@ export async function resolveDefaultSessionModelForSelections(
     input.organizationDefaults !== undefined
       ? (input.organizationDefaults?.sessionDefaults ?? null)
       : (await getOrganizationModelDefaults(db, input.accountId)).sessionDefaults;
+  const selections = await withoutUnusableOwnSubscriptions(db, input);
   const decision = {
     settings: input.settings,
-    selections: input.selections,
+    selections,
     workspaceDefaults,
     organizationDefaults,
   };
@@ -303,7 +314,7 @@ export async function resolveDefaultSessionModelForSelections(
   if (
     withoutCredits.source !== "deployment" ||
     input.settings.billingMode !== "stripe" ||
-    !input.selections.some(
+    !selections.some(
       (selection) => selection.availability.selectable && selection.model.cost === "credits",
     )
   ) {
@@ -313,9 +324,50 @@ export async function resolveDefaultSessionModelForSelections(
   return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
+/**
+ * Own subscriptions need a paid plan of at least $20 a month. Without one
+ * (Free), a connected subscription stays connected but every use is refused
+ * with Upgrade, so it is never chosen as a default: new chats and scheduled
+ * tasks fall through to a model the account can run. The plan is read only
+ * when a selectable own-subscription model could be chosen. A failed plan
+ * read keeps every model: admission still refuses an unusable subscription
+ * with Upgrade, so a default is never worth failing a create or catalog read.
+ */
+async function withoutUnusableOwnSubscriptions(
+  db: Database,
+  input: {
+    settings: Settings;
+    accountId: string;
+    selections: readonly WorkspaceModelSelection[];
+    billingOrigin?: BillingOrigin | null;
+  },
+): Promise<readonly WorkspaceModelSelection[]> {
+  const isOwnSubscription = (selection: WorkspaceModelSelection) =>
+    ownModelFunding(selection.model) === "subscription";
+  if (
+    connectedSubscriptionsRefusedForOrigin(input.settings, chargeBillingOrigin(input.billingOrigin))
+  ) {
+    return input.selections.filter((selection) => !isOwnSubscription(selection));
+  }
+  if (
+    !ownSubscriptionPlanRequired(input.settings, input.accountId) ||
+    !input.selections.some(
+      (selection) => selection.availability.selectable && isOwnSubscription(selection),
+    )
+  ) {
+    return input.selections;
+  }
+  const allowed = await ownSubscriptionPlanAllows(db, input.settings, input.accountId).catch(
+    () => true,
+  );
+  if (allowed) return input.selections;
+  return input.selections.filter((selection) => !isOwnSubscription(selection));
+}
+
 export type WorkspaceModelSelectionContext = {
   accountId: string;
   workspaceId: string;
+  billingOrigin?: BillingOrigin | null;
   /**
    * The subject whose connected-subscription authority applies: the
    * authenticated caller for direct creates, or a scheduled task's immutable
@@ -328,11 +380,9 @@ export type WorkspaceModelSelectionContext = {
 
 /**
  * SuperGrok readiness and its `supergrok/` model restriction on the shared
- * core once its provider route is `core` (design 5.3, SuperGrok track X1a,
- * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
- * (shared pools; their own personal connection only in their own Personal
- * workspace). Null when the route is not `core` (maintenance, or no receipt,
- * which this binary's readiness check refuses) and when the deployment
+ * core (design 5.3, SuperGrok track X1a, EP-T18/EP-S25/EP-N26): the core
+ * eligibility projection for the subject (shared pools; their own personal
+ * connection only in their own Personal workspace). Null when the deployment
  * disables SuperGrok (no read): the caller then treats SuperGrok as not ready
  * with no selectable model.
  */
@@ -342,8 +392,7 @@ export async function loadCoreRoutedXaiCatalogReadiness(
   context: { accountId: string; workspaceId: string; subjectId: string | null },
 ): Promise<{ ready: boolean; allowedModelIds: string[] | null } | null> {
   if (!settings.supergrokSubscriptionEnabled) return null;
-  const answer = await readSubscriptionCoreRouteReadiness(db, { provider: "xai", ...context });
-  return answer.route === "core" ? answer.value : null;
+  return await readSubscriptionCoreReadiness(db, { provider: "xai", ...context });
 }
 
 /** The connection restrictions with SuperGrok's replaced by the core's answer. */
@@ -355,16 +404,13 @@ export function withCoreRoutedXaiRestriction(
 }
 
 /**
- * Claude readiness and its two model restrictions on the shared core once
- * Claude's provider route is `core` (design 5.3, Claude track C2a,
- * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
- * split by the legacy prefixes (`organization-claude-subscription/` from the
- * organization inference pool; `workspace-claude-subscription/` from the
- * workspace pool or the subject's own personal connection in their own
- * Personal workspace). Not ready under maintenance. Null on the legacy route
- * (one receipt read) and when the deployment disables Claude subscriptions
- * (no read), so the caller keeps its legacy answer. Frozen v1 Claude
- * snapshots are not read on the core route.
+ * Claude readiness and its model restrictions on the shared core (design 5.3,
+ * Claude track C2a, EP-T18/EP-S25/EP-N26): the core eligibility projection
+ * for the subject (shared connections reaching the workspace, and the
+ * subject's own personal connection in their own Personal workspace), one
+ * answer for every Claude subscription model id form
+ * (docs/design/ownership-and-reach.md). Null when the deployment disables
+ * Claude subscriptions (no read). Frozen v1 Claude snapshots are not read.
  */
 export async function loadCoreRoutedClaudeCatalogReadiness(
   db: Database,
@@ -372,12 +418,6 @@ export async function loadCoreRoutedClaudeCatalogReadiness(
   context: { accountId: string; workspaceId: string; subjectId: string | null },
 ): Promise<SubscriptionCoreClaudeCatalogReadiness | null> {
   if (!settings.claudeSubscriptionEnabled) return null;
-  const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    provider: "claude",
-  });
-  if (route !== "core") return SUBSCRIPTION_CORE_CLAUDE_NOT_READY;
   return await readSubscriptionCoreClaudeCatalogReadiness(db, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -453,7 +493,10 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
   // The exact provider set the catalog route reads. A disabled Claude
@@ -476,9 +519,10 @@ export async function loadWorkspaceModelSelectionInput(
       providerKinds,
       organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
     });
-  const sharedCatalogRead =
-    typeof db.transaction === "function" &&
-    typeof (db as Database & { rollback?: unknown }).rollback !== "function"
+  const sharedCatalogRead = options.catalogInputs
+    ? Promise.resolve(options.catalogInputs)
+    : typeof db.transaction === "function" &&
+        typeof (db as Database & { rollback?: unknown }).rollback !== "function"
       ? readCatalog()
       : undefined;
   // The catalog batch still owns this failure. An unavailable shared read
@@ -591,11 +635,15 @@ export async function resolveCallerWorkspaceModelSelections(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelection[]> {
   return resolveWorkspaceModelSelection(
     await loadWorkspaceModelSelectionInput(db, settings, context, {
       observeAvailability: options.observeAvailability === true,
+      ...(options.catalogInputs ? { catalogInputs: options.catalogInputs } : {}),
     }),
   );
 }
@@ -651,6 +699,7 @@ export async function resolveDefaultSessionModel(
     accountId: context.accountId,
     workspaceSettings,
     selections: resolveWorkspaceModelSelection(selectionInput),
+    ...(context.billingOrigin ? { billingOrigin: context.billingOrigin } : {}),
   });
 }
 
@@ -672,6 +721,14 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    billingOrigin: fundedBillingOrigin(
+      task.accountId,
+      await readScheduledTaskBillingOrigin(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+      }),
+    ),
     claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

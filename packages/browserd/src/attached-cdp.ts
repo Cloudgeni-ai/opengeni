@@ -12,6 +12,7 @@ import {
 import {
   AgentBrowserDriver,
   isBlankTabUrl,
+  PERMISSION_OPENED_TABS_ONLY,
   type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
@@ -42,6 +43,13 @@ const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
 const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+// A page command's deadline when its caller sets none, as on a direct CDP
+// connection: a page that stops answering (a dialog it opened before the
+// debugger attached blocks it) must fail the command, not hold it forever.
+const PAGE_COMMAND_TIMEOUT_MS = 30_000;
+// A live page answers attaching in well under a second; one that has not
+// answered after this is blocked or hung.
+const ATTACH_TIMEOUT_MS = 10_000;
 // Retry bounds while the event stream is re-established after it broke.
 const RESYNC_RETRY_MIN_MS = 100;
 const RESYNC_RETRY_MAX_MS = 5_000;
@@ -53,6 +61,66 @@ const DOWNLOAD_START_SLACK_MS = 5_000;
 const DOWNLOAD_FIND_ATTEMPTS = 10;
 const DOWNLOAD_FIND_RETRY_MS = 200;
 const MAX_TRACKED_DOWNLOADS = 1_000;
+// The site permissions Chrome lets an extension set, by their CDP names, as
+// the extension's `permissions.set` names them. The others it cannot set.
+const ATTACHED_SITE_PERMISSIONS = new Map([
+  ["videoCapture", "camera"],
+  ["audioCapture", "microphone"],
+  ["geolocation", "geolocation"],
+  ["notifications", "notifications"],
+]);
+const SITE_PERMISSION_UNSUPPORTED =
+  "In the person's own Chrome, only camera, microphone, geolocation and notifications permissions can be set.";
+const SITE_PERMISSIONS_OUTDATED =
+  "The browser extension in the person's Chrome is too old to set site permissions; Chrome updates it on its own.";
+const SITE_PERMISSION_CONSENT_REQUIRED =
+  "The person must allow site permissions once in their Chrome first. A tab asking them to is open there; ask them to allow it, then try again.";
+const SITE_PERMISSION_CONSENT_DECLINED =
+  "The person has not allowed site permissions in their Chrome. Ask them to allow it in the browser extension's popup, then try again.";
+const SITE_PERMISSION_TAB_CHANGED =
+  "The tab left this site before the permission was set; observe the tab again.";
+const SITE_PERMISSION_UNSUPPORTED_SITE =
+  "In the person's own Chrome, permissions can be set only for http and https sites with a plain host name or IP address.";
+const SITE_PERMISSION_LIMIT_REACHED =
+  "Agents have already set 1,000 site permissions in the person's Chrome; set ones no longer needed back to prompt, or ask the person to remove some in the extension's popup.";
+const SITE_PERMISSION_REFUSED =
+  "The browser extension in the person's Chrome refused this permission request; nothing was set.";
+
+/** What the agent is told when the extension does not set a permission.
+ * Anything else (Chrome's own refusal, a lost connection) is reported as for
+ * any other command. */
+function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
+  // The extension could not read the request: nothing reached Chrome.
+  if (error.code === "invalid_request")
+    return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_REFUSED);
+  if (error.code !== "driver_rejected") return error;
+  switch (error.extensionCode) {
+    case "consent_required":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_REQUIRED,
+      );
+    case "consent_declined":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_DECLINED,
+      );
+    case "not_opened_by_agent":
+      return new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
+    case "tab_changed":
+      return new InteractionDefiniteDriverError(
+        "document_stale",
+        SITE_PERMISSION_TAB_CHANGED,
+        true,
+      );
+    case "unsupported_site":
+      return new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED_SITE);
+    case "limit_reached":
+      return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_LIMIT_REACHED);
+    default:
+      return error;
+  }
+}
 
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
@@ -96,6 +164,10 @@ type AttachedTab = {
   url: string | null;
   active: boolean;
   controllable: boolean;
+  /** Null when the extension does not say. */
+  windowId: number | null;
+  /** Whether Chrome unloaded the tab's page to save memory. */
+  discarded: boolean;
 };
 
 type BridgeDebuggerEvent = {
@@ -171,7 +243,10 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
     return new ReconnectingAttachedBridge(options, await connector(options), connector);
   }
 
-  async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+  async request<T = unknown>(
+    payload: Readonly<Record<string, unknown>>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<T> {
     if (this.stopped)
       throw new AttachedBrowserBridgeError(
         "transport_failed",
@@ -196,7 +271,7 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
       );
     }
     try {
-      return await client.request<T>(payload);
+      return await client.request<T>(payload, options);
     } catch (error) {
       if (client.closed && this.client === pending) this.client = null;
       throw error;
@@ -282,10 +357,22 @@ export function createAttachedChromeDriver(
     },
     connect: async () => transport.connection,
     engine: "chrome",
-    permissionControl: false,
+    // Permissions go through the extension (see setSitePermission), which
+    // sets only some of them and only once the person allowed it to, and
+    // only in a tab this session opened: every other tab is the person's.
+    permissionControl: "opened_tabs",
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    // A dialog a page opened before Chrome's debugger attached blocks it and
+    // can be neither read nor answered: a tab whose page does not answer says
+    // so quickly, and handle_dialog dismiss hides the tab for a moment, which
+    // makes Chrome close it.
+    attachTimeoutMs: ATTACH_TIMEOUT_MS,
+    personDialogs: {
+      inFront: async (tabId) => await transport.connection.tabInFront(tabId),
+      hideForAMoment: async (tabId) => await transport.connection.hideTabForAMoment(tabId),
+    },
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
     // Chrome saves downloads in the person's own downloads folder; the
     // session keeps a copy of each one its tabs start.
@@ -455,6 +542,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly browserVersion: string;
   private readonly browserPlatform: NodeJS.Platform;
   private cursor = 0;
+  // The extension worker's event stream the cursor counts in. A new worker
+  // (Chrome restarts extension workers at will, keeping their tabs and
+  // debugger attachments) starts its buffer again under a new stream.
+  // Extensions that predate it name none.
+  private stream: string | null = null;
   private pollTask: Promise<void> | null = null;
   private pollReady: Promise<void> | null = null;
   private wakePoll: (() => void) | null = null;
@@ -575,17 +667,82 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.markActive();
     this.inFlight += 1;
     try {
-      return await this.sendNow<T>(method, params, options);
+      const sent = this.sendNow<T>(method, params, options);
+      if (!options.sessionId) return await sent;
+      return await withPageDeadline(
+        sent,
+        method,
+        options.sessionId,
+        options.timeoutMs ?? PAGE_COMMAND_TIMEOUT_MS,
+      );
     } finally {
       this.inFlight -= 1;
       this.lastActivityAt = Date.now();
     }
   }
 
+  /** Whether the tab is the one shown in its window. */
+  async tabInFront(tabId: string): Promise<boolean> {
+    if (this.stopped || this.failure) return false;
+    return (await this.tabShown(tabId)) === true;
+  }
+
+  /**
+   * Hide a tab in front for a moment with its debugger released. Chrome lets
+   * no extension read or answer a dialog (alert, confirm, prompt) a page
+   * opened while nothing debugged it, and holds every page command until
+   * someone does; it closes such a dialog, as Cancel, when the tab is hidden
+   * while nothing debugs it. The tab shown instead is a new blank one, so no
+   * page of the person's sees anything, or else another tab of the same
+   * window when the blank one opens in another window; anything created is
+   * closed again. The tab comes back to front only if the person did not
+   * show another one meanwhile. A tab not in front, or one another session
+   * here is debugging, is left be.
+   */
+  async hideTabForAMoment(tabId: string): Promise<"hidden" | "not_front" | "unavailable"> {
+    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return "unavailable";
+    const listTabs = async () =>
+      requireTabs((await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs);
+    const tab = (await listTabs()).find((entry) => entry.id === tabId);
+    if (!tab?.active) return "not_front";
+    if (tab.windowId === null) return "unavailable";
+    const blank = requireTab(
+      (
+        await this.bridge.request<{ tab: unknown }>({
+          type: "tabs.create",
+          url: "about:blank",
+        })
+      ).tab,
+    );
+    try {
+      let shown: AttachedTab | undefined = blank;
+      if (blank.windowId !== tab.windowId) {
+        const siblings = (await listTabs()).filter(
+          (entry) => entry.id !== tabId && entry.id !== blank.id && entry.windowId === tab.windowId,
+        );
+        // Showing a discarded tab would load its page again.
+        shown = siblings.find((entry) => !entry.discarded) ?? siblings[0];
+      }
+      if (!shown) return "unavailable";
+      if (this.attachedTabs.has(tabId)) {
+        await this.bridge.request({ type: "debugger.detach", tabId });
+        this.forgetReleasedAttachment(tabId);
+      }
+      await this.bridge.request({ type: "tabs.activate", tabId: shown.id });
+      // Give back only this switch, never one the person made meanwhile.
+      const now = await listTabs();
+      if (now.find((entry) => entry.id === shown.id)?.active === true)
+        await this.bridge.request({ type: "tabs.activate", tabId });
+      return "hidden";
+    } finally {
+      await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
+    }
+  }
+
   private async sendNow<T>(
     method: string,
     params: Readonly<Record<string, unknown>>,
-    options: { sessionId?: string },
+    options: { sessionId?: string; timeoutMs?: number },
   ): Promise<T> {
     try {
       if (options.sessionId) {
@@ -597,6 +754,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             true,
           );
         const navigation = method === "Page.navigate";
+        // A permission for the site of exactly this tab (see setSitePermission).
+        if (method === "Browser.setPermission")
+          return (await this.setSitePermission(params, tabId)) as T;
         if (navigation && typeof params.url === "string") this.assertNavigable(params.url);
         const mayChangePage = mayChangePageContent(method);
         if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
@@ -604,14 +764,19 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const attachment = this.tabAttachments.get(tabId);
         let response: { result: unknown };
         try {
-          response = await this.bridge.request<{ result: unknown }>({
-            type: "debugger.command",
-            tabId,
-            sessionId: nestedSessionId(options.sessionId),
-            ...(attachment === undefined ? {} : { attachment }),
-            method,
-            params,
-          });
+          // send() stops waiting at the command's own deadline; the bridge's
+          // pending request ends then too instead of at the connection's limit.
+          response = await this.bridge.request<{ result: unknown }>(
+            {
+              type: "debugger.command",
+              tabId,
+              sessionId: nestedSessionId(options.sessionId),
+              ...(attachment === undefined ? {} : { attachment }),
+              method,
+              params,
+            },
+            options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+          );
         } catch (error) {
           if (
             error instanceof AttachedBrowserBridgeError &&
@@ -728,6 +893,17 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       listeners.delete(listener);
       if (listeners.size === 0) this.listeners.delete(key);
     };
+  }
+
+  /** Whether the tab is the active one in its window, as Chrome reports it;
+   * null for a tab Chrome does not list. The extension has no single-tab
+   * lookup, so this lists the profile's tabs. */
+  async tabShown(targetId: string, options: { timeoutMs?: number } = {}): Promise<boolean | null> {
+    const listed = await withinTimeout(
+      this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" }, options),
+      options.timeoutMs,
+    );
+    return requireTabs(listed.tabs).find((tab) => tab.id === targetId)?.active ?? null;
   }
 
   /**
@@ -923,6 +1099,10 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       case "Target.attachToTarget": {
         const targetId = requireTargetId(params.targetId);
+        // A tab left uncertain by a command the extension's worker held is
+        // certain again once a new worker has taken over (see pollEvents).
+        if (this.uncertainTabs.has(targetId))
+          await this.pollEvents(Number.MAX_SAFE_INTEGER).catch(() => undefined);
         this.assertAttachAllowed(targetId);
         // Establish the event cursor before attaching, so a disconnect during
         // initialization cannot be discarded as pre-existing history.
@@ -977,9 +1157,53 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         this.tabSessions.set(targetId, sessionId);
         return { sessionId };
       }
+      case "Browser.setPermission":
+        // Only for a tab: the driver sends it on that tab's session.
+        throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
       default:
         throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
     }
+  }
+
+  /** A permission for the exact site the tab `tabId` shows, set by the
+   * extension in the person's own Chrome once they allowed it to. The
+   * extension sets it only while this connection's attachment to that tab
+   * lasts and the tab shows that site. */
+  private async setSitePermission(
+    params: Readonly<Record<string, unknown>>,
+    tabId: string,
+  ): Promise<Record<string, unknown>> {
+    const name =
+      typeof params.permission === "object" && params.permission !== null
+        ? (params.permission as { name?: unknown }).name
+        : undefined;
+    const permission = typeof name === "string" ? ATTACHED_SITE_PERMISSIONS.get(name) : undefined;
+    if (!permission) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED);
+    }
+    // An extension from before this command would not answer it at all.
+    const ping = await this.bridge.request<{ sitePermissions?: unknown } | null>({ type: "ping" });
+    if (ping?.sitePermissions !== true) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSIONS_OUTDATED);
+    }
+    const attachment = this.tabAttachments.get(tabId);
+    if (attachment === undefined) {
+      throw new InteractionDefiniteDriverError("document_stale", SITE_PERMISSION_TAB_CHANGED, true);
+    }
+    try {
+      await this.bridge.request({
+        type: "permissions.set",
+        tabId,
+        attachment,
+        origin: params.origin,
+        permission,
+        setting: params.setting,
+      });
+    } catch (error) {
+      if (error instanceof AttachedBrowserBridgeError) throw sitePermissionRefusal(error);
+      throw error;
+    }
+    return {};
   }
 
   /** Chrome answers a navigation to a page the extension may not control by
@@ -1004,6 +1228,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     if (this.pollTask || this.stopped || this.failure) return;
     this.pollReady = this.pollEvents(Number.MAX_SAFE_INTEGER).then((initial) => {
       this.cursor = initial.cursor;
+      this.stream = initial.stream;
     });
     this.pollTask = this.poll(this.pollReady);
   }
@@ -1066,7 +1291,8 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     const firstSequence = batch.events[0]?.sequence;
     if (
       (firstSequence !== undefined && firstSequence !== this.cursor + 1) ||
-      (batch.truncated && firstSequence === undefined)
+      (batch.truncated && firstSequence === undefined) ||
+      batch.stream !== this.stream
     ) {
       throw new CdpTransportError("attached Chrome debugger event history was truncated");
     }
@@ -1103,8 +1329,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     const ready = (async () => {
       for (const tabId of [...this.tabSessions.keys()])
         this.detachLocally(tabId, "event_stream_resynchronized", { synthetic: true });
-      const { cursor } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
+      const { cursor, stream } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
       this.cursor = cursor;
+      this.stream = stream;
       this.resyncing = false;
     })();
     this.pollReady = ready;
@@ -1150,15 +1377,18 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     events: BridgeDebuggerEvent[];
     cursor: number;
     truncated: boolean;
+    stream: string | null;
   }> {
     const value = await this.bridge.request<{
       events: unknown;
       cursor: unknown;
       truncated: unknown;
+      stream?: unknown;
     }>({ type: "debugger.poll", afterSequence, limit: POLL_LIMIT });
     if (!Array.isArray(value.events) || typeof value.truncated !== "boolean") {
       throw new CdpTransportError("attached Chrome returned an invalid event batch");
     }
+    const stream = typeof value.stream === "string" ? value.stream : null;
     const cursor = boundedInteger(value.cursor, 0, Number.MAX_SAFE_INTEGER, "debugger cursor");
     const events = value.events.map(parseDebuggerEvent);
     if (
@@ -1169,7 +1399,14 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     if (events.length > 0 && cursor !== events.at(-1)!.sequence) {
       throw new CdpTransportError("attached Chrome debugger cursor does not match its event batch");
     }
-    return { events, cursor, truncated: value.truncated };
+    if (this.stream !== null && stream !== null && stream !== this.stream) {
+      // A new extension worker answered. The worker that held this
+      // connection's unanswered commands is gone, and they with it: none can
+      // reach a tab later, so a tab they left uncertain can be used again.
+      // Their own outcome stays unknown.
+      this.uncertainTabs.clear();
+    }
+    return { events, cursor, truncated: value.truncated, stream };
   }
 
   private emit(input: BridgeDebuggerEvent): void {
@@ -1388,6 +1625,8 @@ function requireTab(value: unknown): AttachedTab {
     url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
+    windowId: Number.isSafeInteger(tab.windowId) ? (tab.windowId as number) : null,
+    discarded: tab.discarded === true,
   };
 }
 
@@ -1399,6 +1638,28 @@ function requireTab(value: unknown): AttachedTab {
 function tabUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
+}
+
+/** A bridge reply waited for no longer than the caller allowed, whichever
+ * bridge carries it. The command may still arrive or finish in Chrome. */
+async function withinTimeout<T>(reply: Promise<T>, timeoutMs: number | undefined): Promise<T> {
+  if (timeoutMs === undefined) return await reply;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
+        ),
+      Math.max(1, Math.ceil(timeoutMs)),
+    );
+  });
+  try {
+    return await Promise.race([reply, expired]);
+  } finally {
+    clearTimeout(timer);
+    reply.catch(() => undefined);
+  }
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
@@ -1618,6 +1879,8 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.resolveNode",
+  "Emulation.clearDeviceMetricsOverride",
+  "DOMSnapshot.captureSnapshot",
   "Emulation.setFocusEmulationEnabled",
   "Inspector.enable",
   "Log.enable",
@@ -1629,7 +1892,9 @@ const READ_ONLY_TAB_METHODS = new Set([
   "Page.getLayoutMetrics",
   "Page.getNavigationHistory",
   "Runtime.enable",
+  "Runtime.getProperties",
   "Runtime.releaseObject",
+  "Runtime.releaseObjectGroup",
 ]);
 
 function mayChangePageContent(method: string): boolean {
@@ -1713,6 +1978,30 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     throw new CdpTransportError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+/** A page command's result, or CdpCommandTimeoutError once its deadline
+ * passes; a late result is dropped. */
+async function withPageDeadline<T>(
+  sent: Promise<T>,
+  method: string,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new CdpCommandTimeoutError(method, sessionId)),
+      boundedTimeout(timeoutMs),
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([sent, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void sent.catch(() => undefined);
+  }
 }
 
 async function delay(milliseconds: number): Promise<void> {

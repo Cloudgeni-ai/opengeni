@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
@@ -17,7 +16,7 @@ import type {
   SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
   databasePasswordFileOptions,
@@ -26,6 +25,7 @@ import {
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
+  reportRuntimeDatabaseDegraded,
   runtimeDatabaseReadyCheck,
   type Database,
   type EventOccurrenceToStart,
@@ -63,12 +63,14 @@ import {
   type SessionWorkflowClient,
 } from "./app";
 import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
+import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startSlackAgentUpdatePump } from "./integrations/slack-agent-updates";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
@@ -81,7 +83,6 @@ import {
   startEventTriggerDispatchPump,
   startEventSubscriptionPump,
 } from "./event-trigger-dispatch";
-import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
@@ -97,6 +98,11 @@ import {
   apiRequestBindingsForIdleTimeout,
 } from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
+import {
+  apiHttpDrainDeadlineMs,
+  apiRequestBindingsForServerDrain,
+  createHttpServerDrain,
+} from "./http/server-drain";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
@@ -172,19 +178,6 @@ export async function createTemporalWorkflowClient(
     },
   });
   const client: SessionWorkflowClient = {
-    triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
-      try {
-        await temporal.workflow.start("automationRunWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `automation-run:${runId}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [{ accountId, workspaceId, runId }],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },
@@ -364,6 +357,20 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startRecordingSpeakerScan: async (input) => {
+      try {
+        await temporal.workflow.start("recordingSpeakerScanWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-speaker-scan:${input.recordingId}`,
+          // One that ended (a long pause) starts again when audio does.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     startBrowserRecordingVideo: async (input) => {
       try {
         await temporal.workflow.start("browserRecordingVideoWorkflow", {
@@ -373,6 +380,48 @@ export async function createTemporalWorkflowClient(
           // and one after its deletion makes it again from the bundle.
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchive: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRequestWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One Archive, one run: an undone and repeated Archive has a new time.
+          workflowId: `session-archive-request-${input.workspaceId}-${input.sessionId}-${Date.parse(input.archivedAt)}`,
+          startDelay: Math.max(0, input.runAt.getTime() - Date.now()),
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+              archivedAt: input.archivedAt,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchiveRestore: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRestoreWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One restore request, one run; a repeated request has a new time.
+          workflowId: `session-archive-restore-${input.workspaceId}-${input.sessionId}-${Date.parse(input.requestedAt)}`,
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+            },
+          ],
         });
       } catch (error) {
         if (isWorkflowAlreadyStarted(error)) return;
@@ -500,6 +549,8 @@ export async function startApi(options: StartApiOptions = {}) {
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
+  // One reporter for startup and readiness, so a degraded posture logs once.
+  const reportDegradedPosture = reportRuntimeDatabaseDegraded(observability, "api");
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request exact generation-fenced agent RPC subjects. Null in local dev
@@ -520,7 +571,7 @@ export async function startApi(options: StartApiOptions = {}) {
     );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () => assertRuntimeDatabaseReadiness(dbClient.db, databasePosture, reportDegradedPosture),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
@@ -583,27 +634,30 @@ export async function startApi(options: StartApiOptions = {}) {
       throw error;
     }
   }
-  const { app, routeDeps, renewBrowserHolds } = createAppComposition({
-    ...startApiSessionAuthorizationOverride(options),
-    settings,
-    db: dbClient.db,
-    bus,
-    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
-    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
-    objectStorage,
-    ...(editableArtifactComposition
-      ? {
-          editableArtifacts: editableArtifactComposition.application,
-          editableArtifactExports: editableArtifactComposition.durableExports,
-          editableArtifactAgent: editableArtifactComposition.agent,
-          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
-        }
-      : {}),
-    observability,
-    readinessChecks: {
-      db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+  const { app, routeDeps, renewBrowserHolds, stopBillingAutoTopUps } = createAppComposition(
+    {
+      ...startApiSessionAuthorizationOverride(options),
+      settings,
+      db: dbClient.db,
+      bus,
+      workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+      documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+      objectStorage,
+      ...(editableArtifactComposition
+        ? {
+            editableArtifacts: editableArtifactComposition.application,
+            editableArtifactExports: editableArtifactComposition.durableExports,
+            editableArtifactAgent: editableArtifactComposition.agent,
+            editableArtifactOfficeImports: editableArtifactComposition.officeImports,
+          }
+        : {}),
+      observability,
+      readinessChecks: {
+        db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture, reportDegradedPosture),
+      },
     },
-  });
+    { startBillingAutoTopUps: true },
+  );
   if (!routeDeps.editableArtifacts) {
     observability.warn("editable artifact engine is not composed", {
       subsystem: "editable_artifacts",
@@ -650,11 +704,14 @@ export async function startApi(options: StartApiOptions = {}) {
     new OfficeWorkbookWebSocketTransport(officeWorkbookRelayFor(routeDeps)),
     ...(computeGateway ? [computeGateway.gateway] : []),
   ];
+  // One drain for both listeners: from SIGTERM their responses close their
+  // connections, live streams end and WebSockets go away (http/server-drain.ts).
+  const httpDrain = createHttpServerDrain();
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
-    fetch: (request, bunServer) => {
+    fetch: httpDrain.fetch((request, bunServer: Bun.Server<ApiWebSocketConnection>) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
         bunServer,
@@ -665,9 +722,10 @@ export async function startApi(options: StartApiOptions = {}) {
       return app.fetch(request, {
         ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
         ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+        ...apiRequestBindingsForServerDrain(httpDrain.signal),
       });
-    },
-    websocket: {
+    }),
+    websocket: httpDrain.websocket<ApiWebSocketConnection>({
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
       backpressureLimit: 16 * 1024 * 1024,
       closeOnBackpressureLimit: true,
@@ -676,11 +734,23 @@ export async function startApi(options: StartApiOptions = {}) {
       close: (socket) => socket.data.transportClosed(),
       ping: (socket) => socket.data.heard?.(),
       pong: (socket) => socket.data.heard?.(),
-    },
+    }),
   });
-  const metricsServer = startApiMetricsListener(settings, observability);
+  const metricsServer = startApiMetricsListener(settings, observability, httpDrain);
+  const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
+  const stopBillingCreditNotificationDelivery =
+    routeDeps.managedAuth && billingAppUrl
+      ? startBillingCreditNotificationDelivery(
+          dbClient.db,
+          routeDeps.managedEmailTransport,
+          billingAppUrl,
+        )
+      : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
+    : undefined;
+  const stopSlackAgentUpdatePump = settings.slackSigningSecret
+    ? startSlackAgentUpdatePump(routeDeps)
     : undefined;
   const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
@@ -696,8 +766,6 @@ export async function startApi(options: StartApiOptions = {}) {
   });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
-    cleanupConnectorAuthorization: async (claim) =>
-      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },
@@ -745,6 +813,7 @@ export async function startApi(options: StartApiOptions = {}) {
       db: dbClient.db,
       bus,
       observability,
+      wakeSessionWorkflow: workflowClient.client.wakeSessionWorkflow,
       agentUpdates: createAutomaticAgentUpdater({
         db: dbClient.db,
         bus,
@@ -792,11 +861,22 @@ export async function startApi(options: StartApiOptions = {}) {
   return {
     server,
     close: async () => {
-      server.stop(true);
+      // Prevent another charge/recovery pass while other shutdown pumps drain.
+      const billingAutoTopUpsStopped = stopBillingAutoTopUps();
+      // Drain HTTP rather than resetting sockets: a keep-alive client still
+      // sending on a pooled socket must get the response its request produced.
+      // Requests keep the database, bus and workflow client until they finish,
+      // so those close only after the drain.
+      const httpDrainDeadline = apiHttpDrainDeadlineMs(settings.apiShutdownGraceMs);
+      const httpDrained = Promise.allSettled([
+        httpDrain.stop(server, httpDrainDeadline),
+        ...(metricsServer ? [httpDrain.stop(metricsServer, httpDrainDeadline)] : []),
+      ]);
       // Start private CLI session cleanup even if another service's drain stalls.
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
-      metricsServer?.stop(true);
+      await stopBillingCreditNotificationDelivery?.();
       stopSlackInteractionPump?.();
+      await stopSlackAgentUpdatePump?.();
       stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
@@ -809,8 +889,13 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
+      await billingAutoTopUpsStopped;
+      await httpDrained;
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
+      await routeDeps.decisions?.flushUsage().catch(() => {
+        observability.error("Decision usage receipts remain pending at shutdown");
+      });
       await Promise.allSettled([
         vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
@@ -840,6 +925,8 @@ if (import.meta.main) {
     const api = await startApi({ settings, observability });
     installApiShutdownHandlers({
       close: api.close,
+      // The time the pod gives the process after SIGTERM.
+      timeoutMs: settings.apiShutdownGraceMs,
       onFailure: () =>
         observability.warn("Opengeni API shutdown did not finish cleanly", {
           errorCode: "api_shutdown_failed",
@@ -970,12 +1057,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
 }
 
 function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
-  if (task.status === "paused") return true;
-  if (!scheduledTaskKnowledgeSource(task)) return false;
-  const control = task.metadata.knowledgeSourceSync;
-  if (!control || typeof control !== "object") return false;
-  const record = control as Record<string, unknown>;
-  return record.sourceEnabled === false || record.connectionPaused === true;
+  return task.status === "paused";
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

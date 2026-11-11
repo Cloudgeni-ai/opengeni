@@ -34,13 +34,14 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-function runtime(mode: "legacy" | "dual" | "broker" = "legacy") {
+function runtime(mode: "legacy" | "dual" | "broker" = "legacy", allowedUserEmails?: string[]) {
   const settings = testSettings({
     databaseUrl: shared!.appUrl,
     productAccessMode: "managed",
     managedAuthSessionSetMode: mode,
     publicBaseUrl: ORIGIN,
     betterAuthSecret: "native-desktop-sign-in-test-secret-at-least-32-bytes",
+    ...(allowedUserEmails ? { allowedUserEmails } : {}),
   });
   const auth = createManagedAuth(settings, client.db, {
     sender: "auth@example.test",
@@ -75,7 +76,7 @@ async function signedInBrowser(rt: ReturnType<typeof runtime>) {
   return { userId, cookie };
 }
 
-async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: string) {
+async function desktopAuthorization(rt: ReturnType<typeof runtime>, browserCookie: string) {
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const authorize = await rt.app.request("/v1/native-app/authorize", {
@@ -97,11 +98,22 @@ async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: 
   expect(authorize.status).toBe(200);
   const { redirectUrl } = (await authorize.json()) as { redirectUrl: string };
   const code = new URL(redirectUrl).searchParams.get("code")!;
-  const token = await rt.app.request("/v1/native-app/token", {
+  return { code, verifier };
+}
+
+function redeemDesktopCode(
+  rt: ReturnType<typeof runtime>,
+  { code, verifier }: { code: string; verifier: string },
+) {
+  return rt.app.request("/v1/native-app/token", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code, codeVerifier: verifier, redirectUri: "opengeni://auth/callback" }),
   });
+}
+
+async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: string) {
+  const token = await redeemDesktopCode(rt, await desktopAuthorization(rt, browserCookie));
   expect(token.status).toBe(200);
   return ((await token.json()) as { accessToken: string }).accessToken;
 }
@@ -170,6 +182,16 @@ describe("desktop app sign-in", () => {
     expect(forged.headers.getSetCookie()).toEqual([]);
   }, 120_000);
 
+  test("an address taken off the allowed list before the code is redeemed is denied, not a server error", async () => {
+    const open = runtime();
+    const browser = await signedInBrowser(open);
+    const authorization = await desktopAuthorization(open, browser.cookie);
+    const restricted = runtime("legacy", ["someone-else@example.test"]);
+    const token = await redeemDesktopCode(restricted, authorization);
+    expect(token.status).toBe(403);
+    expect(await token.json()).toEqual({ error: "access_denied" });
+  }, 120_000);
+
   test("broker deployments refuse the legacy window cookie", async () => {
     const legacy = runtime();
     const browser = await signedInBrowser(legacy);
@@ -187,4 +209,86 @@ describe("desktop app sign-in", () => {
     expect(nativeAppSessionUserAgent("linux", "Box")).toBe("Opengeni app (Linux; Box)");
     expect(nativeAppSessionUserAgent("ios", null)).toBe("Opengeni app (iOS)");
   });
+
+  test("the app's own requests renew its window's sign-in cookie with the device session", async () => {
+    const rt = runtime();
+    const browser = await signedInBrowser(rt);
+    const credential = await desktopCredential(rt, browser.cookie);
+    const token = credential.slice("ogapp_".length);
+    const handoff = await rt.app.request("/v1/native-app/web-session", {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    expect(handoff.status).toBe(200);
+    const windowCookie = cookieHeader(handoff);
+    const dueForRenewal = () =>
+      admin`update auth_sessions set expires_at = now() + interval '5 days' where token = ${token}`;
+    const renewedCookies = (response: Response) =>
+      response.headers.getSetCookie().filter((value) => value.includes(encodeURIComponent(token)));
+
+    // Not due: nothing to renew, so no cookie goes back.
+    const fresh = await rt.app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${credential}`, cookie: windowCookie },
+    });
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers.getSetCookie()).toEqual([]);
+
+    // Due, and the request holds the window's cookie of this same session:
+    // the renewal refreshes that cookie for the full session lifetime.
+    await dueForRenewal();
+    const renewed = await rt.app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${credential}`, cookie: windowCookie },
+    });
+    expect(renewed.status).toBe(200);
+    const [renewedCookie] = renewedCookies(renewed);
+    expect(renewedCookie).toContain("HttpOnly");
+    expect(renewedCookie).toContain("Max-Age=604800");
+    const [row] = await admin<{ days: number }[]>`
+      select extract(epoch from expires_at - now()) / 86400 as days from auth_sessions where token = ${token}`;
+    expect(Number(row?.days)).toBeGreaterThan(6.9);
+
+    // Without that cookie (or with another session's) the renewal still
+    // happens but sets no cookie.
+    await dueForRenewal();
+    const bare = await rt.app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    expect(bare.status).toBe(200);
+    expect(renewedCookies(bare)).toEqual([]);
+    await dueForRenewal();
+    const otherSession = await rt.app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${credential}`, cookie: browser.cookie },
+    });
+    expect(otherSession.status).toBe(200);
+    expect(otherSession.headers.getSetCookie()).toEqual([]);
+  }, 120_000);
+
+  test("a lapsed sign-in is refused as expired and a missing one as missing", async () => {
+    const rt = runtime();
+    const browser = await signedInBrowser(rt);
+    const credential = await desktopCredential(rt, browser.cookie);
+    const handoff = await rt.app.request("/v1/native-app/web-session", {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    const windowCookie = cookieHeader(handoff);
+    const signedIn = await rt.app.request("/v1/access/me", { headers: { cookie: windowCookie } });
+    expect(signedIn.status).toBe(200);
+
+    await admin`delete from auth_sessions where token = ${credential.slice("ogapp_".length)}`;
+    const refusal = async (headers: Record<string, string>) => {
+      const response = await rt.app.request("/v1/access/me", { headers });
+      expect(response.status).toBe(401);
+      const body = (await response.json()) as {
+        error: { code: string; details?: { code?: string } };
+      };
+      expect(body.error.code).toBe("unauthenticated");
+      return body.error.details?.code;
+    };
+    expect(await refusal({ cookie: windowCookie })).toBe("session_expired");
+    expect(await refusal({ authorization: `Bearer ${credential}` })).toBe("session_expired");
+    expect(await refusal({})).toBe("session_missing");
+    expect(await refusal({ cookie: "unrelated=1" })).toBe("session_missing");
+    expect(await refusal({ authorization: "Bearer not-a-known-key" })).toBe("credential_invalid");
+  }, 120_000);
 });

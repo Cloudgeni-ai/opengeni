@@ -50,6 +50,26 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ siteConversations: "include" }, false)).toThrow();
   });
 
+  test("filters by a creator's subject id with or without its frozen kind", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    expect(sessionListQuery({ createdBySubjectId: subjectId })).toMatchObject({
+      createdBy: { subjectId },
+      hasPageFilters: true,
+    });
+    expect(sessionListQuery({ createdBySubjectId: subjectId }).createdBy).not.toHaveProperty(
+      "kind",
+    );
+    expect(
+      sessionListQuery({ createdByKind: "service", createdBySubjectId: subjectId }).createdBy,
+    ).toEqual({ kind: "service", subjectId });
+    for (const query of [
+      { createdByKind: "service" },
+      { createdByKind: "robot", createdBySubjectId: subjectId },
+      { createdBySubjectId: " " },
+    ])
+      expect(() => sessionListQuery(query)).toThrow();
+  });
+
   test("accepts Only mine as a page filter", () => {
     expect(sessionListQuery({ parentSessionId: "null", mineOnly: "true" })).toMatchObject({
       mineOnly: true,
@@ -63,6 +83,28 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ mineOnly: "true" }, false)).toThrow();
   });
 
+  test("selects at most 200 session ids as a page filter", () => {
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    expect(
+      sessionListQuery({ sessionIds: `${id(1)},${id(2)},${id(1)}`, search: "fix" }),
+    ).toMatchObject({ sessionIds: [id(1), id(2)], search: "fix", hasPageFilters: true });
+    expect(sessionListQuery({ sessionIds: id(1).toUpperCase() }).sessionIds).toEqual([id(1)]);
+    expect(
+      sessionListQuery({ sessionIds: Array.from({ length: 200 }, (_, n) => id(n)).join(",") })
+        .sessionIds,
+    ).toHaveLength(200);
+    expect(sessionListQuery({}).sessionIds).toBeUndefined();
+    for (const query of [
+      { sessionIds: "" },
+      { sessionIds: `${id(1)},` },
+      { sessionIds: "not-a-session" },
+      { sessionIds: Array.from({ length: 201 }, (_, n) => id(n)).join(",") },
+      { sessionIds: id(1), pinsOnly: "true" },
+    ])
+      expect(() => sessionListQuery(query)).toThrow();
+    expect(() => sessionListQuery({ sessionIds: id(1) }, false)).toThrow();
+  });
+
   test("accepts each sorting/archive mode and retains legacy defaults", () => {
     for (const sortBy of ["name", "createdAt", "updatedAt"]) {
       for (const archiveStatus of ["active", "archived", "all"]) {
@@ -72,6 +114,14 @@ describe("session list sorting and archive query", () => {
         });
       }
     }
+    // The Archived view sorts by archive date by default.
+    expect(sessionListQuery({ sortBy: "archivedAt", archiveStatus: "archived" })).toMatchObject({
+      sortBy: "archivedAt",
+      archiveStatus: "archived",
+    });
+    expect(sessionListQuery({ sortBy: "archivedAt", archivedOnly: "true" }).sortBy).toBe(
+      "archivedAt",
+    );
     expect(sessionListQuery({ archivedOnly: "true" })).toMatchObject({
       archivedOnly: true,
       sortBy: undefined,
@@ -84,6 +134,8 @@ describe("session list sorting and archive query", () => {
   test("rejects invalid modes, contradictory aliases and archived pins", () => {
     for (const query of [
       { sortBy: "archivedAt" },
+      { sortBy: "archivedAt", archiveStatus: "active" },
+      { sortBy: "archivedAt", archiveStatus: "all" },
       { sortBy: "" },
       { archiveStatus: "idle" },
       { archiveStatus: "all", archivedOnly: "true" },

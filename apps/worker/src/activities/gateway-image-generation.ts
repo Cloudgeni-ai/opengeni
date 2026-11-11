@@ -1,4 +1,8 @@
-import { imageGenerationCreditCostMicros, type Settings } from "@opengeni/config";
+import {
+  imageGenerationCreditCostMicros,
+  sideFeatureProcessingResidency,
+  type Settings,
+} from "@opengeni/config";
 import type {
   Database,
   ImageGenerationCreditError,
@@ -283,6 +287,8 @@ export async function executeGatewayImageGeneration(
       providerId: GATEWAY_IMAGE_PROVIDER_ID,
       providerBindingHash,
       ...(input.references ? { referenceDigests: input.references } : {}),
+      // A code-owned rule: the Gateway can process in any region.
+      processingResidency: sideFeatureProcessingResidency({}, "image_generation.ai_gateway"),
       isProviderDispatchRejected: isGatewayImageRequestRefused,
       generate: async () =>
         await generateGatewayImage({

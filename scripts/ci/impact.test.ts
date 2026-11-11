@@ -48,6 +48,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_RELAY_HEADERS_E2E = "test/e2e/session-relay-headers.browser.e2e.ts";
 const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
@@ -61,6 +62,22 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("relay header browser coverage follows SDK and header contracts without widening browserd plans", () => {
+    for (const path of [
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/browser-response-headers.ts",
+      SESSION_RELAY_HEADERS_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.e2eTests, path).toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      SESSION_RELAY_HEADERS_E2E,
+    );
+    expect(usesBrowserRunner(SESSION_RELAY_HEADERS_E2E)).toBe(true);
+  });
   test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
     expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
     expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
@@ -234,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toEqual([
       "format",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       "subscription-contract",
@@ -243,6 +261,7 @@ describe("fail-closed change impact", () => {
   test.each([
     "bun.lock",
     ".bun-version",
+    ".changeset/config.json",
     ".github/workflows/ci.yml",
     ".dockerignore",
     "scripts/ci/workspace.ts",
@@ -260,12 +279,25 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
-    expect(plan.guards).toContain("migration-schema-contract");
+    expect(plan.guards).toContain("migration-immutability");
+    expect(plan.guards).toContain("migration-previous-release");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
-    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("docs and changeset notes alongside code select only the code's tests", () => {
+    const code = createImpactPlan(["apps/web/src/main.tsx"]);
+    const mixed = createImpactPlan([
+      "apps/web/src/main.tsx",
+      "docs/artifact-engine.md",
+      ".changeset/quiet-web.md",
+    ]);
+    expect(mixed.mode).toBe("focused");
+    expect(mixed.unitTests).toEqual(code.unitTests);
+    expect(mixed.typecheckProjects).toEqual(code.typecheckProjects);
+    expect(createImpactPlan([".changeset/quiet-web.md"]).mode).toBe("docs");
   });
 
   test("public API surface guards follow the API, contracts, SDK, and React graph", () => {
@@ -278,11 +310,35 @@ describe("fail-closed change impact", () => {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.guards).toContain("public-api");
-      expect(plan.guards).toContain("sdk-compat");
     }
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
-    expect(web.guards).not.toContain("sdk-compat");
+  });
+
+  test("published SDK compatibility runs in the service tier for every relevant producer and fixture", () => {
+    const suite = "test/integration/sdk-compatibility.integration.ts";
+    for (const path of [
+      "apps/api/src/app.ts",
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/index.ts",
+      "packages/core/src/domain/sessions.ts",
+      "packages/db/src/index.ts",
+      "packages/events/src/index.ts",
+      "packages/runtime/src/index.ts",
+      "apps/worker/src/activities.ts",
+      "packages/react/src/index.ts",
+      "packages/storage/src/index.ts",
+      "packages/testing/src/settings.ts",
+      "test/integration/sdk-compatibility/consumer.ts",
+      "test/integration/sdk-compatibility/versions.json",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.integrationTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["test/integration/sdk-compatibility/versions.json"]).guards).toContain(
+      "public-api",
+    );
   });
 
   test("the subscription contract guard runs on docs-only and focused plans", () => {
@@ -315,9 +371,11 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -335,6 +393,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -342,6 +401,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
       "test/e2e/new-conversation.browser.e2e.ts",
@@ -354,6 +414,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
@@ -365,16 +426,19 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -847,6 +911,20 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the desktop window bar helper selects every browser test that uses it", () => {
+    const plan = createImpactPlan(["test/e2e/desktop-window-bar.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of [
+      "test/e2e/artifact-desktop.browser.e2e.ts",
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
+      "test/e2e/session-sidebar.browser.e2e.ts",
+      "test/e2e/signed-out-page.browser.e2e.ts",
+    ]) {
+      expect(plan.e2eTests).toContain(path);
+    }
+  });
+
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
       "apps/web/src/components/rail/switcher-block.tsx",
@@ -909,9 +987,11 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -929,6 +1009,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -936,6 +1017,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
       "test/e2e/new-conversation.browser.e2e.ts",
@@ -948,6 +1030,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
@@ -959,16 +1042,19 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,

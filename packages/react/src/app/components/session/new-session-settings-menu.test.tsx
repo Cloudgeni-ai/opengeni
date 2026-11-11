@@ -171,7 +171,34 @@ test("picking a machine goes through the explicit compute path; offline ones can
   });
 });
 
-test("in the + menu, Runs on rows are menu radios that the keyboard reaches", async () => {
+test("a machine row says what kind of computer it is and whether agents can use its screen", async () => {
+  const mac = {
+    ...(machine("studio") as object),
+    os: "macos",
+    arch: "aarch64",
+    hasDisplay: true,
+    allowScreenControl: true,
+  } as never;
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...choices({ machines: [machine("build-01"), mac] })}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Mac · Agents can use its screen");
+  expect(text).toContain("Linux · No screen");
+  expect(text).not.toContain("aarch64");
+  expect(text).not.toContain("x86_64");
+});
+
+test("in a menu, Runs on rows are menu radios that the keyboard reaches", async () => {
   const onComputeChange = mock();
   const onChange = mock();
   await renderInMenu(
@@ -327,7 +354,7 @@ test("a failed machine load offers a retry the keyboard reaches", async () => {
   expect(onRetryMachines).toHaveBeenCalledTimes(1);
 });
 
-test("in the + menu, Visibility rows are menu radios with the value focused", async () => {
+test("in a menu, Visibility rows are menu radios with the value focused", async () => {
   const onChange = mock();
   await renderInMenu(<VisibilityMenuBody value="private" disabled={false} onChange={onChange} />);
   expect(document.querySelectorAll('[role="radio"]')).toHaveLength(0);
@@ -388,7 +415,7 @@ test("Send waiting on Runs on is explained under the composer", async () => {
       />,
     ),
   );
-  expect(container.textContent).toContain("Pick a machine under + > Runs on to send.");
+  expect(container.textContent).toContain("Pick a machine in Runs on, above the message, to send.");
 
   await act(async () =>
     root.render(
@@ -400,7 +427,7 @@ test("Send waiting on Runs on is explained under the composer", async () => {
     ),
   );
   expect(container.textContent).toContain("offline");
-  expect(container.textContent).toContain("+ > Runs on");
+  expect(container.textContent).toContain("Runs on, above the message");
 
   await act(async () =>
     root.render(

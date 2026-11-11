@@ -15,6 +15,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -26,6 +27,7 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   settleCollectedConnectedMachineBackgroundCommand,
   settleClaimedConnectedMachineBackgroundCommand,
+  waitForSessionInputWithEvent,
 } from "@opengeni/db";
 import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
@@ -87,6 +89,10 @@ afterAll(async () => {
 }, 180_000);
 
 async function fixture(crossWorkspace = false) {
+  return (await fixtureWithTurn(crossWorkspace)).identity;
+}
+
+async function fixtureWithTurn(crossWorkspace = false) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -146,7 +152,7 @@ async function fixture(crossWorkspace = false) {
     executionGeneration: claimed.turn.executionGeneration,
     command: "sleep 30",
   });
-  return identity;
+  return { identity, turn: claimed.turn, attemptId };
 }
 
 test("completion lookup batches exact process identities and reads fresh terminal state", async () => {
@@ -786,4 +792,82 @@ test("a runner without OpRelease, or a release that fails, leaves the stored out
     output_release_observed_at: null,
     output_due: true,
   });
+});
+
+test("a pushed completion wakes a session waiting on it at once, and only then", async () => {
+  const waiting = await fixtureWithTurn();
+  const command = waiting.identity;
+  await waitForSessionInputWithEvent(client.db, command.workspaceId, command.sessionId, {
+    reason: "waiting for the background tests",
+    timeoutSeconds: 600,
+    command: {
+      accountId: command.accountId,
+      actor: {
+        type: "agent_attempt",
+        sessionId: command.sessionId,
+        turnId: waiting.turn.id,
+        attemptId: waiting.attemptId,
+        executionGeneration: waiting.turn.executionGeneration,
+      },
+      operationKey: crypto.randomUUID(),
+    },
+  });
+  const settled = await applySessionTurnSettlement(client.db, command.workspaceId, {
+    sessionId: command.sessionId,
+    turnId: waiting.turn.id,
+    triggerEventId: waiting.turn.triggerEventId,
+    attemptId: waiting.attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed", payload: { reply: "Waiting." } }],
+  });
+  expect(settled.action).toBe("settled");
+  const wakes: unknown[] = [];
+  const wakeSessionWorkflow = async (wake: unknown) => {
+    wakes.push(wake);
+  };
+  const completed = { opId: command.opId, exit: OpExit.fromPartial({ exitCode: 0 }) };
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    completed,
+    new MemoryEventBus(),
+    reader(completed.exit),
+    undefined,
+    undefined,
+    wakeSessionWorkflow,
+  );
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "exited" });
+  const [outbox] = await shared.admin<{ wake_revision: string; delivered_revision: string }[]>`
+    select wake_revision::text, delivered_revision::text
+    from session_workflow_wake_outbox where session_id = ${command.sessionId}`;
+  expect(Number(outbox!.wake_revision)).toBeGreaterThan(Number(outbox!.delivered_revision));
+  // Signalled from the settlement, not left for the periodic dispatcher.
+  expect(wakes).toEqual([
+    {
+      accountId: command.accountId,
+      workspaceId: command.workspaceId,
+      sessionId: command.sessionId,
+      workflowId: `session-${command.sessionId}`,
+      wakeRevision: Number(outbox!.wake_revision),
+    },
+  ]);
+
+  // A session still running its turn takes the result with its next model
+  // call; nothing wakes it.
+  const busy = await fixture();
+  const busyCompleted = { opId: busy.opId, exit: OpExit.fromPartial({ exitCode: 0 }) };
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(busy),
+    busyCompleted,
+    new MemoryEventBus(),
+    reader(busyCompleted.exit),
+    undefined,
+    undefined,
+    wakeSessionWorkflow,
+  );
+  expect(await getSessionBackgroundCommand(client.db, busy)).toMatchObject({ state: "exited" });
+  expect(wakes).toHaveLength(1);
 });

@@ -863,3 +863,94 @@ describe("unknown and stale coverage", () => {
     }
   });
 });
+
+/**
+ * The history read's call totals: a connection's calls between two consecutive
+ * readings (of any window) within one UTC hour, at the last of them.
+ */
+function callTotals(data: Input): Input {
+  const totals = new Map<string, Input["calls"][number]>();
+  for (const call of [...data.calls].sort((a, b) => a.at - b.at)) {
+    const stretch = data.readings.filter(
+      (row) => row.connectionId === call.connectionId && row.observedAt < call.at,
+    ).length;
+    const key = `${call.connectionId}:${stretch}:${Math.floor(call.at / HOUR)}`;
+    const total = totals.get(key);
+    totals.set(
+      key,
+      total
+        ? {
+            ...total,
+            at: call.at,
+            units: total.units + call.units,
+            count: (total.count ?? 1) + (call.count ?? 1),
+          }
+        : { ...call },
+    );
+  }
+  return { ...data, calls: [...totals.values()] };
+}
+
+describe("call totals", () => {
+  test("totals of equal calls forecast exactly as the single calls", () => {
+    const data = input();
+    account(data, "a", "five_hour", 40, 1);
+    pace(data, "a", [0, 20, 40], "five_hour", 2);
+    for (const start of [NOW - 4 * HOUR, NOW - 2 * HOUR]) {
+      for (const minutes of [10, 20, 30])
+        data.calls.push({ connectionId: "a", at: start + minutes * 60_000, units: 10 });
+    }
+    account(data, "base", "weekly", 20, 24, 1);
+    account(data, "large", "weekly", 20, 24, 10);
+    calibration(data, "base", 7_000);
+    calibration(data, "large", 70_000);
+    const totals = callTotals(data);
+    expect(totals.calls.length).toBeLessThan(data.calls.length);
+    expect(totals.calls.some((call) => (call.count ?? 1) > 1)).toBe(true);
+    for (const window of ["five_hour", "weekly"] as const)
+      expect(result(totals, window)).toEqual(result(data, window));
+    expect(result(totals, "weekly").accounts.map((row) => row.weightBasis)).toEqual([
+      "plan_estimate",
+      "observed",
+      "observed",
+    ]);
+  });
+
+  test("a total counts its calls toward the evidence needed for calibration", () => {
+    const data = input();
+    account(data, "a", "weekly", 20, 24);
+    account(data, "b", "weekly", 20, 24);
+    calibration(data, "a", 1_000);
+    calibration(data, "b", 3_000);
+    const totals = callTotals(data);
+    expect(totals.calls).toHaveLength(8);
+    expect(totals.calls.every((call) => call.count === 2)).toBe(true);
+    expect(result(totals, "weekly").accounts.map((row) => row.weight)).toEqual([0.5, 1.5]);
+  });
+
+  test("an outlier in a total is capped at its average call", () => {
+    const data = input();
+    account(data, "a", "five_hour", 20, 1);
+    pace(data, "a", [0, 10, 20], "five_hour", 2);
+    for (let hours = 3.5; hours > 0; hours -= 0.5)
+      data.calls.push({ connectionId: "a", at: NOW - hours * HOUR, units: 1 });
+    data.calls[0]!.units = 1e12;
+    const forecast = result(callTotals(data)).forecast;
+    expect(forecast.unusedPercent).toBeGreaterThan(65);
+    expect(forecast.unusedPercent).toBeLessThan(80);
+  });
+
+  test("a total that is not a whole number of calls is ignored", () => {
+    const data = input();
+    account(data, "a", "weekly", 20, 24);
+    account(data, "b", "weekly", 20, 24);
+    calibration(data, "a", 1_000);
+    calibration(data, "b", 3_000);
+    const broken = structuredClone(data);
+    for (const call of broken.calls) call.count = 0.5;
+    expect(result(broken, "weekly").accounts.map((row) => row.weightBasis)).toEqual([
+      "plan_estimate",
+      "plan_estimate",
+    ]);
+  });
+});

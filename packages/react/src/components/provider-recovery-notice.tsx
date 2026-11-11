@@ -18,6 +18,10 @@ export const PROVIDER_RECOVERY_NOTICE_DETAIL = (t: OpenGeniText) =>
 export const SANDBOX_WAIT_NOTICE_DETAIL = (t: OpenGeniText) =>
   t("providerRecoveryNotice.theTurnContinuesAutomaticallyAs");
 
+/** The restarted machine is named in the line above, so this says "it". */
+const MACHINE_RESTART_NOTICE_DETAIL = (t: OpenGeniText) =>
+  t("providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack");
+
 /**
  * One calm, live status line while the same turn waits for an automatic retry
  * after a transient provider failure. It replaces itself on every attempt
@@ -32,9 +36,11 @@ export function ProviderRecoveryNotice({
   if (!recovery) return null;
   const secondary =
     detail === undefined
-      ? recovery.sandboxWait
-        ? SANDBOX_WAIT_NOTICE_DETAIL(t)
-        : PROVIDER_RECOVERY_NOTICE_DETAIL(t)
+      ? recovery.code === "sandbox_machine_restarting"
+        ? MACHINE_RESTART_NOTICE_DETAIL(t)
+        : recovery.sandboxWait
+          ? SANDBOX_WAIT_NOTICE_DETAIL(t)
+          : PROVIDER_RECOVERY_NOTICE_DETAIL(t)
       : detail;
   return (
     <div

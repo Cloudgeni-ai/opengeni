@@ -375,10 +375,12 @@ function OrgCodexResets({
 export function OrgCodexAccessPage({
   codex,
   accountId,
+  organizationName,
   onClose,
 }: {
   codex: OrganizationCodexSubscriptions;
   accountId: string;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const account = codex.accounts.find((candidate) => candidate.id === accountId);
@@ -392,6 +394,7 @@ export function OrgCodexAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization
+      organizationName={organizationName}
       canManage
       name={account ? codexAccountName(account) : "this account"}
       onClose={onClose}
@@ -428,6 +431,7 @@ export function OrgCodexConnectPage({
   const signingIn = Boolean(codex.pending);
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description={`Sign in with the ChatGPT account whose plan pays for work across ${places.organizationName}.`}
       onClose={onClose}

@@ -15,8 +15,8 @@ const SESSION = "22222222-2222-4222-8222-222222222222";
 const NO_EVENTS: readonly SessionEvent[] = [];
 const ONE_EVENT = [{ sequence: 1, type: "user.message" }] as unknown as readonly SessionEvent[];
 
-function Reporter(props: SessionViewState) {
-  useReportSessionState(props);
+function Reporter({ enabled, ...props }: SessionViewState & { enabled?: boolean }) {
+  useReportSessionState(props, enabled);
   return null;
 }
 
@@ -53,5 +53,23 @@ describe("useReportSessionState", () => {
       </AppHostProvider>,
     );
     await rendered.unmount();
+  });
+
+  test("a chat in a panel beside another view isn't reported as the open chat", async () => {
+    const seen: SessionViewState[] = [];
+    const host = { onSessionState: (state) => void seen.push(state) } as AppHost;
+    const rendered = await renderComponent(
+      <AppHostProvider host={host}>
+        <Reporter
+          enabled={false}
+          sessionId={SESSION}
+          status="running"
+          events={ONE_EVENT}
+          initialLoading={false}
+        />
+      </AppHostProvider>,
+    );
+    await rendered.unmount();
+    expect(seen).toEqual([]);
   });
 });

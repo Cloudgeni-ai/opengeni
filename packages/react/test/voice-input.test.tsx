@@ -1,24 +1,31 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   createMemoryRecordingChunkStore,
   RecordingUploader,
-  type Recorder,
-  type RecordingChunkStore,
-  type RecorderOptions,
   type RecorderPlatform,
-  type RecorderSnapshot,
 } from "@opengeni/sdk/recordings";
 import { act, useState } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
+import { composerTranscription } from "../src/app/components/Composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
   useVoiceInput,
   type UseVoiceInputOptions,
-  type VoiceInputRecordingsClient,
 } from "../src/hooks/use-voice-input";
 import type { ComposerState } from "../src/hooks/use-composer";
 import { registerDom, renderComponent, renderHook, type RenderedComponent } from "./render-hook";
+import {
+  FakeMediaRecorder,
+  FakeServer,
+  capability,
+  fakePlatform,
+  installMediaMocks,
+  resumableCapability,
+  settle,
+  waitFor,
+} from "./voice-input-fakes";
 
 registerDom();
 
@@ -33,333 +40,6 @@ afterEach(async () => {
   globalThis.localStorage?.clear();
   mock.restore();
 });
-
-const capability = {
-  available: true,
-  maxDurationSeconds: 60,
-  maxSizeBytes: 25 * 1024 * 1024,
-  acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
-};
-
-const resumableCapability = {
-  ...capability,
-  resumable: {
-    maxDurationSeconds: 2 * 60 * 60,
-    maxSizeBytes: 512 * 1024 * 1024,
-    maxChunkSizeBytes: 8 * 1024 * 1024,
-    providerSegmentSeconds: 50,
-  },
-};
-
-async function settle(count = 20): Promise<void> {
-  for (let index = 0; index < count; index += 1) await Promise.resolve();
-}
-
-/** Let real timers (the transcript poll) run, inside act. */
-async function waitFor(check: () => boolean, timeoutMilliseconds = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (!check()) {
-    if (Date.now() >= deadline) return;
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      await settle();
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// One-shot dictation: a client with only transcribeAudio records in memory.
-
-class FakeMediaRecorder {
-  static instances: FakeMediaRecorder[] = [];
-  static isTypeSupported(type: string) {
-    return type.startsWith("audio/webm");
-  }
-  state: "inactive" | "recording" = "inactive";
-  mimeType: string;
-  startTimeslice: number | undefined;
-  bytes = 3;
-  private listeners: Array<() => void> = [];
-  ondataavailable: ((event: { data: Blob }) => void) | null = null;
-  constructor(
-    readonly stream: MediaStream,
-    options?: { mimeType?: string },
-  ) {
-    this.mimeType = options?.mimeType ?? "audio/webm";
-    FakeMediaRecorder.instances.push(this);
-  }
-  start(timeslice?: number) {
-    this.state = "recording";
-    this.startTimeslice = timeslice;
-  }
-  addEventListener(_type: "stop", listener: () => void) {
-    this.listeners.push(listener);
-  }
-  stop() {
-    this.state = "inactive";
-    this.ondataavailable?.({
-      data: new Blob([new Uint8Array(this.bytes)], { type: this.mimeType }),
-    });
-    for (const listener of this.listeners.splice(0)) listener();
-  }
-}
-
-function installMediaMocks(options?: { deny?: boolean }) {
-  FakeMediaRecorder.instances = [];
-  const track = { stop: mock(() => undefined) };
-  const getUserMedia = options?.deny
-    ? mock(async () => {
-        throw new DOMException("Permission denied", "NotAllowedError");
-      })
-    : mock(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
-  Object.defineProperty(navigator, "mediaDevices", {
-    configurable: true,
-    value: { getUserMedia },
-  });
-  Object.defineProperty(globalThis, "MediaRecorder", {
-    configurable: true,
-    value: FakeMediaRecorder,
-  });
-  return { track, getUserMedia };
-}
-
-// ---------------------------------------------------------------------------
-// Durable dictation: a fake recordings server and a fake recorder platform.
-
-type FakeVersion = {
-  id: string;
-  state: "queued" | "running" | "complete" | "failed";
-  errorCode: string | null;
-  createdAt: string;
-  text: string;
-};
-type FakeRecording = {
-  id: string;
-  workspaceId: string;
-  purpose: string;
-  state: "capturing" | "processing" | "ready" | "failed";
-  versions: FakeVersion[];
-};
-
-class FakeServer {
-  readonly recordings = new Map<string, FakeRecording>();
-  readonly created: Array<{ workspaceId: string; request: Record<string, unknown> }> = [];
-  readonly deletes: string[] = [];
-  readonly transcriptRequests: string[] = [];
-  /** What the next version hears; null leaves it running until `complete`. */
-  heard: string | null = "hello voice";
-  /** Fail the next version with this code instead. */
-  failNext: string | null = null;
-  /** Deletes fail like this until cleared. */
-  deleteFails: "offline" | null = null;
-  private versionCount = 0;
-  private clock = Date.parse("2026-10-25T08:00:00.000Z");
-
-  seed(input: {
-    id: string;
-    workspaceId?: string;
-    state: FakeRecording["state"];
-    text?: string;
-    failed?: string;
-  }) {
-    const recording: FakeRecording = {
-      id: input.id,
-      workspaceId: input.workspaceId ?? "ws-1",
-      purpose: "dictation",
-      state: input.state,
-      versions: [],
-    };
-    if (input.state !== "capturing") {
-      recording.versions.push(
-        this.version(input.failed ? null : (input.text ?? null), input.failed),
-      );
-    }
-    this.recordings.set(input.id, recording);
-    return recording;
-  }
-
-  version(text: string | null, failed?: string | null): FakeVersion {
-    this.versionCount += 1;
-    this.clock += 1_000;
-    return {
-      id: `version-${this.versionCount}`,
-      state: failed ? "failed" : text === null ? "running" : "complete",
-      errorCode: failed ?? null,
-      createdAt: new Date(this.clock).toISOString(),
-      text: text ?? "",
-    };
-  }
-
-  /** Hear the newest running version of a recording now. */
-  complete(recordingId: string, text: string) {
-    const recording = this.recordings.get(recordingId)!;
-    const version = recording.versions.at(-1)!;
-    version.state = "complete";
-    version.text = text;
-    recording.state = "ready";
-  }
-
-  /** Called by the fake recorder when its capture is stopped. */
-  finalize(recordingId: string) {
-    const recording = this.recordings.get(recordingId)!;
-    const failed = this.failNext;
-    this.failNext = null;
-    recording.versions.push(this.version(failed ? null : this.heard, failed));
-    recording.state = failed ? "failed" : this.heard === null ? "processing" : "ready";
-  }
-
-  readonly client: VoiceInputRecordingsClient = {
-    createRecording: async (workspaceId, request) => {
-      this.created.push({ workspaceId, request: request as Record<string, unknown> });
-      const id = request.recordingId ?? `recording-${this.created.length}`;
-      this.seed({ id, workspaceId, state: "capturing" });
-      return { id } as never;
-    },
-    createRecordingUploads: async (_workspaceId, _recordingId, request) =>
-      ({
-        uploads: request.chunks.map((chunk) => ({
-          chunkNumber: chunk.chunkNumber,
-          uploaded: true,
-          url: null,
-          method: "PUT",
-          headers: {},
-          expiresAt: null,
-        })),
-      }) as never,
-    completeRecordingChunks: async (_workspaceId, _recordingId, request) =>
-      ({ uploaded: request.chunkNumbers, missing: [] }) as never,
-    finalizeRecording: async (_workspaceId, recordingId) => {
-      const recording = this.recordings.get(recordingId);
-      if (!recording) throw Object.assign(new Error("gone"), { status: 404 });
-      if (recording.state === "capturing") this.finalize(recordingId);
-      const version = recording.versions.at(-1)!;
-      return { recording: { id: recordingId }, transcript: { ...version } } as never;
-    },
-    deleteRecording: async (_workspaceId, recordingId) => {
-      if (this.deleteFails === "offline") throw new TypeError("Failed to fetch");
-      this.deletes.push(recordingId);
-      if (!this.recordings.delete(recordingId))
-        throw Object.assign(new Error("gone"), { status: 404 });
-    },
-    listRecordings: async (workspaceId, options) => {
-      expect(options?.purpose).toBe("dictation");
-      return {
-        recordings: [...this.recordings.values()]
-          .filter((recording) => recording.workspaceId === workspaceId)
-          .map((recording) => ({
-            id: recording.id,
-            state: recording.state,
-            purpose: recording.purpose,
-            errorCode: null,
-            transcript: recording.versions.at(-1) ?? null,
-          })),
-        nextBefore: null,
-      } as never;
-    },
-    listRecordingTranscriptVersions: async (_workspaceId, recordingId) => {
-      const recording = this.recordings.get(recordingId);
-      if (!recording) throw Object.assign(new Error("gone"), { status: 404 });
-      return recording.versions.map((version) => ({ ...version })) as never;
-    },
-    getRecordingTranscript: async (_workspaceId, recordingId, options) => {
-      const version = this.recordings
-        .get(recordingId)
-        ?.versions.find((item) => item.id === options?.versionId);
-      return {
-        segments: version?.text ? [{ text: version.text }] : [],
-        nextAfter: null,
-      } as never;
-    },
-    createRecordingTranscript: async (_workspaceId, recordingId) => {
-      this.transcriptRequests.push(recordingId);
-      const recording = this.recordings.get(recordingId)!;
-      const version = this.version(this.heard);
-      recording.versions.push(version);
-      recording.state = this.heard === null ? "processing" : "ready";
-      return { ...version } as never;
-    },
-  };
-}
-
-function fakePlatform(
-  server: FakeServer,
-  options?: { deny?: boolean; store?: RecordingChunkStore },
-) {
-  const recorders: Array<{ options: RecorderOptions; stopped: boolean; discarded: boolean }> = [];
-  const stream = { getTracks: () => [] } as unknown as MediaStream;
-  const store = options?.store;
-  const platform: RecorderPlatform = {
-    supported: true,
-    systemAudioSupported: false,
-    createStore: () => store ?? createMemoryRecordingChunkStore(),
-    isCaptureActive: async () => false,
-    createRecorder(recorderOptions): Recorder {
-      const entry = { options: recorderOptions, stopped: false, discarded: false };
-      recorders.push(entry);
-      let snapshot: RecorderSnapshot = {
-        state: "idle",
-        recordingId: null,
-        elapsedMilliseconds: 0,
-        tracks: [],
-        upload: null,
-        error: null,
-      };
-      const status = (id: string) => ({
-        recordingId: id,
-        created: true,
-        pendingChunks: 0,
-        pendingBytes: 0,
-        uploading: false,
-        retryingAfterError: null,
-        failed: null,
-        finalized: true,
-        discarded: false,
-      });
-      return {
-        get snapshot() {
-          return snapshot;
-        },
-        async start() {
-          if (options?.deny) {
-            snapshot = {
-              ...snapshot,
-              state: "failed",
-              error: { code: "microphone_denied", message: "denied" },
-            };
-            return;
-          }
-          const created = await recorderOptions.client.createRecording(
-            recorderOptions.workspaceId,
-            {
-              purpose: recorderOptions.purpose,
-              tracks: [{ trackNumber: 0, source: "microphone", label: "Microphone" }],
-            } as never,
-          );
-          snapshot = { ...snapshot, state: "recording", recordingId: created.id };
-        },
-        pause() {},
-        resume() {},
-        async stop() {
-          entry.stopped = true;
-          const id = snapshot.recordingId!;
-          snapshot = { ...snapshot, state: "stopped" };
-          server.finalize(id);
-          return status(id);
-        },
-        async discard() {
-          entry.discarded = true;
-          const id = snapshot.recordingId;
-          snapshot = { ...snapshot, state: "stopped" };
-          if (id) server.recordings.delete(id);
-        },
-        async rename() {},
-        levels: () => ({ 0: 0 }),
-        inputStream: () => (snapshot.state === "recording" ? stream : null),
-      };
-    },
-  };
-  return { platform, recorders, stream };
-}
 
 type HookProps = { value: string; workspaceId: string };
 
@@ -589,6 +269,105 @@ describe("useVoiceInput: dictations as recordings", () => {
     await hook.unmount();
   });
 
+  test("a host that dictates elsewhere leaves saved dictations for the composer", async () => {
+    const server = new FakeServer();
+    server.seed({ id: "left-behind", state: "ready", text: "from yesterday" });
+    const { platform } = fakePlatform(server);
+    const { hook } = await renderDurable(server, platform, { recover: false });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await settle();
+    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.savedTranscript).toBeNull();
+    expect(server.recordings.has("left-behind")).toBe(true);
+    await hook.unmount();
+  });
+
+  test("a list answer without recordings leaves the composer quiet and still dictating", async () => {
+    // A host proxy or test double answering the list route with another
+    // route's body (here a session), or failing outright.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const listRecordings of [
+        async () => ({ id: "session-1", status: "running" }) as never,
+        async () => ({ items: [] }) as never,
+        async () => undefined as never,
+        async () => ({ recordings: [null, { state: "ready" }], nextBefore: null }) as never,
+        async () => {
+          throw new Error("refused");
+        },
+      ]) {
+        const server = new FakeServer();
+        server.heard = "still works";
+        const { platform } = fakePlatform(server);
+        const { hook, draft } = await renderDurable(server, platform, {
+          recordings: { ...server.client, listRecordings },
+        });
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await settle();
+        });
+        expect(hook.result.current.status).toBe("idle");
+        expect(hook.result.current.error).toBeNull();
+
+        await act(async () => {
+          expect(await hook.result.current.start()).toBe(true);
+        });
+        await act(async () => {
+          hook.result.current.stop();
+          await settle();
+        });
+        await waitFor(() => hook.result.current.status === "idle");
+        expect(draft.value).toBe("still works");
+        // Taking it looks again, through the same answer: still quiet.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await settle();
+        });
+        expect(hook.result.current.status).toBe("idle");
+        await hook.unmount();
+      }
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("release lets go of a held dictation without deleting it", async () => {
+    const server = new FakeServer();
+    server.failNext = "voice_provider";
+    const { platform } = fakePlatform(server);
+    const { hook } = await renderDurable(server, platform, { recover: false });
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    const id = hook.result.current.recordingId!;
+    await act(async () => {
+      hook.result.current.stop();
+      await settle();
+    });
+    await waitFor(() => hook.result.current.status === "error");
+    expect(hook.result.current.hasRecoverableRecording).toBe(true);
+
+    await act(async () => {
+      hook.result.current.release();
+      await settle();
+    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasRecoverableRecording).toBe(false);
+    // Still saved: the composer offers it.
+    expect(server.recordings.has(id)).toBe(true);
+    expect(server.deletes).toEqual([]);
+    // A new dictation can start straight away.
+    await act(async () => {
+      expect(await hook.result.current.start()).toBe(true);
+    });
+    await hook.unmount();
+  });
+
   test("finishes uploading a dictation a closed page left on this device, then offers it", async () => {
     const server = new FakeServer();
     server.heard = "left mid-sentence";
@@ -661,55 +440,72 @@ describe("useVoiceInput: dictations as recordings", () => {
     await hook.unmount();
   });
 
-  test("Cancel and Escape keep real speech; only an accidental start is thrown away", async () => {
-    for (const via of ["cancel", "escape"] as const) {
-      const server = new FakeServer();
-      const { platform, recorders } = fakePlatform(server);
-      const { hook, draft, advance } = await renderDurable(server, platform);
-      await act(async () => {
-        await hook.result.current.start();
-      });
-      const id = hook.result.current.recordingId!;
-      advance(45_000);
-      await act(async () => {
-        if (via === "cancel") hook.result.current.cancel();
-        else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-        await settle();
-      });
-      await waitFor(() => hook.result.current.status === "transcript-ready");
-      expect(recorders[0]?.stopped).toBe(true);
-      expect(hook.result.current.savedTranscript).toBe("hello voice");
-      expect(draft.value).toBe("");
-      expect(server.recordings.has(id)).toBe(true);
-      await hook.unmount();
-    }
-
+  test("Cancel deletes the dictation, so nothing offers it again; Escape never does", async () => {
     const server = new FakeServer();
     const { platform, recorders } = fakePlatform(server);
-    const { hook, advance } = await renderDurable(server, platform);
+    const { hook, draft, advance } = await renderDurable(server, platform);
     await act(async () => {
       await hook.result.current.start();
     });
-    // An Escape a dialog already handled leaves dictation alone.
+    const id = hook.result.current.recordingId!;
+    advance(45_000);
+    // A stray Escape loses no speech.
     await act(async () => {
-      const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      event.preventDefault();
-      document.dispatchEvent(event);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
       await settle();
     });
     expect(hook.result.current.status).toBe("recording");
-    advance(1_000);
+    expect(recorders[0]?.discarded).toBe(false);
     await act(async () => {
       hook.result.current.cancel();
       await settle();
     });
     expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasRecoverableRecording).toBe(false);
     expect(recorders[0]?.discarded).toBe(true);
-    expect(server.recordings.size).toBe(0);
+    expect(server.recordings.has(id)).toBe(false);
+    expect(draft.value).toBe("");
     await hook.unmount();
   });
 
-  test("cancel while it is being heard keeps the text to insert later", async () => {
+  test("setting a dictation aside keeps real speech; only an accidental start is thrown away", async () => {
+    const server = new FakeServer();
+    const { platform, recorders } = fakePlatform(server);
+    const { hook, draft, advance } = await renderDurable(server, platform);
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    const id = hook.result.current.recordingId!;
+    advance(45_000);
+    await act(async () => {
+      hook.result.current.setAside();
+      await settle();
+    });
+    await waitFor(() => hook.result.current.status === "transcript-ready");
+    expect(recorders[0]?.stopped).toBe(true);
+    expect(hook.result.current.savedTranscript).toBe("hello voice");
+    expect(draft.value).toBe("");
+    expect(server.recordings.has(id)).toBe(true);
+    await hook.unmount();
+
+    const quick = new FakeServer();
+    const second = fakePlatform(quick);
+    const accidental = await renderDurable(quick, second.platform);
+    await act(async () => {
+      await accidental.hook.result.current.start();
+    });
+    accidental.advance(1_000);
+    await act(async () => {
+      accidental.hook.result.current.setAside();
+      await settle();
+    });
+    expect(accidental.hook.result.current.status).toBe("idle");
+    expect(second.recorders[0]?.discarded).toBe(true);
+    expect(quick.recordings.size).toBe(0);
+    await accidental.hook.unmount();
+  });
+
+  test("cancel while it is being heard deletes it; an offered one only stops retrying", async () => {
     const server = new FakeServer();
     server.heard = null;
     const { platform } = fakePlatform(server);
@@ -722,21 +518,92 @@ describe("useVoiceInput: dictations as recordings", () => {
       hook.result.current.stop();
       await settle();
     });
+    await waitFor(() => hook.result.current.status === "transcribing");
     await act(async () => {
       hook.result.current.cancel();
       await settle();
     });
-    expect(hook.result.current.status).toBe("recovered");
-    server.complete(id, "kept for later");
-    await waitFor(() => hook.result.current.status === "transcript-ready");
-    expect(draft.value).toBe("");
-    expect(hook.result.current.savedTranscript).toBe("kept for later");
-    await act(async () => {
-      await hook.result.current.discard();
-      await settle();
-    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasRecoverableRecording).toBe(false);
     expect(server.recordings.has(id)).toBe(false);
     expect(draft.value).toBe("");
+    await hook.unmount();
+
+    // A dictation an earlier page left, offered here and still being heard.
+    const left = new FakeServer();
+    left.heard = null;
+    const leftId = left.seed({ id: "left-behind", state: "processing" }).id;
+    const offered = await renderDurable(left, fakePlatform(left).platform);
+    await waitFor(() => offered.hook.result.current.status === "retrying");
+    await act(async () => {
+      offered.hook.result.current.cancel();
+      await settle();
+    });
+    expect(offered.hook.result.current.status).toBe("recovered");
+    expect(offered.hook.result.current.hasRecoverableRecording).toBe(true);
+    expect(left.recordings.has(leftId)).toBe(true);
+    await offered.hook.unmount();
+  });
+
+  test("a host that keeps speech gets a cancelled dictation's copy before it is deleted", async () => {
+    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3])];
+    for (const when of ["recording", "transcribing"] as const) {
+      const server = new FakeServer();
+      server.heard = null;
+      const { platform } = fakePlatform(server, { chunks, elapsedMilliseconds: 6_000 });
+      const copies: Array<{ bytes: number[]; cancelled: boolean; durationMilliseconds: number }> =
+        [];
+      const { hook } = await renderDurable(server, platform, {
+        onAudio: (copy) => {
+          void copy.audio.arrayBuffer().then((buffer) =>
+            copies.push({
+              bytes: [...new Uint8Array(buffer)],
+              cancelled: copy.cancelled === true,
+              durationMilliseconds: copy.durationMilliseconds,
+            }),
+          );
+        },
+      });
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      const id = hook.result.current.recordingId!;
+      if (when === "transcribing") {
+        await act(async () => {
+          hook.result.current.stop();
+          await settle();
+        });
+        await waitFor(() => hook.result.current.status === "transcribing");
+      }
+      await act(async () => {
+        hook.result.current.cancel();
+        await settle();
+      });
+      await waitFor(() => copies.some((copy) => copy.cancelled));
+      expect(copies.at(-1)).toEqual({
+        bytes: [1, 2, 3],
+        cancelled: true,
+        durationMilliseconds: 6_000,
+      });
+      expect(hook.result.current.status).toBe("idle");
+      expect(server.recordings.has(id)).toBe(false);
+      await hook.unmount();
+    }
+
+    // An accidental start leaves nothing to keep.
+    const server = new FakeServer();
+    const { platform } = fakePlatform(server, { chunks });
+    let given = 0;
+    const { hook } = await renderDurable(server, platform, { onAudio: () => (given += 1) });
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle();
+    });
+    expect(given).toBe(0);
+    expect(server.recordings.size).toBe(0);
     await hook.unmount();
   });
 
@@ -884,6 +751,56 @@ describe("useVoiceInput: one request", () => {
     await hook.unmount();
   });
 
+  test("an EU-only refusal (422 region_restricted) is a region error, with or without details", async () => {
+    for (const details of [{ code: "region_restricted" }, undefined]) {
+      installMediaMocks();
+      let calls = 0;
+      const refusal = new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: {
+            status: 422,
+            code: "region_restricted",
+            message: "Not supported in EU",
+            retryable: false,
+            outcomeUnknown: false,
+            ...(details ? { details } : {}),
+          },
+        }),
+        { mutation: true },
+      );
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async () => {
+                calls += 1;
+                throw refusal;
+              },
+            },
+            workspaceId: "ws-1",
+            capability: resumableCapability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      await act(async () => {
+        hook.result.current.stop();
+        await settle();
+      });
+      expect(calls).toBe(1);
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe("region_restricted");
+      await hook.unmount();
+    }
+  });
+
   test("permission denial is controlled and a cancelled start stays cancelled", async () => {
     installMediaMocks({ deny: true });
     let draft = "keep";
@@ -986,9 +903,7 @@ describe("composer dictation", () => {
       await settle();
     });
     expect(mounted.container.querySelector("[data-voice-waveform]")).toBeTruthy();
-    expect(
-      mounted.container.querySelector("[aria-label='Stop without transcribing']"),
-    ).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Discard dictation']")).toBeTruthy();
     await act(async () => {
       mounted?.container
         .querySelector<HTMLButtonElement>("[aria-label='Stop and transcribe']")
@@ -1107,7 +1022,7 @@ describe("composer dictation", () => {
     });
     await act(async () => {
       mounted?.container
-        .querySelector<HTMLButtonElement>("[aria-label='Stop without transcribing']")
+        .querySelector<HTMLButtonElement>("[aria-label='Discard dictation']")
         ?.click();
       await settle();
     });
@@ -1168,6 +1083,68 @@ describe("composer dictation", () => {
     });
     expect(mounted.container.querySelector(blocked)).toBeNull();
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+  });
+});
+
+describe("the mic in an EU-only workspace", () => {
+  const context = (config: Record<string, unknown>) =>
+    ({
+      client: { transcribeAudio: async () => ({ text: "", languages: [] }) },
+      workspaces: [{ id: "ws-1", settings: {} }],
+      clientConfig: config,
+    }) as unknown as Parameters<typeof composerTranscription>[0];
+
+  test("stays, switched off, and says Not supported in EU", async () => {
+    const transcription = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [
+          { id: "voice_input", available: false, unavailableReason: "region_restricted" },
+        ],
+      }),
+      "ws-1",
+    );
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <ChatComposer composer={composerState("", () => {}, sends)} transcription={transcription} />,
+    );
+    const mic = mounted.container.querySelector<HTMLButtonElement>(
+      "[aria-label='Not supported in EU']",
+    );
+    expect(mic).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeNull();
+    await act(async () => {
+      mic!.click();
+      await settle();
+    });
+    expect(mounted.container.querySelector("[data-voice-waveform]")).toBeNull();
+  });
+
+  test("an available mic is unchanged; without voice input there is no mic", () => {
+    const available = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [{ id: "voice_input", available: true, unavailableReason: null }],
+      }),
+      "ws-1",
+    );
+    expect(available?.capability?.available).toBe(true);
+    expect(available?.workspaceEnabled).toBe(true);
+    expect(composerTranscription(context({ voiceInput: { available: false } }), "ws-1")).toBe(
+      undefined,
+    );
+  });
+
+  test("no speech-to-text route at all: no mic, and no EU label", () => {
+    expect(
+      composerTranscription(
+        context({
+          voiceInput: { available: false, providers: [] },
+          inferenceFeatures: [{ id: "voice_input", available: false, unavailableReason: null }],
+        }),
+        "ws-1",
+      ),
+    ).toBe(undefined);
   });
 });
 

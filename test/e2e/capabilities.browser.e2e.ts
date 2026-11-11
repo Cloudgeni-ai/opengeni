@@ -42,8 +42,8 @@ type AtlassianUiState = {
 };
 
 type DriveUiState = {
+  /** Requests to the retired facet browse and source routes; must stay 0. */
   driveSaves: number;
-  sourceRequest: Record<string, unknown> | null;
   binding: Record<string, unknown> | null;
 };
 
@@ -597,7 +597,7 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("native Atlassian retirement preserves hosted agent tools and historical cleanup", async () => {
+  test("a historical native Atlassian connection stays hidden while hosted agent tools remain", async () => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     try {
@@ -619,43 +619,12 @@ describe("capabilities browser e2e", () => {
       await expectVisible(
         page.getByRole("button", { name: /Let agents work in Jira and Confluence/ }),
       );
-      await expectVisible(page.getByRole("button", { name: /Previous sync connections/ }));
-      expect(
-        await page.getByText("You can set up both. Each one is connected separately.").count(),
-      ).toBe(0);
-      await page.getByRole("button", { name: /Previous sync connections/ }).click();
-      await page
-        .getByRole("button", { name: "More actions for Jira & Confluence", exact: true })
-        .click();
-      await page.getByRole("menuitem", { name: "Disconnect previous sync", exact: true }).click();
-      const confirmation = page.getByRole("dialog");
-      await expectVisible(
-        confirmation.getByRole("button", { name: "Disconnect previous sync", exact: true }),
-      );
-      await expectText(confirmation, "Its imported documents and history remain.");
-      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
-      await expectHidden(confirmation);
-      await expectText(page.locator("main"), "Knowledge sync retired");
-      await expectText(page.locator("main"), "Imported documents and history remain.");
-      expect(
-        await page
-          .getByRole("button", { name: /Reconnect|Choose sources|Resume/, exact: false })
-          .count(),
-      ).toBe(0);
-      await assertAccessibleAndBounded(page, "main");
-      await page.screenshot({
-        path: `${evidenceDir}atlassian-retired-desktop.png`,
-        fullPage: true,
-      });
-      expect(state.nativeRequests).toBe(0);
-
-      state.nativeConnected = false;
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/plugins`, {
-        waitUntil: "networkidle",
-      });
-      await page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }).click();
+      // Integration Knowledge sync was removed: a saved native connection is
+      // inert and no longer shown, and nothing calls the native routes.
       expect(await page.getByRole("button", { name: /Previous sync connections/ }).count()).toBe(0);
+      expect(await page.getByText(/Knowledge sync retired/).count()).toBe(0);
       await expectVisible(page.getByRole("heading", { name: "Jira & Confluence", exact: true }));
+      await assertAccessibleAndBounded(page, "main");
       expect(state.nativeRequests).toBe(0);
     } catch (error) {
       console.error(
@@ -672,11 +641,10 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("Google Drive folders configure only the exact named Integration instance", async () => {
+  test("a saved Google Drive Knowledge source facet is never shown", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
-      sourceRequest: null,
-      binding: null,
+      binding: driveBinding(),
     };
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
@@ -686,9 +654,7 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      // One Google Drive row folds every account in: the primary knowledge
-      // connection plus each named Drive account (its own tool namespace).
-      // The row's accessible name carries the state, and the accounts - with
+      // One Google Drive row folds every account in. The accounts - with
       // their per-instance facets - live in the row's detail sheet.
       const driveRow = page.getByRole("button", {
         name: "Google Drive. Not connected",
@@ -704,35 +670,12 @@ describe("capabilities browser e2e", () => {
       await instance
         .getByRole("button", { name: "Manage facets for Google Drive — Finance" })
         .click();
-      const facet = instance.locator('[data-integration-facet="drive-content"]');
-      await expectVisible(facet);
-      await facet.getByRole("button", { name: "Configure" }).click();
-
-      const dialog = page.locator('[data-slot="dialog-content"]').filter({
-        hasText: "Google Drive locations · Google Drive — Finance",
-      });
-      await expectVisible(dialog);
-      await expectText(dialog, "Google Drive locations · Google Drive — Finance");
-      await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
-      await assertAccessibleAndBounded(page, '[data-slot="dialog-content"]');
-      await dialog.getByRole("button", { name: "Save 1 location" }).click();
-      await expectHidden(dialog);
-
-      expect(state.driveSaves).toBe(1);
-      expect(state.sourceRequest).toMatchObject({
-        sources: [
-          {
-            id: "root",
-            name: "My Drive",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
-        ],
-        destination: { authorityKind: "workspace", collectionId: null },
-        syncCadence: "hourly",
-        readPolicy: "allow",
-      });
-      await expectText(facet, "Active");
+      // Integration Knowledge sync was removed: a stale knowledge_source facet
+      // from an older server is never shown; the account's other facets are.
+      await expectVisible(instance.locator('[data-integration-facet="account-identity"]'));
+      expect(await instance.locator('[data-integration-facet="drive-content"]').count()).toBe(0);
+      await assertAccessibleAndBounded(page, '[data-integration-sheet="google-drive"]');
+      expect(state.driveSaves).toBe(0);
     } finally {
       await context.close();
     }
@@ -971,8 +914,7 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
           member.startsWith("capabilities-services-") ||
           member.startsWith("integration-account-facets-") ||
           member.startsWith("integration-facets-panel-") ||
-          member.startsWith("custom-api-setup-dialog-") ||
-          member.startsWith("google-drive-knowledge-source-dialog-"),
+          member.startsWith("custom-api-setup-dialog-"),
       )
         ? cycle
         : null;
@@ -1163,28 +1105,12 @@ async function installCapabilityApi(
     }
     if (
       "driveSaves" in state &&
-      request.method() === "GET" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/browse`
-    ) {
-      return json(driveBrowse());
-    }
-    if (
-      "driveSaves" in state &&
-      request.method() === "PUT" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/source`
+      url.pathname.startsWith(
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/`,
+      )
     ) {
       state.driveSaves += 1;
-      state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
-      state.binding = driveBinding(state.sourceRequest);
-      return json({
-        capabilityId: driveCapabilityId,
-        instanceKey: "finance",
-        facetKey: "drive-content",
-        status: "configured",
-        binding: state.binding,
-      });
+      return json({ message: "retired" }, 410);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
@@ -1860,39 +1786,7 @@ function driveIdentityDefinition() {
   };
 }
 
-function driveBrowse() {
-  return {
-    connection: driveConnection(),
-    parentId: "root",
-    current: {
-      id: "root",
-      name: "My Drive",
-      mimeType: "application/vnd.google-apps.folder",
-      kind: "folder",
-      driveId: null,
-      modifiedTime: null,
-      size: null,
-      webViewLink: "https://drive.google.com/drive/my-drive",
-    },
-    items: [
-      {
-        id: "folder-1",
-        name: "Product",
-        mimeType: "application/vnd.google-apps.folder",
-        kind: "folder",
-        driveId: null,
-        modifiedTime: "2026-08-11T00:00:00.000Z",
-        size: null,
-        webViewLink: "https://drive.google.com/drive/folders/folder-1",
-      },
-    ],
-    nextPageToken: null,
-    incompleteSearch: false,
-  };
-}
-
-function driveBinding(request: Record<string, unknown>) {
-  const sources = Array.isArray(request.sources) ? request.sources : [];
+function driveBinding() {
   return {
     id: "00000000-0000-4000-8000-000000000132",
     facetKey: "drive-content",
@@ -1902,18 +1796,14 @@ function driveBinding(request: Record<string, unknown>) {
     connectionId: driveConnectionId,
     status: "active",
     config: {
-      sources: sources.map((source) => ({
-        ...(source as Record<string, unknown>),
-        sourceKind: (source as Record<string, unknown>).id === "root" ? "my_drive" : "folder",
-        includeDescendants: true,
-      })),
+      sources: [{ id: "root", name: "My Drive", sourceKind: "my_drive", includeDescendants: true }],
       destination: {
         authorityKind: "workspace",
         authorityAccountId: accountId,
         authorityWorkspaceId: workspaceId,
       },
-      syncCadence: request.syncCadence,
-      readPolicy: request.readPolicy,
+      syncCadence: "hourly",
+      readPolicy: "allow",
     },
     version: 1,
     hasCursor: false,

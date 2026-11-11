@@ -8,13 +8,22 @@ import {
   type CodexUsagePayload,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
+import {
+  API_CREDITS_REQUIRED_CODE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  modelCallProcessingResidency,
+  type ModelCallProcessingResidencyV1,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,
   admitModelCall,
   clampReasoningEffortForConfiguredModel,
   isWorkspaceModelAdmissible,
   ModelCallError,
+  ownModelFunding,
+  connectedSubscriptionsRefusedForOrigin,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
@@ -39,7 +48,6 @@ import {
   fetchSubscriptionCoreCodexUsage,
   getWorkspace,
   listSubscriptionCoreCodexOperationCandidates,
-  readCodexCutoverDisposition,
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   reserveSubscriptionCoreCodexOperationRequest,
@@ -53,7 +61,10 @@ import {
   type SubscriptionCoreCodexOperationScope,
 } from "@opengeni/db";
 import {
+  findInferenceRegionRestrictedError,
   MultiProviderModelProvider,
+  inferenceResidencyRequirement,
+  withInferenceResidency,
   normalizeModelCallUsage,
   runSingleModelCall,
   SingleModelCallProviderError,
@@ -63,6 +74,7 @@ import {
 import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
 import { PendingUsageSettlements } from "./pending-usage-settlements";
 import {
+  billingOriginForAccessGrant,
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
 } from "../access-grant-rls";
@@ -120,6 +132,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       modelId = (
         await resolveDefaultSessionModelForSelections(deps.db, {
           settings: resolved.catalogSettings,
+          billingOrigin: await billingOriginForAccessGrant(deps, caller.grant),
           accountId: caller.accountId,
           workspaceSettings: workspace?.settings ?? {},
           selections: resolved.selections,
@@ -142,8 +155,17 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
   return {
     async listModels(caller) {
       const { selections: all } = await selections(caller);
+      const origin = await billingOriginForAccessGrant(deps, caller.grant);
       return all
-        .filter((entry) => isWorkspaceModelAdmissible(entry) && servedBySingleModelCalls(entry))
+        .filter(
+          (entry) =>
+            isWorkspaceModelAdmissible(entry) &&
+            servedBySingleModelCalls(entry) &&
+            !(
+              connectedSubscriptionsRefusedForOrigin(deps.settings, origin) &&
+              ownModelFunding(entry.model) === "subscription"
+            ),
+        )
         .map(({ model }) => ({
           id: model.id,
           label: model.label,
@@ -159,11 +181,19 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
+      // The person's own API key pays the platform fee; their own
+      // subscription pays none but needs a paid plan.
+      const ownFunding = chargesOpenGeniCredits ? null : ownModelFunding(model);
+      const byok = ownFunding === "api_key";
+      const ownSubscription = ownFunding === "subscription";
       // a call made by a live agent attempt (its grant was verified
       // by the attempt boundary) counts against that task's usage limit and is
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
       const sourceId = `model_call:${input.requestId}`;
+      // Who pays: API work spends credits only, never plan credit. Decided
+      // before custody opens, so a failed read leaves no marker behind.
+      const billingOrigin = await billingOriginForAccessGrant(deps, input.grant);
       if (usageLimitSessionId) {
         if (pendingSettlements.full) {
           // Never drop a retained receipt to make room for another call.
@@ -210,13 +240,32 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           chargesOpenGeniCredits,
           countsTowardTokenCap,
           subjectId: input.subjectId,
+          billingOrigin,
+          byok,
+          ownSubscription,
         });
         if (!admission.allowed) {
           throw new ModelCallError({
-            status: admission.denial === "insufficient_credits" ? 402 : 429,
-            type: "insufficient_quota",
-            code: admission.denial,
-            message: admission.message,
+            status:
+              admission.denial === "subscription_api_unavailable"
+                ? 403
+                : admission.denial === "insufficient_credits"
+                  ? 402
+                  : 429,
+            type:
+              admission.denial === "subscription_api_unavailable"
+                ? "invalid_request_error"
+                : "insufficient_quota",
+            code: admission.apiCreditsRequired
+              ? API_CREDITS_REQUIRED_CODE
+              : admission.byokPaidCreditRequired
+                ? BYOK_PAID_CREDIT_REQUIRED_CODE
+                : admission.subscriptionPlanRequired
+                  ? SUBSCRIPTION_PLAN_REQUIRED_CODE
+                  : admission.denial,
+            message: admission.apiCreditsRequired
+              ? `${admission.message} Add credits to use the API.`
+              : admission.message,
           });
         }
         const settings = await settingsWithModelProviderCredentials(deps.db, {
@@ -244,14 +293,26 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         ...reasoningEffortFor(model, input.request.reasoningEffort),
         ...(input.signal ? { signal: input.signal } : {}),
       };
-      const execute = async (): Promise<SingleModelCallResult> => {
-        const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
-        return await runSingleModelCall(
-          { client: binding.client, provider: binding.provider, modelId: binding.modelId },
-          request,
-          input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
-        );
-      };
+      // EU-only inference: resolution refuses a non-EU route, and the
+      // transport refuses any request that is not on one.
+      let servedResidency: ModelCallProcessingResidencyV1 | undefined;
+      const execute = async (): Promise<SingleModelCallResult> =>
+        await withInferenceResidency(settings, async () => {
+          const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
+          // Where the call ran: the served route's residency claim; a missing
+          // or invalid record is unknown (the model-call fact's projection).
+          servedResidency = modelCallProcessingResidency(binding.residency);
+          return await runSingleModelCall(
+            {
+              client: binding.client,
+              provider: binding.provider,
+              modelId: binding.modelId,
+              residency: inferenceResidencyRequirement(settings),
+            },
+            request,
+            input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
+          );
+        });
       let result: SingleModelCallResult;
       try {
         result =
@@ -298,6 +359,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId,
+            ...(servedResidency ? { processingResidency: servedResidency } : {}),
             ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
             usageLimitMetrics: deps.usageLimitMetrics ?? null,
             // A failed task-usage receipt never suppresses the credit
@@ -307,6 +369,8 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
               logSettlementFailure(error);
             },
             debitMetadata: { modelCallId: input.requestId },
+            billingOrigin,
+            byok,
           }),
         ).catch(async (error: unknown) => {
           logSettlementFailure(error);
@@ -514,12 +578,6 @@ async function withCodexOperation<T>(
   model: ConfiguredModel,
   run: () => Promise<T>,
 ): Promise<T> {
-  const disposition = await readCodexCutoverDisposition(
-    deps.db,
-    input.accountId,
-    input.workspaceId,
-  );
-  if (disposition !== "core") throw subscriptionCapacityUnavailable("Codex");
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: input.accountId,
@@ -646,6 +704,16 @@ export function publicModelCallError(error: unknown): unknown {
       code: "unsupported_parameter",
       param: error.parameter,
       message: error.message,
+    });
+  }
+  const regionRestricted = findInferenceRegionRestrictedError(error);
+  if (regionRestricted) {
+    return new ModelCallError({
+      status: 422,
+      type: "invalid_request_error",
+      code: "region_restricted",
+      param: "model",
+      message: regionRestricted.message,
     });
   }
   if (error instanceof CodexReloginRequired) return subscriptionReconnectRequired("Codex");

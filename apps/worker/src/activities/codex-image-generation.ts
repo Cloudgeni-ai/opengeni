@@ -19,7 +19,7 @@ import {
   type SubscriptionCoreCodexOperationScope,
   type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
-import type { Settings } from "@opengeni/config";
+import { sideFeatureProcessingResidency, type Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GeneratedImageReceipt } from "./generated-images";
 import { CodexCredentialLeaseLostError } from "./agent-turn/credential-leases";
@@ -89,6 +89,12 @@ export async function executeCodexImageGeneration(
       providerBindingHash,
       modelId: CODEX_IMAGE_MODEL,
       ...(input.references ? { referenceDigests: input.references } : {}),
+      // A code-owned rule: the subscription offers no regional control. EU
+      // turns never get here (Codex turns are refused under EU).
+      processingResidency: sideFeatureProcessingResidency(
+        {},
+        "image_generation.codex_subscription",
+      ),
       isProviderDispatchRejected: (error) =>
         !providerDispatchAdmitted &&
         (error instanceof CodexCredentialLeaseLostError ||

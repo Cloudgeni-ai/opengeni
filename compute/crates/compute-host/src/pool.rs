@@ -77,7 +77,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{CHUNK_BYTES, Depth, Images, Parts, Suspect, Verified, ZERO};
+use crate::image::{CHUNK_BYTES, Depth, Images, Made, Parts, Suspect, Verified, ZERO};
 use crate::layout::{
     Machine, Paths, copy_size, copy_sparse, link_kernel, remove_if_present, sync_parent,
     templates_dir, write_atomic,
@@ -158,6 +158,11 @@ pub(crate) struct Sources {
     pub networked: bool,
     /// How guest memory is backed, as the engine describes it.
     pub memory: String,
+    /// The runtime new VMs run under (see [`compute_engine::Engine::runtime`]):
+    /// a template's clones wake under the runtime that saved it, so one
+    /// saved under another, before the host's kernel changed say, would
+    /// give every new sandbox an image this host may refuse.
+    pub runtime: String,
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
@@ -193,6 +198,7 @@ impl Sources {
             boot_args: self.boot_args.clone(),
             networked: self.networked,
             memory: self.memory.clone(),
+            runtime: self.runtime.clone(),
             ready_port: self.ready_port,
         })
     }
@@ -233,6 +239,7 @@ pub(crate) struct Inputs {
     boot_args: String,
     networked: bool,
     memory: String,
+    runtime: String,
     ready_port: u32,
 }
 
@@ -287,6 +294,11 @@ impl Template {
         self.footprint
     }
 
+    /// Its directory, which holds all its files.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Its disk, which every sandbox started from it copies.
     pub fn disk(&self) -> PathBuf {
         self.dir.join(DISK)
@@ -333,14 +345,19 @@ impl Template {
             .map_err(CopyFailure::from)?
             .ok_or_else(|| CopyFailure::Unusable("the template has no image".into()))?;
         copy_sparse(&self.dir.join(DISK), &paths.disk).map_err(CopyFailure::from)?;
-        // A clone is made by whatever made its template.
+        // A clone is made by whatever made its template, and from the
+        // same machine and disk.
         images
             .publish_made_by(
                 Parts::Shared {
                     from: &source,
                     image: &image,
                 },
-                image.meta().runtime.as_deref(),
+                Made {
+                    runtime: image.meta().runtime.as_deref(),
+                    vcpus: image.meta().vcpus,
+                    disk_len: image.meta().disk_len,
+                },
             )
             .map_err(CopyFailure::from)?;
         Ok(())
@@ -523,9 +540,9 @@ impl Pool {
         (None, self.want(shape, now))
     }
 
-    /// Gives up `shape`'s template, which went unused, until its next
-    /// [`Pool::take`]. Returns nothing if it is being built (it retires
-    /// once built) or already retired.
+    /// Gives up `shape`'s template, which went unused or whose disk is
+    /// wanted, until its next [`Pool::take`]. Returns nothing if it is
+    /// being built (it retires once built) or already retired.
     pub fn retire(&mut self, shape: Shape) -> Option<Retired> {
         let entry = self.entries.get(&shape);
         if matches!(entry, Some(Entry::Building | Entry::Retired)) {
@@ -535,7 +552,6 @@ impl Pool {
             Some(Entry::Ready(template)) => Some(template),
             _ => None,
         };
-        tracing::info!(%shape, "template unused for long; retired");
         Some(Retired { template })
     }
 
@@ -553,6 +569,20 @@ impl Pool {
         self.entries.insert(shape, entry);
     }
 
+    /// Puts off `shape`'s build, which found no memory, disk or processor
+    /// time to spare: as after a failed build, new sandboxes boot cold and
+    /// a later one tries again, but nothing failed, so it is not warned
+    /// about each time.
+    pub fn put_off(&mut self, shape: Shape, now: Instant) {
+        tracing::debug!(%shape, "template build put off: no room to spare for it");
+        self.entries.insert(
+            shape,
+            Entry::Failed {
+                retry: now + RETRY_AFTER,
+            },
+        );
+    }
+
     /// Forgets `template`, which no longer fits today's inputs, and asks for
     /// a new one as [`Pool::want`] does, unless a newer one is already
     /// ready or being built.
@@ -564,6 +594,17 @@ impl Pool {
             self.entries.remove(&shape);
         }
         self.want(shape, now)
+    }
+
+    /// The templates ready now.
+    pub fn templates(&self) -> Vec<Arc<Template>> {
+        self.entries
+            .values()
+            .filter_map(|entry| match entry {
+                Entry::Ready(template) => Some(Arc::clone(template)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The images of the shapes whose templates are kept or being built.
@@ -959,6 +1000,7 @@ fn publish(
     fs::rename(&paths.disk, &disk)?;
     compute_engine::confined::check_written(&disk)?;
     seal(&disk)?;
+    let disk_len = fs::metadata(&disk)?.len();
     let images = Images::new(staging.join("images"));
     images
         .publish_made_by(
@@ -967,7 +1009,11 @@ fn publish(
                 memory: &written.memory,
                 len: inputs.shape.bytes(),
             },
-            Some(runtime),
+            Made {
+                runtime: Some(runtime),
+                vcpus: Some(inputs.shape.vcpus),
+                disk_len: Some(disk_len),
+            },
         )
         .map_err(io::Error::other)?;
     let footprint = match images.current_verified() {
@@ -1018,15 +1064,16 @@ fn seal(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
-/// Removes the files of a retired `template`. Sandboxes started from it
-/// keep theirs: their memory images are their own links to the file.
+/// Removes the files of a retired `template`, and says whether it did.
+/// Sandboxes started from it keep theirs: their memory images are their
+/// own links to the file.
 ///
 /// The directory leaves its name at once, before this returns, so a build
 /// of the same inputs started any time later publishes there and is never
 /// what the removal, which runs when the returned future does, deletes.
 /// Its new name marks it unfinished, so an agent that stops first removes
 /// it at its next start.
-pub(crate) fn remove(template: &Template) -> impl Future<Output = ()> + Send + 'static {
+pub(crate) fn remove(template: &Template) -> impl Future<Output = bool> + Send + 'static {
     let dir = template.dir.clone();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1038,14 +1085,18 @@ pub(crate) fn remove(template: &Template) -> impl Future<Output = ()> + Send + '
     async move {
         match moved {
             Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
             Err(error) => {
                 tracing::warn!(%error, dir = %dir.display(), "could not move a retired template away");
-                return;
+                return false;
             }
         }
-        if let Err(error) = blocking(move || remove_dir(&away)).await {
-            tracing::warn!(%error, dir = %dir.display(), "could not remove a retired template");
+        match blocking(move || remove_dir(&away)).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, dir = %dir.display(), "could not remove a retired template");
+                false
+            }
         }
     }
 }

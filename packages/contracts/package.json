@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.4.2",
+  "version": "6.14.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,22 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./machine-access": {
+      "types": "./src/machine-access.ts",
+      "default": "./src/machine-access.ts"
+    },
+    "./encrypted-reasoning-refusal": {
+      "types": "./src/encrypted-reasoning-refusal.ts",
+      "default": "./src/encrypted-reasoning-refusal.ts"
+    },
+    "./browser-response-headers": {
+      "types": "./src/browser-response-headers.ts",
+      "default": "./src/browser-response-headers.ts"
+    },
+    "./billing-credit-notifications": {
+      "types": "./src/billing-credit-notifications.ts",
+      "default": "./src/billing-credit-notifications.ts"
+    },
     "./event-triggers": {
       "types": "./src/event-triggers.ts",
       "default": "./src/event-triggers.ts"
@@ -25,6 +41,14 @@
     "./automation-templates": {
       "types": "./src/automation-templates.ts",
       "default": "./src/automation-templates.ts"
+    },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
     },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
@@ -42,9 +66,21 @@
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"
     },
+    "./billing-origin": {
+      "types": "./src/billing-origin.ts",
+      "default": "./src/billing-origin.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
+    },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
+    },
+    "./knowledge-source-sync-retirement": {
+      "types": "./src/knowledge-source-sync-retirement.ts",
+      "default": "./src/knowledge-source-sync-retirement.ts"
     },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
@@ -53,6 +89,22 @@
     "./values": {
       "types": "./src/values.ts",
       "default": "./src/values.ts"
+    },
+    "./json-safe": {
+      "types": "./src/json-safe.ts",
+      "default": "./src/json-safe.ts"
+    },
+    "./citation-urls": {
+      "types": "./src/citation-urls.ts",
+      "default": "./src/citation-urls.ts"
+    },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
+    },
+    "./no-reply": {
+      "types": "./src/no-reply.ts",
+      "default": "./src/no-reply.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
@@ -65,6 +117,10 @@
     "./session-usage-limit-refusal": {
       "types": "./src/session-usage-limit-refusal.ts",
       "default": "./src/session-usage-limit-refusal.ts"
+    },
+    "./seat-upgrade": {
+      "types": "./src/seat-upgrade.ts",
+      "default": "./src/seat-upgrade.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -105,6 +161,10 @@
     "./organization-access": {
       "types": "./src/organization-access.ts",
       "default": "./src/organization-access.ts"
+    },
+    "./api-key-delegation": {
+      "types": "./src/api-key-delegation.ts",
+      "default": "./src/api-key-delegation.ts"
     },
     "./connect": {
       "types": "./src/connect.ts",
@@ -222,6 +282,10 @@
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
     },
+    "./claude-subscription-model-ids": {
+      "types": "./src/claude-subscription-model-ids.ts",
+      "default": "./src/claude-subscription-model-ids.ts"
+    },
     "./secret-use-approval-question": {
       "types": "./src/secret-use-approval-question.ts",
       "default": "./src/secret-use-approval-question.ts"
@@ -305,10 +369,6 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
-    },
-    "./google-drive-native-retirement": {
-      "types": "./src/google-drive-native-retirement.ts",
-      "default": "./src/google-drive-native-retirement.ts"
     }
   },
   "publishConfig": {
@@ -322,6 +382,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },

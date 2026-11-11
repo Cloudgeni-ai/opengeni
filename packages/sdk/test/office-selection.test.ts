@@ -7,6 +7,7 @@ import {
   type SelectionRequestContext,
   type SelectionSnapshot,
 } from "../src/office/selection";
+import { workbookContextItem } from "../src/office/workbook";
 
 const base: SelectionSnapshot = {
   sheet: "Budget",
@@ -152,5 +153,18 @@ describe("readSelection", () => {
       filled: null,
       text: [],
     });
+  });
+});
+
+describe("workbookContextItem", () => {
+  test("names the open workbook and the tool that reaches it", () => {
+    const item = workbookContextItem({
+      workbook: { name: "Budget.xlsx", app: "Excel on the web", version: null, excelApi: null },
+      connectionId: "wb_1",
+      addinName: "Example",
+    });
+    expect(item.text).toContain('call excel_run with workbook "wb_1"');
+    // A chat that starts with this context has excel_run in its first request.
+    expect(item.tools).toEqual(["excel_run"]);
   });
 });

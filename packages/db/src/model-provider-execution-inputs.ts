@@ -15,6 +15,11 @@ import {
   type OrganizationModelProviderCustomModel,
   type OrganizationModelCatalogProviderKind,
 } from "./organization-model-providers";
+import {
+  listOrganizationCompatibleEndpointsInScope,
+  type OrganizationCompatibleEndpointForWorkspace,
+} from "./organization-compatible-model-endpoints";
+import { isWorkspaceEuOnlyInScope } from "./organization-inference-residency";
 import * as schema from "./schema";
 
 /** Attempt-local read results, never a cross-turn credential or authority cache. */
@@ -32,6 +37,13 @@ export type ModelProviderExecutionInputs = {
   organizationEndpoints: Partial<Record<"azure_openai", string>>;
   /** Azure OpenAI's sign-in method, when it is Microsoft Entra ID instead of a key. */
   organizationAuthMethods: Partial<Record<"azure_openai", OrganizationModelProviderAuthMethod>>;
+  /**
+   * The organization's OpenAI-compatible endpoints this workspace can use,
+   * with their models; each carries its encrypted key when credentials load.
+   */
+  organizationCompatibleEndpoints: OrganizationCompatibleEndpointForWorkspace[];
+  /** Whether the workspace is EU-only (`isWorkspaceEuOnly`), read in the same transaction. */
+  euOnly: boolean;
 };
 
 /**
@@ -49,6 +61,7 @@ export async function loadModelProviderExecutionInputs(
   },
 ): Promise<ModelProviderExecutionInputs> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    const euOnly = await isWorkspaceEuOnlyInScope(scopedDb, input);
     const kinds: WorkspaceCustomModelProviderKind[] = [
       "vercel_gateway",
       "openrouter",
@@ -116,7 +129,7 @@ export async function loadModelProviderExecutionInputs(
           ),
         );
       for (const row of rows) {
-        if (row.providerKind !== "elevenlabs") {
+        if (row.providerKind !== "elevenlabs" && row.providerKind !== "openai_compatible") {
           encryptedCredentials[row.providerKind] = row.credentialEncrypted;
         }
         if (row.providerKind === "azure_openai" && row.endpoint) {
@@ -127,6 +140,10 @@ export async function loadModelProviderExecutionInputs(
         }
       }
     }
+    const organizationCompatibleEndpoints = await listOrganizationCompatibleEndpointsInScope(
+      scopedDb,
+      { accountId: input.accountId, includeCredentials: input.loadOrganizationCredentials },
+    );
     return {
       claudeSubscriptionEnabled: input.claudeSubscriptionEnabled,
       loadOrganizationCredentials: input.loadOrganizationCredentials,
@@ -136,6 +153,8 @@ export async function loadModelProviderExecutionInputs(
       encryptedCredentials,
       organizationEndpoints,
       organizationAuthMethods,
+      organizationCompatibleEndpoints,
+      euOnly,
     };
   });
 }

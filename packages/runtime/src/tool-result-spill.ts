@@ -9,6 +9,7 @@ import {
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
 } from "@opengeni/contracts";
+import { projectCommandReadToolResultForModel } from "./command-read-model-projection";
 import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
 
@@ -17,6 +18,19 @@ export type SpillOversizedModelToolResult = (input: {
   result: AttemptToolResultValue;
   serializedBytes: number;
 }) => Promise<AttemptToolResultValue>;
+
+/**
+ * The tools this attempt's model has for reading a spilled copy: a shell
+ * where the sandbox copy can be opened, and the Files download tool
+ * (`files__files_get_download_url`). Undefined means not known, and the
+ * guidance names both, as it did before the model's tools were considered.
+ */
+export type SpilledToolResultReaders = {
+  shell: boolean;
+  fileDownload: boolean;
+};
+
+const FILE_DOWNLOAD_MODEL_TOOL_NAME = "files__files_get_download_url";
 
 /**
  * A tool's own model-visible copy of one exact result (for example a local MCP
@@ -52,6 +66,7 @@ export function modelToolResultOverflowError(): AttemptToolResultValue {
 
 export function spilledModelToolResult(
   receipt: ToolResultSpilledReceiptValue,
+  readers?: SpilledToolResultReaders,
 ): AttemptToolResultValue {
   // `sandboxPath` is where the model's shell can open the copy, as the spill
   // port resolved it for the turn's placement, or null when there is no copy.
@@ -60,7 +75,7 @@ export function spilledModelToolResult(
     isError: false,
     content: [
       { type: "text", text: JSON.stringify(structuredContent) },
-      { type: "text", text: spilledToolResultGuidance(structuredContent) },
+      { type: "text", text: spilledToolResultGuidance(structuredContent, readers) },
     ],
     structuredContent,
   };
@@ -69,14 +84,28 @@ export function spilledModelToolResult(
 /** How the model reads a spilled result: the shell copy when there is one,
  * and otherwise (or when that copy is gone, for example in a later turn on a
  * new box) the workspace File through the Files download tool, as for
- * attachments. */
-function spilledToolResultGuidance(receipt: ToolResultSpilledReceiptValue): string {
+ * attachments. Only tools the model has are named: without a shell and the
+ * download tool together the model cannot read the file, so it is told which
+ * one is missing and how to get a result that fits instead. */
+function spilledToolResultGuidance(
+  receipt: ToolResultSpilledReceiptValue,
+  readers: SpilledToolResultReaders = { shell: true, fileDownload: true },
+): string {
   const size = `The result was too large to show (${receipt.byteSize} bytes)`;
   const read = "read the parts you need, for example with jq, head or grep";
-  const download = `call files__files_get_download_url with fileId ${receipt.fileId} and download it with the shell`;
-  return receipt.sandboxPath === null
-    ? `${size}, so its exact JSON is saved as a workspace file. To read it, ${download}, then ${read}.`
-    : `${size}, so its exact JSON is saved at ${receipt.sandboxPath} where your shell runs. With the shell, ${read}, instead of printing it whole. If the file is not there, ${download}.`;
+  const download = `call ${FILE_DOWNLOAD_MODEL_TOOL_NAME} with fileId ${receipt.fileId} and download it with the shell`;
+  const canDownload = readers.shell && readers.fileDownload;
+  if (receipt.sandboxPath !== null) {
+    const fallback = canDownload ? ` If the file is not there, ${download}.` : "";
+    return `${size}, so its exact JSON is saved at ${receipt.sandboxPath} where your shell runs. With the shell, ${read}, instead of printing it whole.${fallback}`;
+  }
+  if (canDownload) {
+    return `${size}, so its exact JSON is saved as a workspace file. To read it, ${download}, then ${read}.`;
+  }
+  const unreadable = readers.fileDownload
+    ? "this session has no shell to read it with"
+    : "no tool in this session can open it";
+  return `${size}, so none of it is shown here. Its exact JSON is saved as workspace file ${receipt.fileId}, but ${unreadable}. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.`;
 }
 
 /** True when the model receives this result as is, without a spill or overflow error. */
@@ -88,7 +117,7 @@ export function modelToolResultFits(result: AttemptToolResultValue): boolean {
  * The single per-caller seam over one executor result. Codemode receives the
  * exact result. The model receives its model-visible projection (the tool's
  * own `projectForModel`, such as compact Gmail cards, or compact Knowledge
- * discovery output for the exact tool identity) when that fits in 1 MiB;
+ * discovery output or plain-text command reads for the exact tool identity) when that fits in 1 MiB;
  * otherwise the exact result is spilled to a file, as for any tool. A
  * projection that throws leaves the exact result in place.
  * MCP-backed exact results are bounded only by the 8 MiB MCP transport cap
@@ -107,7 +136,12 @@ export async function projectAttemptToolResultForCaller(
       return result;
     case "model": {
       const own = projectForModel ? toolOwnModelProjection(projectForModel, result) : result;
-      const visible = identity ? projectKnowledgeToolResultForModel(identity, own) : own;
+      const visible = identity
+        ? projectCommandReadToolResultForModel(
+            identity,
+            projectKnowledgeToolResultForModel(identity, own),
+          )
+        : own;
       if (modelToolResultFits(visible)) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {

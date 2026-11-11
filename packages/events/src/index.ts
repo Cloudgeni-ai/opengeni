@@ -562,6 +562,8 @@ export interface OpStreamConnection {
   publish(subject: string, payload: Uint8Array): void;
   /** Subscription/publish barrier used before reading durable authority. */
   flush?(): Promise<void>;
+  /** Existing shared-bus reconnect notification; returns listener cleanup. */
+  subscribeReconnect?(listener: () => void): () => void;
 }
 
 /**
@@ -740,6 +742,10 @@ export async function createNatsEventBus(
       nc.publish(subject, payload);
     },
     flush: () => nc.flush(),
+    subscribeReconnect: (listener) => {
+      reconnectSubscribers.add(listener);
+      return () => reconnectSubscribers.delete(listener);
+    },
   };
   const publishSessionEvents = (
     workspaceId: string,

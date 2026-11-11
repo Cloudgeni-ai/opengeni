@@ -1,3 +1,4 @@
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   AZURE_LIVE_REALTIME_MODEL_ID,
@@ -7,16 +8,24 @@ import {
   realtimeVoiceMinuteCreditMicros,
   realtimeVoiceStartedMinutes,
   voiceInputCreditBillingActive,
+  CODEX_REALTIME_MODEL_ID,
+  ELEVENLABS_REALTIME_MODELS,
+  SUPERGROK_REALTIME_MODEL_ID,
+  sideFeatureProcessingResidency,
+  sideFeatureRouteAllowed,
   type RealtimeVoicePricing,
   type Settings,
+  type SideFeatureTarget,
 } from "@opengeni/config";
 import type { SessionRealtimeModel } from "@opengeni/contracts";
 import {
+  chargeBillingOrigin,
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionMetadata,
   existingUsageEventIdempotencyKeys,
   getSpendableCreditBalance,
+  isWorkspaceEuOnly,
   loadSessionRealtimeBillingFacts,
   recordUsageEvent,
   sumUsageQuantity,
@@ -25,9 +34,12 @@ import {
   type CreditDebitAttribution,
   type Database,
 } from "@opengeni/db";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import { TranscriptionBillingRefusedError } from "../transcription";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 import { errorMessage } from "@opengeni/contracts/values";
+import { HTTPException } from "hono/http-exception";
+import { checkOwnSubscriptionPlan } from "../billing/limits";
 
 /** Credit debit type and usage source for deployment-funded live voice. */
 export const REALTIME_VOICE_DEBIT_TYPE = "voice_realtime_debit";
@@ -103,6 +115,52 @@ export function deploymentRealtimeVoice(
   return null;
 }
 
+/**
+ * The side-feature route a live-voice model runs on, or null for a model this
+ * deployment does not know (never EU).
+ */
+export function realtimeVoiceRoute(
+  model: SessionRealtimeModel | string,
+  settings: Pick<Settings, "azureLiveEndpoint" | "azureLiveDeployment">,
+): SideFeatureTarget | null {
+  // The deployment's own Azure resource, at the endpoint it connects to.
+  if (model === AZURE_LIVE_REALTIME_MODEL_ID) {
+    // The deployment it calls is the one the live session names.
+    return {
+      route: "realtime_voice.azure_live",
+      endpoint: settings.azureLiveEndpoint,
+      deployment: settings.azureLiveDeployment,
+    };
+  }
+  if (model === CODEX_REALTIME_MODEL_ID) return "realtime_voice.codex_subscription";
+  if (model === SUPERGROK_REALTIME_MODEL_ID) return "realtime_voice.supergrok_subscription";
+  for (const gateway of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
+    if (gateway.managedModelId === model || gateway.workspaceModelId === model) {
+      return "realtime_voice.ai_gateway";
+    }
+  }
+  for (const elevenLabs of Object.values(ELEVENLABS_REALTIME_MODELS)) {
+    if (elevenLabs.modelId === model) return "realtime_voice.elevenlabs";
+  }
+  return null;
+}
+
+/** Whether a live-voice model may run under these (residency-narrowed) settings. */
+export function realtimeVoiceRegionAllowed(
+  settings: Pick<
+    Settings,
+    | "sideFeatureResidencyJson"
+    | "requiredModelGeography"
+    | "azureLiveEndpoint"
+    | "azureLiveDeployment"
+  >,
+  model: SessionRealtimeModel | string,
+): boolean {
+  if (settings.requiredModelGeography !== "eu") return true;
+  const route = realtimeVoiceRoute(model, settings);
+  return route !== null && sideFeatureRouteAllowed(settings, route);
+}
+
 export type RealtimeVoiceUnavailableCode =
   | "not_configured"
   | "pricing_unconfigured"
@@ -170,7 +228,7 @@ export function voiceCreditStanding(balance: {
  * account holding only those must not be told it has nothing.
  */
 export function voiceInsufficientCreditsMessage(
-  feature: "Live voice" | "Voice input",
+  feature: "Live voice" | "Voice input" | "Live transcript",
   standing: VoiceCreditStanding,
 ): string {
   return standing === "promotional_only"
@@ -206,7 +264,12 @@ export type RealtimeVoiceSettlement = {
  * heartbeats, owner-proven end). Each (connection, minute) is one idempotent
  * usage receipt plus one post-use debit.
  */
-export function createRealtimeVoiceBilling(deps: { db: Database; settings: Settings }) {
+export function createRealtimeVoiceBilling(deps: {
+  db: Database;
+  settings: Settings;
+  /** The workspace's EU-only setting (tests inject it). */
+  isEuOnly?: typeof isWorkspaceEuOnly;
+}) {
   const billingActive = () => voiceInputCreditBillingActive(deps.settings);
 
   async function refusal(input: {
@@ -221,11 +284,25 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
         WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE,
       );
     }
-    const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
+    // API callers spend credits only, as their debit will.
+    const origin = chargeBillingOrigin(
+      input.attribution.kind === "unknown" ? undefined : input.attribution.billingOrigin,
+    );
+    const balance = await getSpendableCreditBalance(
+      deps.db,
+      input.accountId,
+      VOICE_CREDIT_USAGE,
+      undefined,
+      undefined,
+      origin,
+    );
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",
-        message: voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
+        message:
+          origin === "api"
+            ? API_CREDITS_REQUIRED_MESSAGE
+            : voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
       });
     }
     const allowance = await checkWorkspaceAllowance(deps.db, {
@@ -267,7 +344,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     /**
      * Throws RealtimeVoiceUnavailableError when the deployment cannot offer
      * the model and TranscriptionBillingRefusedError for a credit refusal.
-     * Workspace-funded models are always admitted here.
+     * Connected subscriptions require a paid app plan, but never fee credit.
      */
     async admit(input: {
       accountId: string;
@@ -276,6 +353,33 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       attribution: CreditDebitAttribution;
       now?: Date;
     }): Promise<void> {
+      // EU-only first, for every live-voice model (workspace-funded too),
+      // before any connection to a provider is made.
+      const euOnly =
+        deps.settings.requiredModelGeography === "eu" ||
+        (await (deps.isEuOnly ?? isWorkspaceEuOnly)(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        }));
+      if (
+        euOnly &&
+        !realtimeVoiceRegionAllowed({ ...deps.settings, requiredModelGeography: "eu" }, input.model)
+      ) {
+        throw sideFeatureRegionRestrictedError("realtime_voice");
+      }
+      if (input.model === CODEX_REALTIME_MODEL_ID || input.model === SUPERGROK_REALTIME_MODEL_ID) {
+        const decision = await checkOwnSubscriptionPlan(
+          deps,
+          input.accountId,
+          input.attribution.kind === "unknown" ? undefined : input.attribution.billingOrigin,
+        );
+        if (!decision.allowed) {
+          throw new HTTPException(decision.code === "subscription_api_unavailable" ? 403 : 402, {
+            message: decision.message,
+            cause: decision,
+          });
+        }
+      }
       const voice = deploymentRealtimeVoice(deps.settings, input.model);
       if (!voice) return;
       const problem = realtimeVoiceOfferProblem(deps.settings, voice);
@@ -360,6 +464,8 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
         workspaceId: facts.workspaceId,
         keys: minutes.map((minute) => minute.key),
       });
+      // Where the voice call ran, recorded on each minute's receipt.
+      const processingRoute = realtimeVoiceRoute(facts.model, deps.settings);
       let debitedMicros = 0;
       for (const minute of minutes) {
         if (recorded.has(minute.key)) continue;
@@ -381,6 +487,14 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
               occurredAt: minute.startsAt,
               initiator: { kind: "service", subjectId: "api:voice-realtime" },
               initiatorContext: { creditDebitAttribution: attribution },
+              ...(processingRoute
+                ? {
+                    processingResidency: sideFeatureProcessingResidency(
+                      deps.settings,
+                      processingRoute,
+                    ),
+                  }
+                : {}),
             });
             const amount = Number(receipt.quantity);
             if (amount <= 0) return 0;

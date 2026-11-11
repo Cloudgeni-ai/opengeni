@@ -14,6 +14,23 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
+# The pinned rg builds the agent embeds and appends to every command's PATH,
+# with the static musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS shell-tools-fetch
+WORKDIR /src
+COPY scripts/fetch-shell-tools.ts scripts/
+COPY packages/runtime/src/sandbox/shell-tools-manifest.ts packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt packages/runtime/src/sandbox/
+COPY agent/vendor/jq/ agent/vendor/jq/
+COPY --from=shell-tools-linux /cache/ /cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /out
+
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
 FROM --platform=$BUILDPLATFORM rust:1.82-bookworm AS computer-native-build
 
@@ -38,6 +55,7 @@ RUN set -eux; \
       linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
+COPY --from=shell-tools-fetch /out/ /shell-tools/
 # Cache mounts keep the crates.io registry and the per-target build directory
 # between builds so an edit under agent/ recompiles only the changed crates.
 # Cargo locks its own package cache, so the registry/git mounts are shared and
@@ -49,7 +67,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
+    OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
     xx-verify /out/opengeni-computer-native; \
@@ -216,6 +234,7 @@ RUN set -eux; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    cp -aL packages/contracts/node_modules/entities "$runtime/node_modules/entities"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
     test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
@@ -358,30 +377,50 @@ ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
 ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
 
+# Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
+# from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
+# poppler-utils gives PDF text page by page (pdftotext -f N -l N, pdfinfo),
+# which AnyDoc's Markdown does not mark.
+# The small general tools agents reach for without checking first: GNU time
+# (`/usr/bin/time -v`), zip, iproute2 (ss, ip), netcat and net-tools, file,
+# binutils (strings, objdump, readelf), xxd, bc and patch. The last build step
+# (docker/check-default-commands.sh) proves every default command is present.
 RUN set -eux; \
     printf '%s\n' \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     packages=" \
         bash \
+        bc \
+        binutils \
         ca-certificates \
         coreutils \
         curl \
+        file \
         gpg \
         git \
+        iproute2 \
         jq \
         libatomic1 \
         libstdc++6 \
+        netcat-openbsd \
+        net-tools \
         openssh-client \
+        patch \
+        poppler-utils \
         postgresql-client \
         procps \
         fuse3 \
         fonts-liberation \
         rclone \
         ripgrep \
+        time \
         unzip \
         util-linux \
+        uuid-runtime \
         wget \
+        xxd \
+        zip \
         xvfb \
         x11vnc \
         xauth \
@@ -417,14 +456,27 @@ RUN set -eux; \
     printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \
     test -x /usr/lib/chromium/chromium; \
     psql --version; \
+    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'; \
+    pdftotext -v; \
+    pdfinfo -v; \
     dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
     ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
+# npm and npx come from the same pinned Node release as the binary; bunx is Bun
+# started under that name, as in the official Bun images.
 COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=node-target /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY --from=bun-runtime /out/bun /usr/local/bin/bun
-RUN test "$(node --version)" = "v22.22.0"
+RUN set -eux; \
+    test "$(node --version)" = "v22.22.0"; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    ln -s bun /usr/local/bin/bunx; \
+    npm --version; \
+    npx --version; \
+    test "$(bunx --version)" = "$(bun --version)"
 
 # Pinned native document-to-Markdown parser. The lock contains the registry
 # integrity for the JS wrapper and every target binding; the builder copies
@@ -577,6 +629,14 @@ RUN set -eux; \
       test -f /opt/opengeni/artifact-runtime/.unavailable; \
     fi
 
+# A commit identity for a box nobody configured one for. Commands run as the
+# host's uid, which has no passwd entry here, so Git can find neither a name nor
+# an email and `git commit` fails. The system level is Git's lowest: `GIT_*`
+# variables (OPENGENI_GIT_* or the GitHub App bot), ~/.gitconfig and
+# repository config all win over it.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
+
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
@@ -642,6 +702,11 @@ RUN set -eux; \
     bash -n /usr/local/bin/opengeni-browserd-down; \
     chromium --version; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS
+
+# Last build step: every default command an agent may reach for is present
+# and runs (docker/check-default-commands.sh), so a regression fails the build.
+RUN --mount=type=bind,source=docker/check-default-commands.sh,target=/opt/opengeni-check/check-default-commands.sh \
+    sh /opt/opengeni-check/check-default-commands.sh
 
 EXPOSE 7681
 EXPOSE 7682

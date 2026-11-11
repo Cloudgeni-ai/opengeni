@@ -1,5 +1,372 @@
 # @opengeni/desktop
 
+## 6.14.0
+
+### Minor Changes
+
+- 904eae7: Dictation from anywhere now has one workspace of its own. Settings → Dictation gains a Workspace row (shown when the person can use more than one workspace), and every shortcut dictation goes to that workspace and is billed to it, whichever workspace the window shows. The recorder runs outside the workspace screens, so switching workspace mid-dictation no longer stops it. When the person has left that workspace, voice input is off there, or it doesn't offer a shortcut's model, the setting says so on the row at fault and the popup offers "Open settings"; a dictation never falls back to another workspace. The desktop bridge's dictation settings carry the chosen workspace (`DesktopDictationWorkspace`).
+
+### Patch Changes
+
+- 91320a4: A page whose sign-in is gone now stops instead of polling on. A request refused because its sign-in expired, was revoked or its cookie lapsed answers HTTP 401 `unauthenticated` with `details.code` `session_missing` (no sign-in sent) or `session_expired` (a sign-in cookie or app credential that no longer signs anyone in); another credential that is not accepted, such as an API key, is `credential_invalid`. Route-rejection metrics and logs carry the same reason instead of `unclassified`. The web app hears the first such refusal, confirms with the session read, and leaves the signed-in app at once, so its polling and streams stop and the sign-in page shows; inside the desktop app the window's sign-in is renewed and the page reloads.
+
+  The desktop app also stops its window being signed out while the app stays signed in. Its window shares the device's session, which is renewed at most once a day by whichever request comes first. When that was one of the app's own requests (it polls the inbox, also right after the computer wakes), the renewal never reached the window's cookie, so the cookie lapsed a week after it was last set. The app now sends its own requests with the window's cookies, and a request that renews the session returns the renewed window cookie with it.
+
+  `@opengeni/contracts` adds `AUTHENTICATION_REQUIRED_REASONS`, `AuthenticationRequiredReason` and `isSignInLostRejection`. `@opengeni/core` adds `AuthenticationRequiredRefusal`. The app state's host can pass `subscribeSignInLost`.
+
+- Updated dependencies [c976c87]
+- Updated dependencies [904eae7]
+- Updated dependencies [7c926f8]
+  - @opengeni/sdk@6.14.0
+  - @opengeni/agent-host@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/sdk@6.13.0
+  - @opengeni/agent-host@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+  - @opengeni/sdk@6.12.0
+  - @opengeni/agent-host@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- 635cc6b: A "connect this computer" link to a server the app has not used before now asks the person to approve that server, named in the dialog and defaulting to Cancel, before any sign-in starts. Links to the app's own or installed-from server, or to a server that already has an account in the app, work as before.
+- 83399c2: The macOS install script no longer refuses to update when an iOS simulator is running an app with the same name: it only waits for the desktop app itself to close.
+- 840a780: The desktop app now opens a link to any page of the web app, not only workspaces and sessions. Before, a connector sign-in started in the desktop app finished in the browser, and the browser's "Back to Opengeni" page handed the app the page it started on (for example a workspace's plugins page with the connection result in its address), but the app only read workspace and session links, so it just came forward on whatever page it was showing and never showed the result. Now the app opens that page, with its query kept, on the account for that server and workspace; a page on a server without an account here opens in the browser. `parseAppLink` takes a new `anyPage` option for apps that show the whole web app, and `AppWebPaths` gets an optional `workspaceOf` that reads the workspace any page belongs to (`OPENGENI_WEB_PATHS` reads `/workspaces/:id/…`). Without `anyPage` nothing changes, so phone apps still open those pages in the browser.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [cd52481]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [a505ce8]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [888aaf5]
+- Updated dependencies [d677983]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [57748cf]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [42cd370]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+  - @opengeni/sdk@6.11.0
+  - @opengeni/agent-host@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- c19768e: Not now on the desktop app's meeting card now ends the question for the whole call. An app that drops the microphone for a while, for example when muted or switching devices, is no longer asked about again. Inside a calendar meeting the question doesn't come back until the meeting ends. Outside one, it comes back only after the app has been off the microphone for five minutes. Not now on a call that started shortly before a calendar meeting also covers that meeting, so its "Join and start recording" reminder no longer appears for a meeting the person is already in. The card no longer holds itself up after Not now. Chromium replays the pointer onto a window shown again, which made the next card never time out. The pointer's position now comes from the main process, so a card holds only once the pointer moves onto it. Escape closes the question like Not now does, and a card window closed from outside counts as Not now. `MeetingPromptCard` takes an optional `pointerMs`.
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+- 15763a2: Stop recording on the desktop meeting card now stops the recording in the account where it started, even while the window shows another account. Before, the stop could go to the account on screen, which ignored it, and the meeting kept recording. If a recording hasn't stopped a few seconds after Stop, the app shows its account, asks it again and logs this. Meeting detection, system audio and dictation now forget a page only when it really leaves its document (a committed navigation, an error page or a lost renderer), not when a navigation starts and is cancelled, such as a link opened in the browser. With several accounts, the stop card names the account that records and the account menu marks it.
+
+  API: `MeetingDetection` and `createMeetingDetection` take optional `revealPage`, `describePage`, `recordingChanged` and `stopConfirmMs`. `MeetingDetection` adds `isRecording()`. The stop prompt has an optional `where`, `MeetingWords` an optional `callEndedIn` and `DesktopAccount` an optional `recording`. Code that declares a `Required<MeetingWords>` object must now include `callEndedIn`.
+
+- f2b5205: Picking the wrong account no longer forces a sign-in. In the phone app, picking a signed-out account opens its sign-in over the account in use, so Cancel goes back. The account menus mark signed-out accounts. When the account in use is signed out, the sign-in screen lists the other accounts, so one tap returns to a signed-in one. In the desktop app, Cancel on the sign-in page returns to the account you came from, not the first signed-in one.
+- Updated dependencies [b72f388]
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [fb37d99]
+- Updated dependencies [f619179]
+- Updated dependencies [6900fce]
+- Updated dependencies [15763a2]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/agent-host@6.10.0
+  - @opengeni/sdk@6.10.0
+
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/agent-host@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [feaecf8]
+  - @opengeni/sdk@6.8.0
+  - @opengeni/agent-host@6.8.0
+
+## 6.7.0
+
+### Minor Changes
+
+- cb37e4d: A meeting being recorded shows in the desktop app's menu bar (the tray on Windows and Linux). While one records, the icon becomes a recording badge (a dictation under way still shows its own icon first), and the menu starts with the meeting: whether it records or is paused, for how long, its name (or when it started), and the account it records in when the window shows another. "Open Live Transcript" brings that account up and opens the meeting; "Stop Recording" stops it. Nothing about meetings shows while none records. `DesktopMeetingDetection.setRecording()` takes an optional `DesktopRecordingMeeting` (title, recorded time, paused), and `DesktopMeetingRequest` adds `{ kind: "open" }`, sent only to a page that described its recording. The meeting recorder in `@opengeni/react` describes its recording and opens it on `open`. `MeetingDetection` adds `recording()`, `onRecording()`, `openRecording()` and `stopRecording()`.
+
+### Patch Changes
+
+- cf35731: Only the owner of a personal (Only me) login can approve an action that runs on it. An approval runs on the accounts its message froze, so before this any member, workspace API key or Slack click by someone else could make an action happen as another person. The owner's personal API key and `asUser` tokens count as the owner. Approving such an action as anyone else now answers 403 with `details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` and a message naming who can approve (the SDK adds `isApprovalRequiresAccountOwnerError` and `APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE`); declining stays open to anyone who can control the chat, and actions on workspace logins keep their ordinary rules. A tool review adds the optional `approvedBy` ("you" or "account_owner") and `accountOwnerLabel` fields, and the review card says who can approve, or tells the owner in a shared chat that the decision is theirs. Slack cards for anyone else offer only Decline, and the desktop and mobile apps show or route a refused approval instead of failing.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [cf35731]
+  - @opengeni/sdk@6.7.0
+  - @opengeni/agent-host@6.7.0
+
+## 6.6.0
+
+### Minor Changes
+
+- 2c76a2a: Each desktop dictation shortcut can pick its own speech-to-text model, such as one for English and another for Norwegian. The client config lists the models a dictation can use (`voiceInput.models`), a dictation recording may name its `providerId` and `model`, and it is then heard by exactly that model with no fallback to another provider. Escape no longer cancels a dictation, on the desktop or in the composer: only the Cancel button and the cancel shortcut do, so a stray Escape never loses speech or is taken from the app being typed in. The dictation window no longer draws a drop shadow around its pill.
+
+### Patch Changes
+
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [3cb05f9]
+  - @opengeni/sdk@6.6.0
+  - @opengeni/agent-host@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- a977392: Dictation shows in the menu bar (the tray on Windows and Linux). While a dictation starts, listens, transcribes or has failed, the icon changes to match (a microphone, a record button, moving sound bars, a warning sign; a brief check when the text is delivered), and the tooltip and the first menu line say how it is going. The menu starts each dictation shortcut, showing its keys, and copies the last dictation again; while dictating it offers Finish and Cancel, and after a failure Retry (when possible) and Dismiss. The menu bar item now stays while dictation is on, even when this computer isn't connected. `Dictation` adds `activity()`, `onActivity()`, `menu()` and `menuAction()`.
+
+### Patch Changes
+
+- 8811409: The dictation pill and the meeting card no longer stop appearing after their page's process is killed or hangs, for example when the system reclaims memory. A window whose page is gone, hangs, fails to render or doesn't answer within five seconds is thrown away and built again (once) showing the current state, and the failure is logged instead of being swallowed. `DictationHud` and `MeetingPromptCard` take an optional `log`.
+- Updated dependencies [7a9c492]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/sdk@6.5.0
+  - @opengeni/agent-host@6.5.0
+
+## 6.4.0
+
+### Minor Changes
+
+- 0d409a7: Desktop meeting detection can record calls without asking. With the new "Record without asking" switch on (off by default), a call in a call app starts recording by itself, a card in the corner says so with a Stop recording button, and the recording stops when the call ends. A meeting in a browser still asks first. `DesktopMeetingDetectionStatus` gains `autoRecord`, `update` accepts it, and `MeetingWords` gains the optional `recordingStarted`, `callRecording` and `ok`, which fall back to English.
+
+### Patch Changes
+
+- Updated dependencies [92f419c]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [b4e780e]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [d55f740]
+- Updated dependencies [0d409a7]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/sdk@6.4.0
+  - @opengeni/agent-host@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- d010825: In the macOS app, the sidebar toggle and a chat's header now sit on the same line as the traffic lights, also with desktop apps from before the new top bar (0.1.33 and older), whose traffic lights sit lower, and when the page is zoomed. At a large zoom, where they don't fit above and below that line, they start at the top of the window instead of being cut off. The desktop bridge adds `windowBarHeight` and `zoomFactor()`.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [d872b12]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [c0b945b]
+- Updated dependencies [d0295f8]
+- Updated dependencies [f4ad926]
+- Updated dependencies [a550481]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+  - @opengeni/agent-host@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+  - @opengeni/sdk@6.2.0
+  - @opengeni/agent-host@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/sdk@6.1.0
+  - @opengeni/agent-host@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- 1271da5: Cancel throws a dictation away. Cancel, Escape and the phone's cancel now delete the dictation under way, while it records or while it is being transcribed, so no composer offers it again. Before, speech longer than a few seconds was kept and the composer offered it later. A dictation an earlier page left only stops being retried when cancelled, and dictations that fail are still kept and offered as before.
+
+  The desktop app keeps a cancelled dictation's speech in Recent dictations, marked "Cancelled, not transcribed", to play or transcribe again there; the retry shortcut transcribes it and types it. `useVoiceInput` gives `onAudio` the cancelled copy with `cancelled: true`, the `cancelled` desktop dictation report carries its `audio`, and history entries have `cancelled: true` until they are transcribed again.
+
+  `useVoiceInput` has a new `setAside()` for interruptions other than the person's Cancel, such as live voice taking over or another chat opening: capture stops and the speech stays saved to insert later, as `cancel()` did before. The composer's cancel button reads "Discard dictation".
+
+### Patch Changes
+
+- f0708a1: The desktop app has a thin bar across the top of the window for the window controls: the macOS traffic lights (and the wider badge macOS shows while the window is shared or recorded) and the Windows caption buttons. The page starts below it, so nothing is drawn under the controls in any layout, and the collapsed rail stays narrow.
+
+  - `@opengeni/desktop`: the macOS traffic lights are centred in the 44px bar, and the Windows caption buttons are 44px tall.
+  - `@opengeni/react`: the session rail keeps its brand row on every platform. Layers that fill the window (a full-window Site or panel, the image viewer, side sheets) carry `data-window-layer`, so a host can start them below its own window bar. `windowControlsInPage` is deprecated.
+
+- b130649: Desktop dictation: the first shortcut now hears the app's language even when the app only learns it after sign-in. `createDesktopDictation` reads its settings each time instead of once at startup, and its `language` option can be a function, so until the person saves a choice the first shortcut follows the language the app reports. Before, an app that started before sign-in kept the computer's language, so a Norwegian account on an English Mac dictated in English.
+- 4b1a292: The dictation pill's clock now stops when the pill goes away. After a dictation was cancelled or finished, the hidden pill kept its recording clock ticking four times a second until the next dictation, which kept the app waking up for nothing. Hiding the pill now empties it as well.
+- 6f096c8: On macOS, dictation from anywhere now types the text every time. The app pastes the text with Command-V, and the helper used to press and release the keys in the same instant and quit straight away, which macOS sometimes dropped: on a real Mac about one dictation in five was transcribed and kept in Recent dictations but never typed. The helper now holds the keys for a moment, as a person would, and waits briefly before it quits; twenty pastes in a row all landed.
+- e669e43: Turning on computer use in a workspace that uses a connection made in another workspace now reconnects it when the server stopped accepting its sign-in, as it already did for a connection made in the same workspace. While that workspace still lists the computer, it is connected again there, since the server keeps one live connection of a personal computer, and every workspace that used it keeps using it. A computer removed where it was made is never put back there, and one the person can no longer set up there is set up in this workspace instead. The menu bar now says the computer needs reconnecting, with **Reconnect This Computer…**, instead of "connecting…" forever. `ThisComputer.summary()` gains `needsReconnect`.
+- Updated dependencies [d7fb082]
+- Updated dependencies [44ba53b]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [1ea8bd6]
+- Updated dependencies [aa6b340]
+- Updated dependencies [f2e1953]
+- Updated dependencies [12b773f]
+- Updated dependencies [1271da5]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [60c6c56]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [e669e43]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+  - @opengeni/agent-host@6.0.0
+  - @opengeni/sdk@6.0.0
+
+## 5.5.1
+
+### Minor Changes
+
+- 9180cf8: Dictation from anywhere in the desktop app: press a shortcut in any app, speak, press it again (or hold it while speaking), and the text is typed where the cursor is. Each shortcut can have its own language; on macOS a shortcut can be modifier keys alone (Control and Fn by default).
+
+  - `@opengeni/desktop/dictation`: the main-process controller (`createDesktopDictation`, `Dictation`), which watches the shortcuts, shows a small progress window at the bottom of the screen, and types the text by pasting it and putting the clipboard back (macOS with Accessibility, Windows through PowerShell, Linux through xdotool, wtype or ydotool), or only copies it. It keeps the last 50 texts on the computer. `words` puts its small window in the app's language (`ENGLISH_DICTATION_WORDS` by default), and `language` sets what the first shortcut hears until the person picks another (it detects the language by default); the status names problems by code (`shortcutErrors[].problem`, `paste.blocker`) for the page to translate. `handleDictationIpc` answers the page; `@opengeni/desktop/preload/dictation` exports `exposeDictation()`, which defines `window.opengeniDictation` for apps that aren't the Opengeni desktop shell.
+  - `@opengeni/react/desktop-dictation`: `DesktopDictationHost` records and transcribes for the shortcut on a signed-in page with the workspace's voice input, so each dictation is an ordinary dictation recording (a failed one offers Retry, a dismissed one stays saved for the composer). `DesktopDictationSettings` is the stock settings UI and `useDesktopDictation` the hook under it; `desktopShortcutLabel` and `acceleratorFromKey` name and record shortcuts.
+  - `useVoiceInput` takes `recover: false` for a host that dictates somewhere else, and returns `release()`, which lets go of the current dictation without deleting it.
+  - `@opengeni/sdk/desktop-bridge`: the `dictation` capability, the `DesktopDictation*` types, `getDesktopDictation()` and `DESKTOP_DICTATION_GLOBAL`.
+
+- 1908715: Dictation listens for a vocabulary, and dictation from anywhere keeps each dictation's speech to play and transcribe again.
+
+  - A dictation recording's `transcription` takes `keyterms` as well as `language`. The worker passes them to the voice input model when it takes keyterms: ElevenLabs Scribe and Azure Speech as keyterms, OpenAI and Azure OpenAI as the prompt (their text models now report `keyterms: true`, so meetings on them listen for keyterms too).
+  - `useVoiceInput` takes `keyterms` and `onAudio`, which hands over each dictation's microphone audio with its text, and returns `transcribe(blob)` to transcribe audio kept earlier as a new dictation.
+  - `@opengeni/sdk/recordings`: `uploadRecordingAudio()` uploads finished audio as a one-track recording.
+  - `@opengeni/desktop/dictation`: settings gain `vocabulary`, `retryShortcut` (transcribes the last dictation again and types it) and `cancelShortcut`; the status reports `actionShortcutErrors`. The history keeps each dictation's speech on the computer (private to the person, deleted with the history), and `historyAudio(id)` and `transcribeAgain(id)` play and re-transcribe it. While dictation is on, the app opens at login.
+  - `DesktopDictationSettings` offers the vocabulary, the retry and cancel shortcuts, and Play and Transcribe again on each recent dictation.
+
+- cc59c02: The desktop app asks whether to record a call on a card of its own in the top right corner of the screen, instead of in a system notification. Focus and Do Not Disturb hid the notification, so a person in a call often never saw the question. The card shows above full-screen apps on every desktop and space, never takes the keyboard from the call, and has two buttons: Record and Not now (or Stop recording and Keep recording when the recorded call ends). A question to record goes away after 45 seconds unless the pointer is on it; a question to stop stays until answered. Closing or ignoring a question no longer holds back the next call's. Each question and its outcome is written, with the call app's id and the time only, to `meeting-detection.log` in the app's logs folder.
+
+  Any Electron app that shows Opengeni's meetings can now offer this too. `@opengeni/desktop/meeting-detection` exports `createMeetingDetection` and `handleMeetingDetectionIpc` (with the card's words, so an app can show them in its own language), and `@opengeni/desktop/preload/meeting-detection` exports `exposeMeetingDetection()`, which defines `window.opengeniMeetingDetection`. The meeting recorder uses it when the Opengeni desktop bridge is absent (`getDesktopMeetingDetection` in `@opengeni/sdk/desktop-bridge`). A choice now waits up to a minute for the page to listen, so choosing Record while the window is closed still starts recording once it opens, and Stop recording goes to the page that records.
+
+### Patch Changes
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [f23588a]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [cc59c02]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [8382bdb]
+- Updated dependencies [a18a2e2]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/agent-host@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

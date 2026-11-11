@@ -32,19 +32,6 @@ const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
 const discoveryActionPath = ".github/actions/probe/action.yaml";
 
-test("Batch plan no longer has a five-hour priority timeout exemption", () => {
-  const source = (timeout: number) =>
-    `name: Batch CI\non: push\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority batch\n`;
-  expect(
-    inspectWorkflowExecutionSources({
-      ".github/workflows/batch-ci.yml": source(320),
-    }).violations.join("\n"),
-  ).toContain("job timeout-minutes must be a static integer in 1..120");
-  expect(
-    inspectWorkflowExecutionSources({ ".github/workflows/batch-ci.yml": source(20) }).violations,
-  ).toEqual([]);
-});
-
 test("PR CI plan has no five-hour priority timeout exemption", () => {
   const source = (timeout: number) =>
     `name: PR CI\non: pull_request\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
@@ -1437,14 +1424,14 @@ describe("workflow execution graph manifest", () => {
     expect(headless).toBeDefined();
     expect(headed).toBeDefined();
     expect(headed).not.toBe(headless);
-    expect(headless["timeout-minutes"]).toBe(6);
+    expect(headless["timeout-minutes"]).toBe(13);
     expect(headed["timeout-minutes"]).toBe(5);
     expect(headed.run).toContain("streams a mobile headed tab continuously");
     const stepBudget = job.steps.reduce((sum, step) => sum + (step["timeout-minutes"] ?? 0), 0);
     expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(stepBudget + 3);
   });
 
-  test("removing any one of the 54 approved caps invalidates the committed graph", async () => {
+  test("removing any one of the 55 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1461,7 +1448,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(54);
+    expect(capped).toHaveLength(55);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };

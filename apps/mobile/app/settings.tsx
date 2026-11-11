@@ -3,7 +3,7 @@ import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
 import { Alert } from "react-native";
-import { useAccount } from "@/account";
+import { useAccount, usePickAccount } from "@/account";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
 import {
@@ -14,7 +14,7 @@ import {
 import {
   inboxSettingsSections,
   useInboxSettings,
-  useNotificationSettingsSection,
+  useNotificationSettingsSections,
 } from "@/notifications";
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
@@ -41,9 +41,10 @@ function Settings() {
   const appearance = useAppearancePreference();
   const shakeToSendFeedback = useShakeToSendFeedback();
   const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
-  const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
+  const { accounts, account, workspace, organizations, signOut } = useAccount();
+  const pickAccount = usePickAccount();
   const inbox = useInboxSettings();
-  const notifications = useNotificationSettingsSection(inbox);
+  const { notifications, agentCalls } = useNotificationSettingsSections(inbox);
   const inboxSettings = inboxSettingsSections(inbox);
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
   const multipleServers = new Set(accounts.map((each) => each.baseUrl)).size > 1;
@@ -81,10 +82,8 @@ function Settings() {
               ? serverLabel(each.baseUrl)
               : undefined,
           selected: each.id === account?.id,
-          onPress: () => {
-            switchAccount(each.id);
-            dismissToHome();
-          },
+          // A signed-out account opens its sign-in over Settings instead.
+          onPress: () => pickAccount(each.id, dismissToHome),
         })),
         {
           kind: "action" as const,
@@ -126,6 +125,7 @@ function Settings() {
     });
   }
   if (account && notifications) sections.push(notifications);
+  if (account && agentCalls) sections.push(agentCalls);
   if (account) sections.push(...inboxSettings);
   const appearances: { id: AppearancePreference; title: string }[] = [
     { id: "system", title: "System" },

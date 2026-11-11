@@ -66,6 +66,17 @@ describe("opening at login", () => {
     expect(computer(dataDir).openAtLoginChange(false)).toBeNull();
   });
 
+  test("opens at login while dictation shortcuts are on, without a connected computer", () => {
+    const dataDir = folder();
+    const app = computer(dataDir);
+    expect(app.openAtLoginChange(false, true)).toBe("open");
+    expect(app.openAtLoginChange(false, true)).toBeNull();
+    // Connecting the computer as well changes nothing; turning dictation off then still opens.
+    expect(app.openAtLoginChange(true, true)).toBeNull();
+    expect(app.openAtLoginChange(true, false)).toBeNull();
+    expect(app.openAtLoginChange(false, false)).toBe("stop");
+  });
+
   test("adds and removes the Linux autostart entry", () => {
     const config = folder();
     const previous = process.env.XDG_CONFIG_HOME;

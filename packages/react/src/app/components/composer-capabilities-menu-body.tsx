@@ -12,7 +12,6 @@ import { ConnectorAction } from "../../ui/composer-menu-action";
 import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "../../ui/composer-menu";
 import {
   AGENT_CAPABILITY_GROUPS,
-  UNAVAILABLE_CAPABILITY_REASON,
   capabilityDescription,
   capabilityLabel,
   capabilitySummary,
@@ -95,7 +94,7 @@ export function ComposerCapabilitiesMenuBody(props: {
               const note = !available ? (
                 <span className="mt-0.5 flex items-start gap-1.5 text-xs leading-4.5 font-normal text-fg-muted">
                   <LockIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
-                  {UNAVAILABLE_CAPABILITY_REASON}
+                  {availability.unavailableReason(id)}
                 </span>
               ) : id === "workspaceConnectors" && on ? (
                 <span className="mt-0.5 block text-xs leading-4.5 font-normal text-fg-muted">
@@ -141,7 +140,7 @@ export function ComposerCapabilitiesMenuBody(props: {
                       presentation={props.presentation}
                       readOnly
                       label={`${capabilityLabel(id)}, ${
-                        !available ? UNAVAILABLE_CAPABILITY_REASON : on ? "on" : "off"
+                        !available ? availability.unavailableReason(id) : on ? "on" : "off"
                       }`}
                       className="flex min-h-11 flex-1 items-center gap-3 rounded-md px-2 py-1.5"
                       onAction={() => {}}

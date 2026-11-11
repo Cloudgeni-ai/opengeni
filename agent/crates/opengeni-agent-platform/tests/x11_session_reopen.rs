@@ -498,7 +498,7 @@ mod linux {
         assert_eq!(typed("aB"), [(a, 0x10), (b, 0x11)]);
         // A second group gives `ф` and `Ф` on the `a` key. While it is
         // active, `ф` is pressed there, and `a` is not pressed on a key that
-        // would give `ф` (it goes to a spare keycode, bound for the press).
+        // would give `ф` (it goes to a spare keycode, bound for the session).
         conn.change_keyboard_mapping(1, a, 4, &[0x61, 0x41, 0x6c6, 0x6e6])
             .unwrap()
             .check()

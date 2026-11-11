@@ -17,7 +17,12 @@ import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
 } from "@opengeni/react/app/lib/session-browse-preferences";
-import { client, evidence, subjectId, workspaceId } from "./session-sidebar-context";
+import {
+  previewClient as client,
+  evidence,
+  subjectId,
+  workspaceId,
+} from "./session-sidebar-context";
 import "../src/styles.css";
 
 function RequestProfile() {
@@ -46,7 +51,7 @@ function RequestProfile() {
 writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, workspaceId), {
   // Sparse activity starts ungrouped so project auto-hydration cannot populate
   // additional running roots before the test uses the real Group by menu.
-  groupBy: ["sparse-active", "hover"].includes(
+  groupBy: ["sparse-active", "hover", "unread-reply", "paused"].includes(
     new URLSearchParams(window.location.search).get("scenario") ?? "",
   )
     ? "none"

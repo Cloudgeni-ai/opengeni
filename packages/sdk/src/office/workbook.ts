@@ -56,14 +56,17 @@ export async function describeWorkbook(): Promise<OfficeWorkbookInfo> {
 /**
  * The per-message context naming the connected workbook, so the agent knows
  * which workbook "here" is. `addinName` is the add-in as the person knows it.
+ * It is for `excel_run`, so a chat that starts with it loads that tool before
+ * its first model request.
  */
 export function workbookContextItem(input: {
   workbook: OfficeWorkbookInfo;
   connectionId: string;
   addinName: string;
-}): { id: string; text: string } {
+}): { id: string; text: string; tools: readonly string[] } {
   return {
     id: "excel-workbook",
     text: `The person is writing from the ${input.addinName} add-in in their open Excel workbook "${input.workbook.name}" (${input.workbook.app}). To read or change it, call excel_run with workbook "${input.connectionId}".`,
+    tools: ["excel_run"],
   };
 }

@@ -1,11 +1,11 @@
-import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
+import { requestSessionArchive } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
 // sections (workspace switcher, navigation extras, footer, banners) come in as
 // slots, so the web app and embeds share one shell and differ only in what they
 // put in it.
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 import {
   useCallback,
@@ -24,7 +24,7 @@ import {
 import { toast } from "../../lib/toast";
 
 import { findPickerRow } from "../../../model-policy";
-import { withLineageAutomationFacts } from "../../../session-list-model";
+import { sessionDisplayTitle, withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
@@ -35,6 +35,7 @@ import {
   sessionUsageLimitCapability,
 } from "../../lib/session-usage-limit";
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "./rail-context";
+import { RailSurface, ShellRail } from "./rail-surface";
 import { CollapsedSessionsButton, SessionList } from "./session-list";
 import {
   PrimaryNav,
@@ -58,6 +59,9 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/s
 import { TooltipProvider } from "../../../ui/tooltip";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
+import { desktopPlatform } from "../../lib/desktop";
+import { chatHeaderInWindowBar, isSessionRoutePath } from "../../lib/window-bar-row";
+import { useWindowBarRow, WindowBarPageTitle, windowBarRowActive } from "../window-bar";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
@@ -67,10 +71,9 @@ import { applySessionArchiveProjection } from "../../lib/session-pagination";
 import { notifySessionListChanged } from "../../lib/session-list-invalidation";
 import type { Session } from "../../types";
 import { cn } from "../../lib/utils";
-import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("../session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -97,25 +100,15 @@ export function RailBody() {
     );
   };
   return (
-    <div
-      data-rail
-      className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
-    >
-      {/* Native macOS controls sit over this row. Keep it outside the clipped
-          viewport so navigation cannot scroll underneath them. */}
-      {windowControlsInPage ? (
-        <div data-rail-window-controls className="relative z-10 shrink-0 pb-3">
-          <RailHeader showSwitcher={false} />
-        </div>
-      ) : null}
+    <RailSurface data-rail>
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          {!windowControlsInPage ? <RailHeader /> : null}
+          <RailHeader />
 
-          {rail.collapsed || windowControlsInPage ? switcher : null}
+          {rail.collapsed ? switcher : null}
 
           {rail.isMobile && mobileWorkspacePanel ? (
             <>
@@ -214,7 +207,7 @@ export function RailBody() {
           {railFooter}
         </div>
       ) : null}
-    </div>
+    </RailSurface>
   );
 }
 
@@ -271,6 +264,12 @@ export function SessionShell({
   );
 }
 
+/**
+ * In the macOS app a chat's header is the window bar's row, as in native Mac
+ * apps: its title and actions sit beside the traffic lights and the sidebar
+ * toggle, and the canvas, the rounded panel, starts under the bar as on every
+ * other page (the `[data-window-bar-row]` rules in the app's stylesheet).
+ */
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
@@ -279,6 +278,18 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const headerInWindowBar = chatHeaderInWindowBar({
+    platform: desktopPlatform,
+    mobile: rail.isMobile,
+    session: Boolean(context.session),
+    pathname,
+  });
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  // Every other page's title line is the bar's row instead, as on a chat.
+  const pageTitleInWindowBar =
+    windowBarRowActive({ platform: desktopPlatform, mobile: rail.isMobile }) &&
+    !isSessionRoutePath(pathname);
+  const windowBarRow = useWindowBarRow(canvasRef, headerInWindowBar || pageTitleInWindowBar);
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
@@ -344,18 +355,18 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     <TooltipProvider delayDuration={300}>
       <div
         className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
-        // Lets page chrome (the desktop title bar) follow the rail without a
+        // Lets page chrome and host styles follow the rail without a
         // document-wide `:has()` selector.
         data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
       >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
-          <nav
+          <ShellRail
+            as="nav"
             aria-label="Primary"
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
-              "relative shrink-0 border-r border-border",
               // Animate the collapse/expand toggle, but never while dragging — a
               // transition there would lag the handle behind the pointer.
               !resizing && "motion-safe:transition-[width] motion-safe:duration-150",
@@ -366,7 +377,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
             {/* The drag handle only exists on the expanded desktop rail; the
                 collapsed strip and the mobile drawer are fixed-width. */}
             {!rail.collapsed ? <RailResizeHandle onStart={startResize} active={resizing} /> : null}
-          </nav>
+          </ShellRail>
         ) : null}
 
         {/* Mobile overlay drawer. */}
@@ -394,12 +405,19 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         ) : null}
 
         {/* Main canvas. */}
-        <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <SessionStartupProvider session={context.session}>
-            <CanvasTopStrip hamburgerRef={hamburgerRef} />
-            {canvasBanners}
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
-          </SessionStartupProvider>
+        <div
+          ref={canvasRef}
+          data-canvas
+          {...windowBarRow}
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        >
+          <WindowBarPageTitle enabled={pageTitleInWindowBar}>
+            <SessionStartupProvider session={context.session}>
+              <CanvasTopStrip hamburgerRef={hamburgerRef} />
+              {canvasBanners}
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+            </SessionStartupProvider>
+          </WindowBarPageTitle>
         </div>
       </div>
     </TooltipProvider>
@@ -419,8 +437,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
-  const showSessionActions = Boolean(context.session) && isSessionRoute;
+  const showSessionActions = Boolean(context.session) && isSessionRoutePath(pathname);
   const sharedFeed = useSyncExternalStore(
     context.sessionEventFeedStore.subscribe,
     context.sessionEventFeedStore.getSnapshot,
@@ -535,16 +552,13 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const accountProvider = subscriptionAccountProvider(
-    displayModelId,
-    selectedRow?.catalog.credentialSource,
-  );
+  const accountProvider = subscriptionAccountProvider(displayModelId, selectedRow?.catalog);
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
-  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
+  const onArchiveRef = useRef<((target: Session, archived: boolean) => Promise<void>) | null>(null);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
       if (archiveInFlight.current) return;
@@ -552,7 +566,13 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        const updated = await requestSessionArchive(
+          context,
+          target,
+          archived,
+          sessionDisplayTitle(target),
+          (next) => void onArchiveRef.current?.(target, next),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
@@ -565,18 +585,18 @@ function SessionRouteHeader({
           sessionId: target.id,
           archived: updated.archived,
         });
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: errorMessage(error),
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
+          description: userErrorText(error),
         });
       } finally {
         archiveInFlight.current = false;
       }
     },
-    [context, confirmArchive],
+    [context],
   );
+  onArchiveRef.current = onArchive;
 
   return (
     <SessionHeader
@@ -611,11 +631,19 @@ function SessionRouteHeader({
       onPin={(target, pinned) =>
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
+      onUpdateProfile={context.updateSessionProfile}
+      onMakeAgent={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/agents/new",
+          params: { workspaceId: session.workspaceId },
+          search: { sourceSessionId: session.id },
+        })
+      }
       onArchive={onArchive}
       repliesMute={repliesMute}
       adminAccess={adminAccess}
       onOpenUsageLimit={
-        // The editor lives in the session panel's Agent tab.
+        // The editor lives in the session panel's Settings tab.
         sessionUsageLimitCapability(context.clientConfig) === "absent" || !dock
           ? null
           : () => requestSessionUsageLimitEditor(uiEvents)

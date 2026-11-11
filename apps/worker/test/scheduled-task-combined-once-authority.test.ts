@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
-import { createDb, createScheduledTask, createSession, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  createRig,
+  createScheduledTask,
+  createSession,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -72,24 +78,24 @@ async function fixture() {
     (account_id, workspace_id, subject_id, role, permissions)
     values (${account!.id}, ${target!.id}, ${subjectId}, 'owner', '[]'::jsonb)`;
 
-  const [variableSet] = await admin<{ id: string }[]>`
-    insert into workspace_variable_sets (account_id, workspace_id, name)
-    values (${account!.id}, ${personal!.id}, ${`combined-vs-${crypto.randomUUID()}`}) returning id`;
-  const [variableAuthority] = await admin<{ id: string }[]>`
-    insert into organization_user_resource_authorities
-      (account_id, organization_membership_id, resource_kind, resource_id,
-       origin_workspace_id, generation, status)
-    values (${account!.id}, ${membership!.id}, 'variable_set', ${variableSet!.id},
-      ${personal!.id}, 1, 'active') returning id`;
-  await admin`update workspace_variable_sets set authority_scope='user',
-    authority_id=${variableAuthority!.id}, owner_organization_membership_id=${membership!.id},
-    origin_workspace_id=${personal!.id} where id=${variableSet!.id}`;
-  const [variableGrant] = await admin<{ id: string }[]>`
+  const rig = await createRig(client.db, {
+    accountId: account!.id,
+    workspaceId: personal!.id,
+    scope: "user",
+    subjectId,
+    name: `combined-rig-${crypto.randomUUID()}`,
+  });
+  const [rigAuthority] = await admin<{ id: string; generation: number }[]>`
+    select authority.id, authority.generation::int as generation
+    from organization_user_resource_authorities authority
+    join rigs rig on rig.authority_id = authority.id
+    where rig.id = ${rig.id}`;
+  const [rigGrant] = await admin<{ id: string }[]>`
     insert into organization_user_resource_grants
       (account_id, authority_id, owner_organization_membership_id, workspace_id,
        action, mode, context, generation, status)
-    values (${account!.id}, ${variableAuthority!.id}, ${membership!.id}, ${target!.id},
-      'variable_set.use', 'always', 'workspace_shared', 1, 'active') returning id`;
+    values (${account!.id}, ${rigAuthority!.id}, ${membership!.id}, ${target!.id},
+      'rig.use', 'always', 'workspace_shared', ${rigAuthority!.generation}, 'active') returning id`;
 
   const connection = await admin.begin(async (tx) => {
     await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
@@ -130,8 +136,9 @@ async function fixture() {
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
-    variableSetId: variableSet!.id,
     personalConnectionDelegations: [initialDelegation],
+    rigId: rig.id,
+    rigVersionId: rig.activeVersion!.id,
   });
   const [{ authorityEpoch, visibility }] = await admin<
     Array<{
@@ -143,14 +150,14 @@ async function fixture() {
   await admin`update organization_user_resource_grants set
       mode='once', session_id=${session.id}, context=${visibility},
       authority_epoch=${authorityEpoch}, updated_at=now()
-    where id=${variableGrant!.id}`;
+    where id=${rigGrant!.id}`;
   return {
     accountId: account!.id,
     workspaceId: target!.id,
     personalWorkspaceId: personal!.id,
     subjectId,
-    variableSetId: variableSet!.id,
-    variableGrantId: variableGrant!.id,
+    rigId: rig.id,
+    rigGrantId: rigGrant!.id,
     session,
   };
 }
@@ -168,12 +175,12 @@ async function createCombinedTask(value: Awaited<ReturnType<typeof fixture>>) {
     targetSessionId: value.session.id,
     overlapPolicy: "allow_concurrent",
     agentConfig: {
-      prompt: "use owned connection and once variable set",
+      prompt: "use owned connection and once sandbox environment",
       resources: [],
       tools: [{ kind: "mcp", id: "combined-once" }],
       metadata: {},
     },
-    variableSetId: value.variableSetId,
+    rigId: value.rigId,
     metadata: {},
   });
 }
@@ -185,8 +192,8 @@ async function facts(
 ) {
   const [row] = await admin<Array<Record<string, unknown>>>`
     select
-      (select status from organization_user_resource_grants where id=${value.variableGrantId})
-        as "variableGrantStatus",
+      (select status from organization_user_resource_grants where id=${value.rigGrantId})
+        as "rigGrantStatus",
       (select count(*)::int from scheduled_task_runs run
        where run.task_id=${taskId} and run.producer_key=${producerKey}) as runs,
       (select min(status) from scheduled_task_runs run
@@ -202,13 +209,13 @@ async function facts(
       (select count(*)::int from connection_use_once_consumption_receipts receipt
        where receipt.account_id=${value.accountId}) as "connectionReceipts",
       (select count(*)::int from scheduled_task_run_personal_resource_once_receipts receipt
-       where receipt.grant_id=${value.variableGrantId}) as "personalScheduledReceipts",
+       where receipt.grant_id=${value.rigGrantId}) as "personalScheduledReceipts",
       (select count(*)::int from personal_resource_once_consumption_receipts receipt
-       where receipt.grant_id=${value.variableGrantId}) as "personalAttemptReceipts"`;
+       where receipt.grant_id=${value.rigGrantId}) as "personalAttemptReceipts"`;
   return row!;
 }
 
-test("owned connection and once variable set execute atomically and replay is receipt-idempotent", async () => {
+test("owned connection and once sandbox environment execute atomically and replay is receipt-idempotent", async () => {
   if (!available) return;
   const value = await fixture();
   const task = await createCombinedTask(value);
@@ -234,7 +241,7 @@ test("owned connection and once variable set execute atomically and replay is re
     triggerEventId: first.action === "signal" ? first.triggerEventId : undefined,
   });
   expect(firstFacts).toEqual({
-    variableGrantStatus: "consumed",
+    rigGrantStatus: "consumed",
     runs: 1,
     runStatus: "dispatched",
     runError: null,
@@ -252,7 +259,7 @@ test("combined later personal admission failure rolls connection work back", asy
   const value = await fixture();
   const task = await createCombinedTask(value);
   await admin`update organization_user_resource_grants
-    set generation=generation+1, updated_at=now() where id=${value.variableGrantId}`;
+    set generation=generation+1, updated_at=now() where id=${value.rigGrantId}`;
   const producerKey = `combined-rollback-${crypto.randomUUID()}`;
   const result = await activities().dispatchScheduledTaskRun({
     workspaceId: value.workspaceId,
@@ -263,7 +270,7 @@ test("combined later personal admission failure rolls connection work back", asy
   const after = await facts(value, task.id, producerKey);
   expect(result).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
   expect(after).toEqual({
-    variableGrantStatus: "active",
+    rigGrantStatus: "active",
     runs: 1,
     runStatus: "failed",
     runError: "scheduled_run_authority_proof_rejected",

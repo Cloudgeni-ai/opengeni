@@ -1,15 +1,34 @@
+import { version as sdkVersion } from "../package.json";
+import type {
+  DecisionQuestion,
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+} from "@opengeni/contracts";
+import type {
+  BillingAlertSettings,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
+} from "@opengeni/contracts/billing-credit-notifications";
 import {
   copyObservedSessionSequence,
   recordObservedSessionSequence,
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
-import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  McpElicitationContent,
+} from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
   currentMessageTimeZone,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
+import type {
+  EditableArtifactResource,
+  UpdateEditableArtifactVisibilityRequest,
+} from "./editable-artifact-resources";
 import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
@@ -19,8 +38,25 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  AutoConnectSupport,
+  CheckMcpTrustedIssuerRequest,
+  CheckMcpTrustedIssuerResponse,
+  CheckOrganizationConnectorAutoConnectRequest,
+  CreateMcpTrustedIssuerRequest,
+  CreateOrganizationConnectorRequest,
+  ListMcpTrustedIssuerEventsResponse,
+  ListMcpTrustedIssuersResponse,
+  McpTrustedIssuer,
+  TestOrganizationConnectorAutoConnectResponse,
+  UpdateMcpTrustedIssuerRequest,
+  ListOrganizationConnectorsResponse,
+  OrganizationApiIntegrationHere,
+  OrganizationConnector,
+  PreviewOrganizationApiIntegrationRequest,
+  SetOrganizationApiIntegrationHereRequest,
   SubscriptionPoolSettings,
   SubscriptionUsagePoolsResponse,
+  UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -36,11 +72,45 @@ import type {
   ArtifactCatalogKind,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
   ArtifactPinResponse,
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  Agent,
+  AgentChatsFilter,
+  AgentListFilter,
+  AgentResponse,
+  AgentSlackAvailabilityResponse,
+  AgentSlackChannelListResponse,
+  AgentSlackIntroRequest,
+  AgentSlackIntroResponse,
+  AgentSummary,
+  CreateAgentRequest,
+  DeleteAgentResponse,
+  ListAgentChatsResponse,
+  ListAgentRevisionsResponse,
+  ListAgentSlackInstallsResponse,
+  ListAgentsResponse,
+  PutAgentSlackAvailabilityRequest,
+  UpdateAgentRequest,
   AutomationTemplateResponse,
+  BotTemplateResponse,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
+  CreateSlackAgentRequest,
+  SlackAgentChannelListResponse,
+  SlackAgentIntroRequest,
+  SlackAgentIntroResponse,
+  SlackAgentListResponse,
+  SlackAgentResponse,
+  UpdateSlackAgentRequest,
+  SlackAgentUpdatePreviewRequest,
+  SlackAgentUpdatePreviewResponse,
+  SlackAgentUpdateSettings,
+  UpdateSlackAgentUpdateSettingsRequest,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -119,6 +189,8 @@ import type {
   KnowledgeEntryRecord,
   KnowledgeEntrySaveRequest,
   KnowledgeEntryWriteReceipt,
+  KnowledgeEntryReach,
+  KnowledgeEntryReachRecord,
   KnowledgeEntryReviewRequest,
   KnowledgeEntryBatchReviewRequest,
   KnowledgeEntryRestoreRequest,
@@ -129,7 +201,9 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -164,6 +238,7 @@ import {
   OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   rejectsStartModeField,
+  sessionUsageLimitConfirmed,
   sessionUsageLimitNotConfirmed,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
@@ -177,7 +252,6 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
-import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import {
   abortableReadRetryDelay,
   isSafeReadMethod,
@@ -192,6 +266,7 @@ import {
   type ReadRetryPolicy,
 } from "./read-retry";
 import type {
+  OrganizationSkillReach,
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
@@ -355,6 +430,7 @@ import type {
   SessionMcpToolPermissionsResponse,
   UpdateSessionMcpToolPermissionsRequest,
   CapabilityInstallation,
+  RemoveCapabilityInstallationResponse,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
   ApiIntegrationUninstallPreview,
@@ -401,6 +477,8 @@ import type {
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
   UpdateOrganizationPrivacySettingsRequest,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
@@ -428,11 +506,20 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  OrganizationCompatibleEndpoint,
+  OrganizationCompatibleEndpointsResponse,
+  CreateOrganizationCompatibleEndpointRequest,
+  ReplaceOrganizationCompatibleEndpointKeyRequest,
+  CreateOrganizationCompatibleEndpointModelRequest,
+  OrganizationCompatibleEndpointModel,
+  SetOrganizationCompatibleEndpointModelReasoningRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   ConnectionMetadata,
@@ -471,6 +558,8 @@ import type {
   UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
+  AgentCall,
+  AgentCallHostPhones,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -478,6 +567,10 @@ import type {
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -537,10 +630,18 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
+  OwnResourceReachKind,
+  OwnResourceReachResponse,
+  OwnResourcesResponse,
+  SetOwnResourceReachRequest,
+  SetOwnResourceReachResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
+  ListOrganizationMemberNamesResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
   AcceptOrganizationRecoveryCustodyRequest,
@@ -618,6 +719,11 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  ChatSession,
+  ChatSessionListResponse,
+  ChatSessionLineageResponse,
+  SessionResponseMode,
+  SessionConfiguration,
   SessionStatus,
   WorkClaimSubjectType,
   SessionBackgroundCommandListResponse,
@@ -630,10 +736,15 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
   SessionVisibility,
+  SessionShareLink,
+  SessionShareLinkList,
+  SessionShareLinkState,
+  SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
   SessionEvent,
@@ -723,9 +834,6 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   TranscribeAudioResponse,
-  TranscriptionRecordingListResponse,
-  TranscriptionRecordingResponse,
-  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   RefreshScheduledTaskAccessRequest,
   UpdateScheduledTaskRequest,
@@ -737,11 +845,18 @@ import type {
   ContinueAfterCapabilitySetupResponse,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
+  RemoveSessionResourcesRequest,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
+  OrganizationComputeReachResponse,
+  ListOrganizationMachinesResponse,
+  ListOrganizationRigsResponse,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  MemberDefaultExecutionTarget,
+  WorkspaceDefaultExecutionTarget,
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   Channel,
@@ -834,6 +949,8 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
@@ -887,8 +1004,11 @@ export type SessionListPageOptions = {
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
   channelId?: string | null;
-  /** Restrict rows to the exact frozen session creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /**
+   * Restrict rows to the exact frozen session creator identity. Omit `kind` to
+   * include every session the subject created, whichever kind it was frozen as.
+   */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive ISO-8601 activity lower bound. */
   updatedFrom?: string;
   /** Exclusive ISO-8601 activity upper bound. */
@@ -897,13 +1017,20 @@ export type SessionListPageOptions = {
   createdFrom?: string;
   /** Exclusive ISO-8601 creation upper bound. */
   createdBefore?: string;
+  /**
+   * Only these sessions, at most 200 ids. Narrows the caller's ordinary list
+   * (other filters, archive status and Site scope still apply); never widens it.
+   * Pass `archiveStatus: "all"` to include archived sessions.
+   */
+  sessionIds?: readonly string[];
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean;
   /** Skip pinned details when the pinned section is loaded separately. Defaults to true. */
   includePinned?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
-  sortBy?: "updatedAt" | "createdAt" | "name";
+  /** `archivedAt` orders archived chats by when they were archived. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
   archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
@@ -918,6 +1045,7 @@ const SESSION_PAGE_FILTER_KEYS = [
   "updatedBefore",
   "createdFrom",
   "createdBefore",
+  "sessionIds",
 ] as const;
 const SESSION_PAGE_STRING_QUERY_KEYS = [
   "updatedFrom",
@@ -985,12 +1113,6 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
-  /**
-   * Receives a notice (once per route per client) when the API advertises a
-   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
-   * `console.warn` per route; pass `false` to silence notices.
-   */
-  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -1235,28 +1357,6 @@ export type TranscribeAudioInput = {
   signal?: AbortSignal | undefined;
 };
 
-export type CreateTranscriptionRecordingInput = {
-  recordingId: string;
-  mimeType: string;
-  signal?: AbortSignal | undefined;
-};
-
-export type UploadTranscriptionRecordingChunkInput = {
-  audio: Blob | File | Uint8Array;
-  mimeType: string;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
-export type FinalizeTranscriptionRecordingInput = {
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
 function normalizeScheduledTaskMachineTarget<
   T extends CreateScheduledTaskRequest | UpdateScheduledTaskRequest,
 >(request: T): T {
@@ -1333,7 +1433,58 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
   };
 }
 
+type ChatSessionMethods =
+  | "createSession"
+  | "getSession"
+  | "updateSession"
+  | "updateSessionToolPolicy"
+  | "updateSessionAgent"
+  | "updateSessionSkills"
+  | "removeSessionResources"
+  | "listSessions"
+  | "listSessionPage"
+  | "updateSessionPin"
+  | "updateSessionAttention"
+  | "updateSessionArchive"
+  | "updateSessionRetention"
+  | "updateSessionUnattended"
+  | "getSessionLineage"
+  | "updateSessionChannel";
+type ClientCloneMethods = "withHeaders" | "asUser" | "asService";
+type ChatResult<Result> =
+  Result extends Promise<infer Value>
+    ? Promise<
+        Value extends Session
+          ? Omit<Value, "instructions" | "skills" | "effectiveTools"> &
+              Partial<Pick<Value, "instructions" | "skills" | "effectiveTools">>
+          : Value extends Session[]
+            ? ChatSession[]
+            : Value extends SessionListResponse
+              ? ChatSessionListResponse
+              : Value extends SessionLineageResponse
+                ? ChatSessionLineageResponse
+                : Value
+      >
+    : Result extends OpenGeniClient
+      ? ChatClient<Result>
+      : Result;
+
+/** Explicit compact session methods; every other SDK method keeps its existing signature. */
+export type ChatClient<Client extends OpenGeniClient = OpenGeniClient> = Omit<
+  Client,
+  ChatSessionMethods | ClientCloneMethods
+> & {
+  [Method in Extract<
+    keyof Client,
+    ChatSessionMethods | ClientCloneMethods
+  >]: Client[Method] extends (...args: infer Args) => infer Result
+    ? (...args: Args) => ChatResult<Result>
+    : never;
+};
+
 export class OpenGeniClient {
+  protected sessionResponse: SessionResponseMode = "full";
+  private readonly responseClients = new Map<SessionResponseMode, this>();
   get toolGatewayMode(): "target" | "catalog" {
     return this.options.toolGatewayMode ?? "target";
   }
@@ -1349,6 +1500,7 @@ export class OpenGeniClient {
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
+  private warnedMissingResponseHeaders = false;
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
   /** Dynamic typed tool facade backed by the canonical workspace gateway. */
@@ -1357,11 +1509,8 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = withDeprecationNotices<FetchResponse>(
-      options.fetch ?? ((input, init) => fetch(input, init)),
-      options.onDeprecation,
-    );
+    // Bind lazily so environments that polyfill fetch after module load work.
+    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
@@ -1441,161 +1590,18 @@ export class OpenGeniClient {
     return body;
   }
 
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async createTranscriptionRecording(
+  /** Typed stateless judgments using the deployment's configured decision model. */
+  async decide<Q extends Record<string, DecisionQuestion>>(
     workspaceId: string,
-    input: CreateTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings`,
-        { recordingId: input.recordingId, mimeType: input.mimeType },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async getTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "GET",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async listTranscriptionRecordings(
-    workspaceId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingListResponse> {
-    const body = await this.requestJson<unknown>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/transcription-recordings`,
-      undefined,
+    request: ModelDecisionRequest<Q>,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ModelDecisionResponse<Q>> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/decisions`,
+      request,
       {},
-      options.signal ? { signal: options.signal } : {},
-    );
-    if (!isTranscriptionRecordingListResponse(body)) {
-      throw invalidApiResponseError("Invalid transcription recording list response.", {
-        code: "invalid_response",
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async uploadTranscriptionRecordingChunk(
-    workspaceId: string,
-    recordingId: string,
-    chunkNumber: number,
-    input: UploadTranscriptionRecordingChunkInput,
-  ): Promise<UploadTranscriptionRecordingChunkResponse> {
-    const correlationId = crypto.randomUUID();
-    let response: FetchResponse;
-    try {
-      response = await this.fetchImpl(
-        this.url(
-          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
-        ),
-        {
-          method: "PUT",
-          headers: {
-            ...this.headers(correlationId),
-            Accept: "application/json",
-            "Content-Type": input.mimeType,
-            "x-opengeni-chunk-sha256": input.sha256,
-            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
-            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
-          },
-          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
-          ...(input.signal ? { signal: input.signal } : {}),
-        },
-      );
-    } catch (error) {
-      if (input.signal?.aborted) throw error;
-      throw mutationTransportError(correlationId);
-    }
-    assertApiContractResponse(response, this.apiContractStrict);
-    if (!response.ok)
-      throw await apiErrorFromResponse(response, {
-        method: "PUT",
-        correlationId,
-      });
-    await assertJsonResponse(response, { method: "PUT", correlationId });
-    const body = await response.json().catch(() => null);
-    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
-      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
-        code: "invalid_response",
-        mutation: true,
-        correlationId,
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async finalizeTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    input: FinalizeTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
-        {
-          chunkCount: input.chunkCount,
-          totalBytes: input.totalBytes,
-          totalDurationMilliseconds: input.totalDurationMilliseconds,
-        },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async processNextTranscriptionRecordingSegment(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
-        {},
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async discardTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "DELETE",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
+      options,
     );
   }
 
@@ -1683,7 +1689,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
-    if (committed.limitMicros !== request.limitMicros) {
+    if (!sessionUsageLimitConfirmed(request, committed)) {
       throw sessionUsageLimitNotConfirmed(sessionId);
     }
     return committed;
@@ -1833,6 +1839,20 @@ export class OpenGeniClient {
     );
   }
 
+  /** Full operator configuration. Requires sessions:control; not needed to open a chat. */
+  async getSessionConfiguration(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionConfiguration> {
+    const path = `${sessionPath(workspaceId, sessionId)}/configuration`;
+    return await this.sharedRead(
+      path,
+      (signal) => this.requestJson<SessionConfiguration>("GET", path, undefined, {}, { signal }),
+      options,
+    );
+  }
+
   async getToolActionReview(
     workspaceId: string,
     sessionId: string,
@@ -1903,6 +1923,60 @@ export class OpenGeniClient {
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/visibility`,
       request,
+    );
+  }
+
+  /**
+   * Whether the person can share a chat with a read-only link here, and their
+   * live link for it (`link: null` when they haven't shared it).
+   */
+  async getSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionShareLinkState> {
+    return await this.requestJson<SessionShareLinkState>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /**
+   * Share a chat the person started with a read-only link: anyone holding it
+   * reads the conversation as it is now (the person's messages and the
+   * replies, never tool details or files), without signing in. Calling it
+   * again refreshes the same link with the newest messages.
+   */
+  async createSessionShareLink(workspaceId: string, sessionId: string): Promise<SessionShareLink> {
+    return await this.requestJson<SessionShareLink>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** Stop sharing a chat: its link stops working at once. */
+  async revokeSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ revoked: boolean }> {
+    return await this.requestJson<{ revoked: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** The person's live share links in a workspace, newest first. */
+  async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
+    return await this.requestJson<SessionShareLinkList>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/share-links`,
+    );
+  }
+
+  /** Read a shared chat by its share id, as anyone holding the link does. */
+  async getSharedSession(shareId: string): Promise<SharedSession> {
+    return await this.requestJson<SharedSession>(
+      "GET",
+      `/v1/shared-sessions/${encodeURIComponent(shareId)}`,
     );
   }
 
@@ -2000,6 +2074,24 @@ export class OpenGeniClient {
   }
 
   /**
+   * Remove attached repositories from a session and its child sessions. The
+   * agent loses Git and GitHub access to them on its next call, and the next
+   * turn removes their folders from the sandbox. Only a person or an API
+   * caller can remove repositories.
+   */
+  async removeSessionResources(
+    workspaceId: string,
+    sessionId: string,
+    request: RemoveSessionResourcesRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/resources/remove`,
+      request,
+    );
+  }
+
+  /**
    * Replace one attached MCP server's approval policy. The change is captured
    * by the next claimed attempt; already-claimed work keeps its immutable
    * policy snapshot.
@@ -2034,6 +2126,7 @@ export class OpenGeniClient {
         query: request.query,
         ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
         ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
+        ...(request.order !== undefined ? { order: request.order } : {}),
         ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
         ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
@@ -2177,6 +2270,16 @@ export class OpenGeniClient {
     summary = false,
   ): Promise<SessionListResponse | SessionListEntryResponse> {
     const search = options.search?.trim();
+    if (options.sessionIds !== undefined && options.sessionIds.length === 0) {
+      // An empty selection matches nothing; the server requires at least one id.
+      const empty = {
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        sessionIdsApplied: true as const,
+      };
+      return summary ? { ...empty, projection: "summary" } : empty;
+    }
     let result: SessionListResponse | SessionListEntryResponse | Session[];
     try {
       const query: Record<string, string> = {
@@ -2188,7 +2291,7 @@ export class OpenGeniClient {
       if (search) query.search = search;
       if (options.channelId !== undefined) query.channelId = options.channelId ?? "null";
       if (options.createdBy) {
-        query.createdByKind = options.createdBy.kind;
+        if (options.createdBy.kind) query.createdByKind = options.createdBy.kind;
         query.createdBySubjectId = options.createdBy.subjectId;
       }
       for (const key of SESSION_PAGE_STRING_QUERY_KEYS) {
@@ -2202,6 +2305,10 @@ export class OpenGeniClient {
       if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
+      if (options.sessionIds !== undefined) {
+        // An empty selection is answered locally below: it matches nothing.
+        query.sessionIds = options.sessionIds.join(",");
+      }
       if (options.siteConversations) query.siteConversations = options.siteConversations;
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
         "GET",
@@ -2264,6 +2371,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("read-only session filtering");
     if (options.mineOnly && response.mineOnly !== true)
       throw unsupportedSessionPage("your-sessions filtering");
+    if (options.sessionIds !== undefined && response.sessionIdsApplied !== true)
+      throw unsupportedSessionPage("session id filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -2307,6 +2416,24 @@ export class OpenGeniClient {
     return this.requestJson(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
+    );
+  }
+
+  /**
+   * Move a Site's sidebar row from one project to another (null is Default),
+   * like moving a chat: its conversations in that project move with it, and the
+   * Site itself moves for everyone when the row is its own project's. Needs
+   * `sessions:control`; the Site stays published and in Artifacts.
+   */
+  async updateSiteProject(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteProjectRequest,
+  ): Promise<SiteProjectResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/channel`,
       request,
     );
   }
@@ -2407,7 +2534,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Archive or restore this authenticated member's root chat. */
+  /**
+   * Archive this authenticated member's root chat, or restore it (at any
+   * time; stored content comes back in the background). Archiving refuses
+   * while a sub-chat is in use unless `confirmActiveSubChats` lists it.
+   */
   async updateSessionArchive(
     workspaceId: string,
     sessionId: string,
@@ -2432,6 +2563,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }
@@ -2884,6 +3032,33 @@ export class OpenGeniClient {
     );
   }
 
+  /** Change where an organization Connected Machine works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. The workspace it was connected from
+   * always has it. Organization owners and admins only. */
+  async updateMachineReach(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/reach`,
+      request,
+    );
+  }
+
+  /** Every organization Connected Machine, wherever it works, with where each
+   * works. Organization owners only; a workspace's machine list holds only
+   * the ones that work there. `complete` is false while the server can only
+   * list the ones that work in this workspace. */
+  async listOrganizationMachines(workspaceId: string): Promise<ListOrganizationMachinesResponse> {
+    return await this.requestJson<ListOrganizationMachinesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-machines`,
+    );
+  }
+
   /** Revision-fenced update of a Connected Machine's optional command memory
    * policy. Null byte limits preserve unrestricted machine access. */
   async updateMachineOperationPolicy(
@@ -2992,7 +3167,9 @@ export class OpenGeniClient {
    * non-interactive enroll path. The returned `token` is SECRET — surface it once
    * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
    * screen-control consent into the token. `scope: "user"` connects the signed-in
-   * person's own machine; `"workspace"` (or omitted) shares it with the workspace.
+   * person's own machine; `"workspace"` shares it with the workspace. Omitted, a
+   * signed-in teammate without `enrollments:manage` gets `"user"` and everyone
+   * else `"workspace"`.
    * Check the response's `scope` before showing a command: an older server ignores
    * the request and mints a workspace-shared token.
    */
@@ -3182,6 +3359,38 @@ export class OpenGeniClient {
       return body as SessionEventCompactResult;
     }
     const events = body as SessionEvent[];
+    const requiredHeaders = [
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Page-Max-Bytes",
+      "X-OpenGeni-Page-Truncated",
+      "X-OpenGeni-Event-Mode",
+      "X-OpenGeni-Event-Direction",
+      "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Forensic-Exact",
+      ...(events.length ? ["X-OpenGeni-Covered-First", "X-OpenGeni-Covered-Last"] : []),
+      ...(listOptions?.presentedToolCalls === "include" && !options.latest
+        ? [SESSION_EVENT_CONVERSATION_FILTER_HEADER]
+        : []),
+      ...(response.headers.get("X-OpenGeni-Has-More") === "true"
+        ? [
+            response.headers.get("X-OpenGeni-Event-Direction") === "after"
+              ? "X-OpenGeni-Next-After"
+              : "X-OpenGeni-Next-Before",
+          ]
+        : []),
+    ];
+    const missingHeaders = requiredHeaders.filter((name) => response.headers.get(name) === null);
+    if (missingHeaders.length && !this.warnedMissingResponseHeaders) {
+      this.warnedMissingResponseHeaders = true;
+      console.warn(
+        "[Opengeni] History response headers are missing or unreadable: " +
+          missingHeaders.join(", ") +
+          ". History paging and conversation filtering may be degraded. " +
+          "For a relay, preserve OPENGENI_BROWSER_RESPONSE_HEADERS from @opengeni/sdk " +
+          "and include them in Access-Control-Expose-Headers. Older APIs may not provide them.",
+      );
+    }
     const integerHeader = (name: string): number | null => {
       const raw = response.headers.get(name);
       if (raw === null) return null;
@@ -3309,6 +3518,10 @@ export class OpenGeniClient {
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+      /** Answers to the approval's `elicitation` forms; only with `approve`. */
+      content?: McpElicitationContent;
+      /** The `elicitation.round` this answers; required to approve one. */
+      elicitationRound?: number;
       clientEventId?: string;
     },
   ): Promise<SessionEvent> {
@@ -3420,10 +3633,21 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+  /**
+   * Read the session's prompt queue. Concurrent reads share one request; pass
+   * `fresh` after a change you observed so the read starts no earlier than
+   * this call instead of joining an older one still in flight.
+   */
+  async getQueue(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionQueueSnapshot> {
     const path = `${sessionPath(workspaceId, sessionId)}/queue`;
-    return await this.sharedRead(path, () =>
-      this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+    return await this.sharedRead(
+      path,
+      () => this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+      options,
     );
   }
 
@@ -3785,14 +4009,23 @@ export class OpenGeniClient {
   /**
    * Steer: atomically put this prompt at the head and supersede the current
    * inference. The client performs one request and renders server order.
+   *
+   * `options.delivery: "steer_or_send"` lets the server decide atomically
+   * with the session's turn state: it steers while a turn runs (or is about
+   * to start) and otherwise sends, so the message reaches a running turn
+   * however stale your view of the session is. The response's `routing` says
+   * which: `accepted_for_steering` for a Steer, otherwise a Send. Servers
+   * older than this option reject it with a 422 that names `delivery`.
    */
   async steerMessage(
     workspaceId: string,
     sessionId: string,
     message: string | SendMessageInput,
+    options: { delivery?: "steer" | "steer_or_send" | undefined } = {},
   ): Promise<SteerMessageResult> {
-    const input = typeof message === "string" ? { text: message } : message;
-    assertNoMessageTools(input);
+    const text = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(text);
+    const input = options.delivery === undefined ? text : { ...text, delivery: options.delivery };
     const path = `${sessionPath(workspaceId, sessionId)}/steer`;
     const { body, automatic } = withMessageTimeZone(input, this.options.messageTimeZone);
     try {
@@ -5072,7 +5305,13 @@ export class OpenGeniClient {
     ) {
       throw invalidApiResponseError("browser frame evidence does not match its request");
     }
-    return { ...metadata, data };
+    return {
+      ...metadata,
+      data,
+      ...(response.headers.get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+        ? { inexactScrollbars: true as const }
+        : {}),
+    };
   }
 
   async closeBrowserTarget(
@@ -6125,6 +6364,185 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's connectors and where each works (organization owners and admins). */
+  async listOrganizationConnectors(organizationId: string): Promise<OrganizationConnector[]> {
+    const response = await this.requestJson<ListOrganizationConnectorsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/connectors`,
+    );
+    return response.connectors;
+  }
+
+  /**
+   * Preview an API integration (a reviewed definition, or a custom OpenAPI or
+   * GraphQL API) for the organization before adding it: its tools, how it
+   * signs in, and the revision `createOrganizationConnector` must match.
+   */
+  async previewOrganizationApiIntegration(
+    organizationId: string,
+    request: PreviewOrganizationApiIntegrationRequest,
+  ): Promise<ApiIntegrationPreview> {
+    return await this.requestJson<ApiIntegrationPreview>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/api-integrations/preview`,
+      request,
+    );
+  }
+
+  /**
+   * Add a catalog connector, a custom MCP server or a previewed API
+   * integration for the workspaces its availability selects.
+   */
+  async createOrganizationConnector(
+    organizationId: string,
+    request: CreateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors`,
+      request,
+    );
+  }
+
+  /** Change where it works, its tools, whether it is on, or its organization key. */
+  async updateOrganizationConnector(
+    organizationId: string,
+    connectorId: string,
+    request: UpdateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+      request,
+    );
+  }
+
+  /** Remove it; every workspace stops serving it at once. */
+  async deleteOrganizationConnector(organizationId: string, connectorId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+    );
+  }
+
+  /**
+   * Whether a connector can connect everyone automatically: its server must
+   * accept ID-JAGs (MCP Enterprise-Managed Authorization). Ask before adding it.
+   */
+  async checkOrganizationConnectorAutoConnect(
+    organizationId: string,
+    request: CheckOrganizationConnectorAutoConnectRequest,
+  ): Promise<AutoConnectSupport> {
+    return await this.requestJson<AutoConnectSupport>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/auto-connect/check`,
+      request,
+    );
+  }
+
+  /**
+   * Try an auto-connect connector as yourself: Opengeni signs an ID-JAG for
+   * you and the app redeems it. Saves only the outcome on the connector.
+   */
+  async testOrganizationConnectorAutoConnect(
+    organizationId: string,
+    connectorId: string,
+  ): Promise<TestOrganizationConnectorAutoConnectResponse> {
+    return await this.requestJson<TestOrganizationConnectorAutoConnectResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}/auto-connect/test`,
+      {},
+    );
+  }
+
+  /**
+   * Connect yourself to an auto-connect connector that works in this
+   * workspace. When the app refuses, the message says why; sign in instead.
+   */
+  async connectWorkspaceOrganizationConnector(
+    workspaceId: string,
+    connectorId: string,
+  ): Promise<{ status: "connected" } | { status: "refused"; message: string }> {
+    return await this.requestJson<{ status: "connected" } | { status: "refused"; message: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-connectors/${connectorId}/connect`,
+      {},
+    );
+  }
+
+  // --- Auto-connect: trusted issuers (organization MCP server) ----------------------------------
+
+  /**
+   * Issuers whose ID-JAGs connect members to the organization MCP server
+   * with no sign-in (Claude's organization issuer, or an identity provider),
+   * with the MCP URL and audience to give the app. Owners and admins.
+   */
+  async listMcpTrustedIssuers(organizationId: string): Promise<ListMcpTrustedIssuersResponse> {
+    return await this.requestJson<ListMcpTrustedIssuersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+    );
+  }
+
+  /** Look an issuer up before trusting it: whether its signing keys load. */
+  async checkMcpTrustedIssuer(
+    organizationId: string,
+    request: CheckMcpTrustedIssuerRequest,
+  ): Promise<CheckMcpTrustedIssuerResponse> {
+    return await this.requestJson<CheckMcpTrustedIssuerResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/check`,
+      request,
+    );
+  }
+
+  /** Trust an issuer, with the access every app it connects gets. */
+  async createMcpTrustedIssuer(
+    organizationId: string,
+    request: CreateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers`,
+      request,
+    );
+  }
+
+  /**
+   * Change a trusted issuer. New access applies to every app it connected;
+   * turning it off disconnects them.
+   */
+  async updateMcpTrustedIssuer(
+    organizationId: string,
+    trustedIssuerId: string,
+    request: UpdateMcpTrustedIssuerRequest,
+  ): Promise<McpTrustedIssuer> {
+    return await this.requestJson<McpTrustedIssuer>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+      request,
+    );
+  }
+
+  /** Stop trusting an issuer and disconnect every app it connected. */
+  async deleteMcpTrustedIssuer(organizationId: string, trustedIssuerId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}`,
+    );
+  }
+
+  /** Recent auto-connect attempts through an issuer, refusals with their reason. */
+  async listMcpTrustedIssuerEvents(
+    organizationId: string,
+    trustedIssuerId: string,
+  ): Promise<ListMcpTrustedIssuerEventsResponse> {
+    return await this.requestJson<ListMcpTrustedIssuerEventsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-trusted-issuers/${trustedIssuerId}/events`,
+    );
+  }
+
   /** List workspace-owned Claude model slugs. */
   async listWorkspaceClaudeCustomModels(
     workspaceId: string,
@@ -6222,7 +6640,99 @@ export class OpenGeniClient {
     );
   }
 
-  /** Remove the workspace's own allowlist so it follows its organization's default. */
+  /** List the organization's OpenAI-compatible endpoints and their models. */
+  async listOrganizationCompatibleEndpoints(
+    organizationId: string,
+  ): Promise<OrganizationCompatibleEndpointsResponse> {
+    return await this.requestJson<OrganizationCompatibleEndpointsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+    );
+  }
+
+  /** Connect an OpenAI-compatible endpoint with its first model. */
+  async createOrganizationCompatibleEndpoint(
+    organizationId: string,
+    request: CreateOrganizationCompatibleEndpointRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints`,
+      request,
+    );
+  }
+
+  /** Replace an OpenAI-compatible endpoint's API key. */
+  async replaceOrganizationCompatibleEndpointKey(
+    organizationId: string,
+    connectionId: string,
+    request: ReplaceOrganizationCompatibleEndpointKeyRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/key`,
+      request,
+    );
+  }
+
+  /** Disconnect an OpenAI-compatible endpoint; its models stop at once. */
+  async revokeOrganizationCompatibleEndpoint(
+    organizationId: string,
+    connectionId: string,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationCompatibleEndpoint> {
+    return await this.requestJson<OrganizationCompatibleEndpoint>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /**
+   * Add a model to an OpenAI-compatible endpoint. The response also carries
+   * the model's `reasoning` levels; list the endpoints to read them typed.
+   */
+  async createOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    request: CreateOrganizationCompatibleEndpointModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models`,
+      request,
+    );
+  }
+
+  /** Set an OpenAI-compatible endpoint model's reasoning levels, or read them again from the endpoint. */
+  async setOrganizationCompatibleEndpointModelReasoning(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
+      request,
+    );
+  }
+
+  /** Remove a model from an OpenAI-compatible endpoint. */
+  async deleteOrganizationCompatibleEndpointModel(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
+  /** Remove the workspace's own allowlist so it uses its organization's list as is. */
   async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "DELETE",
@@ -6409,6 +6919,31 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's EU-only inference setting. Any member. */
+  async getOrganizationInferenceResidency(
+    organizationId: string,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "GET",
+      `/v1/organizations/${organizationId}/inference-residency`,
+    );
+  }
+
+  /**
+   * Turn EU-only inference on (an owner or admin) or off (an owner or admin in
+   * the app in a browser, never an agent or API key).
+   */
+  async updateOrganizationInferenceResidency(
+    organizationId: string,
+    request: UpdateOrganizationInferenceResidencyRequest,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/inference-residency`,
+      request,
+    );
+  }
+
   /** Fully replace the workspace's hard provider/model allowlist. */
   async updateWorkspaceModelAccessPolicy(
     workspaceId: string,
@@ -6475,6 +7010,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Issue an exact-session or standing personal-resource grant. A person's
+   * own subscription is turned on for their own turns in a workspace with a
+   * standing `subscription_connection` grant there.
+   */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -6483,6 +7035,48 @@ export class OpenGeniClient {
     return await this.requestJson<RevokeUserResourceGrantResponse>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
+    );
+  }
+
+  /**
+   * "Where it works" for your own login, plan or machine: each workspace you
+   * belong to in its organization, and whether it works there for your own
+   * messages. Ask from any workspace where you can see it.
+   */
+  async getOwnResourceReach(
+    workspaceId: string,
+    resource: { resourceKind: OwnResourceReachKind; resourceId: string },
+  ): Promise<OwnResourceReachResponse> {
+    const query = new URLSearchParams({
+      resourceKind: resource.resourceKind,
+      resourceId: resource.resourceId,
+    });
+    return await this.requestJson<OwnResourceReachResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources/reach?${query.toString()}`,
+    );
+  }
+
+  /** Turn your own login, plan or machine on or off for your own messages in one workspace. */
+  async setOwnResourceReach(
+    workspaceId: string,
+    request: SetOwnResourceReachRequest,
+  ): Promise<SetOwnResourceReachResponse> {
+    return await this.requestJson<SetOwnResourceReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/own-resources/reach`,
+      request,
+    );
+  }
+
+  /**
+   * "My things": every one of your own logins, model plans and machines in
+   * this workspace's organization, each with where it works.
+   */
+  async listOwnResources(workspaceId: string): Promise<OwnResourcesResponse> {
+    return await this.requestJson<OwnResourcesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources`,
     );
   }
 
@@ -6581,6 +7175,16 @@ export class OpenGeniClient {
     organizationId: string,
   ): Promise<ListOrganizationAdministrationMembersResponse> {
     return await this.listOrganizationAdministrationMembers(organizationId);
+  }
+
+  /** Who is in the organization, by name only; any member may read it. */
+  async listOrganizationMemberNames(
+    organizationId: string,
+  ): Promise<ListOrganizationMemberNamesResponse> {
+    return await this.requestJson<ListOrganizationMemberNamesResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/member-names`,
+    );
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
@@ -6835,6 +7439,14 @@ export class OpenGeniClient {
         this.requestJson("GET", `${root(workspaceId)}/accounts`, undefined, undefined, options),
       pending: (workspaceId, options) =>
         this.requestJson("GET", `${root(workspaceId)}/attempts`, undefined, undefined, options),
+      finishUnfinished: (workspaceId, options) =>
+        this.requestJson(
+          "POST",
+          `${root(workspaceId)}/attempts/finish`,
+          undefined,
+          undefined,
+          options,
+        ),
       begin: (workspaceId, input, options) =>
         this.requestJson("POST", `${root(workspaceId)}/attempts`, input, undefined, options),
       get: (workspaceId, id, options) =>
@@ -6866,21 +7478,6 @@ export class OpenGeniClient {
           const connectionId = id.slice("social:".length);
           if (!/^[0-9a-f-]{36}$/i.test(connectionId)) throw new Error("Invalid social account ID");
           await this.disconnectSocialConnection(workspaceId, connectionId);
-          return;
-        }
-        if (id.startsWith("lens-registration:")) {
-          const registrationId = id.slice("lens-registration:".length);
-          if (
-            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(registrationId)
-          )
-            throw new Error("Invalid Lens registration ID");
-          await this.requestJson(
-            "DELETE",
-            `/v1/workspaces/${encodeURIComponent(workspaceId)}/pr-review/registrations/${registrationId}`,
-            undefined,
-            undefined,
-            options,
-          );
           return;
         }
         if (id.startsWith("github-installation:")) {
@@ -6918,7 +7515,7 @@ export class OpenGeniClient {
     };
   }
 
-  /** Browse first-party Atlassian sources without choosing or starting sync. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -6929,6 +7526,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveAtlassianSources(
     workspaceId: string,
     connectionId: string,
@@ -6941,6 +7539,7 @@ export class OpenGeniClient {
     );
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async setAtlassianLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -6962,6 +7561,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6977,6 +7578,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },
@@ -7092,6 +7694,11 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Creates an inactive draft revision. Empty (or blank) content is stored as
+   * "" and, once activated, clears the target: prompts get no policy for it,
+   * history keeps the earlier versions, and rollback can restore one.
+   */
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
@@ -7496,6 +8103,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Link the request's Slack account once the person confirmed it (offered as
+   * `canLink`, naming the account in `slackAccountLabel`). Preparing a request
+   * never links it; this confirmation is required for every link.
+   */
+  async linkSlackUserAsOrganizationMember(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/link`,
+      request,
+    );
+  }
+
   async cancelSlackUserLinkAccess(
     workspaceId: string,
     requestId: string,
@@ -7854,6 +8478,217 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Bot templates ----------------------------------------------------------
+  // A bot is a long-lived chat with a name, description and avatar. A bot
+  // template is a saved starting point for one: starting from it opens a new
+  // chat whose first message is the template's setup instructions. Whoever
+  // saved one, or an admin, can change it.
+
+  async listBotTemplates(workspaceId: string): Promise<WorkspaceBotTemplate[]> {
+    const response = await this.requestJson<ListBotTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+    );
+    return response.templates;
+  }
+
+  async getBotTemplate(workspaceId: string, templateId: string): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+    return response.template;
+  }
+
+  async createBotTemplate(
+    workspaceId: string,
+    request: CreateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateBotTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteBotTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+  }
+
+  // --- Agents ----------------------------------------------------------------
+  // An agent is a name, icon and description, standing Instructions every one
+  // of its chats follows, an optional First message the app puts in the
+  // composer, and an optional Memory. It lives in one workspace, is Only me or
+  // shared with that workspace, and can also be available in Slack. Bot
+  // templates and Slack agents are agents too (same ids); their endpoints
+  // keep working. Start a chat with one through `createSession({ agentId })`.
+
+  async listAgents(
+    workspaceId: string,
+    options: { filter?: AgentListFilter } = {},
+  ): Promise<AgentSummary[]> {
+    const query = options.filter ? `?${new URLSearchParams({ filter: options.filter })}` : "";
+    const response = await this.requestJson<ListAgentsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents${query}`,
+    );
+    return response.agents;
+  }
+
+  async getAgent(workspaceId: string, agentId: string): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+    );
+    return response.agent;
+  }
+
+  async createAgent(workspaceId: string, request: CreateAgentRequest): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
+  /** Changes only what the request names, at `expectedVersion`. */
+  async updateAgent(
+    workspaceId: string,
+    agentId: string,
+    request: UpdateAgentRequest,
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+      request,
+    );
+    return response.agent;
+  }
+
+  /** Deletes the agent. Its chats stay and continue as ordinary chats. */
+  async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
+    return await this.requestJson<DeleteAgentResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /** Saved versions of the agent's Instructions and First message, newest first. */
+  async listAgentRevisions(
+    workspaceId: string,
+    agentId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListAgentRevisionsResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListAgentRevisionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/revisions${suffix}`,
+    );
+  }
+
+  /** The agent's chats, newest first: the reader's own, or everyone's they can open. */
+  async listAgentChats(
+    workspaceId: string,
+    agentId: string,
+    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number } = {},
+  ): Promise<ListAgentChatsResponse> {
+    const query = new URLSearchParams();
+    if (options.filter) query.set("filter", options.filter);
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListAgentChatsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/chats${suffix}`,
+    );
+  }
+
+  /** The connected Slack workspaces the agent can be available in, and where it is. */
+  async listAgentSlackInstalls(
+    workspaceId: string,
+    agentId: string,
+  ): Promise<ListAgentSlackInstallsResponse> {
+    return await this.requestJson<ListAgentSlackInstallsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack`,
+    );
+  }
+
+  /** Make the agent available in one Slack workspace, or change how (open use). */
+  async putAgentSlackAvailability(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    request: PutAgentSlackAvailabilityRequest = {},
+  ): Promise<AgentSlackAvailabilityResponse> {
+    return await this.requestJson<AgentSlackAvailabilityResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /** Stop the agent answering in one Slack workspace. The agent and its chats stay. */
+  async deleteAgentSlackAvailability(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+  ): Promise<AgentSlackAvailabilityResponse> {
+    return await this.requestJson<AgentSlackAvailabilityResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}`,
+    );
+  }
+
+  /** Slack channels the Opengeni app is in, where the agent can be introduced. */
+  async listAgentSlackChannels(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<AgentSlackChannelListResponse> {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return await this.requestJson<AgentSlackChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}/channels${query}`,
+    );
+  }
+
+  /** Post a short intro of the agent, under its name, in each chosen channel. */
+  async postAgentSlackIntro(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    request: AgentSlackIntroRequest,
+  ): Promise<AgentSlackIntroResponse> {
+    return await this.requestJson<AgentSlackIntroResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}/intro`,
+      request,
+    );
+  }
+
   // --- Vaults ---------------------------------------------------------------
   // Metadata reads never carry values; `revealField` is the one audited
   // plaintext route. `{{secret:…}}` references resolve at execution time.
@@ -7941,6 +8776,30 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}`,
       request,
+    );
+  }
+
+  /** Change where an organization Sandbox Environment works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. Organization owners and admins only. */
+  async updateRigReach(
+    workspaceId: string,
+    rigId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/reach`,
+      request,
+    );
+  }
+
+  /** Every organization Sandbox Environment, wherever it works, with where
+   * each works. Organization owners only. `complete` as for machines. */
+  async listOrganizationRigs(workspaceId: string): Promise<ListOrganizationRigsResponse> {
+    return await this.requestJson<ListOrganizationRigsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-rigs`,
     );
   }
 
@@ -8197,6 +9056,27 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change where your Only me file works besides the workspace that stores it
+   * and your Personal workspace: your other workspaces of this organization,
+   * or all of them (null). It stays Only me in each. Only the file's owner
+   * can, from the workspace that stores it.
+   */
+  async updateFileReach(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileReachRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileReachResponse> {
+    return await this.requestJson<UpdateFileReachResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/reach`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async getFile(
     workspaceId: string,
     fileId: string,
@@ -8207,6 +9087,24 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/files/${fileId}${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
+      options,
+    );
+  }
+
+  /** Resolve a UUID artifact link through one authenticated workspace lookup. */
+  async resolveArtifactLink(
+    workspaceId: string,
+    artifactId: string,
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
+  ): Promise<ArtifactLinkResolution> {
+    const client = options.sessionId
+      ? this.withHeaders({ "x-opengeni-session-id": options.sessionId })
+      : this;
+    return client.requestJson<ArtifactLinkResolution>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(artifactId)}/resolve${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
+      undefined,
+      undefined,
       options,
     );
   }
@@ -8716,6 +9614,33 @@ export class OpenGeniClient {
     );
   }
 
+  /** Where an organization or personal Knowledge entry works besides the
+   * workspace it was added in, and whether the caller may change it. */
+  async getKnowledgeEntryReach(
+    workspaceId: string,
+    entryId: string,
+  ): Promise<KnowledgeEntryReachRecord> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${encodeURIComponent(entryId)}/reach`,
+    );
+  }
+
+  /** Choose where an entry works. Organization: every shared workspace
+   * (`null`) or the listed ones, plus members' Personal workspaces when
+   * switched on. Personal: the owner's listed workspaces, or all (`null`). */
+  async updateKnowledgeEntryReach(
+    workspaceId: string,
+    entryId: string,
+    reach: KnowledgeEntryReach,
+  ): Promise<KnowledgeEntryReachRecord> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${encodeURIComponent(entryId)}/reach`,
+      reach,
+    );
+  }
+
   async getAgentLearningSettings(
     workspaceId: string,
     scope: "workspace" | "personal" | "context",
@@ -8777,6 +9702,26 @@ export class OpenGeniClient {
     );
   }
 
+  /** The caller's own default placement for new chats ("Your default machine"). */
+  async getMyDefaultExecutionTarget(workspaceId: string): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+    );
+  }
+
+  /** Saves the caller's own default placement; null follows the workspace default. */
+  async setMyDefaultExecutionTarget(
+    workspaceId: string,
+    target: WorkspaceDefaultExecutionTarget | null,
+  ): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+      { target },
+    );
+  }
+
   async setWorkspaceDefaultRig(
     workspaceId: string,
     request: SetWorkspaceDefaultRigRequest,
@@ -8787,8 +9732,6 @@ export class OpenGeniClient {
       request,
     );
   }
-
-  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
 
   // --- Capabilities -------------------------------------------------------------------------
 
@@ -8921,6 +9864,22 @@ export class OpenGeniClient {
     return await this.requestJson<CapabilityInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
+    );
+  }
+
+  /**
+   * Remove a custom MCP server added in this workspace, so it is no longer
+   * on; anyone who may turn integrations on can add it again. Integration
+   * admins remove any; a member only one they turned on, while it is on
+   * (otherwise 403 `capabilities:manage`). See `canRemove` on catalog items.
+   */
+  async removeCapabilityInstallation(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<RemoveCapabilityInstallationResponse> {
+    return await this.requestJson<RemoveCapabilityInstallationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/installation`,
     );
   }
 
@@ -9091,6 +10050,25 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateWorkspaceArtifactVisibilityResponse>(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change who can open a document, spreadsheet or presentation: the whole
+   * workspace, or only you. Only its owner can, from the app.
+   */
+  async updateEditableArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateEditableArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/visibility`,
       request,
       undefined,
       options,
@@ -9862,6 +10840,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Turn the organization's API integration off in this workspace, or back
+   * on. It stays managed in the organization's settings.
+   */
+  async setOrganizationApiIntegrationHere(
+    workspaceId: string,
+    capabilityId: string,
+    request: SetOrganizationApiIntegrationHereRequest,
+  ): Promise<OrganizationApiIntegrationHere> {
+    return await this.requestJson<OrganizationApiIntegrationHere>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/organization`,
+      request,
+    );
+  }
+
   /** Remove one Integration instance without deleting its Connection or sibling instances. */
   async uninstallApiIntegration(
     workspaceId: string,
@@ -9903,7 +10897,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Browse source metadata through one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async browseGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -9924,7 +10918,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async saveGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
@@ -10169,6 +11163,21 @@ export class OpenGeniClient {
     );
   }
 
+  /** Choose where an organization Skill works: every shared workspace (`null`)
+   * or the listed ones, plus members' Personal workspaces when switched on.
+   * Whoever may change the organization's Skills only. */
+  async updateSkillReach(
+    workspaceId: string,
+    skillId: string,
+    reach: OrganizationSkillReach,
+  ): Promise<{ reach: OrganizationSkillReach }> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reach`,
+      reach,
+    );
+  }
+
   /** Install one exact reviewed curated-library Skill through the Skill domain. */
   async installLibrarySkill(
     workspaceId: string,
@@ -10290,6 +11299,7 @@ export class OpenGeniClient {
       {
         ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.query ? { query: options.query } : {}),
       },
     );
   }
@@ -10445,6 +11455,111 @@ export class OpenGeniClient {
     );
   }
 
+  /** Every Slack agent in the workspace's organization. Any member may read them. */
+  async listOpenGeniSlackAgents(workspaceId: string): Promise<SlackAgentListResponse> {
+    return await this.requestJson<SlackAgentListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents`,
+    );
+  }
+
+  /** Create a Slack agent that always works in `workspaceId`. */
+  async createOpenGeniSlackAgent(
+    workspaceId: string,
+    request: CreateSlackAgentRequest,
+  ): Promise<SlackAgentResponse> {
+    return await this.requestJson<SlackAgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents`,
+      request,
+    );
+  }
+
+  /** Change a Slack agent; `workspaceId` is the workspace the agent works in. */
+  async updateOpenGeniSlackAgent(
+    workspaceId: string,
+    agentId: string,
+    request: UpdateSlackAgentRequest,
+  ): Promise<SlackAgentResponse> {
+    return await this.requestJson<SlackAgentResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      request,
+    );
+  }
+
+  /** Delete a Slack agent; `workspaceId` is the workspace the agent works in. */
+  async deleteOpenGeniSlackAgent(
+    workspaceId: string,
+    agentId: string,
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /** Slack channels the Opengeni app is already in, where the agent can be introduced. */
+  async listOpenGeniSlackAgentChannels(
+    workspaceId: string,
+    agentId: string,
+    cursor?: string,
+  ): Promise<SlackAgentChannelListResponse> {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return await this.requestJson<SlackAgentChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/channels${query}`,
+    );
+  }
+
+  /** Post a short intro of the agent in each chosen channel. */
+  async postOpenGeniSlackAgentIntro(
+    workspaceId: string,
+    agentId: string,
+    request: SlackAgentIntroRequest,
+  ): Promise<SlackAgentIntroResponse> {
+    return await this.requestJson<SlackAgentIntroResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
+      request,
+    );
+  }
+
+  /** Update messages about Slack agents for one Slack installation. */
+  async getOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates?connectionId=${encodeURIComponent(connectionId)}`,
+    );
+  }
+
+  /** An organization admin turns update messages on or off, or limits them to channel posts. */
+  async setOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    request: UpdateSlackAgentUpdateSettingsRequest,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates`,
+      request,
+    );
+  }
+
+  /** An organization admin sends one update message to their own linked Slack account now. */
+  async previewOpenGeniSlackAgentUpdate(
+    workspaceId: string,
+    request: SlackAgentUpdatePreviewRequest,
+  ): Promise<SlackAgentUpdatePreviewResponse> {
+    return await this.requestJson<SlackAgentUpdatePreviewResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates/preview`,
+      request,
+    );
+  }
+
   async updateConnection(
     workspaceId: string,
     connectionId: string,
@@ -10466,6 +11581,11 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /**
+   * @deprecated The native Google Drive source connection was removed with
+   * Integration Knowledge sync. Use `deleteConnection`; this method goes in
+   * the next SDK major.
+   */
   async disconnectGoogleDriveConnection(
     workspaceId: string,
     connectionId: string,
@@ -10479,6 +11599,7 @@ export class OpenGeniClient {
     return response.connection;
   }
 
+  /** @deprecated Integration Knowledge sync was removed; the server answers 410. This method goes in the next SDK major. */
   async transitionGoogleDriveLifecycle(
     workspaceId: string,
     connectionId: string,
@@ -11034,12 +12155,81 @@ export class OpenGeniClient {
     await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
   }
 
+  /** An agent's call to the signed-in person, while it rings and after. */
+  async getAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}`,
+    );
+    return call;
+  }
+
+  /**
+   * Take an agent's call. The first phone to answer wins; the call comes back
+   * `answered` with `answeredHere: true`, then start the chat's voice call.
+   * A call already taken, declined or rung out comes back in that state.
+   */
+  async answerAgentCall(
+    workspaceId: string,
+    callId: string,
+    options: { device?: string } = {},
+  ): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/answer`,
+      options,
+    );
+    return call;
+  }
+
+  /** Decline an agent's call: it stops ringing everywhere and the agent is told. */
+  async declineAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/decline`,
+      {},
+    );
+    return call;
+  }
+
+  /**
+   * The phones your product rings for this person's agent calls, as they last
+   * stated through it; null when none. For products that ring their own app
+   * from the `session.agentCall.ringing` webhook.
+   */
+  async getAgentCallHostPhones(workspaceId: string): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+    );
+    return hostPhones;
+  }
+
+  /**
+   * State how many of this person's phones your product rings for agent calls
+   * (the phones where they turned agent calls on in your app), so agents can
+   * call them; `phones: 0` removes them. `teammates` lets agents working for
+   * other members of a shared workspace ring them too. Applies across the
+   * person's workspaces in this organization.
+   */
+  async setAgentCallHostPhones(
+    workspaceId: string,
+    input: { phones: number; teammates?: boolean },
+  ): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+      input,
+    );
+    return hostPhones;
+  }
+
   // --- Organization-wide sessions ----------------------------------------------------------------
 
   /**
    * One page of sessions across every shared workspace of the organization the
-   * caller may read within its live workspace scope (an organization API key or
-   * organization owner). Each row carries its `workspaceId`; read events,
+   * caller may read within its live workspace scope (an organization API key, or
+   * the organization's owner or an admin). Each row carries its `workspaceId`; read events,
    * history, and files through the ordinary workspace methods. Personal
    * workspaces are never included and private sessions stay invisible.
    */
@@ -11088,6 +12278,36 @@ export class OpenGeniClient {
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------
+
+  async getBillingAlertSettings(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("GET", "/v1/billing/alerts", undefined, options);
+  }
+
+  async updateBillingAlertSettings(
+    request: UpdateBillingAlertSettingsRequest,
+  ): Promise<BillingAlertSettings> {
+    return this.requestJson("PUT", "/v1/billing/alerts", request);
+  }
+
+  async listBillingCreditNotifications(
+    options: { accountId?: string } = {},
+  ): Promise<ListBillingCreditNotificationsResponse> {
+    return this.requestJson("GET", "/v1/billing/notifications", undefined, options);
+  }
+
+  async markBillingCreditNotificationRead(
+    notificationId: string,
+    options: { accountId?: string } = {},
+  ): Promise<{ ok: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/billing/notifications/${encodeURIComponent(notificationId)}/read`,
+      undefined,
+      options,
+    );
+  }
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
     return await this.requestJson<BillingSummary>("GET", "/v1/billing", undefined, {
@@ -11322,6 +12542,25 @@ export class OpenGeniClient {
     return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
   }
 
+  async getBillingAutoTopUp(
+    options: { accountId?: string } = {},
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("GET", "/v1/billing/auto-top-up", undefined, options);
+  }
+
+  /** Owner-only. enabled:true explicitly consents to recurring off-session threshold charges. */
+  async updateBillingAutoTopUp(
+    request: UpdateBillingAutoTopUpRequest,
+  ): Promise<BillingAutoTopUpSettings> {
+    return await this.requestJson("PUT", "/v1/billing/auto-top-up", request);
+  }
+
+  async createBillingAutoTopUpSetupSession(
+    request: CreateBillingAutoTopUpSetupSessionRequest,
+  ): Promise<CreateBillingAutoTopUpSetupSessionResponse> {
+    return await this.requestJson("POST", "/v1/billing/auto-top-up/setup", request);
+  }
+
   async createSubscriptionCheckout(
     request: CreateSubscriptionCheckoutRequest,
   ): Promise<CreateSubscriptionCheckoutResponse> {
@@ -11383,6 +12622,20 @@ export class OpenGeniClient {
     }
     client.serviceInitiatorHeader = this.serviceInitiatorHeader;
     client.serviceContextHeader = this.serviceContextHeader;
+    client.sessionResponse = this.sessionResponse;
+    return client;
+  }
+
+  /** Opt another client into compact session reads without changing existing readers. */
+  withSessionResponse(mode: "chat"): ChatClient<this>;
+  withSessionResponse(mode: "full"): this;
+  withSessionResponse(mode: SessionResponseMode): this | ChatClient<this> {
+    if (this.sessionResponse === mode) return this;
+    const existing = this.responseClients.get(mode);
+    if (existing) return existing;
+    const client = this.withHeaders({});
+    client.sessionResponse = mode;
+    this.responseClients.set(mode, client);
     return client;
   }
 
@@ -11418,6 +12671,7 @@ export class OpenGeniClient {
     const headers: Record<string, string> = {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      ...(sdkVersion ? { [OPENGENI_SDK_VERSION_HEADER]: sdkVersion } : {}),
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
@@ -11464,14 +12718,21 @@ export class OpenGeniClient {
     );
   }
 
-  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
-  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    // A JSON body even though the route reads none: signed-in browsers are
-    // admitted to subscription mutations only as same-origin JSON requests.
+  /**
+   * Begin device-code login: show `userCode` at `verificationUri`, then poll
+   * with `state`. `scope: "user"` connects the person's own subscription from
+   * this workspace; it is kept in their own Personal workspace.
+   */
+  async codexConnectStart(
+    workspaceId: string,
+    options: { scope?: "user" } = {},
+  ): Promise<CodexConnectStart> {
+    // Always a JSON body: signed-in browsers are admitted to subscription
+    // mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
-      {},
+      options.scope ? { scope: options.scope } : {},
     );
   }
 
@@ -11731,6 +12992,22 @@ export class OpenGeniClient {
       "PUT",
       `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
       policy,
+    );
+  }
+
+  /**
+   * Stops a workspace from using another workspace's own subscription account
+   * that was shared with it. Only the owning workspace or the organization
+   * changes the account otherwise. Requires workspace admin.
+   */
+  async removeModelConnectionFromWorkspace(target: {
+    workspaceId: string;
+    kind: "codex" | "supergrok" | "claude_subscription";
+    connectionId: string;
+  }): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(target.workspaceId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
     );
   }
 
@@ -12003,7 +13280,8 @@ export class OpenGeniClient {
           method,
           headers: {
             ...headers,
-            Accept: "application/json",
+            Accept:
+              this.sessionResponse === "chat" ? OPENGENI_SESSION_CHAT_ACCEPT : "application/json",
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -12125,91 +13403,6 @@ function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResp
     typeof record.text === "string" &&
     Array.isArray(record.languages) &&
     record.languages.every((language) => typeof language === "string")
-  );
-}
-
-function isUploadTranscriptionRecordingChunkResponse(
-  value: unknown,
-): value is UploadTranscriptionRecordingChunkResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (
-    !isTranscriptionRecordingResponse({
-      recording: record.recording,
-      segments: [],
-    })
-  ) {
-    return false;
-  }
-  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
-    return false;
-  }
-  const chunk = record.chunk as Record<string, unknown>;
-  return (
-    typeof chunk.chunkNumber === "number" &&
-    typeof chunk.byteLength === "number" &&
-    typeof chunk.sha256 === "string" &&
-    typeof chunk.startMilliseconds === "number" &&
-    typeof chunk.durationMilliseconds === "number" &&
-    typeof chunk.deduplicated === "boolean"
-  );
-}
-
-function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const response = value as Record<string, unknown>;
-  if (
-    !response.recording ||
-    typeof response.recording !== "object" ||
-    Array.isArray(response.recording)
-  ) {
-    return false;
-  }
-  const recording = response.recording as Record<string, unknown>;
-  return (
-    typeof recording.id === "string" &&
-    typeof recording.workspaceId === "string" &&
-    typeof recording.mimeType === "string" &&
-    typeof recording.state === "string" &&
-    typeof recording.nextChunkNumber === "number" &&
-    typeof recording.chunkCount === "number" &&
-    typeof recording.totalBytes === "number" &&
-    typeof recording.totalDurationMilliseconds === "number" &&
-    typeof recording.segmentCount === "number" &&
-    typeof recording.completedSegmentCount === "number" &&
-    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
-    Array.isArray(recording.languages) &&
-    (recording.errorCode === null || typeof recording.errorCode === "string") &&
-    typeof recording.retryable === "boolean" &&
-    typeof recording.objectsCleaned === "boolean" &&
-    typeof recording.createdAt === "string" &&
-    typeof recording.updatedAt === "string" &&
-    typeof recording.expiresAt === "string" &&
-    (response.retryAfterMilliseconds === undefined ||
-      (typeof response.retryAfterMilliseconds === "number" &&
-        Number.isInteger(response.retryAfterMilliseconds) &&
-        response.retryAfterMilliseconds > 0 &&
-        response.retryAfterMilliseconds <= 60_000)) &&
-    Array.isArray(response.segments)
-  );
-}
-
-function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
-  if (isTranscriptionRecordingResponse(value)) return value;
-  throw invalidApiResponseError("Invalid transcription recording response.", {
-    code: "invalid_response",
-  });
-}
-
-function isTranscriptionRecordingListResponse(
-  value: unknown,
-): value is TranscriptionRecordingListResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const recordings = (value as Record<string, unknown>).recordings;
-  return (
-    Array.isArray(recordings) &&
-    recordings.length <= 50 &&
-    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
   );
 }
 

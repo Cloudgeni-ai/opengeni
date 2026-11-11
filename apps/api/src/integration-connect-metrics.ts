@@ -32,7 +32,6 @@ const FIXED_CONNECT_PROVIDERS = [
   "slack-personal",
   "github-personal",
   "github-app",
-  "github-lens",
   "google-drive-knowledge",
   "google-drive-publish",
   "fiken-token",
@@ -108,16 +107,12 @@ const OAUTH_CALLBACK_FLOWS = new Map<string, string>([
   ["/v1/integrations/provider-oauth/callback", "provider_oauth"],
   ["/v1/integrations/slack/callback", "slack_bot"],
   ["/v1/integrations/fiken/callback", "fiken"],
-  ["/v1/integrations/atlassian/callback", "atlassian"],
-  ["/v1/integrations/google-drive/callback", "google_drive"],
   ["/v1/integrations/github-personal/oauth/callback", "github_personal"],
   ["/v1/social/oauth/callback", "social"],
   ["/v1/github/setup", "github_app"],
   ["/v1/github/install/callback", "github_app"],
   ["/v1/github/oauth/callback", "github_app"],
   ["/v1/github/app-manifest/callback", "github_app"],
-  ["/v1/pr-review/github/install/callback", "github_lens"],
-  ["/v1/pr-review/github/oauth/callback", "github_lens"],
 ]);
 
 /** Redirect query markers written by each flow's `callbackReturnPath`. */

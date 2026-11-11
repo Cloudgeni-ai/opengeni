@@ -209,6 +209,75 @@ describe("Company Brain OKF package", () => {
     });
   });
 
+  test("leaves cleared (empty) revisions out, whether active or historical", () => {
+    const id = (n: number) => `00000000-0000-4000-8000-0000000000${40 + n}`;
+    const revisions = (
+      [
+        [1, "old rule", null],
+        [2, "", id(1)],
+        [3, "new rule", id(2)],
+        [4, "", id(1)],
+      ] as const
+    ).map(([revision, content, supersedes]) => ({
+      id: id(revision),
+      operationId: id(revision + 10),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      kind: "policy" as const,
+      scope: "global" as const,
+      roleKey: null,
+      content,
+      contentHash: HASH,
+      revision,
+      provenance: { source: "human" as const, sourceId: null },
+      supersedesRevisionId: supersedes,
+      createdBySubjectId: "authorized-human",
+      createdAt: GENERATED_AT,
+    }));
+    const policies = WorkspaceInstructionPolicyListResponse.parse({
+      revisions,
+      activeHeads: [
+        {
+          workspaceId: WORKSPACE_ID,
+          kind: "policy",
+          scope: "global",
+          roleKey: null,
+          revisionId: revisions[3]!.id,
+          revision: 4,
+          contentHash: HASH,
+          activationVersion: 3,
+          activatedAt: GENERATED_AT,
+        },
+      ],
+      activationEvents: [],
+      nextAfterRevision: null,
+    });
+    const value = createCompanyBrainOkfPackage({
+      workspaceId: WORKSPACE_ID,
+      generatedAt: GENERATED_AT,
+      companyProfile: emptyProfile(),
+      instructionPolicies: policies,
+      activeInstructionPolicyRevisions: [revisions[3]!],
+      activatedInstructionPolicyRevisionIds: [revisions[0]!.id, revisions[1]!.id, revisions[3]!.id],
+      preferences: {
+        rows: [],
+        preferenceCountTruncated: false,
+        revisionCountTruncated: false,
+        contentBytesTruncated: false,
+      },
+      knowledge: unavailableKnowledge(),
+    });
+    expect(CompanyBrainOkfPackage.parse(value)).toEqual(value);
+    expect(
+      Object.fromEntries(
+        value.guidance.entries.map((entry) => [
+          entry.content,
+          [entry.lifecycle, entry.relationships],
+        ]),
+      ),
+    ).toEqual({ "old rule": ["historical", []], "new rule": ["inactive", []] });
+  });
+
   test("bounds aggregate UTF-8 content and drops relationships to omitted targets", () => {
     const entry = makePackage(availableEmptyKnowledge()).guidance.entries[0]!;
     const oversizedEntries = Array.from(

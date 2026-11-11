@@ -8,6 +8,7 @@ import {
   initializeSessionStartAtomically,
   type DbClient,
 } from "../src/index";
+import { attachLegacyVariableSets } from "./helpers/legacy-variable-sets";
 
 // Deleting a workspace removes its rows through cascading foreign keys.
 // PostgreSQL runs that cascade level by level and orders a row's foreign key
@@ -272,6 +273,38 @@ async function grantCount(workspaceId: string) {
 }
 
 describe("deleting a workspace", () => {
+  test("deletes a session retaining historical Variable Set IDs after table contraction", async () => {
+    const { accountId, workspaceId, subjectId } = await seedAccount("legacy attachment");
+    const variableSetId = crypto.randomUUID();
+    const session = await createSession(adminClient.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      initialMessage: "historical attachment",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await attachLegacyVariableSets(adminClient.db, {
+      workspaceId,
+      sessionId: session.id,
+      variableSetIds: [variableSetId],
+    });
+    const [before] = await shared.admin<Array<{ ids: string[] }>>`
+      select variable_set_ids as ids from sessions where id = ${session.id}`;
+    expect(before!.ids).toEqual([variableSetId]);
+    const result = await deleteWorkspaceIfQuiescent(appClient.db, { accountId, workspaceId });
+    expect(result.status).toBe("deleted");
+    expect(await workspaceRowCount(workspaceId)).toBe(0);
+    const [after] = await shared.admin<Array<{ absent: boolean }>>`
+      select to_regclass('workspace_variable_sets') is null as absent`;
+    expect(after!.absent).toBe(true);
+  }, 120_000);
+
   test("removes a chat whose turn used a personal machine grant", async () => {
     const { accountId, workspaceId } = await workspaceWithMachineGrantTurn();
     const result = await deleteWorkspaceIfQuiescent(appClient.db, {

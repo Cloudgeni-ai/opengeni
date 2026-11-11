@@ -69,6 +69,48 @@ export function githubRepositoryOf(releasesBase: string): string | null {
   return match?.[1] ?? null;
 }
 
+function pktLine(payload: string): string {
+  return `${(payload.length + 4).toString(16).padStart(4, "0")}${payload}`;
+}
+
+// A Git protocol v2 ls-refs request for the desktop tags only: what
+// `git ls-remote --tags <repo> 'desktop-v*'` sends.
+const LS_REFS_REQUEST = `${pktLine("command=ls-refs\n")}0001${pktLine(
+  `ref-prefix refs/tags/${TAG_PREFIX}\n`,
+)}0000`;
+
+/**
+ * The ref names in a Git protocol v2 ls-refs response. Packet lengths count
+ * bytes, and a complete answer ends with a flush packet (0000); anything else
+ * throws so the caller falls back instead of serving a partial tag list.
+ */
+export function refsFromLsRefs(response: Uint8Array | string): string[] {
+  const body = typeof response === "string" ? new TextEncoder().encode(response) : response;
+  const ascii = new TextDecoder("latin1");
+  const utf8 = new TextDecoder();
+  const refs: string[] = [];
+  let offset = 0;
+  while (offset < body.length) {
+    const header = ascii.decode(body.subarray(offset, offset + 4));
+    if (!/^[0-9a-f]{4}$/iu.test(header)) throw new Error("Malformed Git ls-refs response");
+    const length = Number.parseInt(header, 16);
+    if (length === 0) return refs;
+    if (length < 4) {
+      offset += 4;
+      continue;
+    }
+    if (offset + length > body.length) throw new Error("Truncated Git ls-refs response");
+    const line = utf8.decode(body.subarray(offset + 4, offset + length)).trimEnd();
+    offset += length;
+    if (line === "ERR" || line.startsWith("ERR ")) {
+      throw new Error(`Git ls-refs failed: ${line.slice(4)}`);
+    }
+    const ref = line.split(" ")[1];
+    if (ref) refs.push(ref);
+  }
+  throw new Error("Truncated Git ls-refs response");
+}
+
 export interface DesktopVersionResolverOptions {
   /** An operator pin. When set, it is the only version ever served. */
   pinnedVersion?: string | undefined;
@@ -83,9 +125,13 @@ export interface DesktopVersionResolverOptions {
 
 /**
  * The version /desktop/latest serves: the pin, or the newest desktop-v tag on
- * the release repository. A lookup is shared by concurrent requests and reused
- * for ten minutes, well within GitHub's unauthenticated rate limit. When GitHub
- * is unreachable the last known version keeps serving.
+ * the release repository. Tags are listed over Git's smart HTTP protocol, the
+ * way `git ls-remote` does, because the REST API's unauthenticated limit (60
+ * requests an hour) is per IP address and is shared with everything else behind
+ * the same egress address; on October 27, 2026 production's NAT address had
+ * used it up and every download answered 503. The REST API remains a fallback.
+ * A lookup is shared by concurrent requests and reused for ten minutes. When
+ * GitHub is unreachable the last known version keeps serving.
  */
 export function createDesktopVersionResolver(
   options: DesktopVersionResolverOptions,
@@ -101,24 +147,53 @@ export function createDesktopVersionResolver(
   let nextLookupAt = 0;
   let inFlight: Promise<void> | null = null;
 
+  async function tagRefsFromGit(deadline: AbortSignal): Promise<string[]> {
+    const response = await fetchImpl(`https://github.com/${repository}.git/git-upload-pack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-git-upload-pack-request",
+        accept: "application/x-git-upload-pack-result",
+        "git-protocol": "version=2",
+        "user-agent": "git/opengeni-api",
+      },
+      body: LS_REFS_REQUEST,
+      // Leave part of the lookup's time for the REST fallback.
+      signal: AbortSignal.any([deadline, AbortSignal.timeout(3_000)]),
+    });
+    if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
+    return refsFromLsRefs(new Uint8Array(await response.arrayBuffer()));
+  }
+
+  async function tagRefsFromApi(deadline: AbortSignal): Promise<string[]> {
+    const response = await fetchImpl(
+      `https://api.github.com/repos/${repository}/git/matching-refs/tags/${TAG_PREFIX}`,
+      {
+        headers: { accept: "application/vnd.github+json", "user-agent": "opengeni-api" },
+        signal: deadline,
+      },
+    );
+    if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
+    const refs = (await response.json()) as Array<{ ref?: unknown }>;
+    return refs.flatMap((entry) => (typeof entry.ref === "string" ? [entry.ref] : []));
+  }
+
+  async function newestTaggedVersion(): Promise<string | null> {
+    // One budget for both sources, so a cold request waits at most 5 seconds.
+    const deadline = AbortSignal.timeout(5_000);
+    let refs: string[];
+    try {
+      refs = await tagRefsFromGit(deadline);
+    } catch {
+      refs = await tagRefsFromApi(deadline);
+    }
+    return newestDesktopVersion(
+      refs.flatMap((ref) => (ref.startsWith("refs/tags/") ? [ref.slice("refs/tags/".length)] : [])),
+    );
+  }
+
   async function lookUp(): Promise<void> {
     try {
-      const response = await fetchImpl(
-        `https://api.github.com/repos/${repository}/git/matching-refs/tags/${TAG_PREFIX}`,
-        {
-          headers: { accept: "application/vnd.github+json", "user-agent": "opengeni-api" },
-          signal: AbortSignal.timeout(5_000),
-        },
-      );
-      if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
-      const refs = (await response.json()) as Array<{ ref?: unknown }>;
-      const version = newestDesktopVersion(
-        refs.flatMap((entry) =>
-          typeof entry.ref === "string" && entry.ref.startsWith("refs/tags/")
-            ? [entry.ref.slice("refs/tags/".length)]
-            : [],
-        ),
-      );
+      const version = await newestTaggedVersion();
       if (version) known = version;
       nextLookupAt = now() + (version ? freshForMs : retryAfterMs);
     } catch {

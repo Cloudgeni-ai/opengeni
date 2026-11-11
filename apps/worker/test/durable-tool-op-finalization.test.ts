@@ -28,12 +28,20 @@ for (const scenario of [
     const checkpointTx = {} as db.Database;
     const allowedFence = { allowed: true } as Parameters<db.SessionEventMutation<"event">>[1];
     const mutationEvents: string[] = [];
+    // Turn input settles the turn's search-record form (here it moves); the
+    // run's model calls must read the settled form, not the loaded one.
+    const searchRecords = { form: "assistant" as "assistant" | "runtime" };
+    const runStreamOptions: unknown[] = [];
     const spies = [
-      spyOn(runInput, "turnInput").mockResolvedValue({
-        input: { input: checkpoint },
-        persistedHistoryCount: checkpoint.length,
-        providerArtifactCandidates: { knownHistoryItemIds: [], historyItemIds: [] },
-      } as Awaited<ReturnType<typeof runInput.turnInput>>),
+      spyOn(runInput, "turnInput").mockImplementation(async (...args) => {
+        expect(args[4].searchRecords).toBe(searchRecords);
+        searchRecords.form = "runtime";
+        return {
+          input: { input: checkpoint },
+          persistedHistoryCount: checkpoint.length,
+          providerArtifactCandidates: { knownHistoryItemIds: [], historyItemIds: [] },
+        } as Awaited<ReturnType<typeof runInput.turnInput>>;
+      }),
       spyOn(openSuffix, "settleOpenSuffixResumeIfNeeded").mockResolvedValue({
         action: "continue",
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
@@ -43,6 +51,7 @@ for (const scenario of [
       spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
+      spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "registerPendingSessionToolCallInTransaction").mockResolvedValue({
         accepted: true,
@@ -110,7 +119,12 @@ for (const scenario of [
           settings,
           runSettings: settings,
           db: {} as db.Database,
-          runtime: { runStream: async () => stream },
+          runtime: {
+            runStream: async (...args: unknown[]) => {
+              runStreamOptions.push(args[3]);
+              return stream;
+            },
+          },
           observability: {
             metrics: { histogram: () => metric, counter: () => metric, gauge: () => metric },
             observeHistogram() {},
@@ -200,10 +214,14 @@ for (const scenario of [
             order.push("finalize");
             finalizations.push(callIds);
           },
+          compactionModeOptions: {},
+          searchRecords,
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
       } catch (error) {
         caught = error;
       }
+      expect(runStreamOptions).toHaveLength(1);
+      expect(runStreamOptions[0]).toMatchObject({ searchRecordForm: "runtime" });
       expect(mutationEvents).toEqual(["created", "created", "output"]);
       if (scenario === "fenced" || scenario === "checkpoint_fenced") {
         expect(caught).toBeInstanceOf(TurnAttemptFencedError);

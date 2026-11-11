@@ -114,7 +114,7 @@ answer the user. Future-task retrieval excludes pending content; if a previous
 published revision exists, it remains current until approval.
 
 Related pending writes are collected into one review batch per task/run. A
-nonblocking chat card and Knowledge > Needs review show the same proposals.
+nonblocking chat card and Knowledge > Review show the same proposals.
 Approve all, edit and approve, and reject operate on exact revisions. A stale
 review cannot overwrite a newer correction. There is no second approval after
 the review decision and no `requires_action` interruption for Knowledge saves.
@@ -166,11 +166,10 @@ confirmation recovery remain; conversation history and task notes are separate.
 This is a maintenance cutover: stop old API and workers, migrate and provision
 roles, and start only the matching runtime. Do not restart an old binary.
 
-Built-in Drive sources use ordinary scheduled agent turns. Their fetch
-adapter retains originals/source text under the frozen policy; the agent selects
-useful findings. Task lifecycle owns completion; source adapters own checkpoints.
-Native Jira/Confluence source sync is retired; its imported Documents and
-historical configuration remain, but native schedules cannot fetch new content.
+Integration Knowledge sync (Drive, OneDrive, Jira/Confluence) was removed:
+integrations give agents tools, and recurring work is an ordinary agent schedule
+that uses them. Imported Documents remain; the saved source schedules were
+deleted (see [Knowledge](../knowledge.md)).
 Legacy source schedules keep their IDs and configuration. Those with no active
 owning-human authority are preserved paused, and require a current authorized
 edit. The change does not extend the managed scheduled-authority lifecycle to

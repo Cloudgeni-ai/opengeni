@@ -1,16 +1,35 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess } from "@opengeni/testing/process";
 
-test("macOS rail reserves native controls outside the scroll viewport", async () => {
+import {
+  expectWindowTop,
+  LEGACY_MAC_TRAFFIC_LIGHT_POSITION,
+  MAC_TRAFFIC_LIGHT_POSITION,
+  MACOS_BAR_CONTROLS_LEFT,
+  MACOS_BAR_ROW_LEFT,
+  simulateWindowsTitleBar,
+  trafficLightCentre,
+  WINDOW_BAR_HEIGHT,
+  windowBar,
+  windowBarControls,
+  windowBarRow,
+} from "./desktop-window-bar";
+
+let url: string;
+let output: string | undefined;
+let web: Awaited<ReturnType<typeof startProcess>>;
+let browser: Browser;
+
+beforeAll(async () => {
   const port = await freePort();
-  const url = `http://127.0.0.1:${port}/test/desktop-rail.html`;
-  const output = process.env.OPENGENI_DESKTOP_RAIL_ARTIFACT_DIR;
+  url = `http://127.0.0.1:${port}/test/desktop-rail.html`;
+  output = process.env.OPENGENI_DESKTOP_RAIL_ARTIFACT_DIR;
   if (output) await mkdir(output, { recursive: true });
-  const web = await startProcess(
+  web = await startProcess(
     [
       "bun",
       "run",
@@ -31,61 +50,350 @@ test("macOS rail reserves native controls outside the scroll viewport", async ()
       timeoutMs: 45_000,
     },
   );
-  const browser = await chromium.launch({ headless: true });
-  try {
+  browser = await chromium.launch({ headless: true });
+}, 60_000);
+
+afterAll(async () => {
+  await browser?.close();
+  await web?.stop();
+});
+
+test("the rail starts below the desktop window bar and scrolls clear of the window controls", async () => {
+  {
     for (const platform of ["macos", "windows", "linux", "browser"]) {
       for (const width of [1280, 640]) {
-        const page = await browser.newPage({ viewport: { width, height: 420 } });
+        const page = await browser.newPage({
+          viewport: { width, height: 420 },
+        });
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
+        if (platform === "windows") await simulateWindowsTitleBar(page);
         await page.goto(`${url}?platform=${platform}`);
-        const toggle = page.getByRole("button", { name: "Collapse sidebar", exact: true });
+        const toggle = page.getByRole("button", {
+          name: "Collapse sidebar",
+          exact: true,
+        });
         await toggle.waitFor({ timeout: 90_000 });
         await page.locator("[data-session-row]").first().waitFor();
         const viewport = page.locator("[data-rail-scroll-viewport]");
         const header = page.locator("[data-rail-header]");
-        const before = await header.boundingBox();
+        const top = platform === "macos" || platform === "windows" ? WINDOW_BAR_HEIGHT : 0;
+        // One rail layout everywhere: the list starts at the top of the page,
+        // which on macOS and Windows is below the window bar.
+        expect((await viewport.boundingBox())!.y).toBe(top);
+        const before = (await header.boundingBox())!;
+        expect(before.y).toBeGreaterThanOrEqual(top);
+        await expectWindowTop(page, platform);
+        // The macOS app has no row of its own for the traffic lights: the
+        // sidebar toggle sits in the window bar beside them, and the rail's
+        // header starts with the brand. Elsewhere it stays in the header.
+        const sidebarToggles = header.getByRole("button", { name: /sidebar$/ });
         if (platform === "macos") {
-          expect((await viewport.boundingBox())!.y).toBe(56);
-          expect(await page.locator("[data-rail-window-controls]").count()).toBe(1);
-          expect(await page.locator("[data-rail-window-controls] button").count()).toBe(1);
-          if (output) await page.screenshot({ path: `${output}/macos-${width}-top.png` });
+          expect(await sidebarToggles.count()).toBe(0);
+          const box = (await toggle.boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
+          expect(box.y + box.height).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
+          expect(
+            (await windowBarControls(page)).map(({ visible, buttons }) => ({
+              visible,
+              buttons,
+            })),
+          ).toEqual([{ visible: true, buttons: ["Collapse sidebar"] }]);
+          // The bar comes first on screen and first in the tab order.
+          await page.keyboard.press("Tab");
+          expect(
+            await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+          ).toBe("Collapse sidebar");
+          await page.keyboard.press("Shift+Tab");
         } else {
-          expect(await page.locator("[data-rail-window-controls]").count()).toBe(0);
-          expect((await viewport.boundingBox())!.y).toBe(0);
+          expect(await sidebarToggles.count()).toBe(1);
         }
+        if (output)
+          await page.screenshot({
+            path: `${output}/${platform}-${width}-top.png`,
+          });
         await viewport.evaluate((element) => {
           element.scrollTop = 240;
         });
         expect(await viewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+        // The header scrolls with the list and never reaches the window controls.
+        expect((await header.boundingBox())!.y).toBeLessThan(before.y);
+        await expectWindowTop(page, platform);
+        if (output)
+          await page.screenshot({
+            path: `${output}/${platform}-${width}-scrolled.png`,
+          });
+        // Pointer collapse and keyboard expansion remain available after scrolling.
+        await toggle.click();
+        const expand = page.getByRole("button", {
+          name: "Expand sidebar",
+          exact: true,
+        });
+        const expandBox = (await expand.boundingBox())!;
         if (platform === "macos") {
-          expect((await header.boundingBox())!.y).toBe(before!.y);
-          expect(
-            await page.evaluate(
-              () =>
-                document.elementFromPoint(40, 28)?.closest("[data-rail-scroll-viewport]") === null,
-            ),
-          ).toBe(true);
-          if (output) await page.screenshot({ path: `${output}/macos-${width}-scrolled.png` });
-          // Pointer collapse and keyboard expansion remain available after scrolling.
-          await toggle.click();
-          const expand = page.getByRole("button", { name: "Expand sidebar", exact: true });
-          expect((await expand.boundingBox())!.y).toBeGreaterThanOrEqual(44);
-          expect((await viewport.boundingBox())!.y).toBe(88);
-          if (output) await page.screenshot({ path: `${output}/macos-${width}-collapsed.png` });
-          await expand.focus();
-          await page.keyboard.press("Enter");
-          await toggle.waitFor();
-          expect((await viewport.boundingBox())!.y).toBe(56);
+          // The toggle stays put in the bar when the rail collapses.
+          expect(expandBox.x).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
+          expect(expandBox.y + expandBox.height).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
         } else {
-          expect((await header.boundingBox())!.y).toBeLessThan(before!.y);
+          expect(expandBox.y).toBeGreaterThanOrEqual(top);
+        }
+        await expectWindowTop(page, platform);
+        if (output)
+          await page.screenshot({
+            path: `${output}/${platform}-${width}-collapsed.png`,
+          });
+        await expand.focus();
+        await page.keyboard.press("Enter");
+        await toggle.waitFor();
+        expect((await viewport.boundingBox())!.y).toBe(top);
+        if (platform === "macos") {
+          // The session page's workspace dock: below 1024px a full-window
+          // overlay, mounted but hidden while closed. Closed, the toggle stays
+          // in the bar; open, the overlay is the window's inset panel and the
+          // toggle, with nothing to show or hide under it, steps aside.
+          const shown = async () =>
+            (await windowBarControls(page)).map((control) => control.visible);
+          expect(await shown()).toEqual([true]);
+          await page.getByRole("button", { name: "Open workspace", exact: true }).click();
+          await page.getByRole("button", { name: "Close workspace", exact: true }).waitFor();
+          if (width < 1024) {
+            expect(await shown()).toEqual([false]);
+            const overlay = (await page.locator("[data-workspace-surface]").boundingBox())!;
+            expect(overlay).toEqual({
+              x: 4,
+              y: WINDOW_BAR_HEIGHT,
+              width: width - 8,
+              height: 420 - WINDOW_BAR_HEIGHT - 4,
+            });
+          } else {
+            expect(await shown()).toEqual([true]);
+          }
+          await expectWindowTop(page, platform);
+          await page.getByRole("button", { name: "Close workspace", exact: true }).click();
+          await toggle.waitFor();
+          expect(await shown()).toEqual([true]);
+          await expectWindowTop(page, platform);
         }
         expect(errors).toEqual([]);
         await page.close();
       }
     }
-  } finally {
-    await browser.close();
-    await web.stop();
   }
 }, 180_000);
+
+// A chat's page. In the macOS app the chat's header is the window bar's row:
+// its title and actions sit right of the traffic lights and the sidebar
+// toggle, never under them, its buttons take clicks, and the rounded panel
+// starts under the bar as on every other page. Elsewhere the header stays the
+// panel's first row, below any window bar.
+test("a chat's header is the macOS window bar's row", async () => {
+  const height = 420;
+  for (const platform of ["macos", "windows", "browser"]) {
+    for (const [width, rail] of [
+      [1280, "open"],
+      [1280, "collapsed"],
+      [1280, "none"],
+      [800, "collapsed"],
+    ] as const) {
+      const page = await browser.newPage({ viewport: { width, height } });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      if (platform === "windows") await simulateWindowsTitleBar(page);
+      await page.goto(
+        `${url}?platform=${platform}&view=chat${rail === "none" ? "&rail=none" : ""}`,
+      );
+      const header = page.locator("[data-titlebar]");
+      await header.getByText("Ship the window bar").waitFor({ timeout: 90_000 });
+      if (rail === "collapsed") {
+        await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+        await page.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
+      }
+      const panel = page.locator("[data-canvas]");
+      const check = async () => {
+        const headerBox = (await header.boundingBox())!;
+        const panelBox = (await panel.boundingBox())!;
+        if (platform === "macos") {
+          expect(headerBox.y).toBe(0);
+          expect(headerBox.height).toBe(WINDOW_BAR_HEIGHT);
+          // Beside the open rail the header starts at the panel's edge;
+          // otherwise past the sidebar toggle. It ends where the panel ends.
+          expect(headerBox.x).toBe(rail === "open" ? 288 : MACOS_BAR_ROW_LEFT);
+          expect(headerBox.x + headerBox.width).toBe(width - 4);
+          // The panel starts under the bar, as on every other page, and the
+          // whole chat is in it.
+          expect(panelBox.y).toBe(WINDOW_BAR_HEIGHT);
+          expect(panelBox.y + panelBox.height).toBe(height - 4);
+          expect(
+            await panel.evaluate((element) => getComputedStyle(element).borderTopLeftRadius),
+          ).toBe("10px");
+          const row = (await windowBarRow(page))!;
+          expect(row.buttons.map(({ label }) => label)).toContain("More session actions");
+        } else {
+          expect(headerBox.y).toBe(platform === "windows" ? WINDOW_BAR_HEIGHT : 0);
+          // The header is the panel's first row.
+          expect(panelBox.y).toBe(headerBox.y);
+          expect(await windowBarRow(page)).not.toBeNull();
+          expect(await header.evaluate((element) => getComputedStyle(element).position)).toBe(
+            "static",
+          );
+        }
+        await expectWindowTop(page, platform);
+      };
+      await check();
+      if (output) {
+        await page.screenshot({
+          path: `${output}/chat-${platform}-${width}-${rail}.png`,
+        });
+      }
+      // The header's own buttons work from the bar: the workspace opens and
+      // closes from it.
+      await header.getByRole("button", { name: "Open workspace", exact: true }).click();
+      await page.getByRole("button", { name: "Close workspace", exact: true }).waitFor();
+      // Below 1024px the open workspace fills the window: on macOS the header
+      // steps out of the bar under it (expectWindowTop checks it is hidden
+      // and takes no clicks).
+      if (platform === "macos") expect((await windowBarRow(page))!.layerOpen).toBe(width < 1024);
+      await expectWindowTop(page, platform);
+      if (width >= 1024) {
+        // So does the maximized workspace.
+        await page.getByRole("button", { name: "Maximize dock", exact: true }).click();
+        await page.getByRole("button", { name: "Restore dock", exact: true }).waitFor();
+        if (platform === "macos") expect((await windowBarRow(page))!.layerOpen).toBe(true);
+        await expectWindowTop(page, platform);
+        await page.getByRole("button", { name: "Restore dock", exact: true }).click();
+        await page.getByRole("button", { name: "Maximize dock", exact: true }).waitFor();
+        await expectWindowTop(page, platform);
+      }
+      await page.getByRole("button", { name: "Close workspace", exact: true }).click();
+      await header.getByRole("button", { name: "Open workspace", exact: true }).waitFor();
+      await check();
+      if (rail === "collapsed") {
+        // The toggle beside the header still takes clicks.
+        await page.getByRole("button", { name: "Expand sidebar", exact: true }).click();
+        await page.getByRole("button", { name: "Collapse sidebar", exact: true }).waitFor();
+      }
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+  }
+}, 240_000);
+
+test("the macOS sidebar toggle is centred on the traffic lights", async () => {
+  // The shell reports its bar (`?bar=`) and zoom (`?zoom=`); a shell that
+  // doesn't (0.1.33 and older) has the lights lower, on its old 56px row.
+  // Page pixels times the zoom are window points, where the lights are.
+  const shells = [
+    { bar: "44", zoom: 1, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 1.25, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 1.5, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 0.8, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "none", zoom: 1, lights: LEGACY_MAC_TRAFFIC_LIGHT_POSITION },
+  ];
+  const layouts = [
+    { width: 1280, view: "rail", rail: "open", subchat: false },
+    { width: 1280, view: "rail", rail: "collapsed", subchat: false },
+    { width: 800, view: "rail", rail: "collapsed", subchat: false },
+    { width: 1280, view: "chat", rail: "open", subchat: false },
+    { width: 1280, view: "chat", rail: "none", subchat: false },
+    { width: 800, view: "chat", rail: "collapsed", subchat: false },
+    { width: 1280, view: "chat", rail: "open", subchat: true },
+    { width: 800, view: "chat", rail: "none", subchat: true },
+  ] as const;
+  for (const { bar, zoom, lights } of shells) {
+    // The lights' centre line, in page pixels.
+    const line = trafficLightCentre(lights) / zoom;
+    // Centred on the line when it fits above and below it, else from the top.
+    const top = (height: number) => Math.max(0, line - height / 2);
+    for (const { width, view, rail, subchat } of layouts) {
+      const page = await browser.newPage({ viewport: { width, height: 420 } });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.goto(
+        `${url}?platform=macos&bar=${bar}&zoom=${zoom}${view === "chat" ? "&view=chat" : ""}${rail === "none" ? "&rail=none" : ""}${subchat ? "&subchat=1" : ""}`,
+      );
+      const where = `bar=${bar} zoom=${zoom} ${view} ${rail} ${width}px${subchat ? " sub-chat" : ""}`;
+      const ready =
+        view === "chat"
+          ? page.locator("[data-titlebar]").getByText("Ship the window bar")
+          : page.locator("[data-session-row]").first();
+      await ready.waitFor({ timeout: 90_000 });
+      // The bar is the lights' row, centred on them, and holds its tallest
+      // row (a sub-chat's header) whole at any zoom.
+      const barHeight = (await windowBar(page))!.height;
+      expect(barHeight, where).toBeCloseTo(Math.max(2 * line, 44), 1);
+      // With no rail there is no sidebar toggle; the chat's header has the line.
+      let toggleRight = 0;
+      if (rail !== "none") {
+        const collapse = page.getByRole("button", { name: "Collapse sidebar", exact: true });
+        await collapse.waitFor();
+        if (rail === "collapsed") await collapse.click();
+        const toggle = page.getByRole("button", {
+          name: rail === "collapsed" ? "Expand sidebar" : "Collapse sidebar",
+          exact: true,
+        });
+        await toggle.waitFor();
+        const box = (await toggle.boundingBox())!;
+        // On the lights' line, to half a window point, whenever it fits.
+        expect(Math.abs(box.y - top(box.height)) * zoom, where).toBeLessThanOrEqual(0.5);
+        if (line >= box.height / 2) {
+          expect(
+            Math.abs((box.y + box.height / 2) * zoom - trafficLightCentre(lights)),
+            where,
+          ).toBeLessThanOrEqual(0.5);
+        }
+        expect(box.y + box.height, where).toBeLessThanOrEqual(barHeight + 0.01);
+        // Clear of the traffic lights and the sharing badge at any zoom.
+        expect(box.x * zoom, where).toBeCloseTo(MACOS_BAR_CONTROLS_LEFT, 1);
+        toggleRight = box.x + box.width;
+      }
+      if (view === "chat") {
+        // The chat's header shares the line, after the toggle, whole in the bar.
+        const row = (await windowBarRow(page))!;
+        expect(row.left, where).toBeGreaterThanOrEqual(toggleRight);
+        const header = await page
+          .locator("[data-window-bar-row] > [data-titlebar]")
+          .evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            // Its contents' own height, without the stretch to the line.
+            const contents = [...element.children].reduce(
+              (height, child) => Math.max(height, child.getBoundingClientRect().height),
+              0,
+            );
+            return { top: box.top, height: box.height, contents };
+          });
+        if (subchat) expect(header.contents, where).toBeCloseTo(44, 0);
+        expect(
+          Math.abs(header.top + header.height / 2 - (top(header.contents) + header.contents / 2)) *
+            zoom,
+          where,
+        ).toBeLessThanOrEqual(0.5);
+        expect(header.top, where).toBeGreaterThanOrEqual(0);
+        expect(header.top + header.height, where).toBeLessThanOrEqual(barHeight + 0.01);
+        const actions = row.buttons.find(({ label }) => label === "More session actions")!;
+        if (line >= header.contents / 2) {
+          expect(
+            Math.abs(((actions.top + actions.bottom) / 2) * zoom - trafficLightCentre(lights)),
+            where,
+          ).toBeLessThanOrEqual(0.5);
+        }
+        expect(actions.top, where).toBeGreaterThanOrEqual(0);
+        expect(actions.clickable, where).toBe(true);
+        if (subchat) {
+          // The way back to the parent is whole, below the top of the window.
+          const back = (await page
+            .getByRole("link", { name: /^Back to parent session/ })
+            .boundingBox())!;
+          expect(back.y, where).toBeGreaterThanOrEqual(0);
+        }
+      }
+      if (output) {
+        await page.screenshot({
+          path: `${output}/centre-${bar}-${zoom}-${view}-${rail}-${width}${subchat ? "-subchat" : ""}.png`,
+          clip: { x: 0, y: 0, width: 400, height: 80 },
+        });
+      }
+      expect(errors, where).toEqual([]);
+      await page.close();
+    }
+  }
+}, 360_000);

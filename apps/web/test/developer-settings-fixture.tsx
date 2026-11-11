@@ -1,11 +1,16 @@
 // Settings > Developer against an in-memory API: webhooks with deliveries, a
 // failing test, a connected provider whose test returns credential names, and
 // an organization webhook the workspace inherits. `?view=` and `?webhook=` in
-// the fixture URL pick the starting page.
+// the fixture URL pick the starting page; `?scope=organization` shows the
+// organization's Developer settings with a provider that also reaches
+// Personal workspaces.
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { WorkspaceDeveloperSettings } from "../src/components/workspace-developer-settings";
+import {
+  OrganizationDeveloperIntegrations,
+  WorkspaceDeveloperSettings,
+} from "../src/components/workspace-developer-settings";
 import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
@@ -202,19 +207,61 @@ function initialLocation(): DeveloperLocation {
   return { ...(view ? { view } : {}), ...(webhook ? { webhook } : {}) };
 }
 
+const organizationId = "33333333-3333-4333-8333-333333333333";
+let organizationProvider: Record<string, unknown> | null = {
+  organizationId,
+  url: "https://product.example/opengeni/credentials",
+  enabled: true,
+  timeoutMs: 10_000,
+  workspaceFilter: null,
+  allowPersonalWorkspaces: true,
+  createdAt: minutesAgo(60 * 24 * 5),
+  updatedAt: minutesAgo(60 * 24 * 5),
+};
+
+const organizationClient = {
+  requestJson: async (method: string, path: string, body?: Record<string, unknown>) => {
+    if (path === `/v1/organizations/${organizationId}/webhooks`) return later({ webhooks: [] });
+    if (path === `/v1/organizations/${organizationId}/credential-provider`) {
+      if (method === "PUT") {
+        organizationProvider = {
+          ...organizationProvider,
+          ...body,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return later({ provider: organizationProvider });
+    }
+    throw new Error(`fixture has no ${method} ${path}`);
+  },
+};
+
+const organizationScope =
+  new URLSearchParams(window.location.search).get("scope") === "organization";
+
 function Fixture() {
   const [location, setLocation] = useState<DeveloperLocation>(initialLocation);
   return (
     <TooltipProvider>
       <main data-canvas className="mx-auto max-w-[960px] px-4 py-6 sm:px-8">
         <SectionVariantProvider variant="group">
-          <WorkspaceDeveloperSettings
-            client={client as never}
-            workspaceId={workspaceId}
-            canManage
-            location={location}
-            onNavigate={setLocation}
-          />
+          {organizationScope ? (
+            <OrganizationDeveloperIntegrations
+              client={organizationClient as never}
+              organizationId={organizationId}
+              canManage
+              location={location}
+              onNavigate={setLocation}
+            />
+          ) : (
+            <WorkspaceDeveloperSettings
+              client={client as never}
+              workspaceId={workspaceId}
+              canManage
+              location={location}
+              onNavigate={setLocation}
+            />
+          )}
         </SectionVariantProvider>
       </main>
       <Toaster />

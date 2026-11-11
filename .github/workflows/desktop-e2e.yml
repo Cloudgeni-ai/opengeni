@@ -14,19 +14,19 @@ on:
 jobs:
   desktop-image:
     name: Desktop image build + stack assertions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -39,7 +39,7 @@ jobs:
       # Builds docker/desktop.Dockerfile, runs the container, and asserts the
       # noVNC / websockify / real-Chrome / stack-up invariants. The gated
       # live-Modal half stays skipped (no OPENGENI_P41_LIVE_MODAL). Docker is
-      # available on ubuntu-latest, so dockerAvailable() is true here.
+      # available on ubuntu-24.04, so dockerAvailable() is true here.
       - name: Desktop image e2e
         timeout-minutes: 36
         run: bun test --timeout 2100000 ./apps/worker/test/desktop-image.e2e.ts

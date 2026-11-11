@@ -19,12 +19,14 @@ import { ExternalIdentityReference } from "@opengeni/contracts/external-identiti
 import {
   accountScopedApiKeyWorkspaceAuthority,
   accessGrantAuthorizationFromContext,
+  externalActorContinuationForAuthorization,
   requireAccountAdminAuthorizationStamp,
   requireAccessContext,
   requireAccessGrantAuthorization,
   requireResolvedAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   clearWorkspaceAllowance,
@@ -69,7 +71,7 @@ export function requireAllowanceAuthority(
     (operation === "workspace-write" || operation === "member-write")
   ) {
     if (authorization.accountGrant?.permissions.includes("usage_allowances:manage")) return;
-    throw new HTTPException(403, { message: "missing permission: usage_allowances:manage" });
+    throw new MissingPermissionRefusal("usage_allowances:manage");
   }
   if (operation === "own") {
     if (grant.principalKind !== "human_session" || grant.serviceInitiator) {
@@ -82,6 +84,24 @@ export function requireAllowanceAuthority(
       workspaceAdmin ||
       accountAdmin ||
       sameOrganizationKey?.permissions.includes("workspace:read")
+    )
+      return;
+    // A person who can start chats in the workspace sees its budget (how much
+    // it has and how members share it), never the roster's usage. Agents and
+    // session-bound tokens were refused above. Someone acting through another
+    // product is not such a person, whether a product's user in an embedded
+    // chat or Site (`external_user:`) or anyone acting through an
+    // organization key (asUser), so the product's key gains nothing.
+    if (
+      operation === "budget-read" &&
+      !organizationKey &&
+      !externalActorContinuationForAuthorization(authorization) &&
+      !grant.subjectId.startsWith("external_user:") &&
+      !context.subjectId.startsWith("external_user:") &&
+      grant.principalKind === "human_session" &&
+      !grant.serviceInitiator &&
+      !context.subjectId.startsWith("api_key:") &&
+      grant.permissions.includes("sessions:create")
     )
       return;
   } else if (operation === "workspace-write") {
@@ -213,10 +233,10 @@ function usageQuery(c: Context, own: boolean) {
 }
 
 function requireAllowanceProducersEnabled(deps: ApiRouteDeps): void {
-  if (!deps.settings.usageAllowancesEnabled) {
+  if (deps.settings.usageAllowancesEnabled === false) {
     throw new HTTPException(409, {
       message:
-        "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+        "Usage allowance changes are not enabled on this deployment (OPENGENI_USAGE_ALLOWANCES_ENABLED=false).",
     });
   }
 }

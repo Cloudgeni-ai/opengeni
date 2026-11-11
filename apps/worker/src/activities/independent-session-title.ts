@@ -1,5 +1,5 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { settingsWithModelProviderCredentials } from "@opengeni/core";
+import { checkOwnSubscriptionPlan, settingsWithModelProviderCredentials } from "@opengeni/core";
 import {
   admitSessionTitleOperation,
   appendSessionEvents,
@@ -15,6 +15,7 @@ import {
   isRetryablePersistenceSqlState,
   nestedPostgresSqlState,
   readSubscriptionCoreTurnIdentity,
+  readTurnBillingOrigin,
   retrySessionTitleOperation,
   recordSessionTitleResponse,
   reserveSessionTitleDispatch,
@@ -28,7 +29,12 @@ import {
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
   withModelTransportStartedObserver,
 } from "@opengeni/runtime";
-import type { TurnExecutionPolicyV1, SessionEvent } from "@opengeni/contracts";
+import {
+  modelCallProcessingResidency,
+  parseModelCallProcessingResidency,
+  type TurnExecutionPolicyV1,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import type { TurnActivityServices } from "./types";
 import {
   PARALLEL_SESSION_TITLE_TIMEOUT_MS,
@@ -42,6 +48,7 @@ import {
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
   recordModelUsageAndDebitCredits,
+  servedRouteProcessingResidency,
 } from "./agent-turn/model-usage";
 import {
   assertSessionTitleRoute,
@@ -88,6 +95,7 @@ export async function admitIndependentSessionTitle(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  byok?: boolean;
   serviceTier?: "fast" | "priority" | "ultrafast";
 }): Promise<void> {
   if (!input.prompt.trim()) return;
@@ -115,8 +123,14 @@ export async function admitIndependentSessionTitle(input: {
     externallyBilled: input.externallyBilled,
     chargesOpenGeniCredits: input.chargesOpenGeniCredits,
     countsTowardTokenCap: input.countsTowardTokenCap,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
     pricingJson: titlePricingJson(input.settings, route.modelId),
     serviceTier: input.serviceTier,
+    processingResidency: servedRouteProcessingResidency(
+      input.settings,
+      input.route.resolvedModel,
+      route.modelId,
+    ),
   });
   const operation = await admitSessionTitleOperation(input.db, {
     identity,
@@ -194,6 +208,19 @@ export async function reconcileSessionTitleOperation(
       });
       if (!completed) return { action: "retry", delayMs: 5_000 };
       return { action: "terminal" };
+    }
+    if (operation.connectionId) {
+      const origin = await readTurnBillingOrigin(db, {
+        accountId: operation.accountId,
+        workspaceId: operation.workspaceId,
+        turnId: operation.sourceTurnId,
+      });
+      const decision = await checkOwnSubscriptionPlan(
+        { db, settings: service.settings },
+        operation.accountId,
+        origin ?? "api",
+      );
+      if (!decision.allowed) return await finish("failed");
     }
     const target = await getSessionTitleTarget(db, operation);
     if (
@@ -394,6 +421,7 @@ function recordTitleBilling(
     externallyBilled: request.externallyBilled,
     chargesOpenGeniCredits: request.chargesOpenGeniCredits,
     countsTowardTokenCap: request.countsTowardTokenCap,
+    ...(request.byok !== undefined ? { byok: request.byok } : {}),
     creditPolicyRevision: request.creditPolicyRevision,
     normalizedUsage: normalizeModelCallUsage(usage.usage),
     usage: usage.usage,
@@ -425,6 +453,10 @@ async function completeTitle(
       const events: SessionEvent[] = [];
       let usageMetrics: Parameters<typeof recordAuthoritativeModelUsageMetrics>[0] | null = null;
       const sourceKey = `session-title:${operation.id}`;
+      // The accepted route's residency, frozen with the request at admission.
+      const processingResidency =
+        parseModelCallProcessingResidency(request.processingResidency) ??
+        modelCallProcessingResidency(null);
       const identity = {
         accountId: operation.accountId,
         workspaceId: operation.workspaceId,
@@ -468,6 +500,7 @@ async function completeTitle(
             events.push(...appended);
             return { events: appended, accepted: true, canonicalStartupMilestones: [] };
           },
+          processingResidency,
         });
         if (authoritative && billing) {
           await recordAuthoritativeModelCallFact({
@@ -480,6 +513,7 @@ async function completeTitle(
             model: request.modelId,
             billing,
             subscriptionConnectionId: operation.connectionId,
+            processingResidency,
           });
           usageMetrics = {
             settings,

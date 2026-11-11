@@ -18,11 +18,6 @@ import {
   workspaceCodexSubscriptionActive,
   type DbClient,
 } from "../src";
-import {
-  ensureCodexRotationSettings,
-  setInitialActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
-} from "./fixtures/legacy-codex";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 // Codex readiness after the drained cutover (0680): every organization is
@@ -96,10 +91,6 @@ async function organization(): Promise<Org> {
   await shared!.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${sharedWorkspace!.id}::uuid, ${accountId}::uuid)`;
-  const [cutover] = await shared!.admin<{ enabled: boolean }[]>`
-    select enabled from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  expect(cutover?.enabled).toBe(true);
   return {
     accountId,
     ownerSubjectId,
@@ -107,18 +98,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function setCutover(org: Org, enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${org.accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 async function sharedConnection(
@@ -177,30 +156,17 @@ async function personalConnection(org: Org, label: string): Promise<string> {
   return connectionId;
 }
 
-async function allowPersonalFallback(org: Org, allowed: boolean): Promise<void> {
-  await shared!.admin`
-    update subscription_settings set personal_fallback_allowed = ${allowed}
-    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+/** D-53: the owner turns their own subscription on for their own turns in a workspace. */
+async function turnOn(connectionId: string, workspaceId: string): Promise<void> {
+  await shared!.admin`insert into organization_user_resource_grants (
+      account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+    )
+    select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+      ${workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+    from subscription_connections connection where connection.id = ${connectionId}::uuid`;
 }
 
 /** A legacy Personal-workspace-style credential, written before any cutover row. */
-async function legacyCredential(org: Org, workspaceId: string): Promise<string> {
-  const upserted = await upsertCodexSubscriptionCredential(client!.db, {
-    accountId: org.accountId,
-    workspaceId,
-    credentialEncrypted: encryptedTokens(`legacy-${workspaceId}`),
-    chatgptAccountId: `chatgpt-legacy-${workspaceId}`,
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: new Date(Date.now() + 86_400_000),
-    lastRefreshAt: new Date(),
-  });
-  if (upserted.kind === "unresolved_redemption") throw new Error("unexpected redemption fence");
-  await ensureCodexRotationSettings(client!.db, org.accountId, workspaceId);
-  await setInitialActiveCodexCredential(client!.db, workspaceId, upserted.id);
-  return upserted.id;
-}
 
 function serving(org: Org, workspaceId: string, subjectId: string | null) {
   return listSubscriptionCoreCodexServingConnections(client!.db, {
@@ -211,7 +177,7 @@ function serving(org: Org, workspaceId: string, subjectId: string | null) {
 }
 
 describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover", () => {
-  test("shared catalog reuse is scoped, expires, and is fenced by credential generation", async () => {
+  test("shared catalog reuse is scoped, kept once expired, and fenced by credential generation", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, `fresh-${crypto.randomUUID()}`);
     const scope = {
@@ -256,10 +222,12 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         read,
       ),
     ).toEqual(beforeActor);
+    // An expired list is still returned, with its expiry, for display reads
+    // that must not wait for a slow provider; readers check freshness.
     expect(
       (await read(new Date(observedAt + 60_000))).find((c) => c.connectionId === connectionId)
         ?.modelCatalog,
-    ).toBeNull();
+    ).toEqual({ slugs: ["test-model"], observedAt, expiresAt: observedAt + 60_000 });
     expect(
       (await read(new Date(observedAt - 1))).find((c) => c.connectionId === connectionId)
         ?.modelCatalog,
@@ -298,11 +266,9 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
 
   test("personal funding in a private shared-workspace session requires its exact accepted v2", async () => {
     const org = await organization();
-    await personalConnection(org, "exact-personal");
-    await allowPersonalFallback(org, true);
-    await shared!.admin`insert into subscription_person_preferences
-      (account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.ownerMembershipId}::uuid, true)`;
+    const personal = await personalConnection(org, "exact-personal");
+    // Turned on here by its owner (D-53); the retired opt-in no longer funds anything.
+    await turnOn(personal, org.sharedWorkspaceId);
     const accept = (human: boolean) =>
       withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () => {
         const session = await createSession(client!.db, {
@@ -387,46 +353,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         org.ownerSubjectId,
       );
       expect(restrictions["codex/"]).toBeNull();
-    }
-  });
-
-  test("a born-enabled organization without a core connection is not ready, even with frozen legacy rows", async () => {
-    const org = await organization();
-    const ws = org.sharedWorkspaceId;
-    // A legacy credential written in the pre-cutover world, then the row returns.
-    await setCutover(org, null);
-    await legacyCredential(org, ws);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-    expect(
-      (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toEqual([]);
-    await setCutover(org, true);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-    expect(
-      await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
-    ).toBe(false);
-    // No connection can serve: every Codex model is closed.
-    expect(
-      (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toEqual([]);
-  });
-
-  test("a disabled cutover fails closed without reading a legacy Codex table", async () => {
-    const org = await organization();
-    const ws = org.sharedWorkspaceId;
-    await sharedConnection(org, "shared-maintenance");
-    await setCutover(org, false);
-    {
-      expect(await serving(org, ws, org.ownerSubjectId)).toEqual([]);
-      expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-      expect(
-        await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
-      ).toBe(false);
-      expect(
-        (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))[
-          "codex/"
-        ],
-      ).toEqual([]);
     }
   });
 

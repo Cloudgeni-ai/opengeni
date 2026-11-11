@@ -308,6 +308,7 @@ describe("readable per-turn grouping", () => {
     expect(waitingRow?.kind === "activity" && waitingRow.work?.waiting).toEqual({
       label: "Waiting for you",
       since: waiting.occurredAt,
+      waitingOn: "you",
     });
     for (const status of ["cancelled", "failed"]) {
       const terminal = legacy("session.status.changed", { status });
@@ -624,6 +625,44 @@ describe("readable per-turn grouping", () => {
     expect(workRows(groups)).toHaveLength(0);
     expect(kinds(groups)).toEqual(["context-compaction"]);
     expect(groups[0]).toMatchObject({ kind: "item", item: { phase: "compacted" } });
+  });
+
+  test("a proactive maintenance compaction as the last turn leaves no live work row", () => {
+    sequence = 0;
+    const turn = { turnId: "maintenance" };
+    const groups = fold([
+      ...tool("read", "exec_command", "turn-1"),
+      event("turn.completed", {}),
+      event("session.context.compaction.requested", { trigger: "proactive" }),
+      event("turn.started", {}, turn),
+      event("turn.startup.phase.started", { phase: "tools" }, turn),
+      event("turn.startup.phase.completed", { phase: "tools", durationMs: 20 }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event(
+        "turn.startup.phase.failed",
+        {
+          phase: "model_preparation",
+          expectedTransition: true,
+          failureCode: "compaction_required",
+          retryable: true,
+        },
+        turn,
+      ),
+      event("session.context.compaction.started", { trigger: "proactive" }, turn),
+      event("session.context.compacted", { trigger: "proactive" }, turn),
+      event("turn.completed", { result: "compacted", maintenance: "context_compaction" }, turn),
+      event("session.status.changed", { status: "idle" }, turn),
+    ]);
+    // Only the conversational turn keeps a (settled) work row; the
+    // maintenance turn's startup rows leave nothing live behind.
+    expect(workRows(groups)).toHaveLength(1);
+    expect(workRows(groups).every((row) => row.kind === "activity" && row.work!.endedAt)).toBe(
+      true,
+    );
+    expect(groups.at(-1)).toMatchObject({
+      kind: "item",
+      item: { kind: "context-compaction", phase: "compacted" },
+    });
   });
 
   test("compaction before real work attaches only to its own conversational turn", () => {

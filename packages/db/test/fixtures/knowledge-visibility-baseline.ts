@@ -1,10 +1,10 @@
-import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
+import { historicalKnowledgeSql } from "./knowledge-historical";
 import type { ListingFixture } from "./knowledge-collection-listing";
 
 /** Compare the actual current read/projection with only the visibility plan reverted. */
 export async function installVisibilityBaseline(admin: postgres.Sql, appUrl: string) {
-  const source = await readFile(new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url), "utf8");
+  const source = await historicalKnowledgeSql("knowledge_revision_visible");
   const start = source.indexOf("CREATE FUNCTION knowledge_revision_visible(");
   const end = source.indexOf("\n$$;", start);
   if (start < 0 || end < 0) throw new Error("Historical visibility function missing");

@@ -1,4 +1,4 @@
-use super::runtime::{Format, cpu_model, runtime_of};
+use super::runtime::{Format, cpu_model, host_label, runtime_of};
 use super::*;
 use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,11 @@ fn the_runtime_names_the_processor_model() {
     assert_eq!(cpu_model(cpuinfo), "AMD EPYC 9B14");
     assert_eq!(cpu_model("processor : 0\n"), "an unknown processor");
     assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
+    assert_eq!(
+        host_label("AMD EPYC 9B14", "6.12.106"),
+        " on AMD EPYC 9B14 under Linux 6.12.106"
+    );
+    assert_eq!(host_label("AMD EPYC 9B14", ""), " on AMD EPYC 9B14");
 }
 
 fn binary(runtime: &str) -> Binary {
@@ -53,6 +58,12 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
         Some(format("v8.0.0"))
     );
     assert_eq!(
+        Format::of_runtime(
+            "Firecracker snapshot format v8.0.0 on AMD EPYC 9B14 under Linux 6.18.4"
+        ),
+        Some(format("v8.0.0"))
+    );
+    assert_eq!(
         Format::of_runtime("Firecracker v1.13.1 on AMD EPYC 9B14"),
         None
     );
@@ -60,9 +71,10 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
 }
 
 /// Only proof gives an image up: a format every kept binary names and
-/// none reads. Another processor, an unnamed format, or a binary too old
-/// to name its own leaves the question open, and an image goes to the
-/// binary that made it, else to one that reads its format.
+/// none reads. An unnamed format, or a binary too old to name its own,
+/// leaves the question open, and one made on another processor is read but
+/// made elsewhere. An image goes to the binary that made it, else to one
+/// that reads its format.
 #[test]
 fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon");
@@ -74,7 +86,10 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
 
     assert_eq!(readable(&current, &new.runtime), Readable::Yes);
     let elsewhere = "Firecracker snapshot format v12.0.0 on AMD EPYC";
-    assert_eq!(readable(&current, elsewhere), Readable::Yes);
+    assert!(matches!(
+        readable(&current, elsewhere),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC") && why.contains("Intel Xeon")
+    ));
     assert_eq!(
         chosen(&current, elsewhere).map(|binary| &binary.runtime),
         Some(&new.runtime)
@@ -97,6 +112,44 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     assert_eq!(readable(&current, ""), Readable::Unknown);
     assert_eq!(readable(&with_legacy, &old.runtime), Readable::Unknown);
     assert_eq!(chosen(&current, &legacy.runtime).map(|_| ()), None);
+}
+
+/// The processor state KVM saves depends on the host kernel, and an image
+/// made under a newer one can hold registers an older one refuses. So an
+/// image made under another kernel is read but made elsewhere, while the
+/// binary that made it still restores it; so may be an image labelled
+/// before labels named the kernel.
+#[test]
+fn an_image_made_under_another_kernel_is_made_elsewhere() {
+    let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon under Linux 6.12.106");
+    let old = binary("Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.12.106");
+    let both = [&new, &old];
+
+    assert_eq!(readable(&both, &new.runtime), Readable::Yes);
+    let newer_kernel = "Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, newer_kernel),
+        Readable::Elsewhere(why) if why.contains("6.18.47") && why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, newer_kernel).map(|binary| &binary.runtime),
+        Some(&old.runtime),
+        "the binary that made it, whatever the kernel"
+    );
+    let unlabelled = "Firecracker snapshot format v8.0.0 on Intel Xeon";
+    assert!(matches!(
+        readable(&both, unlabelled),
+        Readable::Elsewhere(why) if why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, unlabelled).map(|binary| &binary.runtime),
+        Some(&old.runtime)
+    );
+    let both_differ = "Firecracker snapshot format v12.0.0 on AMD EPYC under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, both_differ),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC")
+    ));
 }
 
 /// Only a VMM that answered, or died loading, has judged the image; a lost
@@ -122,6 +175,30 @@ fn only_a_refusal_or_an_exit_while_loading_counts_against_an_image() {
     }
     let died = ApiError::Io(io::ErrorKind::BrokenPipe.into());
     assert_eq!(load_failure(died, false).kind, ErrorKind::MemoryLost);
+}
+
+/// An image saved on a host whose KVM kept no realtime clock is told apart
+/// from other refusals by Firecracker's answer, as a nested host without an
+/// invariant TSC gives it, so the restore is tried once more without moving
+/// the clock; any other refusal stands.
+#[test]
+fn a_refusal_for_a_missing_realtime_clock_is_told_apart() {
+    let refusal = |status, body: &str| ApiError::Status {
+        method: "PUT",
+        path: "/snapshot/load".into(),
+        status,
+        body: body.into(),
+    };
+    let missing = r#"{"fault_message":"Load snapshot error: Failed to restore from snapshot: Failed to build microVM from snapshot: Failed to restore microVM state: clock_realtime requested but not present in the snapshot state"}"#;
+    assert!(lacks_realtime_clock(&refusal(400, missing)));
+    assert!(!lacks_realtime_clock(&refusal(
+        400,
+        r#"{"fault_message":"Load snapshot error: unsupported snapshot version"}"#
+    )));
+    assert!(!lacks_realtime_clock(&refusal(500, missing)));
+    assert!(!lacks_realtime_clock(&ApiError::Timeout(
+        Duration::from_secs(1)
+    )));
 }
 
 /// A launch records its runtime beside the jail, so an agent that takes
@@ -350,6 +427,100 @@ async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
     assert!(matches!(error, ApiError::Timeout(_)), "{error}");
 }
 
+/// Makes a group's `memory.pressure` report its processes waiting for
+/// memory all the time, as when the kernel slows them, until dropped.
+/// It reports them far ahead of the clock, so that any one report between
+/// two looks covers all the time between them. It writes from a task on
+/// the test's own clock, which the tests using it pause: a writer of its
+/// own on a busy machine was held up past a whole look, and that look
+/// then rightly counted the time. The first report is there before it
+/// returns.
+struct Waiting(tokio::task::JoinHandle<()>);
+
+impl Waiting {
+    fn start(group: &Path) -> Self {
+        let group = group.to_owned();
+        let started = tokio::time::Instant::now();
+        let report = move |group: &Path| {
+            // A thousand times the time passed.
+            let total = started.elapsed().as_micros() * 1_000;
+            let next = group.join("memory.pressure.next");
+            fs::write(
+                &next,
+                format!(
+                    "some avg10=100.00 avg60=100.00 avg300=100.00 total={total}\n\
+                     full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                ),
+            )
+            .unwrap();
+            fs::rename(&next, group.join("memory.pressure")).unwrap();
+        };
+        report(&group);
+        Self(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                report(&group);
+            }
+        }))
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Once the VMs together pass the memory the host leaves them, the kernel
+/// slows every VMM thread that takes more, and a VMM it slows answers
+/// late: its request waits that out instead of failing, then has its own
+/// time again.
+#[tokio::test(start_paused = true)]
+async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let started = tokio::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // Many times its 200 ms deadline.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(!call.is_finished(), "the slowed VMM's request kept waiting");
+    drop(waiting);
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    // Its 200 ms counted from the first or second look (100 ms apart)
+    // after the last report, depending on which came first at 1 s.
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_200) && took < Duration::from_millis(1_400),
+        "once no longer slowed it had its own time, then failed: {took:?}"
+    );
+}
+
+/// A VMM stuck while its group waits for memory for good, as under a limit
+/// of its own its guest keeps pushing against, still fails in the end: of
+/// time it waits, only so much a request goes uncounted.
+#[tokio::test(start_paused = true)]
+async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let _waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api
+        .held_by(own)
+        .with_memory_wait_limit(Duration::from_millis(500));
+    let started = tokio::time::Instant::now();
+    let error = api.call("GET", "/", None).await.unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(700) && took < Duration::from_millis(800),
+        "the 500 ms it may wait, then its 200 ms: {took:?}"
+    );
+}
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
@@ -365,8 +536,8 @@ fn boot_pins_the_clock_source_restore_can_correct() {
 
 #[test]
 fn a_guest_reports_freed_memory_in_blocks_the_host_can_give_back() {
-    assert_eq!(reporting_order(PageSize::Base), 0);
-    assert_eq!(reporting_order(PageSize::Huge), 9);
+    assert_eq!(balloon::reporting_order(PageSize::Base), 0);
+    assert_eq!(balloon::reporting_order(PageSize::Huge), 9);
     assert_eq!(
         boot_args("console=ttyS0", Some(PageSize::Huge)),
         "console=ttyS0 clocksource=kvm-clock page_reporting.page_reporting_order=9"
@@ -413,9 +584,11 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
     };
     let jail = Jail::new(&spec).unwrap();
     let bare = MemoryProfile::bare_metal();
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(body["clock_realtime"], true);
     assert_eq!(body["resume_vm"], false);
+    let clock_as_saved = load_request(&spec, &jail, &files, bare, false).unwrap();
+    assert_eq!(clock_as_saved["clock_realtime"], false);
     assert_eq!(body["snapshot_path"], "/vm.state");
     assert_eq!(body["mem_backend"]["backend_path"], "/vm.mem");
     assert_eq!(body["vsock_override"]["uds_path"], "/vsock.sock");
@@ -426,7 +599,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         mac: "06:00:ac:10:00:02".into(),
         namespace: None,
     });
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(
         body["network_overrides"],
         json!([{ "iface_id": "eth0", "host_dev_name": "tap0" }])
@@ -437,7 +610,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
         made_under: None,
     };
-    assert!(load_request(&spec, &jail, &outside, bare).is_err());
+    assert!(load_request(&spec, &jail, &outside, bare, true).is_err());
 }
 
 fn spec() -> VmSpec {
@@ -502,12 +675,12 @@ fn the_profile_decides_page_size_and_dirty_tracking() {
         memory: paged_source(),
         made_under: None,
     };
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested(), true).unwrap();
     assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
     assert_eq!(body["mem_backend"]["backend_path"], "/uffd.sock");
     assert_eq!(body["huge_pages"], "2M");
     assert_eq!(body["track_dirty_pages"], false);
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal(), true).unwrap();
     assert_eq!(body["huge_pages"], "None");
     assert_eq!(body["track_dirty_pages"], true);
 }

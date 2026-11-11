@@ -2,29 +2,29 @@ import { View } from "react-native";
 import { Icon } from "./icon";
 import { useNativeTimelineTheme } from "./theme";
 
-/** The question form's radio (single) or checkbox (multi) mark. */
+/** The question form's radio (single) or checkbox (multi) mark, as on web: solid when chosen. */
 export function Selector({ multi, selected }: { multi: boolean; selected: boolean }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   return (
     <View
       style={{
-        marginTop: 2,
-        width: 14,
-        height: 14,
-        borderRadius: multi ? 3 : 7,
+        marginTop: 1,
+        width: 18,
+        height: 18,
+        borderRadius: multi ? 5 : 9,
         borderWidth: 1,
-        borderColor: selected ? c.accent : c["fg-muted"],
-        backgroundColor: selected && multi ? c.accent : c["surface-1"],
+        borderColor: selected ? c.fg : c["border-strong"],
+        backgroundColor: selected ? c.fg : c["surface-1"],
         alignItems: "center",
         justifyContent: "center",
       }}
     >
       {selected ? (
         multi ? (
-          <Icon name="check" size={10} color={c["accent-fg"]} strokeWidth={3} />
+          <Icon name="check" size={12} color={c.bg} strokeWidth={3} />
         ) : (
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.accent }} />
+          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.bg }} />
         )
       ) : null}
     </View>

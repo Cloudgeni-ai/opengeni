@@ -6,7 +6,11 @@
  * entitlements before placement and records a selection receipt). Nothing
  * here names a provider.
  */
-import { getSessionGoal, subscriptionCoreTurnActor } from "@opengeni/db";
+import {
+  childWaitingCapacityDedupeKey,
+  getSessionGoal,
+  subscriptionCoreTurnActor,
+} from "@opengeni/db";
 import type {
   Database,
   SubscriptionCorePlacement,
@@ -15,6 +19,7 @@ import type {
 } from "@opengeni/db";
 import { readSubscriptionCoreTurnIdentity } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { deliverChildLifecycleOutboxToParent } from "../parent-wake";
 import { handOverWaitToSteer } from "./waiting-steer";
 import {
   recordTurnStartupPhase,
@@ -25,7 +30,6 @@ import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import {
   subscriptionCoreCapacityFailure,
   subscriptionCoreCapacityWaitPayload,
-  subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreLeaseBusyFailure,
 } from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
@@ -115,7 +119,8 @@ export async function assertCoreSourceConnected(
 
 /**
  * Wrap a core credential resolver for one attempt: every read and refresh
- * rechecks the source and this attempt's live lease. A lost lease marks the
+ * rechecks the source (a read through its own credential load) and this
+ * attempt's live lease. A lost lease marks the
  * local holder lost, so dispatch stops with the ordinary lease-loss error; a
  * failure is reclassified as a disconnect only on proven lifecycle
  * disconnect, never on an ordinary pause.
@@ -128,23 +133,61 @@ export function guardCoreTokenResolver<Snapshot>(
   resolver: { getToken: () => Promise<Snapshot>; refresh: () => Promise<Snapshot> },
   isLeaseLost: (error: unknown) => boolean,
 ): { getToken: () => Promise<Snapshot>; refresh: () => Promise<Snapshot> } {
-  const guarded = (resolve: () => Promise<Snapshot>) => async (): Promise<Snapshot> => {
-    await assertCoreSourceConnected(db, provider, core);
-    try {
-      lease.assertUsable();
-      return await resolve();
-    } catch (error) {
-      // The loader/refresh may have raced secret scrubbing or lease expiry.
-      // Reclassify only a proven lifecycle disconnect, never ordinary pause.
-      await assertCoreSourceConnected(db, provider, core);
-      if (isLeaseLost(error)) {
-        lease.markLost("not_found");
+  // A read needs no source check before it: a disconnected connection is
+  // disabled and scrubbed (a table check), so the credential load refuses it
+  // in its own lease-scoped transaction, and the catch below names that
+  // refusal a disconnect. A refresh may reach the provider, so it checks the
+  // source first.
+  const guarded =
+    (resolve: () => Promise<Snapshot>, checkSourceFirst: boolean) =>
+    async (): Promise<Snapshot> => {
+      if (checkSourceFirst) await assertCoreSourceConnected(db, provider, core);
+      try {
         lease.assertUsable();
+        return await resolve();
+      } catch (error) {
+        // The loader/refresh may have raced secret scrubbing or lease expiry.
+        // Reclassify only a proven lifecycle disconnect, never ordinary pause.
+        await assertCoreSourceConnected(db, provider, core);
+        if (isLeaseLost(error)) {
+          lease.markLost("not_found");
+          lease.assertUsable();
+        }
+        throw error;
       }
-      throw error;
-    }
+    };
+  return {
+    getToken: guarded(resolver.getToken, false),
+    refresh: guarded(resolver.refresh, true),
   };
-  return { getToken: guarded(resolver.getToken), refresh: guarded(resolver.refresh) };
+}
+
+/**
+ * The last step before a core request reaches the wire: its reservation.
+ * The reservation is the dispatch fence. In one transaction it rechecks the
+ * accepted turn and attempt, reads the source under the connection lock
+ * (disconnected or paused refuses) and holds the live lease KEY SHARE while
+ * it inserts the one-shot permit, so separate source and lease reads before
+ * it would prove nothing more and cost two more sequential transactions per
+ * model request. A lease the reservation finds lost marks the local holder
+ * lost and stops with the lease's own loss error, as the separate lease read
+ * did.
+ */
+export async function admitCoreRequest<T>(
+  lease: Pick<CoreSubscriptionTurnLease, "assertUsable" | "markLost">,
+  reserve: () => Promise<T>,
+  isLeaseLost: (error: unknown) => boolean,
+): Promise<T> {
+  lease.assertUsable();
+  try {
+    return await reserve();
+  } catch (error) {
+    if (isLeaseLost(error)) {
+      lease.markLost("not_found");
+      lease.assertUsable();
+    }
+    throw error;
+  }
 }
 
 /** The lease reference a core turn's credential reads and requests carry. */
@@ -239,8 +282,6 @@ export async function selectCoreSubscriptionTurnCapacity(
       case "not_visible":
       case "attempt_fenced":
         return fenced();
-      case "cutover_not_enabled":
-        throw subscriptionCoreCutoverDisabledFailure(provider.displayName);
       case "lease_busy":
         throw subscriptionCoreLeaseBusyFailure(
           placement.leasedUntil,
@@ -248,9 +289,11 @@ export async function selectCoreSubscriptionTurnCapacity(
           provider.displayName,
         );
       case "wait":
-        // Maintenance never parks: as on the legacy path, compaction is
-        // cancelled with its request preserved and runs again with the
-        // session's next work, instead of holding a capacity waiter.
+        // Maintenance never parks: compaction is cancelled instead of holding
+        // a capacity waiter. An operator request is preserved and runs again
+        // with the session's next work; an automatic `proactive` request is
+        // dropped, so it cannot keep winning claims ahead of pending input
+        // with nothing to wake it when capacity returns.
         if (turn.source === "compaction") return await deferCoreCompaction(deps, placement);
         // Park the same turn on the durable core waiter (EP-T09); it resumes
         // when placement can serve it again (a reset, a wake or a timer).
@@ -301,7 +344,12 @@ export async function selectCoreSubscriptionTurnCapacity(
   }
 }
 
-/** The legacy compaction capacity outcome (`requestPreserved`), on a core wait. */
+/**
+ * The compaction capacity outcome on a core wait. The settlement decides from
+ * the request label under the session lock: an operator request is preserved
+ * (`requestPreserved: true`), a `proactive` one is dropped with a
+ * `capacity_unavailable` skipped landmark (`requestPreserved: false`).
+ */
 async function deferCoreCompaction(
   deps: CapacityPhaseDeps,
   wait: WaitPlacement,
@@ -323,6 +371,7 @@ async function deferCoreCompaction(
     turnStatus: "cancelled",
     sessionStatus: "idle",
     activeTurnId: null,
+    dropProactiveCompactionRequest: true,
   });
   if (!settled) return { exit: claimedResult({ status: "cancelled" }) };
   control.turnMetricOutcome = "cancelled";
@@ -440,11 +489,33 @@ export async function parkCoreSubscriptionTurn(
     );
     if (evaluated?.action === "resumed") {
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       return { exit: claimedResult({ status: "recovering" }) };
     }
     if (evaluated?.action === "waiting") {
+      // A long wait told the worker's parent in the arm commit; deliver it now
+      // so the parent hears at once (the outbox reaper is only the fallback).
+      if (deps.settings.childLifecycleNoticesEnabled && deps.session.parentSessionId) {
+        await deliverChildLifecycleOutboxToParent(
+          {
+            db,
+            bus,
+            settings: deps.settings,
+            observability: deps.observability,
+            wakeSessionWorkflow: deps.wakeSessionWorkflow,
+          },
+          input.workspaceId,
+          input.sessionId,
+          childWaitingCapacityDedupeKey({
+            childSessionId: input.sessionId,
+            waiterId: armed.waiter.waiterId,
+          }),
+          { requireRow: false },
+        );
+      }
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "waiting_capacity";
       return {
         exit: claimedResult({

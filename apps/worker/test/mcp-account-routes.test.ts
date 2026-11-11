@@ -143,13 +143,13 @@ test("simultaneous routes retain canonical restrictions and distinct exact accou
     expect(server.headers).toBeUndefined();
   }
   expect(result.accountLabels.get(personal.serverId)).toEqual({
-    model: "mail — Personal: alice@example.test",
+    model: "mail — alice@example.test · Yours",
     connector: "mail",
     providerDomain: "example.test",
     account: "alice@example.test",
   });
   expect(result.accountLabels.get(workspace.serverId)).toEqual({
-    model: "mail — Workspace: Team inbox",
+    model: "mail — Team inbox · Shared",
     connector: "mail",
     providerDomain: "example.test",
     account: "Team inbox",
@@ -163,9 +163,10 @@ test("people see a connector's account only when there are several to tell apart
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [{ ...personal, accountLabel: "alice@example.test · Only me" }],
   });
-  // The model is still told exactly which account it is using.
+  // The model is still told exactly which account it is using, and whose it is;
+  // a label admitted with the older scope words reads the same.
   expect(single.accountLabels.get(personal.serverId)).toEqual({
-    model: "mail — Personal: alice@example.test · Only me",
+    model: "mail — alice@example.test · Yours",
     connector: "mail",
     providerDomain: "example.test",
   });
@@ -174,22 +175,22 @@ test("people see a connector's account only when there are several to tell apart
     settings: settings(),
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [
-      { ...personal, accountLabel: "alice@example.test · Only me" },
-      { ...workspace, accountLabel: "alice@example.test · This workspace" },
+      { ...personal, accountLabel: "alice@example.test · Yours" },
+      { ...workspace, accountLabel: "alice@example.test · Shared" },
     ],
   });
   expect(sameIdentity.accountLabels.get(personal.serverId)?.account).toBe(
-    "alice@example.test · Only me",
+    "alice@example.test · Yours",
   );
   expect(sameIdentity.accountLabels.get(workspace.serverId)?.account).toBe(
-    "alice@example.test · This workspace",
+    "alice@example.test · Shared",
   );
 
   const distinct = expandMcpAccountRoutes({
     settings: settings(),
     tools: [{ kind: "mcp", id: "mail" }],
     bindings: [
-      { ...personal, accountLabel: "alice@example.test · Only me" },
+      { ...personal, accountLabel: "alice@example.test · Yours" },
       { ...workspace, accountLabel: "team@example.test · This workspace" },
     ],
   });
@@ -207,9 +208,39 @@ test("empty accepted bindings remove authenticated defaults while null keeps his
   const empty = expandMcpAccountRoutes({ settings: original, tools, bindings: [] });
   expect(empty.tools.map((tool) => tool.id)).toEqual(["public"]);
   expect(empty.settings.mcpServers.map((server) => server.id)).toEqual(["public"]);
+  // The connector accepted with no account is reported, never silently missing.
+  expect(empty.unavailable).toEqual([{ id: "mail", name: "mail", reason: "no_account" }]);
   const legacy = expandMcpAccountRoutes({ settings: original, tools, bindings: null });
   expect(legacy.tools).toEqual(tools);
   expect(legacy.settings).toBe(original);
+  expect(legacy.unavailable).toEqual([]);
+});
+
+test("a selected connector whose sign-in was not admitted for the turn is reported by name", () => {
+  // The person's personal sign-in was not usable in this workspace when the
+  // message was accepted (for example right after a membership change), so the
+  // turn froze no account for it. Its tools are dropped, and the gap says why.
+  const named = settings();
+  named.mcpServers[0]!.name = "Mail";
+  const result = expandMcpAccountRoutes({
+    settings: named,
+    tools: [{ kind: "mcp", id: "mail", optional: true }],
+    bindings: [],
+  });
+  expect(result.tools).toEqual([]);
+  expect(result.unavailable).toEqual([{ id: "mail", name: "Mail", reason: "no_account" }]);
+
+  const host = settings();
+  host.mcpServers[0]!.connectionRef!.authoritySource = "host";
+  expect(
+    expandMcpAccountRoutes({ settings: host, tools: [{ kind: "mcp", id: "mail" }], bindings: [] })
+      .unavailable,
+  ).toEqual([{ id: "mail", name: "mail", reason: "unsupported_sign_in" }]);
+
+  // A connector that is not selected is not a gap.
+  expect(expandMcpAccountRoutes({ settings: named, tools: [], bindings: [] }).unavailable).toEqual(
+    [],
+  );
 });
 
 test("product credential targets follow account narrowing and never translate onto aliases", () => {
@@ -265,6 +296,9 @@ test("provider changes never rebind an accepted route; the stale route is droppe
   });
   expect(onlyStale.tools).toEqual([]);
   expect(onlyStale.settings.mcpServers).toEqual([]);
+  expect(onlyStale.unavailable).toEqual([
+    { id: "mail", name: "mail", reason: "account_setup_changed" },
+  ]);
 
   const mixed = expandMcpAccountRoutes({
     settings: settings(),
@@ -272,6 +306,7 @@ test("provider changes never rebind an accepted route; the stale route is droppe
     bindings: [moved, workspace],
   });
   expect(mixed.tools.map((tool) => tool.id)).toEqual([workspace.serverId]);
+  expect(mixed.unavailable).toEqual([]);
   expect(mixed.settings.mcpServers.map((server) => server.connectionRef)).toEqual([
     workspace.connectionRef,
   ]);

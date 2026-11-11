@@ -792,12 +792,18 @@ export type PublishedSiteDataViewer = {
   site: SiteDataSite;
   principal: string;
   guest: boolean;
+  /** How the viewer reaches the Site (Site SQL's `:viewer_access`), when known. */
+  access?: "member" | "invited" | "user" | "guest";
+  /** The viewer's verified email address in lowercase (Site SQL's `:viewer_email`), when known. */
+  email?: string | null;
 };
 
 /** Who is calling Site Data: an access grant, or a published Site viewer. */
 export type SiteDataAuthority = AccessGrant | PublishedSiteDataViewer;
 
-function isPublishedViewer(authority: SiteDataAuthority): authority is PublishedSiteDataViewer {
+export function isPublishedViewer(
+  authority: SiteDataAuthority,
+): authority is PublishedSiteDataViewer {
   return (authority as { kind?: unknown }).kind === "published_viewer";
 }
 

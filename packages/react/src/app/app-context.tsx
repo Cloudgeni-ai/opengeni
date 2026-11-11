@@ -3,9 +3,11 @@
 import type {
   CreateSessionRequest,
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import {
@@ -47,8 +49,22 @@ import type {
   Workspace,
 } from "./types";
 
+export type GitHubRefreshOptions = {
+  /** Re-sync the repository list from GitHub instead of reading the catalog. */
+  sync?: boolean | undefined;
+  /**
+   * The person started this refresh (connect, disconnect, an explicit
+   * Refresh or Retry), so a failure is told with a toast. Background
+   * refreshes on load and focus only record the failure: the repository
+   * picker, the GitHub card and the GitHub integration show it where GitHub
+   * is used. A background read that failed because Opengeni was briefly
+   * unreachable (a deploy, a network drop) tries again by itself.
+   */
+  userInitiated?: boolean | undefined;
+};
+
 export type AppContextValue = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -112,8 +128,6 @@ export type AppContextValue = {
   selectedPersonalGitHubRepoRefs: Record<string, string>;
   setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
   personalGitHubAuthority: McpConnectionAccountSelection | null;
-  githubAppOpen: boolean;
-  setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
   setGithubOrg: Dispatch<SetStateAction<string>>;
   selectedCapabilityToolIds: Set<string>;
@@ -121,7 +135,6 @@ export type AppContextValue = {
   busy: boolean;
   repoBusy: boolean;
   githubAppBusy: boolean;
-  selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
   toolMcpServers: McpServerOption[];
   /** Capability MCP servers currently enabled as the workspace default. */
@@ -132,6 +145,8 @@ export type AppContextValue = {
   workspaceMcpCatalogLoadedSuccessfully: boolean;
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
+  /** Who the organization lets turn integrations on (undefined: members, or not loaded). */
+  workspaceMemberIntegrationSetup?: "members" | "admins" | undefined;
   currentResources: ResourceRef[];
   repositoryValidationError: string | null;
   /**
@@ -152,6 +167,11 @@ export type AppContextValue = {
   revalidatePrincipalAccess: () => void;
   /** Refreshes the current principal's organization and workspace grants in place. */
   refreshPrincipalAccess: () => Promise<boolean>;
+  /**
+   * Reads the open workspace's client config again, for example after
+   * EU-only inference changed. Absent outside the stock app state.
+   */
+  refreshWorkspaceConfig?: () => void;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
@@ -172,6 +192,18 @@ export type AppContextValue = {
     sessionId: string,
     title: string,
   ) => Promise<Session | null>;
+  /**
+   * Change a chat's name, description or avatar as the person (what makes a
+   * chat a bot). Only the named fields change; null clears one. Absent in
+   * hosts that predate bots.
+   */
+  updateSessionProfile?:
+    | ((
+        workspaceId: string,
+        sessionId: string,
+        change: import("@opengeni/sdk").UpdateSessionRequest,
+      ) => Promise<Session | null>)
+    | undefined;
   /** Optimistically set the current member's personal session pin. */
   updateSessionPin: (
     workspaceId: string,
@@ -183,16 +215,24 @@ export type AppContextValue = {
   refreshGitHub: (
     workspaceId: string,
     signal?: AbortSignal,
-    options?: { sync?: boolean | undefined },
+    options?: GitHubRefreshOptions,
   ) => Promise<void>;
-  refreshPersonalGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  refreshPersonalGitHub: (
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: Pick<GitHubRefreshOptions, "userInitiated">,
+  ) => Promise<void>;
   connectPersonalGitHub: (workspaceId: string) => Promise<void>;
   reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
   disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;
+  /** `allRepositoriesAccess` turns All my repositories on or off (null); omitted keeps it. */
   savePersonalGitHubRepositories: (
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ) => Promise<boolean>;
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  searchPersonalGitHubRepositories: (workspaceId: string, query: string) => Promise<void>;
   ensurePersonalGitHubAuthority: (
     workspaceId: string,
   ) => Promise<McpConnectionAccountSelection | null>;
@@ -212,6 +252,8 @@ export type AppContextValue = {
       instructions?: string | undefined;
       /** Installed session-selected Skills to freeze onto this exact session. */
       installedSkillIds?: string[] | undefined;
+      /** Start the chat with an agent: it follows the agent's Instructions and shows its icon. */
+      agent?: import("./lib/session-create").NewSessionAgent | undefined;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[] | undefined;
       newSessionDraftToolPolicy?:

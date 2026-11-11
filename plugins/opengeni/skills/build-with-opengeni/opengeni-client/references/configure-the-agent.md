@@ -4,6 +4,8 @@ One `agent` object sets who the agent is and what it can do. The proxy's
 `createSession` hook, `og.client.createSession`, scheduled tasks, and the chat
 facade all accept it, and every session reports it back as `session.agent`.
 
+<!-- doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" -->
+
 ```ts
 agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
@@ -23,6 +25,8 @@ needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists.
 | Capability            | Lets the agent                                          |
 | --------------------- | ------------------------------------------------------- |
 | `humanInput`          | ask the user a question (on in `"none"`)                |
+| `notifications`       | notify, call, and tidy the inbox of the user            |
+| `privacyFacts`        | answer privacy questions from the deployment's facts    |
 | `skills`              | `"read"` Skills (default in `"none"`), or `"manage"`    |
 | `webSearch`           | search the web                                          |
 | `knowledge`           | search and save workspace Knowledge                     |
@@ -42,6 +46,23 @@ tools come from the sandbox; `sandboxBackend: "none"` removes them.
 
 A customer-facing assistant usually starts from `"none"` plus what it needs. An
 internal operator agent usually starts from `"all"` minus what it must not do.
+
+`"none"` pays only for what the session can use on every call. It gets a
+neutral identity unless the session shares a workspace; `request_human_input`
+offers the secret kind only with `secrets` and Skill reviews only with
+`skills: "manage"`, and is left out when nobody can answer: pass
+`unattended: true` for a session no person answers (or turn `humanInput` off);
+`wait_for_input` comes only with a sandbox, `subagents`,
+`goals`, `schedules`, `browser`, `media` or `workspaceAdmin` (a person needs no
+wait: an answer resumes the turn), and Codemode guidance only with a sandbox or
+`run_on`; tool search
+only when a tool is deferred (list the product server with `eager: true`, not
+`optional` and without a `connectionRef`, to avoid it); no Skill index without
+Skills. Prompt sections follow their capability. Switch an item back on with
+its capability, for example `{ from: "none", privacyFacts: true }`. Saved
+workspace defaults and schedules keep notifications and privacy facts under
+`"none"`. `getSessionModelContext` returns the latest request's provider body;
+on the native Anthropic route it also lists the instructions and each tool.
 
 ## Identity, instructions, renderer
 
@@ -71,8 +92,15 @@ await og.client.updateSessionAgent(workspaceId, sessionId, {
 ## Check the result
 
 `session.agent` is the resolved configuration, including `unavailable`
-capabilities. `session.effectiveTools.tools` lists every tool the agent can
-use, each with its `capability`. Errors: 422 `agent_capability_unavailable`
+capabilities. The packaged chat UI selects compact responses, which omit
+instructions, Skill bodies and the full tool catalog. SDK defaults retain the
+full response; custom chat clients can select `client.withSessionResponse("chat")`.
+For an authorized settings or backend read, use
+`const configuration = await og.client.getSessionConfiguration(workspaceId, sessionId)`.
+This requires `sessions:control` and access to that session;
+`configuration.effectiveTools?.tools` lists the tools, each with its `capability`.
+Server-owned browser relays refuse this read; keep it on the backend.
+Errors: 422 `agent_capability_unavailable`
 (the deployment does not offer it), `agent_config_conflict` (contradictory
 fields), and `agent_config_widening` (a child session asked for more than its
 parent).

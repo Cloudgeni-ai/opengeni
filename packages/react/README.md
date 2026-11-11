@@ -131,6 +131,9 @@ A message sent while the agent works is then read as soon as it can, usually
 within seconds. There is no Queue choice beside Send and no Queue or Steer
 words; a message sent while the workstream is paused waits and shows as a
 waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+The server makes the steer-or-start choice when the message arrives
+(`delivery: "steer_or_send"`), so a message reaches the running turn even if
+the page's view of the session is a few seconds old.
 
 An open conversation marks itself read for the signed-in person while they can
 see it: its timeline is on screen, the page is visible, the window is focused,
@@ -219,6 +222,25 @@ someone else's product with zero styling:
   `modelPicker`, or report `modelSelection: true` from the proxy
   (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
   also fixes the policy server-side.
+- **Agent signals can be hidden**: the goal pill (and any agents or commands
+  segments you pass in `chromeProps`) show how the agent works. For end users
+  to whom a paused goal or a helper-agent count means nothing, pass
+  `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
+  `OpenGeniChat`). Queued messages, approvals and the agent's questions still
+  show, and the goal is not read at all. Turn rows then show only their status,
+  and an automation run shows as its one line and its answer.
+  To hide only some of it, pass an object of switches, each `true` unless set:
+  `agentSignals={{ goal: false }}` drops the goal pill and keeps queued
+  messages, helper agents and turn-row detail (your `turnSummary` facets and
+  the live step). The switches are `goal`, `agents`, `commands` and
+  `turnDetail`.
+- **The session row lines up with the composer**: queue, wait, goal and agents
+  chips sit in the composer's readable column in a wide panel; a
+  `chromeProps.className` is added to that row and isn't needed to center it.
+- **Automation runs read as what happened**: a run shows one line, the
+  automation's name and what the event that started it says, never its
+  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
+  person) is not drawn at all.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
@@ -1019,6 +1041,15 @@ headless controller and compound primitives as a namespace. The controller is
 the one behavior path for keyboard routing, guarded queue/steer submission,
 attachments, commands, pause/resume, focus, confirmations, and feedback.
 
+Pass `imageTags` (on `ChatComposer`, `useChatComposerController`, or
+`SessionConversation`'s `composerProps`) to keep each image next to the words
+about it. Pasting, dropping or attaching an image puts a plain-text
+`[Image N]` tag in the text where the person was writing, and the image's chip
+shows the same number. Removing an image removes its tag and renumbers the
+later ones. Image N is the Nth image the message carries, which is the order
+the agent receives them, so the message and API stay the same. It is off by
+default.
+
 ```tsx
 import * as Composer from "@opengeni/react/composer";
 
@@ -1160,8 +1191,11 @@ state remains application-owned; durable draft and session state remain in
   visible queue order (including while paused); `steer()` puts the new direction
   directly in chat, and a running turn reads it as soon as it can, usually
   within seconds, without cutting off running tools. With `busySend: "steer"`,
-  `send()` steers while a turn is running or prompts wait (it still queues
-  while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
+  `send()` submits `delivery: "steer_or_send"` and the server steers the
+  running (or starting) turn or else starts one (it still queues while
+  paused), so a stale local view never queues the message; against a server
+  that predates `steer_or_send` it falls back to its own choice.
+  `sendToQueue()` always queues; the default `"queue"` keeps
   Send queueing. `alternateSend` names the other choice while Send takes that
   busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
   beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
@@ -1369,6 +1403,23 @@ earlier prose and activity in chronological order, not a fold of multiple turns.
 An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
+
+A failure is shown once. If your host shows a session failure itself together
+with what to do about it (for example a banner with Retry), pass that failure's
+event ids as `presentedFailureEventIds`: the turn's row then says only "Failed"
+and the timeline leaves the text to you. Without it, the turn's row carries the
+failure text. An attempt that Retry replaced is always one quiet
+"Attempt failed · retried" step with its text behind the disclosure.
+
+`turnSummary.renderLiveMark` leads the live Working, Waiting or Paused row with
+the host's own mark, such as a small animated mascot. It receives the row's
+state (`{ kind: "working" | "waiting" | "paused", waitingOn?: "you" }`, where
+`waitingOn: "you"` marks an approval or question), is no longer called once
+the turn settles, and renders nothing by default. Draw it about 20 px tall; it
+is `aria-hidden` because the row's words carry the meaning.
+`SessionConversation` takes it as
+`timelineProps={{ turnSummary: { rolling: true, renderLiveMark } }}`.
+
 Expanded outer work headers stay reachable at the top of the timeline until
 their own details end; nested headers never stick. The contextual navigation
 pill stays below the sticky-header strip and avoids interactive controls. If
@@ -1737,7 +1788,12 @@ visible touch targets when styling actions.
 
 `ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
 load the versioned facts with `client.getToolActionReview`. It shows one selected
-action, counts and bounded fields instead of raw argument JSON. Keep
+action, counts and bounded fields instead of raw argument JSON.
+A host may also return its own `ToolActionReview` (a plain title and consequence
+for a tool whose arguments are only identifiers), or `null` to keep the standard
+card for that approval. The React Native `ApprovalStrip` and
+`NativeSessionScreen` take the same `loadReview`.
+Keep
 `selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
 detail route unmounts the surface, so returning cannot silently select a different
 action. The native `onApprove` / `onReject` identity is unchanged and duplicate

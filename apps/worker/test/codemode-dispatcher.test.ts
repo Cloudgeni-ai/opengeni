@@ -4,6 +4,7 @@ import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   SecretReferenceError,
   buildMissingSecretAskCard,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
@@ -39,6 +40,7 @@ import {
   submitCodemodeOperation,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import { McpAccountParameterChoiceError } from "@opengeni/runtime";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -1081,6 +1083,50 @@ describe("CodemodeAttemptDispatcher", () => {
     }
   });
 
+  test("an account value to choose settles as not executed with the choices", async () => {
+    if (!available) return;
+    const { scope, environment } = await fixture(async () => {
+      throw new McpAccountParameterChoiceError("siteId", [
+        { value: "site-1", label: "Alpha" },
+        { value: "site-2", label: "Beta" },
+      ]);
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      const operation = await waitForTerminal(scope, operationId);
+      expect(operation).toMatchObject({
+        state: "failed",
+        errorCode: "connector_action_not_executed",
+      });
+      expect(operation!.errorMessage).toContain("siteId");
+      expect(operation!.errorMessage).toContain(`"Beta" (site-2)`);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
   test("fails connector approval during prepare before marking execution started", async () => {
     if (!available) return;
     let executions = 0;
@@ -1589,6 +1635,76 @@ test("a durable-capable call arriving mid model request still executes an allowe
     expect(operation).toMatchObject({ state: "completed" });
     expect(effects).toBe(1);
     // Prepared like a non-waiting client: no durable wait could be accepted.
+    expect(seenMeta).toEqual([null]);
+    expect(gate.requested).toBe(false);
+  } finally {
+    await dispatcher.close();
+  }
+}, 60_000);
+
+test("an unattended session refuses a call that needs approval instead of waiting", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  const seenMeta: unknown[] = [];
+  const { scope, environment } = await fixture(
+    async () => {
+      effects++;
+      return "unreachable";
+    },
+    { type: "object" },
+    {
+      prepare: async ({ context }) => {
+        seenMeta.push(context.transportMeta?.durableApproval ?? null);
+        throw new AttemptToolApprovalRequiredError();
+      },
+    },
+  );
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    gate,
+    true,
+  );
+  dispatcher.start();
+  const operationId = crypto.randomUUID();
+  try {
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+      },
+    });
+    await bus.request(
+      codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+      encodeCodemodeDispatchRequest({
+        version: 1,
+        operationId,
+        catalogDigest: environment.catalog.digest,
+      }),
+      { timeoutMs: 5000 },
+    );
+    expect(await waitForTerminal(scope, operationId)).toMatchObject({
+      state: "failed",
+      errorCode: "approval_required",
+      errorMessage: UNATTENDED_APPROVAL_REFUSAL_TEXT,
+      executionStartedAt: null,
+    });
+    expect(effects).toBe(0);
+    // Prepared like a non-waiting client, and no durable wait was opened.
     expect(seenMeta).toEqual([null]);
     expect(gate.requested).toBe(false);
   } finally {

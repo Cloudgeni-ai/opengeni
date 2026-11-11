@@ -15,6 +15,7 @@ import {
   encryptEnvironmentValue,
   updateModelConnectionAccess,
   upsertWorkspaceModelPolicy,
+  withBillingOriginOverride,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -47,7 +48,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
+async function fixture(
+  overrides: Parameters<typeof testSettings>[0] = {},
+  billingOrigin: "app" | "api" = "app",
+) {
   if (!client || !shared) throw new Error("PostgreSQL fixture unavailable");
   const context = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test:client-model-admission",
@@ -86,18 +90,21 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     actor: AccessGrant = grant,
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   ): Promise<Response> {
-    return app.request(path, {
-      method: method ?? (body === undefined ? "GET" : "POST"),
-      headers: {
-        authorization: `Bearer ${await signDelegatedAccessToken(SECRET, {
-          ...actor,
-          principalKind: "human_session",
-          exp: Math.floor(Date.now() / 1_000) + 3_600,
-        })}`,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    const token = await signDelegatedAccessToken(SECRET, {
+      ...actor,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
+    return withBillingOriginOverride(billingOrigin, () =>
+      app.request(path, {
+        method: method ?? (body === undefined ? "GET" : "POST"),
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
   }
   async function config(actor: AccessGrant = grant) {
     const response = await request(
@@ -291,6 +298,93 @@ test("PG: ready Codex model permissions and workspace policy affect list and cre
   expect((await f.parity(["codex/gpt-6-sol", "gpt-5.6-luna"])).allowedModels).toEqual([
     "gpt-5.6-sol",
   ]);
+}, 180_000);
+
+test("PG: API client config excludes connected subscriptions and rejects an explicit selection", async () => {
+  if (!client || !shared) return;
+  const f = await fixture({}, "api");
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
+  const config = await f.config();
+  expect(config.models.some(({ id }) => id.startsWith("codex/"))).toBe(false);
+  expect(config.allowedModels).not.toContain("codex/gpt-6-sol");
+  expect(config.defaultModel.startsWith("codex/")).toBe(false);
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: "codex/gpt-6-sol",
+    initialMessage: "Test API subscription selection",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(403);
+  expect(await response.json()).toMatchObject({
+    error: { code: "forbidden", details: { code: "subscription_api_unavailable" } },
+  });
+}, 180_000);
+
+test("PG: with the operator opt-in, API client config lists connected subscriptions and creates on one", async () => {
+  if (!client || !shared) return;
+  const f = await fixture({ apiConnectedSubscriptionsEnabled: true }, "api");
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
+  const config = await f.config();
+  expect(config.allowedModels).toContain("codex/gpt-6-sol");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: "codex/gpt-6-sol",
+    initialMessage: "Test API subscription selection",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  expect((await response.json()).model).toBe("codex/gpt-6-sol");
+}, 180_000);
+
+test("PG: a workspace's own list only narrows its organization's, in list, create and settings", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  await connectCoreCodex(f.grant);
+  const organizationModels = ["gpt-5.6-sol", "codex/gpt-6-sol"];
+  await shared.admin`
+    insert into organization_model_defaults (account_id, allowed_models)
+    values (${f.grant.accountId}::uuid, ${organizationModels}::text[])`;
+  // Listing a model the organization doesn't allow doesn't let it run here.
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: ["gpt-5.6-sol", "gpt-5.6-luna"],
+  });
+  expect((await f.parity(["gpt-5.6-luna", "codex/gpt-6-sol"])).allowedModels).toEqual([
+    "gpt-5.6-sol",
+  ]);
+  // Allowing every model allows exactly what the organization allows.
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: null,
+  });
+  expect((await f.parity(["gpt-5.6-luna"])).allowedModels.toSorted()).toEqual(
+    organizationModels.toSorted(),
+  );
+  // Settings read the workspace's own list back as saved, and the catalog
+  // says per model where the organization rules one out.
+  const policy = await f.request(`/v1/workspaces/${f.grant.workspaceId}/model-policy`);
+  expect(await policy.json()).toMatchObject({
+    allowedProviders: null,
+    allowedModels: null,
+    source: "workspace",
+    organization: { allowedProviders: null, allowedModels: organizationModels },
+  });
+  const catalog = (await (
+    await f.request(`/v1/workspaces/${f.grant.workspaceId}/model-catalog`)
+  ).json()) as { models: { id: string; policyAllowed?: boolean; organizationAllowed?: boolean }[] };
+  const byId = new Map(catalog.models.map((model) => [model.id, model]));
+  expect(byId.get("gpt-5.6-luna")).toMatchObject({
+    policyAllowed: false,
+    organizationAllowed: false,
+  });
+  expect(byId.get("gpt-5.6-sol")).toMatchObject({
+    policyAllowed: true,
+    organizationAllowed: true,
+  });
 }, 180_000);
 
 test("PG: an explicit Codex draft creates with zero credits without refreshing its near-expiry token", async () => {
@@ -584,9 +678,16 @@ test("PG: turning Opengeni credits off blocks every credit model but keeps subsc
     tools: [],
   });
   expect(refused.status).toBe(422);
-  const refusal = (await refused.json()).message;
+  const refusedBody = await refused.json();
+  const refusal = refusedBody.message;
   expect(refusal).toContain("uses credits, which are turned off in this workspace");
   expect(refusal).not.toMatch(/opengeni/i);
+  // Typed, so a refused new chat words the rule instead of showing this text.
+  expect(refusedBody.details).toEqual({
+    code: "model_policy",
+    modelId: expect.any(String),
+    reason: "credits",
+  });
 
   // An omitted model never falls back to a credit model.
   const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {

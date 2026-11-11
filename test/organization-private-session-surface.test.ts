@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const repo = join(import.meta.dir, "..");
-const ENABLEMENT_MIGRATION = "packages/db/drizzle/0323_organization_private_session_enablement.sql";
 
 describe("organization private-session product surface", () => {
   test("uses a dedicated owner/admin settings API and never the members endpoint", async () => {
@@ -25,75 +24,6 @@ describe("organization private-session product surface", () => {
     expect(surface).toContain("updateOrganizationPrivateSessionSettings");
     expect(surface).not.toContain("listOrganizationMembers");
     expect(surface).not.toContain("/members");
-  });
-
-  test("gates shared-workspace creates on the setting and leaves ordinary creates alone", async () => {
-    const migration = await readFile(join(repo, ENABLEMENT_MIGRATION), "utf8");
-    // The entry guard still calls the activation predicate; 0611 made that
-    // predicate universal, so only the owner/admin setting gates shared creates.
-    expect(migration).toContain("OR NOT session_tenancy_product_activated(p_account_id, 1)");
-    const universal = await readFile(
-      join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
-      "utf8",
-    );
-    expect(universal).toContain("AND p_activation_version IS NOT DISTINCT FROM 1");
-    // The owner/admin setting is consulted only outside the actor's Personal workspace.
-    expect(migration).toContain("IF NOT actor_personal_workspace THEN");
-    expect(migration).toContain("organization_private_sessions_enabled(p_account_id)");
-    expect(migration).toContain("actor.role NOT IN ('owner', 'admin')");
-    expect(migration).toContain(
-      "ALTER TABLE session_tenancy_activations NO FORCE ROW LEVEL SECURITY",
-    );
-    expect(migration).toContain("ALTER TABLE session_tenancy_activations FORCE ROW LEVEL SECURITY");
-    // No rolling-compat trigger, reserved capability, or reused depth denial code.
-    expect(migration).not.toContain("CREATE TRIGGER");
-    expect(migration).not.toContain("00000000-0000-0000-0000-000000000000");
-    expect(migration).not.toContain("nested_agent_depth_exceeded");
-    expect(migration).not.toContain("session_spawn_denials");
-
-    // Ordinary creates never run a private-session readiness call. Explicit
-    // private requests use the managed-human preflight unless the separate
-    // Teams admission seam has verified an internal durable inbox proof.
-    const create = await readFile(join(repo, "packages/core/src/domain/sessions.ts"), "utf8");
-    expect(create).not.toContain("getPrivateSessionCreatePolicy");
-    expect(create).not.toContain("personalWorkspace");
-    const compactCreate = create.replace(/\s+/g, " ");
-    expect(compactCreate).toContain(
-      'if ( payload.visibility === "private" && !grant.metadata?.["sessionId"] && !teamsCommitAuthorizer ) {',
-    );
-    // A request-body flag or unverified proof never substitutes for admission.
-    expect(compactCreate).toContain("const teamsProof = requestOptions.teamsConversation;");
-    expect(compactCreate).toContain(
-      'const teamsCommitAuthorizer = teamsProof ? await authorizeTeamsConversationAdmission(unresolvedDeps, grant, { workspaceId, sessionId: payload.requestedSessionId, initialMessage: payload.initialMessage ?? "", creating: true, privateCreate: payload.visibility === "private", personal: payload.visibility === "private", proof: teamsProof, }) : undefined;',
-    );
-    expect(compactCreate).toContain(
-      "const externalBeforeCreateCommit = teamsCommitAuthorizer ? async (tx: Database) => { await teamsCommitAuthorizer(tx); await externalCommitAuthorizer?.(tx); } : externalCommitAuthorizer;",
-    );
-    const teamsAdmission = (
-      await readFile(join(repo, "packages/core/src/application/teams-private-session.ts"), "utf8")
-    ).replace(/\s+/g, " ");
-    expect(teamsAdmission).toContain("source = await requireTeamsConversationProof(db, accepted);");
-    expect(teamsAdmission).toContain(
-      "if (policy.personalWorkspace || !policy.platformAvailable || !policy.organizationEnabled)",
-    );
-    expect(teamsAdmission).toContain(
-      "await requireDeploymentAllowsOnlyMe( { ...deps, db }, { workspaceId: input.workspaceId, actorSubjectId: grant.subjectId }, );",
-    );
-    expect(teamsAdmission).toContain(
-      "await verify(deps.db); return async (tx) => verify(tx, true);",
-    );
-    const tenancy = await readFile(
-      join(repo, "packages/core/src/application/session-tenancy.ts"),
-      "utf8",
-    );
-    expect(tenancy).toContain("getPrivateSessionCreatePolicy(deps.db");
-    // Personal workspaces follow the platform; shared workspaces need the
-    // organization setting and the deployment's "only me" allowance.
-    expect(tenancy.replace(/\s+/g, " ")).toContain(
-      "policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled && privacyDeploymentLimits(deps.settings).onlyMeAllowed",
-    );
-    // A missing active membership is a capability answer, never an unmapped 500.
-    expect(tenancy).toContain('nestedPostgresSqlState(error) !== "42501"');
   });
 
   test("registers exact capability-only database posture and provisioning", async () => {

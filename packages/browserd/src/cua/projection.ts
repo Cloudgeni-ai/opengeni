@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { ComputerLocator, InteractionSemanticNodeValue } from "@opengeni/contracts";
 import { ComputerBackendError } from "../computer-backend";
+import { nameContainsWords } from "../locator-name";
 import { Element } from "./wire";
 
 const roles: Record<string, string> = {
@@ -13,6 +14,7 @@ const roles: Record<string, string> = {
   AXCheckBox: "checkbox",
   AXRadioButton: "radio",
   AXPopUpButton: "combobox",
+  AXComboBox: "combobox",
   AXSlider: "slider",
   AXGroup: "group",
   AXMenuItem: "menuitem",
@@ -549,7 +551,9 @@ export function projectElements(
         platform === "linux"
           ? ["text", "entry", "password text", "combo box", "slider"].includes(element.role)
           : platform === "windows"
-            ? element.actions.includes("set_value")
+            ? // A window's title bar reads the title as its value, which no one
+              // can set.
+              element.actions.includes("set_value") && element.role !== "TitleBar"
             : // An item of a file list is shown as a text field, but its text is
               // the item's name, not something to edit.
               (!opensOnInvoke(element) &&
@@ -559,6 +563,7 @@ export function projectElements(
                   "AXSecureTextField",
                   "AXSlider",
                   "AXPopUpButton",
+                  "AXComboBox",
                 ].includes(element.role)) ||
               numberField ||
               typedFields.has(element.element_index)
@@ -663,7 +668,7 @@ export function locate(
     const match = (value: string | undefined, query: string, exact = false) =>
       exact
         ? value !== undefined && normalized(value) === normalized(query)
-        : (value ?? "").toLowerCase().includes(query.toLowerCase());
+        : nameContainsWords(value, query);
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;

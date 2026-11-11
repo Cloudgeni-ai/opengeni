@@ -8,7 +8,7 @@ import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connect
 import { requireAccessGrant } from "@opengeni/core";
 import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
 
-import { requireOrganizationCodexHuman } from "./codex";
+import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
@@ -19,21 +19,22 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
-import { claudeUsageRoute, coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
+import { coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
 import {
   claudeCoreAccount,
-  claudeCoreRoute,
   claudePoolCore,
   connectClaudeCore,
   requireClaudeCorePersonalWorkspace,
 } from "../claude-subscription-core";
 import { deliverPoolCoreWake } from "./subscription-pool-core";
 import { managedCookieHuman } from "./subscription-pool-access";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
     id: account.id,
     scope: account.scope,
+    ownerWorkspaceId: account.ownerWorkspaceId ?? null,
     subject: account.providerAccountId ?? account.id,
     email: account.accountEmail,
     label: account.label,
@@ -76,8 +77,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     if (mutation && !c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     if (organization) {
       const accountId = c.req.param("organizationId")!;
-      const human = await requireOrganizationCodexHuman(c, deps, accountId);
-      await claudeUsageRoute(deps, accountId, null);
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, accountId);
       return {
         core: true,
         accountId,
@@ -88,7 +88,6 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     }
     const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await claudeUsageRoute(deps, grant.accountId, workspaceId);
     return {
       core: true,
       accountId: grant.accountId,
@@ -129,39 +128,39 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       const actor = organization
         ? {
             organizationId: c.req.param("organizationId")!,
-            ...(await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!)),
+            ...(await requireOrganizationSubscriptionAdministrator(
+              c,
+              deps,
+              c.req.param("organizationId")!,
+            )),
           }
         : null;
-      const workspaceId = organization ? null : c.req.param("workspaceId")!;
-      // The runtime first (one receipt read), so a private account on the
-      // core is authorized in the owner's Personal workspace, where the core
-      // keeps it, and refused (403) anywhere else. The read grant naming the
-      // organization is taken only once a receipt exists (the callback), so
-      // legacy authorizes exactly as before.
+      const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
+      // A private account lives on the core in its owner's Personal
+      // workspace; the person connects it from any workspace of the
+      // organization, and it is written there.
       const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
-      await claudeCoreRoute(deps, async () => {
-        if (actor) return actor.organizationId;
-        read.grant = await requireAccessGrant(c, deps, workspaceId!, "workspace:read");
-        return read.grant.accountId;
-      });
-      if (workspaceId && parsed.data.scope === "user") {
+      if (!actor)
+        read.grant = await requireAccessGrant(c, deps, requestWorkspaceId!, "workspace:read");
+      if (requestWorkspaceId && parsed.data.scope === "user") {
         if (!read.grant) throw new Error("core Claude route without its read grant");
         await requireClaudeCorePersonalWorkspace(deps, {
           accountId: read.grant.accountId,
-          workspaceId,
           subjectId: read.grant.subjectId,
         });
       }
-      const authority = workspaceId
+      const authority = requestWorkspaceId
         ? await requireSubscriptionScopeMutation(
             c,
             deps,
-            workspaceId,
+            requestWorkspaceId,
             parsed.data.scope,
             "Claude",
-            "personal_workspace",
+            "own_personal_workspace",
           )
         : null;
+      // Where the account lives: this workspace, or the owner's Personal workspace.
+      const workspaceId = authority?.workspaceId ?? null;
       const accountId = actor?.organizationId ?? authority!.accountId;
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
@@ -215,6 +214,15 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
         SETUP_TOKEN_CHANGED,
       );
       await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
+      // Their own account added from a shared workspace starts turned on
+      // there for the messages they send (D-53).
+      if (personal && workspaceId && requestWorkspaceId && requestWorkspaceId !== workspaceId)
+        await turnOnOwnSubscriptionWhereAdded(deps.db, {
+          accountId,
+          workspaceId: requestWorkspaceId,
+          subjectId,
+          connectionId: connected.id,
+        });
       await offerClaudeDefaultModels(deps, {
         ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
         actorSubjectId: subjectId,

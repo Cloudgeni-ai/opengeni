@@ -1,4 +1,7 @@
+import { directModelProviderOfProviderId } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import { t } from "./console-text";
+import { checkoutPageReturnUrl } from "./credit-checkout";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   ClientModel,
@@ -40,14 +43,20 @@ export type ConnectedModelFamily =
   | "opper"
   | "credits"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): boolean {
   switch (family) {
     case "openai":
-      return row.provider.startsWith("workspace-openai-");
     case "azure_openai":
-      return row.provider.startsWith("workspace-azure-openai-");
+      return directModelProviderOfProviderId(row.provider) === family;
+    case "openai_compatible":
+      // A workspace's own endpoint, or one of the organization's.
+      return (
+        directModelProviderOfProviderId(row.provider) === family ||
+        row.provider.startsWith("organization-compatible-")
+      );
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":
@@ -127,7 +136,7 @@ export function composerFallbackModel(input: {
 
 /** Select the connected model in the actor-private draft without workspace administration. */
 export async function applyConnectedModelToNewSessionDraft(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   family?: ConnectedModelFamily,
   preferredModelId?: string,
@@ -189,11 +198,14 @@ export async function applyConnectedModelToNewSessionDraft(
  * payment webhook lands. `modelSource=default` marks that policy as the
  * resolved default rather than the person's choice, so the draft keeps
  * following the default and a later subscription connect still replaces it.
+ * With the paying account, the new-chat page also confirms the credits once
+ * they land.
  */
 export function creditCheckoutSuccessUrl(
   origin: string,
   workspaceId: string,
   model: { id: string; effort: string } | null,
+  accountId?: string | undefined,
 ): string {
   const url = new URL(`/workspaces/${encodeURIComponent(workspaceId)}/sessions`, origin);
   if (model) {
@@ -201,12 +213,12 @@ export function creditCheckoutSuccessUrl(
     url.searchParams.set("effort", model.effort);
     url.searchParams.set("modelSource", "default");
   }
-  return url.toString();
+  return accountId ? checkoutPageReturnUrl(url.toString(), accountId, "success") : url.toString();
 }
 
 /** Resolve the credits model for a checkout return; a catalog failure never blocks checkout. */
 export async function creditsModelForCheckout(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
 ): Promise<{ id: string; effort: string } | null> {
   try {

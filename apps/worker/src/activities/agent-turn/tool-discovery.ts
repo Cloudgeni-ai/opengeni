@@ -1,8 +1,57 @@
 import type { Settings } from "@opengeni/config";
-import { recordUsageEvent, type Database } from "@opengeni/db";
-import type { DecisionUsage, DecisionModel } from "@opengeni/decisions";
+import { knowledgeEmbeddingTarget } from "@opengeni/core";
+import { recordUsageEvent, type Database, type UsageEventProcessingResidency } from "@opengeni/db";
+import { DecisionError, type DecisionUsage, type DecisionModel } from "@opengeni/decisions";
+import { createDocumentEmbedder, type DocumentEmbedder } from "@opengeni/documents";
+import {
+  createEmbeddingToolRanker,
+  sideFeatureRouteRunnable,
+  type EmbeddingToolRanker,
+  type ToolMeaningRanker,
+  type ToolSelectionFailure,
+} from "@opengeni/runtime";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 import { configuredDecisionModel } from "./decision-model";
+
+// One ranker per embedding space in this process, so turns share tool vectors;
+// each sends through the embedder of the latest turn that used it.
+const meaningRankers = new Map<string, EmbeddingToolRanker>();
+const latestEmbedders = new Map<string, DocumentEmbedder>();
+
+/**
+ * Tool search's meaning ranking over the deployment's document embedder, the
+ * one Knowledge uses: none for a local embedder (it carries no meaning), one
+ * without a credential, or a route the run may not use. The route is checked
+ * again before every search, since it can depend on the run's context.
+ */
+export function configuredToolMeaningRanker(input: {
+  settings: Settings;
+  onError?: (error: unknown) => void;
+  embedder?: (settings: Settings) => DocumentEmbedder;
+}): ToolMeaningRanker | undefined {
+  if (input.settings.documentEmbeddingProvider === "deterministic") return undefined;
+  const embedder = (input.embedder ?? createDocumentEmbedder)(input.settings);
+  if (embedder.local || embedder.available === false) return undefined;
+  const target = knowledgeEmbeddingTarget(embedder);
+  if (!sideFeatureRouteRunnable(input.settings, target)) return undefined;
+  const space = JSON.stringify([embedder.endpoint ?? null, embedder.model, embedder.dimensions]);
+  latestEmbedders.set(space, embedder);
+  let ranker = meaningRankers.get(space);
+  if (!ranker) {
+    ranker = createEmbeddingToolRanker(
+      {
+        space,
+        embed: (texts) =>
+          runAuxiliaryProviderDispatch(() => latestEmbedders.get(space)!.embedMany(texts)),
+      },
+      input.onError ? { onError: input.onError } : {},
+    );
+    meaningRankers.set(space, ranker);
+  }
+  const shared = ranker;
+  return async (search) =>
+    sideFeatureRouteRunnable(input.settings, target) ? await shared(search) : undefined;
+}
 
 /** Explicitly configured typed inference, never a borrowed customer key/subscription. */
 export function configuredToolDecisionModel(input: {
@@ -17,7 +66,8 @@ export function configuredToolDecisionModel(input: {
       input.settings.decisionModelProvider ||
       input.settings.decisionModelId ||
       input.settings.decisionModelApiKey ||
-      input.settings.decisionModelBaseUrl
+      input.settings.decisionModelBaseUrl ||
+      input.settings.decisionModelAuth === "deployment_identity"
     )
       input.onUnavailable();
     return undefined;
@@ -48,6 +98,8 @@ export async function recordToolDecisionUsage(input: {
   modelId: string;
   usage: DecisionUsage;
   requestId: string;
+  /** Where the decision model processed the call (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency | null;
 }): Promise<void> {
   const entries = [
     ["input_tokens", input.usage.inputTokens, "tokens"],
@@ -73,6 +125,30 @@ export async function recordToolDecisionUsage(input: {
       quantity,
       unit,
       idempotencyKey: `usage:tool_discovery:${category}:${input.turnAttemptId}:${identity}`,
+      ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
     });
   }
 }
+
+/**
+ * Why a tool search's selection fell back to keywords, as a bounded metric
+ * label: its own deadline, a rate limit, another provider reply, a dropped
+ * request, or an answer the runtime could not use.
+ */
+export function toolSelectionFallbackReason(
+  failure: ToolSelectionFailure,
+): "deadline" | "rate_limited" | "provider_error" | "request_failed" | "invalid_answer" {
+  if (failure.timedOut) return "deadline";
+  const { error } = failure;
+  if (error instanceof DecisionError) {
+    if (error.status === 429) return "rate_limited";
+    if (error.status !== undefined) return "provider_error";
+    if (error.code === "request_failed") return "request_failed";
+  }
+  return "invalid_answer";
+}
+
+export const TOOL_SELECTION_FALLBACK_METRIC = {
+  name: "opengeni_tool_search_selection_fallbacks_total",
+  help: "Tool searches whose decision-model selection fell back to keywords, by reason.",
+} as const;

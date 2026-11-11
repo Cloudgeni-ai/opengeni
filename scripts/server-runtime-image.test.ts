@@ -76,11 +76,13 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             if (parserResolved) throw new Error('API must not ship the worker-only native parser');
             const migrations = await import('./packages/db/src/migrate.ts');
             if (typeof migrations.migrate !== 'function') throw new Error('missing migrator');
-            const sharedMigrations = await Promise.all(readdirSync('./packages/db/src').filter(name=>name.startsWith('runtime-')&&name.endsWith('.js')).map(async name=>{
+            // The migrator lands either in its own entry or in a shared chunk,
+            // depending on how splitting groups the DB barrel.
+            const sharedMigrations = await Promise.all(readdirSync('./packages/db/src').filter(name=>name==='migrate.ts'||(name.startsWith('runtime-')&&name.endsWith('.js'))).map(async name=>{
               const path='./packages/db/src/'+name;
               const source=readFileSync(path,'utf8');
               if (!source.includes('async function migrate(')) return;
-              if (!existsSync(join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle/0000_initial.sql'))) {
+              if (!existsSync(join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle/0977_baseline_01.sql'))) {
                 const sqlDirectory=join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle');
                 if (!readdirSync(sqlDirectory).some(name=>name.endsWith('.sql'))) throw new Error('missing relative migration ledger');
               }
@@ -93,6 +95,16 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             const catalog = await import('./scripts/import-integrations-catalog.ts');
             if (typeof catalog.normalizeCatalogSnapshot !== 'function') throw new Error('missing catalog importer');
             if (!existsSync('./data/catalog/integrations-snapshot.json')) throw new Error('missing reviewed catalog');
+            // The opengeni-ops Update Model Catalog workflow runs
+            // \`bun run model-catalog:upsert -- --file ... --expected-version N\` from /app.
+            const rootManifest=JSON.parse(readFileSync('./package.json','utf8'));
+            if (!rootManifest.scripts['model-catalog:upsert']?.includes('scripts/upsert-model-catalog.ts')) throw new Error('missing model catalog upsert command');
+            const upsert = await import('./scripts/upsert-model-catalog.ts');
+            if (typeof upsert.runModelCatalogUpsert !== 'function') throw new Error('missing model catalog upsert');
+            const upsertHelp = Bun.spawnSync([process.execPath, '--no-env-file', 'run', 'model-catalog:upsert', '--', '--help'], { env: { PATH: process.env.PATH } });
+            if (upsertHelp.exitCode !== 0 || !upsertHelp.stdout.toString().includes('--expected-version')) throw new Error('model catalog upsert usage failed: '+upsertHelp.stderr.toString());
+            const upsertMisuse = Bun.spawnSync([process.execPath, '--no-env-file', 'run', 'model-catalog:upsert'], { env: { PATH: process.env.PATH } });
+            if (upsertMisuse.exitCode !== 1 || !upsertMisuse.stderr.toString().includes('Usage:')) throw new Error('model catalog upsert must reject missing arguments');
             for (const command of ['inventory-tenancy','check-tenancy-parity','backfill-session-ownership','backfill-organization-memberships','backfill-connection-authority','verify-resource-classification','sweep-organization-retention']) {
               await import('./scripts/'+command+'.ts');
               const manifest=JSON.parse(readFileSync('./package.json','utf8'));

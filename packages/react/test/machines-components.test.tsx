@@ -180,7 +180,7 @@ describe("MachineStatusPill — state matrix", () => {
   test("consent_required / display_unavailable / enrolling carry a state badge", async () => {
     for (const [state, label] of [
       ["consent_required", "Consent required"],
-      ["display_unavailable", "No display"],
+      ["display_unavailable", "No screen"],
       ["enrolling", "Enrolling"],
     ] as const) {
       const r = await renderComponent(<MachineStatusPill state={state} />);
@@ -220,8 +220,21 @@ describe("MachineMetrics", () => {
     const withGpu = await renderComponent(<MachineMetrics metrics={contended} />);
     await flush();
     expect(withGpu.container.querySelector('[data-metric="gpu"]')).not.toBeNull();
-    expect(withGpu.container.querySelector('[data-metric="runqueue"]')).not.toBeNull();
     await withGpu.unmount();
+  });
+
+  test("load average and run queue show only at full density", async () => {
+    const compact = await renderComponent(<MachineMetrics metrics={contended} />);
+    await flush();
+    expect(compact.container.querySelector('[data-metric="load"]')).toBeNull();
+    expect(compact.container.querySelector('[data-metric="runqueue"]')).toBeNull();
+    await compact.unmount();
+
+    const full = await renderComponent(<MachineMetrics metrics={contended} density="full" />);
+    await flush();
+    expect(full.container.querySelector('[data-metric="load"]')).not.toBeNull();
+    expect(full.container.querySelector('[data-metric="runqueue"]')).not.toBeNull();
+    await full.unmount();
   });
 
   test("null metrics shows the empty placeholder", async () => {
@@ -634,6 +647,57 @@ describe("MachineCard — attach/swap affordance", () => {
 });
 
 describe("MachineDetail — agent and connection", () => {
+  test("an organization machine says where it works; admins open the picker from it", async () => {
+    const opened: MachineView[] = [];
+    const org = machine({ sandboxId: "sh-org-reach", state: "online", scope: "organization" });
+    const editable = await renderComponent(
+      <MachineDetail
+        machine={org}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        reachSummary="2 workspaces"
+        onChangeReach={(changed) => opened.push(changed)}
+      />,
+    );
+    await flush();
+    const row = editable.container.querySelector("[data-machine-reach]") as HTMLElement;
+    expect(row.tagName).toBe("BUTTON");
+    expect(row.textContent).toContain("Available in");
+    expect(row.textContent).toContain("2 workspaces");
+    expect(row.getAttribute("aria-label")).toBe("Where test-machine is available: 2 workspaces");
+    row.click();
+    expect(opened.map((changed) => changed.sandboxId)).toEqual(["sh-org-reach"]);
+    await editable.unmount();
+
+    // Members see where it works, read-only; a workspace machine has no such row.
+    const readOnly = await renderComponent(
+      <MachineDetail
+        machine={org}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        reachSummary="2 workspaces"
+      />,
+    );
+    await flush();
+    expect(readOnly.container.querySelector("[data-machine-reach]")?.tagName).toBe("DIV");
+    await readOnly.unmount();
+    const own = await renderComponent(
+      <MachineDetail
+        machine={machine({ sandboxId: "sh-ws-reach", state: "online" })}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        reachSummary="2 workspaces"
+        onChangeReach={() => {}}
+      />,
+    );
+    await flush();
+    expect(own.container.querySelector("[data-machine-reach]")).toBeNull();
+    await own.unmount();
+  });
+
   test("describes the connection plainly and keeps old refusals as quiet history", async () => {
     const m = machine({
       sandboxId: "sh-authority-detail",
@@ -854,6 +918,23 @@ describe("MachineDetail — agent and connection", () => {
     );
     await flush();
     expect(r.container.textContent).not.toContain("Command execution fails closed");
+    await r.unmount();
+  });
+
+  test("your own machine says where it works right under who can use it", async () => {
+    const m = machine({ sandboxId: "sh-own", state: "online", scope: "user" });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        whereItWorks={<section data-where-it-works>Where it works</section>}
+      />,
+    );
+    await flush();
+    const audience = r.container.querySelector('[data-machine-audience="user"]');
+    expect(audience?.nextElementSibling?.hasAttribute("data-where-it-works")).toBe(true);
     await r.unmount();
   });
 });

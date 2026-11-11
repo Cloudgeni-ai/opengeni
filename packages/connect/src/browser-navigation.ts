@@ -1,4 +1,4 @@
-import type { ConnectNavigation } from "./authorization";
+import type { ConnectNavigation, ConnectPopup } from "./authorization";
 
 /** Structural browser surface so importing Connect never reads DOM globals. */
 export type ConnectBrowserWindow = {
@@ -11,6 +11,7 @@ export type ConnectBrowserWindow = {
     readonly closed?: boolean;
     location: { replace(url: string): void };
     close(): void;
+    focus?(): void;
   } | null;
   location: { assign(url: string): void };
 };
@@ -33,6 +34,29 @@ function closeIsolatedPopup(popup: NonNullable<ReturnType<ConnectBrowserWindow["
   }
 }
 
+/** What the host can still do with an isolated window: it can see whether the
+ * window is open and ask it forward, but not close or navigate it once it shows
+ * another site. */
+function popupHandle(popup: NonNullable<ReturnType<ConnectBrowserWindow["open"]>>): ConnectPopup {
+  return {
+    close: () => closeIsolatedPopup(popup),
+    isOpen() {
+      try {
+        return popup.closed === false;
+      } catch {
+        return false;
+      }
+    },
+    focus() {
+      try {
+        popup.focus?.();
+      } catch {
+        /* Focus is a request; the browser may ignore it. */
+      }
+    },
+  };
+}
+
 /** Reserve the isolated window during the human's click, before asynchronous
  * discovery. The caller must close it if setup fails before navigation. */
 export function reserveBrowserConnectNavigation(browser: ConnectBrowserWindow): {
@@ -48,19 +72,18 @@ export function reserveBrowserConnectNavigation(browser: ConnectBrowserWindow): 
     closeIsolatedPopup(popup);
     throw new Error("Connect popup could not open safely. Please try again.");
   }
-  const close = () => closeIsolatedPopup(popup);
+  const handle = popupHandle(popup);
+  const close = handle.close;
   return {
     close,
     navigation: {
       openPopup(url) {
         validateDestination(url);
         popup.location.replace(url);
-        return {
-          close,
-          // Browser COOP can sever this WindowProxy and report closed while
-          // the provider window is still open. Keep polling durable completion;
-          // the host's Stop control and bounded timeout end observation.
-        };
+        // No `closed`: browser COOP can sever this WindowProxy and report
+        // closed while the provider window is still open. Keep polling durable
+        // completion; the host's Stop control and bounded timeout end observation.
+        return handle;
       },
       redirect(url) {
         validateDestination(url);
@@ -90,11 +113,10 @@ export function createBrowserConnectNavigation(browser: ConnectBrowserWindow): C
         closeIsolatedPopup(popup);
         throw new Error("Connect popup could not navigate safely; retry with redirect mode");
       }
-      return {
-        close: () => closeIsolatedPopup(popup),
-        // WindowProxy.closed is not a reliable user-cancellation signal after
-        // a provider moves the popup into a different browsing context group.
-      };
+      // No `closed`: WindowProxy.closed is not a reliable user-cancellation
+      // signal after a provider moves the popup into a different browsing
+      // context group.
+      return popupHandle(popup);
     },
     redirect(url) {
       validateDestination(url);

@@ -9,19 +9,41 @@
 //! - a sandbox never runs on two hosts: each run happens at an owner epoch
 //!   no lower than any run before it, and a different host runs it only
 //!   at a higher one;
+//! - a VM the guard would leave running for being its sandbox's only copy
+//!   never runs while a copy of the sandbox is in the store;
 //! - a host given up on stopped its VMs before its sandboxes could go
-//!   elsewhere, by at least what the lease terms leave to spare;
+//!   elsewhere, by at least what the lease terms leave to spare, all but
+//!   those its guard left running for being their sandboxes' only copies
+//!   while no copy of them could be handed on;
 //! - an archive pointer's stamp never goes back, so a former owner never
 //!   publishes over a new one and an older save never over a newer one;
 //! - a move loses nothing: the archive holds every write when the host
 //!   releases the sandbox;
 //! - nothing is brought back rewound: an adopt restores the archive's
 //!   memory only when no run of the sandbox wrote past the archive, and
-//!   takes it up from its files alone otherwise.
+//!   takes it up from its files alone otherwise;
+//! - nothing is lost to a host being away: a host given up on keeps its
+//!   sandboxes, which wait for it, so an adopt goes back past writes only
+//!   when the host that made them was declared gone, and a copy ahead of
+//!   the archive is never dropped while its sandbox exists. A host
+//!   declared gone that comes back sets such copies aside.
+//! - a sandbox the service forgets, as one whose create its host failed,
+//!   exists nowhere: no host holds a copy of it and it has no archive.
 //!
-//! At the end faults stop and every sandbox is woken: each must run on its
-//! owner under the store's epoch, except those whose host died for good
-//! before their first archive.
+//! Now and then an operator declares a host given up on gone, whether or
+//! not it is. At the end faults stop, the hosts that died for good are
+//! declared gone, and every sandbox is woken: each must run on its owner
+//! under the store's epoch, except those whose host died for good before
+//! their first archive.
+//!
+//! The guard sees each VM's group. A sandbox is its only copy from its
+//! create until its first archive begins, which clears its VM's mark
+//! first; some, as runners' sandboxes, are archived only to hand them
+//! off. A mark names the agent that set it, so an agent restart leaves
+//! it orphaned until the next agent marks the VMs again, and a group a VM
+//! leaves behind keeps it until the next VM starts in it, unmarked. Now
+//! and then the groups cannot be listed, and the guard treats the VMs as
+//! a whole.
 //!
 //! `FLEET_SIM_SEEDS` sets how many seeds run (default 6) and
 //! `FLEET_SIM_FIRST_SEED` the first; `FLEET_SIM_PRINT` prints what each
@@ -32,10 +54,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::time::Duration;
 
 use compute_fleet::{
-    AnsweredAt, At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Guard, GuardAction,
-    HostEpoch, HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Mutation,
-    Next, Observed, Op, Outcome, OwnerEpoch, Ownership, Prefer, Renewal, Rng, SandboxId, Sends,
-    Stamp, Verdict, ZoneId, answered, fence, reconcile,
+    AnsweredAt, At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Group, Guard,
+    GuardAction, HostEpoch, HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms,
+    Listed, Mutation, Next, Observed, Op, Outcome, OwnerEpoch, Ownership, Prefer, Renewal, Rng,
+    SandboxId, Sends, Stamp, Verdict, ZoneId, answered, fence, reconcile,
 };
 
 const TERMS: LeaseTerms = LeaseTerms::RECOMMENDED;
@@ -80,6 +102,10 @@ impl Clock {
 }
 
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a simulated sandbox's independent facts"
+)]
 struct Local {
     epoch: OwnerEpoch,
     content: u64,
@@ -89,9 +115,51 @@ struct Local {
     archiving: Option<At>,
     /// Being handed off: it takes no wakes, and goes once archived.
     releasing: bool,
+    /// The record says no copy of it could be handed on: from its create
+    /// here until its first archive begins.
+    only_copy: bool,
+    /// Archived only to hand it off, as a runner's sandbox.
+    runner: bool,
+    /// Its VM's group's mark as its only copy: the agent incarnation that
+    /// set it. A group its VM left behind keeps it.
+    mark: Option<u64>,
+    /// What the kernel does with its VM's own group.
+    group: Kernel,
 }
 
-/// What the kernel does with the VMs' cgroup.
+impl Local {
+    fn new(epoch: OwnerEpoch, content: u64, only_copy: bool, runner: bool) -> Self {
+        Self {
+            epoch,
+            content,
+            archived: content,
+            awake: false,
+            archiving: None,
+            releasing: false,
+            only_copy,
+            runner,
+            mark: None,
+            group: Kernel::default(),
+        }
+    }
+
+    /// Its VM starts, in the group an earlier one may have left: the
+    /// engine clears that group's mark and freezer first, then the agent
+    /// `incarnation` marks it if its record says it is its only copy.
+    fn start(&mut self, incarnation: u64) {
+        self.awake = true;
+        self.group = Kernel::default();
+        self.mark = self.only_copy.then_some(incarnation);
+    }
+
+    /// Its VM ends; its group, left behind, keeps the mark.
+    fn end(&mut self) {
+        self.awake = false;
+        self.group = Kernel::default();
+    }
+}
+
+/// What the kernel does with a cgroup: the VMs', or one VM's own.
 #[derive(Clone, Copy, Debug, Default)]
 struct Kernel {
     /// A freeze is asked for (`cgroup.freeze` is 1).
@@ -132,6 +200,9 @@ struct Host {
     suspended_until: Option<u64>,
     /// The sleep hook's mark that a suspend is under way.
     suspending: bool,
+    /// Its guard is asked to stop, for the next one to take over, as in
+    /// an upgrade: it stops at the first step that allows it.
+    handing_over: bool,
     /// The registration attempt under way and what it lists, fixed for
     /// every copy.
     registering: Option<(u64, Vec<Listed>)>,
@@ -158,11 +229,39 @@ impl Host {
         self.sandboxes.values().filter(|local| local.awake).count() as u64
     }
 
+    /// Every VM is frozen, by the cgroup above: a VM's own freeze asked
+    /// for is then met too, as its processes are frozen, so it stays
+    /// frozen once the cgroup above thaws.
+    fn vms_frozen(&mut self) {
+        self.kernel.frozen = true;
+        self.kernel.freeze_at = None;
+        for local in self.sandboxes.values_mut() {
+            if local.group.freezing {
+                local.group.frozen = true;
+                local.group.freeze_at = None;
+            }
+        }
+    }
+
+    /// The VM of `local` as the guard sees its group: marked its only
+    /// copy by an agent that runs, or by one that has ended.
+    fn group(&self, local: &Local) -> Group {
+        let only_copy = self.agent_up && local.mark == Some(self.incarnation);
+        Group {
+            only_copy,
+            orphaned: local.mark.is_some() && !only_copy,
+            freezing: local.group.freezing,
+            frozen: local.group.frozen || self.kernel.frozen,
+            empty: !local.awake,
+        }
+    }
+
     fn capacity(&self) -> Capacity {
         Capacity {
             memory_mib: HOST_MEMORY_MIB,
             free_memory_mib: HOST_MEMORY_MIB.saturating_sub(self.awake() * SANDBOX_MIB),
             reclaimable_memory_mib: 0,
+            cpu_millis: 1_000_000,
             free_cpu_millis: 1_000_000,
             free_disk_mib: 1_000_000,
             ready: Vec::new(),
@@ -213,6 +312,8 @@ enum Answer {
     Stale,
     NoArchive,
     Busy,
+    /// The host failed the create and kept nothing of it.
+    Broken,
     /// The request reached the host after its window.
     Expired,
 }
@@ -224,7 +325,7 @@ impl Answer {
             Self::Ok => Outcome::Done,
             Self::Full | Self::Unavailable | Self::Expired => Outcome::Refused,
             Self::NotFound => Outcome::NotFound,
-            Self::Stale | Self::NoArchive | Self::Busy => Outcome::Other,
+            Self::Stale | Self::NoArchive | Self::Busy | Self::Broken => Outcome::Other,
         }
     }
 }
@@ -327,13 +428,26 @@ struct Stats {
     superseded: u64,
     watchdog_reboots: u64,
     kills: u64,
+    /// Steps a VM marked its sandbox's only copy ran past its host's
+    /// deadline, and steps one ran with its mark orphaned.
+    only_copy_runs: u64,
+    orphaned_runs: u64,
+    /// Guards that handed over to the next one.
+    handovers: u64,
     suspends: u64,
     /// Registration answers that arrived after the host had sent the
     /// attempt again, and counted.
     slow_registrations: u64,
+    /// Hosts declared gone, and the copies they set aside on coming back.
+    declarations: u64,
+    set_aside: u64,
     /// Hosts that died for good, and the sandboxes lost with them.
     dead_hosts: u64,
     lost_sandboxes: u64,
+    /// Creates their hosts failed, and sandboxes forgotten for existing
+    /// nowhere.
+    broken_creates: u64,
+    forgotten: u64,
     min_stop_gap_ns: Option<u64>,
 }
 
@@ -352,6 +466,8 @@ struct Ghost {
 
 impl Ghost {
     /// Notes a run; the first run that breaks the invariant is described.
+    /// A run not `fenced` (an only copy's, with no copy to hand on) does
+    /// not count as its host still running VMs.
     fn ran(
         &mut self,
         id: SandboxId,
@@ -359,6 +475,7 @@ impl Ghost {
         epoch: OwnerEpoch,
         content: u64,
         now: u64,
+        fenced: bool,
     ) -> Result<bool, String> {
         let mut changed = true;
         if let Some(&(last_host, last_epoch)) = self.last_run.get(&id) {
@@ -375,7 +492,9 @@ impl Ghost {
             changed = (last_host, last_epoch) != (host, epoch);
         }
         self.last_run.insert(id, (host, epoch));
-        self.host_last_run.insert(host, now);
+        if fenced {
+            self.host_last_run.insert(host, now);
+        }
         self.written.insert(id, content);
         Ok(changed)
     }
@@ -386,6 +505,10 @@ struct Sim {
     params: Params,
     now: u64,
     rng: Rng,
+    /// How long the kernel takes to freeze and kill, and when the guard
+    /// cannot list the VMs' groups: a stream of its own, so the faults and
+    /// the service's choices follow the seed whatever the guard does.
+    kernel_rng: Rng,
     seq: u64,
     queue: BinaryHeap<Reverse<(u64, u64)>>,
     events: BTreeMap<u64, Event>,
@@ -402,6 +525,12 @@ struct Sim {
     confirmed: BTreeSet<SandboxId>,
     /// What the service kept of each sandbox's creates and adopts.
     sends: BTreeMap<SandboxId, Sends>,
+    /// For each sandbox whose owner was declared gone, the epoch the latest
+    /// declaration raised it to, as its row notes it.
+    declared: BTreeMap<SandboxId, OwnerEpoch>,
+    /// Each sandbox and host it waited for until that host was declared
+    /// gone: what that host wrote of it may be gone with it.
+    forsaken: BTreeSet<(SandboxId, HostId)>,
     ghost: Ghost,
     stats: Stats,
     /// What happened to the sandbox `FLEET_SIM_TRACE` names, and to every
@@ -413,6 +542,16 @@ struct Sim {
 /// True time in seconds, for the trace.
 fn seconds(ns: u64) -> String {
     format!("{}.{:03}s", ns / SEC, ns % SEC / MS)
+}
+
+/// When a freeze or kill asked for at `now` completes: within `span`, or
+/// one time in `hang` never.
+fn completes(rng: &mut Rng, now: u64, hang: u64, span: u64) -> u64 {
+    if rng.chance(1, hang) {
+        u64::MAX
+    } else {
+        now + MS + rng.below(span)
+    }
 }
 
 impl Sim {
@@ -473,6 +612,7 @@ impl Sim {
                     stalled_until: 0,
                     suspended_until: None,
                     suspending: false,
+                    handing_over: false,
                     registering: None,
                     sandboxes: BTreeMap::new(),
                 }
@@ -483,6 +623,7 @@ impl Sim {
             params,
             now: 0,
             rng,
+            kernel_rng: Rng::new(seed ^ 0x9e37_79b9_7f4a_7c15),
             seq: 0,
             queue: BinaryHeap::new(),
             events: BTreeMap::new(),
@@ -497,6 +638,8 @@ impl Sim {
             faults: true,
             confirmed: BTreeSet::new(),
             sends: BTreeMap::new(),
+            declared: BTreeMap::new(),
+            forsaken: BTreeSet::new(),
             ghost: Ghost::default(),
             stats: Stats::default(),
             trace: std::env::var("FLEET_SIM_TRACE")
@@ -654,15 +797,36 @@ impl Sim {
         if self.hosts[index].vms_run() {
             let host = &mut self.hosts[index];
             let id = host.id;
+            let past = host.now(now) >= host.file.deadline;
             let mut runs = Vec::new();
-            for (sandbox, local) in &mut host.sandboxes {
-                if local.awake {
-                    local.content += 1;
-                    runs.push((*sandbox, local.epoch, local.content));
+            for (sandbox, local) in &host.sandboxes {
+                if local.awake && !local.group.frozen {
+                    let group = host.group(local);
+                    runs.push((*sandbox, group.only_copy, group.orphaned));
                 }
             }
-            for (sandbox, epoch, content) in runs {
-                match self.ghost.ran(sandbox, id, epoch, content, now) {
+            for (sandbox, only_copy, orphaned) in runs {
+                let local = self.hosts[index].sandboxes.get_mut(&sandbox).unwrap();
+                local.content += 1;
+                let (epoch, content) = (local.epoch, local.content);
+                if past && only_copy {
+                    self.stats.only_copy_runs += 1;
+                }
+                if orphaned {
+                    self.stats.orphaned_runs += 1;
+                }
+                // Marked by an agent that runs or one that ended.
+                let marked = only_copy || orphaned;
+                if marked && self.objects.contains_key(&sandbox) {
+                    self.fail(
+                        sandbox,
+                        &format!("{sandbox:?} runs on {id:?} marked its only copy, with a copy in the store"),
+                    );
+                }
+                // Left running for being its only copy (an orphaned mark's
+                // until its freeze takes), it may outlast its host's
+                // give-up: no copy of it can be handed on.
+                match self.ghost.ran(sandbox, id, epoch, content, now, !marked) {
                     Ok(true) => self.note(sandbox, &format!("runs on {id:?} at {epoch}")),
                     Ok(false) => {}
                     Err(broken) => self.fail(sandbox, &broken),
@@ -689,8 +853,10 @@ impl Sim {
             let Some(local) = self.hosts[index].sandboxes.get_mut(&id) else {
                 continue;
             };
-            if local.awake && sleep {
-                local.awake = false;
+            // A runner's sandbox never sleeps (its runner counts as a
+            // running command), so it is never handed off either.
+            if local.awake && sleep && !local.runner {
+                local.end();
             }
             // An archive whose answer never came is given up on. It may
             // still land, over or under a later one: stamps order them.
@@ -706,6 +872,7 @@ impl Sim {
                 }
             } else if may_run
                 && archive
+                && !local.runner
                 && local.archiving.is_none()
                 && local.content > local.archived
             {
@@ -714,20 +881,34 @@ impl Sim {
         }
     }
 
-    /// The kernel: freezes and kills complete, and the watchdog fires.
+    /// The kernel: freezes and kills complete, and the watchdog fires. A
+    /// kill of the VMs' cgroup kills every VM that is neither frozen nor
+    /// gone, as the guard does.
     fn kernel_tick(&mut self, index: usize) {
         let now = self.now;
         let host = &mut self.hosts[index];
         if host.kernel.freeze_at.is_some_and(|at| at <= now) {
-            host.kernel.freeze_at = None;
-            host.kernel.frozen = true;
+            host.vms_frozen();
         }
         if host.kernel.kill_at.is_some_and(|at| at <= now) {
             host.kernel.kill_at = None;
+            let frozen = host.kernel.frozen;
             for local in host.sandboxes.values_mut() {
-                local.awake = false;
+                if !frozen && !local.group.frozen {
+                    local.end();
+                }
             }
             self.stats.kills += 1;
+        }
+        for local in host.sandboxes.values_mut() {
+            if local.group.freeze_at.is_some_and(|at| at <= now) {
+                local.group.freeze_at = None;
+                local.group.frozen = true;
+            }
+            if local.group.kill_at.is_some_and(|at| at <= now) {
+                local.end();
+                self.stats.kills += 1;
+            }
         }
         // The watchdog counts on the host's own clock.
         let watchdog = u64::try_from(TERMS.watchdog.as_nanos()).unwrap();
@@ -742,37 +923,74 @@ impl Sim {
 
     fn guard_tick(&mut self, index: usize) {
         let now = self.now;
+        // Now and then what is in the cgroup cannot be listed.
+        let apart = !self.kernel_rng.chance(1, 100);
+        let upgrade = self.kernel_rng.chance(1, 2_000);
         let host = &mut self.hosts[index];
+        if upgrade && !host.handing_over {
+            host.handing_over = true;
+            self.stats.handovers += 1;
+        }
         let observed = Observed {
             freezing: host.kernel.freezing,
             frozen: host.kernel.frozen,
             empty: host.awake() == 0,
             suspending: host.suspending,
         };
-        let step = host.guard.step(host.now(now), host.file.deadline, observed);
-        if let Some(action) = step.action {
-            self.host_note(index, &format!("guard {action:?}"));
+        let (ids, groups): (Vec<SandboxId>, Vec<Group>) = host
+            .sandboxes
+            .iter()
+            .filter(|(_, local)| local.awake)
+            .map(|(id, local)| (*id, host.group(local)))
+            .unzip();
+        let plan = host.guard.plan(
+            host.now(now),
+            host.file.deadline,
+            observed,
+            apart.then_some(groups.as_slice()),
+            host.handing_over,
+        );
+        if plan.vms.is_some() || plan.groups.iter().any(Option::is_some) {
+            let acted: Vec<_> = plan.groups.iter().flatten().collect();
+            self.host_note(index, &format!("guard {:?}, VMs {acted:?}", plan.vms));
+        }
+        for (id, action) in ids.iter().zip(&plan.groups) {
+            let host = &mut self.hosts[index];
+            let parent_frozen = host.kernel.frozen;
+            let group = &mut host.sandboxes.get_mut(id).unwrap().group;
+            match action {
+                // One frozen already, by the cgroup above, stays so.
+                Some(GuardAction::Freeze) if parent_frozen || group.frozen => {
+                    group.freezing = true;
+                    group.frozen = true;
+                    group.freeze_at = None;
+                }
+                Some(GuardAction::Freeze) => {
+                    group.freezing = true;
+                    // One VM in ten waits on its disk past the deadline.
+                    group.freeze_at = Some(completes(&mut self.kernel_rng, now, 10, 100 * MS));
+                }
+                Some(GuardAction::Kill) if group.kill_at.is_none() => {
+                    group.kill_at = Some(completes(&mut self.kernel_rng, now, 100, 200 * MS));
+                }
+                Some(GuardAction::Thaw) => {
+                    group.freezing = false;
+                    group.frozen = false;
+                    group.freeze_at = None;
+                }
+                Some(GuardAction::Kill) | None => {}
+            }
         }
         let host = &mut self.hosts[index];
-        match step.action {
+        match plan.vms {
             Some(GuardAction::Freeze) => {
-                let at = if self.rng.chance(1, 50) {
-                    u64::MAX
-                } else {
-                    now + MS + self.rng.below(100 * MS)
-                };
                 host.kernel.freezing = true;
-                host.kernel.freeze_at = Some(at);
+                host.kernel.freeze_at = Some(completes(&mut self.kernel_rng, now, 50, 100 * MS));
             }
             // Asked again on every step; the first ask is the one that
             // completes, or hangs.
             Some(GuardAction::Kill) if host.kernel.kill_at.is_none() => {
-                let at = if self.rng.chance(1, 100) {
-                    u64::MAX
-                } else {
-                    now + MS + self.rng.below(200 * MS)
-                };
-                host.kernel.kill_at = Some(at);
+                host.kernel.kill_at = Some(completes(&mut self.kernel_rng, now, 100, 200 * MS));
             }
             Some(GuardAction::Thaw) => {
                 host.kernel.freezing = false;
@@ -781,8 +999,13 @@ impl Sim {
             }
             Some(GuardAction::Kill) | None => {}
         }
-        if step.feed {
+        if plan.feed {
             host.fed = now;
+        }
+        if host.handing_over && plan.may_stop {
+            // The next guard, of the same release, keeps no state.
+            host.handing_over = false;
+            host.guard = Guard::new();
         }
     }
 
@@ -868,8 +1091,7 @@ impl Sim {
         if host.lease.due() > renewal.sent + TERMS.register_every {
             self.stats.slow_registrations += 1;
         }
-        let host = &mut self.hosts[index];
-        host.registering = None;
+        self.hosts[index].registering = None;
         // Drop and refetch before the new deadline lets anything run, and
         // keep nothing the answer does not name.
         let mut refetch = Vec::new();
@@ -879,13 +1101,18 @@ impl Sim {
                 Verdict::Keep { epoch } => {
                     kept.insert(*id, *epoch);
                 }
-                Verdict::Drop => {}
+                Verdict::Drop => self.check_drop(index, *id),
+                Verdict::SetAside => {
+                    self.stats.set_aside += 1;
+                    self.host_note(index, &format!("set aside {id:?}"));
+                }
                 Verdict::Refetch { epoch, from_files } => {
                     refetch.push((*id, *epoch, *from_files));
                 }
                 Verdict::Reclaim { .. } => unreachable!("the store resolves reclaims"),
             }
         }
+        let host = &mut self.hosts[index];
         host.sandboxes.retain(|id, local| {
             kept.get(id).is_some_and(|epoch| {
                 local.epoch = *epoch;
@@ -901,6 +1128,27 @@ impl Sim {
         }
         for (id, epoch, from_files) in refetch {
             self.host_request(index, None, (Op::Adopt, from_files), id, epoch, 0);
+        }
+    }
+
+    /// Checks a copy of `id` that host `index` drops as it registers is not
+    /// ahead of all else of its sandbox, while the sandbox exists: the
+    /// latest run's, with writes its archive lacks.
+    fn check_drop(&self, index: usize, id: SandboxId) {
+        let host = &self.hosts[index];
+        let Some(local) = host.sandboxes.get(&id) else {
+            return;
+        };
+        let latest = self.ghost.last_run.get(&id) == Some(&(host.id, local.epoch));
+        let archived = self.objects.get(&id).map_or(0, |pointer| pointer.content);
+        if self.rows.contains_key(&id) && latest && local.content > archived {
+            self.fail(
+                id,
+                &format!(
+                    "{id:?} dropped on {:?} with {} writes, its archive holding {archived}",
+                    host.id, local.content
+                ),
+            );
         }
     }
 
@@ -988,24 +1236,23 @@ impl Sim {
         if host.capacity().free_memory_mib < SANDBOX_MIB || self.rng.chance(1, 50) {
             return Answer::Full;
         }
+        // Now and then it fails, as a host that cannot fetch the image does.
+        if self.rng.chance(1, 40) {
+            self.stats.broken_creates += 1;
+            return Answer::Broken;
+        }
         self.ghost.created_on.entry(id).or_insert(host.id);
-        host.sandboxes.insert(
-            id,
-            Local {
-                epoch,
-                content: 0,
-                archived: 0,
-                awake: true,
-                archiving: None,
-                releasing: false,
-            },
-        );
+        // One in ten is a runner's.
+        let mut local = Local::new(epoch, 0, true, id.0.is_multiple_of(10));
+        local.start(host.incarnation);
+        host.sandboxes.insert(id, local);
         Answer::Ok
     }
 
     fn host_wake(&mut self, index: usize, id: SandboxId, epoch: OwnerEpoch) -> Answer {
         let host = &mut self.hosts[index];
         let free = host.capacity().free_memory_mib;
+        let incarnation = host.incarnation;
         let Some(local) = host.sandboxes.get_mut(&id) else {
             return Answer::NotFound;
         };
@@ -1023,7 +1270,9 @@ impl Sim {
         if !local.awake && free < SANDBOX_MIB {
             return Answer::Full;
         }
-        local.awake = true;
+        if !local.awake {
+            local.start(incarnation);
+        }
         Answer::Ok
     }
 
@@ -1059,6 +1308,19 @@ impl Sim {
             },
         );
         let written = self.ghost.written.insert(id, pointer.content).unwrap_or(0);
+        if written > pointer.content {
+            // Only writes on a host declared gone may be gone with it.
+            let writer = self.ghost.last_run.get(&id).map(|(host, _)| *host);
+            if writer.is_none_or(|writer| !self.forsaken.contains(&(id, writer))) {
+                self.fail(
+                    id,
+                    &format!(
+                        "{id:?} went back from {written} writes to its archive's {} while {writer:?}, which made them, was not declared gone",
+                        pointer.content
+                    ),
+                );
+            }
+        }
         if from_files {
             self.stats.adopts_from_files += 1;
         } else if written > pointer.content {
@@ -1074,17 +1336,10 @@ impl Sim {
         }
         self.stats.lost_writes += written.saturating_sub(pointer.content);
         self.stats.adopts += 1;
-        self.hosts[index].sandboxes.insert(
-            id,
-            Local {
-                epoch,
-                content: pointer.content,
-                archived: pointer.content,
-                awake: true,
-                archiving: None,
-                releasing: false,
-            },
-        );
+        // Taken up from the store, it is never its only copy.
+        let mut local = Local::new(epoch, pointer.content, false, false);
+        local.start(self.hosts[index].incarnation);
+        self.hosts[index].sandboxes.insert(id, local);
         Answer::Ok
     }
 
@@ -1171,6 +1426,12 @@ impl Sim {
     fn begin_archive(&mut self, index: usize, id: SandboxId) {
         let host = &mut self.hosts[index];
         let local = host.sandboxes.get_mut(&id).unwrap();
+        // Before the store sees anything of it, its VM's mark goes (a
+        // group a VM left behind keeps its own), then its record's.
+        if local.awake {
+            local.mark = None;
+        }
+        local.only_copy = false;
         local.archiving = Some(host.clock.read(self.now));
         let (epoch, content, incarnation) = (local.epoch, local.content, host.incarnation);
         let delay = if self.rng.chance(1, 30) {
@@ -1360,8 +1621,13 @@ impl Sim {
         host.incarnation += 1;
         host.lease = HostLease::resume(TERMS, host.file, self.rng.next_u64());
         host.registering = None;
+        // Its recovery marks the VMs it takes back as their records say.
+        let incarnation = host.incarnation;
         for local in host.sandboxes.values_mut() {
             local.archiving = None;
+            if local.awake {
+                local.mark = local.only_copy.then_some(incarnation);
+            }
         }
     }
 
@@ -1374,8 +1640,7 @@ impl Sim {
         let host = &mut self.hosts[index];
         host.suspending = true;
         host.kernel.freezing = true;
-        host.kernel.frozen = true;
-        host.kernel.freeze_at = None;
+        host.vms_frozen();
         host.suspended_until = Some(until);
         host.cut_until = host.cut_until.max(until);
         // The watchdog's clock stops while suspended: it fires as much
@@ -1400,8 +1665,10 @@ impl Sim {
         let host = &mut self.hosts[index];
         host.machine_up = false;
         host.agent_up = false;
+        // The VMs' groups go with the machine.
         for local in host.sandboxes.values_mut() {
-            local.awake = false;
+            local.end();
+            local.mark = None;
         }
     }
 
@@ -1423,11 +1690,13 @@ impl Sim {
         host.stalled_until = 0;
         host.suspended_until = None;
         host.suspending = false;
+        host.handing_over = false;
         host.registering = None;
         host.incarnation += 1;
         host.agent_up = true;
         for local in host.sandboxes.values_mut() {
-            local.awake = false;
+            local.end();
+            local.mark = None;
             local.archiving = None;
         }
     }
@@ -1474,21 +1743,20 @@ impl Sim {
             );
             return;
         }
-        assert!(
-            self.rows.values().all(|row| row.owner != Some(id)),
-            "{id:?} registers while it still owns sandboxes"
-        );
         let epoch = HostEpoch(self.next_host_epoch);
         self.next_host_epoch += 1;
         let renewals = self.host_rows.get(&id).map_or(0, |row| row.renewals) + 1;
         let mut verdicts = Vec::new();
         for item in listed {
             let row = self.rows.get(&item.sandbox).copied();
-            let verdict = match reconcile(id, item.epoch, row) {
+            let declared = self.declared.get(&item.sandbox).copied();
+            let verdict = match reconcile(id, item.epoch, row, declared) {
                 Verdict::Reclaim { change } => {
                     // The only writer in this store; a real one retries.
                     assert_eq!(row, Some(change.expect));
                     self.set_row(item.sandbox, change.set, "reclaimed");
+                    self.declared.remove(&item.sandbox);
+                    self.forsaken.remove(&(item.sandbox, id));
                     self.stats.reclaims += 1;
                     Verdict::Keep {
                         epoch: change.set.epoch,
@@ -1497,6 +1765,18 @@ impl Sim {
                 verdict => verdict,
             };
             verdicts.push((item.sandbox, verdict));
+        }
+        // What waited for it that it no longer has goes on from the store.
+        let gone: Vec<(SandboxId, Ownership)> = self
+            .rows
+            .iter()
+            .filter(|(sandbox, row)| {
+                row.owner == Some(id) && !listed.iter().any(|item| item.sandbox == **sandbox)
+            })
+            .map(|(sandbox, row)| (*sandbox, *row))
+            .collect();
+        for (sandbox, row) in gone {
+            self.set_row(sandbox, row.lose().set, "cleared: back without it");
         }
         self.host_rows.insert(
             id,
@@ -1585,17 +1865,36 @@ impl Sim {
                 let min = self.stats.min_stop_gap_ns.get_or_insert(gap);
                 *min = (*min).min(gap);
             }
-            let owned: Vec<(SandboxId, Ownership)> = self
-                .rows
-                .iter()
-                .filter(|(_, row)| row.owner == Some(host))
-                .map(|(id, row)| (*id, *row))
-                .collect();
-            for (id, row) in owned {
-                self.set_row(id, row.lose().set, "cleared: host lost");
-            }
+            // Its sandboxes wait for it: it may come back with copies
+            // newer than the store's.
             self.stats.recoveries += 1;
         }
+    }
+
+    /// An operator declares host `host`, given up on, gone: its sandboxes
+    /// go on from the store's copies.
+    fn declare_gone(&mut self, host: HostId) {
+        if self
+            .host_rows
+            .get(&host)
+            .is_none_or(|row| row.state != HostState::Lost)
+        {
+            return;
+        }
+        self.host_note(usize::try_from(host.0).unwrap(), "declared gone");
+        let owned: Vec<(SandboxId, Ownership)> = self
+            .rows
+            .iter()
+            .filter(|(_, row)| row.owner == Some(host))
+            .map(|(id, row)| (*id, *row))
+            .collect();
+        for (id, row) in owned {
+            let set = row.lose().set;
+            self.set_row(id, set, "cleared: host declared gone");
+            self.declared.insert(id, set.epoch);
+            self.forsaken.insert((id, host));
+        }
+        self.stats.declarations += 1;
     }
 
     fn client(&mut self) {
@@ -1623,6 +1922,8 @@ impl Sim {
             return;
         };
         match row.owner {
+            // Its host was given up on: it waits for it to come back.
+            Some(owner) if self.lost(owner) => {}
             Some(owner) => self.request(owner, Op::Wake, id, row.epoch, tries),
             // Only an archive can come back elsewhere. Without one, the
             // only copy is on the host that lost it: wait for it to return.
@@ -1636,9 +1937,17 @@ impl Sim {
     fn move_one(&mut self, id: SandboxId) {
         if let Some(row) = self.rows.get(&id).copied()
             && let Some(owner) = row.owner
+            && !self.lost(owner)
         {
             self.request(owner, Op::HandOff, id, row.epoch, 0);
         }
+    }
+
+    /// Whether the store gave up on `host`.
+    fn lost(&self, host: HostId) -> bool {
+        self.host_rows
+            .get(&host)
+            .is_some_and(|row| row.state == HostState::Lost)
     }
 
     fn request(&mut self, host: HostId, op: Op, id: SandboxId, epoch: OwnerEpoch, tries: u32) {
@@ -1741,6 +2050,27 @@ impl Sim {
                 };
                 self.set_row(id, change.set, why);
             }
+            // It exists nowhere: no host holds a copy and nothing is
+            // archived, or forgetting it loses it.
+            Next::Forget => {
+                let held = self
+                    .hosts
+                    .iter()
+                    .find(|host| !host.dead && host.sandboxes.contains_key(&id));
+                if let Some(host) = held {
+                    self.fail(
+                        id,
+                        &format!("{id:?} forgotten while {:?} holds it", host.id),
+                    );
+                }
+                if self.objects.contains_key(&id) || self.confirmed.contains(&id) {
+                    self.fail(id, &format!("{id:?} forgotten though it was made"));
+                }
+                self.note(id, "forgotten: exists nowhere");
+                self.rows.remove(&id);
+                self.sends.remove(&id);
+                self.stats.forgotten += 1;
+            }
         }
     }
 
@@ -1782,6 +2112,8 @@ impl Sim {
                 }
             }
             9 => {}
+            // An operator declares a host given up on gone, rightly or not.
+            10 if self.lost(self.hosts[index].id) => self.declare_gone(self.hosts[index].id),
             _ => {
                 if !self.hosts[index].machine_up {
                     return;
@@ -1825,6 +2157,13 @@ fn simulate(seed: u64, params: Params) -> Stats {
     sim.heal();
     let settle = sim.now + 60 * SEC;
     sim.run_until(settle);
+    // What waits for hosts that died for good goes on once they are
+    // declared gone.
+    for index in 0..sim.hosts.len() {
+        if sim.hosts[index].dead {
+            sim.declare_gone(sim.hosts[index].id);
+        }
+    }
     // Wake everything, more than once to ride out lost messages.
     let ids: Vec<SandboxId> = sim.rows.keys().copied().collect();
     for round in 0..4 {
@@ -1918,10 +2257,17 @@ fn run_seeds(params: Params) -> Stats {
         total.superseded += stats.superseded;
         total.watchdog_reboots += stats.watchdog_reboots;
         total.kills += stats.kills;
+        total.only_copy_runs += stats.only_copy_runs;
+        total.orphaned_runs += stats.orphaned_runs;
+        total.handovers += stats.handovers;
         total.suspends += stats.suspends;
         total.slow_registrations += stats.slow_registrations;
+        total.declarations += stats.declarations;
+        total.set_aside += stats.set_aside;
         total.dead_hosts += stats.dead_hosts;
         total.lost_sandboxes += stats.lost_sandboxes;
+        total.broken_creates += stats.broken_creates;
+        total.forgotten += stats.forgotten;
         if let Some(gap) = stats.min_stop_gap_ns {
             let min = total.min_stop_gap_ns.get_or_insert(gap);
             *min = (*min).min(gap);
@@ -1978,6 +2324,17 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
         total.slow_registrations > 0 && total.min_stop_gap_ns.is_some(),
         "{total:?}"
     );
+    // Hosts were declared gone, and some came back to set copies aside.
+    assert!(total.declarations > 0 && total.set_aside > 0, "{total:?}");
+    // Only copies ran on past their hosts' deadlines, some with their
+    // marks orphaned by an agent restart, and guards handed over.
+    assert!(
+        total.only_copy_runs > 0 && total.orphaned_runs > 0 && total.handovers > 0,
+        "{total:?}"
+    );
+    // Hosts failed creates, and the wakes that found them nowhere forgot
+    // them rather than asking their hosts again.
+    assert!(total.broken_creates > 0 && total.forgotten > 0, "{total:?}");
 }
 
 #[test]

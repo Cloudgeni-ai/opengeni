@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   type AccessGrant,
-  type BrowserPasskeyCredential,
+  BrowserPasskeyCredential,
   type BrowserPasskeyEvent,
   type BrowserPasskeySyncRequest,
   type BrowserPasskeySyncResponse,
@@ -13,12 +13,14 @@ import {
 // F1 stub resolver; apps/api gains the @opengeni/vaults dependency with F2.
 import { createStaticSecretResolver } from "../../../packages/vaults/src/testing/static-resolver";
 import { ApiHttpError } from "../src/http/api-error";
+import { BrowserPasskeyManager } from "../../../packages/browserd/src/passkeys";
 import {
   attemptSecretPrincipal,
   collectStringsDeep,
   type InteractionPasskeyStore,
   type InteractionSecretsPort,
   resetPasskeySessionCacheForTests,
+  releaseBrowserPasskeys,
   resolveInteractionSecretValues,
   syncBrowserPasskeys,
 } from "../src/interaction-secrets";
@@ -367,10 +369,170 @@ describe("syncBrowserPasskeys", () => {
           controllerGeneration: "controller-1",
           authenticators: 1,
           events: [...pending],
+          // A current controller stamps registrations for a caller that names its owner.
+          ...(request.owner !== undefined ? { supportsOwners: true as const } : {}),
         };
       },
     };
   }
+
+  test("device-bound hosted credentials keep the legacy shape without a probe", async () => {
+    const { store } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: false, backupState: false }];
+    const client = fakeClient([]);
+    await syncBrowserPasskeys({
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client,
+    });
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]!.credentials).toEqual([stored]);
+  });
+
+  for (const supportsBackupFlags of [false, true]) {
+    test(`negotiates backup flags without breaking legacy sync (${supportsBackupFlags})`, async () => {
+      const legacyCredential = BrowserPasskeyCredential.omit({
+        backupEligibility: true,
+        backupState: true,
+      }).strict();
+      const credentials = [
+        stored,
+        { ...stored, credentialId: "ZmFsc2U=", backupEligibility: false, backupState: false },
+        { ...stored, credentialId: "dHJ1ZQ==", backupEligibility: true, backupState: true },
+      ];
+      // Reproduce the previous rollout regression against the old strict shape.
+      expect(legacyCredential.safeParse(credentials[1]).success).toBe(false);
+      const { store } = fakeStore();
+      store.lease = async () => credentials;
+      const client = fakeClient([]);
+      const sync = client.passkeySync.bind(client);
+      client.passkeySync = async (request) => {
+        if (!supportsBackupFlags) {
+          for (const credential of request.credentials ?? []) {
+            expect(legacyCredential.safeParse(credential).success).toBe(true);
+          }
+        }
+        return {
+          ...(await sync(request)),
+          ...(supportsBackupFlags ? { supportsBackupFlags: true as const } : {}),
+        };
+      };
+      const input = {
+        port: { ...port({}), passkeys: store },
+        grant: agentGrant,
+        browserSessionId: BROWSER,
+        controllerGeneration: "controller-1",
+        client,
+        refresh: true,
+      };
+      expect(await syncBrowserPasskeys(input)).toEqual({ saved: 0, asserted: 0 });
+      expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([
+        null,
+        3,
+      ]);
+      const sent = client.requests[1]!.credentials!;
+      expect(sent[1]).not.toHaveProperty("backupEligibility");
+      expect(sent[1]).not.toHaveProperty("backupState");
+      expect(sent[2]).toEqual({
+        ...stored,
+        credentialId: "dHJ1ZQ==",
+        ...(supportsBackupFlags ? { backupEligibility: true, backupState: true } : {}),
+      });
+      await syncBrowserPasskeys(input);
+      expect(client.requests).toHaveLength(3); // cached negotiation survives lease refresh
+      await syncBrowserPasskeys({
+        ...input,
+        grant: {
+          ...agentGrant,
+          metadata: { ...agentGrant.metadata, attemptId: "77777777-7777-4777-8777-777777777778" },
+        },
+      });
+      expect(client.requests).toHaveLength(4); // and a new attempt, without sharing its lease
+      expect(client.requests[3]!.credentials).toEqual(sent);
+      await syncBrowserPasskeys({ ...input, controllerGeneration: "controller-2" });
+      expect(client.requests).toHaveLength(6);
+      expect(client.requests[4]!.credentials).toBeNull();
+      await releaseBrowserPasskeys(input.port, BROWSER);
+      await syncBrowserPasskeys(input);
+      expect(client.requests).toHaveLength(8);
+      expect(client.requests[6]!.credentials).toBeNull();
+      expect(credentials[2]!.backupEligibility).toBe(true); // never alter vault material
+    });
+  }
+
+  test("a pending assertion crosses attempts without a destructive capability probe", async () => {
+    const { store, calls } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: true, backupState: true }];
+    const pending: BrowserPasskeyEvent[] = [];
+    const client = fakeClient(pending);
+    const sync = client.passkeySync.bind(client);
+    client.passkeySync = async (request) => ({
+      ...(await sync(request)),
+      supportsBackupFlags: true,
+    });
+    const input = {
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client,
+    };
+    await syncBrowserPasskeys(input);
+    pending.push({
+      type: "asserted",
+      eventId: "99999999-9999-4999-8999-999999999992",
+      occurredAt: "2026-10-29T08:00:00.000Z",
+      targetId: "target-1",
+      rpId: stored.rpId,
+      credentialId: stored.credentialId,
+      itemId: stored.itemId,
+      signCount: 9,
+    });
+    const next = {
+      ...agentGrant,
+      metadata: { ...agentGrant.metadata, attemptId: "77777777-7777-4777-8777-777777777779" },
+    };
+    expect(await syncBrowserPasskeys({ ...input, grant: next })).toEqual({ saved: 0, asserted: 1 });
+    expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([
+      null,
+      1,
+      1,
+      null,
+    ]);
+    expect(client.requests[2]!.credentials![0]!.signCount).toBe(4); // stale vault is reconciled by browserd
+    expect(calls).toContain(`count:${stored.itemId}:9`);
+    expect(pending).toEqual([]);
+  });
+
+  test("a failed load after discovery has not cleared the browser's existing credentials", async () => {
+    const { store } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: true, backupState: true }];
+    let loaded = [{ ...stored, signCount: 9 }];
+    let calls = 0;
+    const result = await syncBrowserPasskeys({
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client: {
+        async passkeySync(request) {
+          if (++calls === 2) throw new Error("synthetic load failure before dispatch");
+          if (request.credentials !== null) loaded = request.credentials;
+          return {
+            browserSessionId: BROWSER,
+            controllerGeneration: "controller-1",
+            authenticators: 1,
+            events: [],
+            supportsBackupFlags: true,
+          };
+        },
+      },
+    });
+    expect(result).toBeNull();
+    expect(loaded).toEqual([{ ...stored, signCount: 9 }]);
+  });
 
   test("loads leased passkeys, saves registrations and writes sign counts back", async () => {
     const { store, calls } = fakeStore();
@@ -389,6 +551,7 @@ describe("syncBrowserPasskeys", () => {
         privateKey: "cHJpdmF0ZTI=",
         signCount: 0,
       },
+      owner: "66666666-6666-4666-8666-666666666666",
     };
     const assertedNew: BrowserPasskeyEvent = {
       type: "asserted",
@@ -487,6 +650,39 @@ describe("syncBrowserPasskeys", () => {
     expect(calls.filter((call) => call.startsWith("lease:"))).toHaveLength(2);
   });
 
+  test("a write-back after an action logs held passkeys that were not used", async () => {
+    const { store } = fakeStore();
+    const client = fakeClient([]);
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const sync = (refresh: boolean, passkeys: InteractionPasskeyStore = store) =>
+      syncBrowserPasskeys({
+        port: { ...port({}), passkeys },
+        grant: agentGrant,
+        browserSessionId: `${BROWSER}-unused`,
+        controllerGeneration: "controller-1",
+        client,
+        now: () => 3_000_000,
+        refresh,
+        log: (event, fields) => logs.push([event, fields]),
+      });
+    // The takeover before an action stays quiet; the write-back after it says
+    // the browser held a passkey for the site and nothing asserted it.
+    expect(await sync(true)).toEqual({ saved: 0, asserted: 0 });
+    expect(logs).toEqual([]);
+    expect(await sync(false)).toEqual({ saved: 0, asserted: 0 });
+    expect(logs).toEqual([
+      ["browser.passkey.synced", { saved: 0, asserted: 0, loadedRpIds: ["localhost"] }],
+    ]);
+
+    // With no passkey loaded there is nothing to report.
+    resetPasskeySessionCacheForTests();
+    logs.length = 0;
+    const empty: InteractionPasskeyStore = { ...store, lease: async () => [] };
+    await sync(true, empty);
+    await sync(false, empty);
+    expect(logs).toEqual([]);
+  });
+
   test("syncs for one browser run in call order, so a write-back need not be awaited", async () => {
     const { store, calls } = fakeStore();
     const assertion: BrowserPasskeyEvent = {
@@ -565,5 +761,233 @@ describe("syncBrowserPasskeys", () => {
     }
     expect(syncs).toBe(1);
     expect(calls).toEqual([`lease:${BROWSER}:600`, `release:${BROWSER}`]);
+  });
+});
+
+describe("passkeys belong to the attempt that loaded them", () => {
+  const ALICE_ATTEMPT = "66666666-6666-4666-8666-66666666aaaa";
+  const BOB_ATTEMPT = "66666666-6666-4666-8666-66666666bbbb";
+  const aliceGrant: AccessGrant = {
+    ...agentGrant,
+    metadata: { ...agentGrant.metadata, attemptId: ALICE_ATTEMPT },
+  };
+  const bobGrant: AccessGrant = {
+    ...agentGrant,
+    metadata: {
+      ...agentGrant.metadata,
+      turnId: "55555555-5555-4555-8555-55555555bbbb",
+      attemptId: BOB_ATTEMPT,
+    },
+  };
+  const memberGrant: AccessGrant = { ...humanGrant, subjectId: "user:bob" };
+  const alicePasskey: BrowserPasskeyCredential = {
+    itemId: "77777777-7777-4777-8777-77777777aaaa",
+    rpId: "bank.example.test",
+    credentialId: "YWxpY2UtYmFuaw",
+    userHandle: "YQ",
+    userName: "alice",
+    userDisplayName: null,
+    privateKey: "ZHVtbXktYWxpY2UtYmFuaw",
+    signCount: 3,
+  };
+
+  beforeEach(() => resetPasskeySessionCacheForTests());
+
+  /** The real browserd manager behind a fake CDP peer, and a vault that, like
+   *  the database, serves only the exact live attempt. */
+  function browser() {
+    const installed = new Map<string, Set<string>>();
+    const listeners = new Map<string, (event: { params: Record<string, unknown> }) => void>();
+    const cdp = {
+      async send<T>(
+        method: string,
+        params: Readonly<Record<string, unknown>> = {},
+        options: { sessionId?: string } = {},
+      ): Promise<T> {
+        const tab = options.sessionId ?? "";
+        if (method === "WebAuthn.addVirtualAuthenticator") {
+          installed.set(tab, new Set());
+          return { authenticatorId: `authenticator-${tab}` } as T;
+        }
+        const credential = params["credential"] as { credentialId?: string } | undefined;
+        if (method === "WebAuthn.addCredential") installed.get(tab)!.add(credential!.credentialId!);
+        if (method === "WebAuthn.removeCredential") {
+          installed.get(tab)!.delete(params["credentialId"] as string);
+        }
+        if (method === "Target.getTargetInfo") {
+          return { targetInfo: { url: "https://rp.example.test/account" } } as T;
+        }
+        return {} as T;
+      },
+      on(
+        method: string,
+        listener: (event: { params: Record<string, unknown> }) => void,
+        sessionId?: string,
+      ) {
+        listeners.set(`${sessionId}:${method}`, listener);
+        return () => listeners.delete(`${sessionId}:${method}`);
+      },
+    };
+    const manager = new BrowserPasskeyManager({
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+    });
+    const live = new Set<string>();
+    const saved: Array<{ attemptId: string; credentialId: string }> = [];
+    const store: InteractionPasskeyStore = {
+      async lease(principal) {
+        if (!live.has(principal.attemptId)) throw new Error("not the current attempt");
+        return principal.attemptId === ALICE_ATTEMPT ? [alicePasskey] : [];
+      },
+      async saveRegistered(principal, input) {
+        if (!live.has(principal.attemptId)) throw new Error("not the current attempt");
+        saved.push({
+          attemptId: principal.attemptId,
+          credentialId: input.credential.credentialId,
+        });
+        return { itemId: "88888888-8888-4888-8888-88888888aaaa" };
+      },
+      async updateSignCount() {},
+      async release() {},
+    };
+    const sync = (grant: AccessGrant, refresh: boolean) =>
+      syncBrowserPasskeys({
+        port: { ...port({}), passkeys: store },
+        grant,
+        browserSessionId: BROWSER,
+        controllerGeneration: "controller-1",
+        client: { passkeySync: async (request) => await manager.sync(request) },
+        refresh,
+      });
+    const attach = (tab: string) =>
+      manager.attachTarget(cdp, { targetId: `target-${tab}`, sessionId: tab });
+    const register = async (tab: string, credentialId: string) => {
+      listeners.get(`${tab}:WebAuthn.credentialAdded`)?.({
+        params: {
+          authenticatorId: `authenticator-${tab}`,
+          credential: {
+            credentialId,
+            rpId: "rp.example.test",
+            privateKey: "ZHVtbXktbmV3LWtleQ==",
+            userHandle: "YQ==",
+            signCount: 0,
+          },
+        },
+      });
+      await manager.sync({
+        protocolVersion: 1,
+        browserSessionId: BROWSER,
+        controllerGeneration: "controller-1",
+        credentials: null,
+        acknowledgeEventIds: [],
+      });
+    };
+    const holding = (tab: string) => [...(installed.get(tab) ?? [])].sort();
+    return { manager, live, saved, sync, attach, register, holding };
+  }
+
+  test("an action no attempt owns runs with nobody's passkeys loaded", async () => {
+    const { live, sync, attach, holding } = browser();
+    await attach("a");
+    live.add(ALICE_ATTEMPT);
+    await sync(aliceGrant, true);
+    await sync(aliceGrant, false);
+    expect(holding("a")).toEqual(["YWxpY2UtYmFuaw=="]);
+
+    // Another member drives the same browser through the actions route.
+    expect(await sync(memberGrant, true)).toBeNull();
+    expect(holding("a")).toEqual([]);
+    await attach("b");
+    expect(holding("b")).toEqual([]);
+    expect(await sync(memberGrant, false)).toBeNull();
+    expect(holding("b")).toEqual([]);
+
+    // Alice's attempt acting again loads her passkeys again.
+    await sync(aliceGrant, true);
+    expect(holding("a")).toEqual(["YWxpY2UtYmFuaw=="]);
+    expect(holding("b")).toEqual(["YWxpY2UtYmFuaw=="]);
+  });
+
+  test("a registration is saved only for the attempt whose passkeys were loaded", async () => {
+    const { manager, live, saved, sync, attach, register, holding } = browser();
+    await attach("a");
+    live.add(ALICE_ATTEMPT);
+    await sync(aliceGrant, true);
+    await register("a", "YWxpY2UtbmV3");
+    // Alice's attempt saves its own registration.
+    expect(await sync(aliceGrant, false)).toEqual({ saved: 1, asserted: 0 });
+    expect(saved).toEqual([{ attemptId: ALICE_ATTEMPT, credentialId: "YWxpY2UtbmV3" }]);
+
+    // A second one whose write-back fails once her attempt is over.
+    await register("a", "bmV3LWNyZWQ=");
+    live.delete(ALICE_ATTEMPT);
+    expect(await sync(aliceGrant, false)).toEqual({ saved: 0, asserted: 0 });
+
+    // Bob's attempt syncs next: the pending registration is dropped, not
+    // saved into his vault, and Alice's passkeys leave the browser.
+    live.add(BOB_ATTEMPT);
+    expect(await sync(bobGrant, true)).toEqual({ saved: 0, asserted: 0 });
+    expect(saved).toHaveLength(1);
+    expect(holding("a")).toEqual([]);
+    const pending = await manager.sync({
+      protocolVersion: 1,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      credentials: null,
+      acknowledgeEventIds: [],
+    });
+    expect(pending.events).toEqual([]);
+  });
+
+  test("a controller that cannot say whose set made a registration never has it saved", async () => {
+    const saves: string[] = [];
+    const vault: InteractionPasskeyStore = {
+      lease: async () => [],
+      saveRegistered: async () => {
+        saves.push("save");
+        return { itemId: "88888888-8888-4888-8888-88888888bbbb" };
+      },
+      updateSignCount: async () => undefined,
+      release: async () => undefined,
+    };
+    const acknowledged: string[] = [];
+    const event: BrowserPasskeyEvent = {
+      type: "registered",
+      eventId: "99999999-9999-4999-8999-99999999aaaa",
+      occurredAt: "2026-10-12T20:00:00.000Z",
+      targetId: "target-1",
+      origin: null,
+      credential: {
+        rpId: "rp.example.test",
+        credentialId: "bmV3LWNyZWQ=",
+        userHandle: null,
+        userName: null,
+        userDisplayName: null,
+        privateKey: "ZHVtbXk=",
+        signCount: 0,
+      },
+    };
+    expect(
+      await syncBrowserPasskeys({
+        port: { ...port({}), passkeys: vault },
+        grant: aliceGrant,
+        browserSessionId: BROWSER,
+        controllerGeneration: "controller-1",
+        client: {
+          async passkeySync(request) {
+            acknowledged.push(...request.acknowledgeEventIds);
+            return {
+              browserSessionId: BROWSER,
+              controllerGeneration: "controller-1",
+              authenticators: 1,
+              events: acknowledged.includes(event.eventId) ? [] : [event],
+            };
+          },
+        },
+        refresh: true,
+      }),
+    ).toEqual({ saved: 0, asserted: 0 });
+    expect(saves).toEqual([]);
+    expect(acknowledged).toEqual([event.eventId]);
   });
 });

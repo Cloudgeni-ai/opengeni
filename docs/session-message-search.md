@@ -9,8 +9,9 @@ SDK mirrors are checked for parity.
 ## Request and matching
 
 The request takes `query` (1–200 UTF-16 code units), optional `sessionId`,
-`archiveStatus` (`active`, `archived`, `all`; default `active`), `limit` (1–50;
-default 20), and an opaque `cursor`. Whitespace is significant. The query is a
+`archiveStatus` (`active`, `archived`, `all`; default `active`), `order`
+(`oldest` or `newest`; default `oldest`), `limit` (1–50; default 20), and an
+opaque `cursor`. Whitespace is significant. The query is a
 literal substring, not a regexp, SQL wildcard, token query, or relevance query.
 Matching uses ECMAScript Unicode simple case folding (`iu`); it does not apply
 locale-dependent lowercasing, Unicode normalization, or multi-character folding
@@ -54,6 +55,12 @@ provider `messageId` is supplemental and is not always present.
 
 Ordering is session UUID ascending, then event sequence ascending, then match
 offset ascending. This is stable traversal order, not relevance ranking.
+`order: "newest"` walks the same key backwards (session UUID descending, then
+event sequence descending), so a session's latest messages come first; the
+occurrences inside one message stay in ascending offset order, and a message
+cut by the page limit continues on the next page. Conversation Find uses it to
+start at the latest match without paging through older history. It cannot be
+combined with `groupBy` (HTTP 400), and the order is bound to the cursor.
 `matchedMessageCount` and `matchedOccurrenceCount` are cumulative counts for this
 traversal. `scannedMessages` counts distinct visited candidate messages (those
 the index could not rule out, see below), including a large message still being

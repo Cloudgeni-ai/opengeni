@@ -3,11 +3,7 @@
  * image generation, realtime and transcription, plus the connection-level
  * credential reads behind live usage and reset credits.
  *
- * Dormant until an organization's cutover row for the provider is enabled:
- * every read, lease and refresh re-checks the enabled cutover in its own
- * transaction (the credential routines return nothing otherwise), so
- * switch-off fails closed mid-operation. Nothing here writes the chat
- * session binding.
+ * Nothing here writes the chat session binding.
  *
  * Three caller contexts exist, each with an explicit owner/workspace tuple:
  * - `turn`: an operation inside an exact accepted chat turn (image). It runs
@@ -62,7 +58,6 @@ import {
 import {
   acquireSubscriptionOperationLease,
   decodeSubscriptionQuota,
-  readSubscriptionProviderCutoverState,
   releaseSubscriptionOperationLease,
   renewSubscriptionOperationLease,
   resolveSubscriptionConnectionId,
@@ -125,8 +120,8 @@ export type SubscriptionCoreOperationLeaseResult =
   | { kind: "acquired"; leasedUntil: Date }
   /** Another live holder or generation owns this operation id. */
   | { kind: "busy" }
-  /** The cutover is not enabled, or the turn is no longer the accepted turn. */
-  | { kind: "not_enabled" }
+  /** The operation's scope is no longer visible (for example, the turn is no longer accepted). */
+  | { kind: "not_visible" }
   /** The database refused the connection for this operation's authority. */
   | { kind: "refused" };
 
@@ -145,7 +140,7 @@ export type SubscriptionCoreConnectionCredential<Credential = unknown> = {
 
 export type SubscriptionCoreConnectionCredentialLoad =
   | { kind: "loaded"; credential: SubscriptionCoreConnectionCredential }
-  /** No live operation lease, no enabled cutover, or the connection is out of scope. */
+  /** No live operation lease, or the connection is out of scope. */
   | { kind: "not_visible" }
   | { kind: "needs_relogin" }
   | { kind: "unavailable" };
@@ -429,13 +424,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     return bytes;
   }
 
-  async function cutoverEnabled(tx: Database, accountId: string): Promise<boolean> {
-    return (
-      (await readSubscriptionProviderCutoverState(tx, { accountId, provider: providerId })) ===
-      "enabled"
-    );
-  }
-
   function leaseIdentity(
     scope: SubscriptionCoreOperationScope,
     ref: SubscriptionCoreOperationLeaseRef,
@@ -476,9 +464,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         db,
         scope,
         async (tx): Promise<SubscriptionCoreOperationLeaseResult> => {
-          if (!(await cutoverEnabled(tx, scopeTenant(scope).accountId))) {
-            return { kind: "not_enabled" };
-          }
           const lease = await acquireSubscriptionOperationLease(tx, {
             ...leaseIdentity(scope, ref),
             ttlMs,
@@ -486,14 +471,14 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
           return lease ? { kind: "acquired", leasedUntil: lease.leasedUntil } : { kind: "busy" };
         },
       );
-      return access?.value ?? { kind: "not_enabled" };
+      return access?.value ?? { kind: "not_visible" };
     } catch (error) {
       if (isRlsRefusal(error)) return { kind: "refused" };
       throw error;
     }
   }
 
-  /** Renew only the exact, still-live operation lease (and only with the cutover on). */
+  /** Renew only the exact, still-live operation lease. */
   async function renewSubscriptionCoreOperationLease(
     db: Database,
     scope: SubscriptionCoreOperationScope,
@@ -501,7 +486,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     ttlMs = SUBSCRIPTION_CORE_OPERATION_LEASE_TTL_MS,
   ): Promise<Date | null> {
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, scopeTenant(scope).accountId))) return null;
       // Renewal touches only the expiry, so the lease guard does not rerun:
       // re-check the full operation authority (live turn attempt and chat
       // lease, scope, personal authority and settings) before extending it.
@@ -635,7 +619,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
 
   /**
    * Rotate the connection's refresh token under the per-connection advisory
-   * key. Authorization (live operation lease, scope, enabled cutover) happens
+   * key. Authorization (live operation lease and scope) happens
    * in begin, before the provider call; the rotated token is persisted
    * immediately after it returns.
    */
@@ -787,7 +771,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     )
       return false;
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, scope.accountId))) return false;
       // The existing credential seam rechecks live connection scope and refuses
       // personal accounts outside an exact accepted turn.
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
@@ -839,7 +822,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
   ): Promise<{ applied: boolean; recovered: boolean }> {
     const { accountId } = scopeTenant(scope);
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, accountId))) return { applied: false, recovered: false };
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
         tx,
         sql`select refresh_generation from opengeni_private.read_subscription_core_connection_credential(${providerId},
@@ -896,7 +878,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
   ): Promise<{ quota: SubscriptionQuota | null } | null> {
     const { accountId } = scopeTenant(scope);
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, accountId))) return null;
       const [connection] = await rawRows<{ status: string }>(
         tx,
         sql`

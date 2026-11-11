@@ -10,7 +10,12 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
-import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type CapabilityCatalogItem,
+  type ConnectionMetadata,
+} from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectCardMessage } from "../connect-card-message";
@@ -20,15 +25,31 @@ import {
   matchingActiveMcpConnections,
   reconnectablePersonalMcpConnections,
 } from "../mcp-connection-status";
+import {
+  ownLoginOffHere,
+  turnOnOwnLoginHere,
+} from "../app/components/capabilities/own-login-turned-on";
 import { useOpenGeniText } from "../messages/runtime";
 import {
   attachSessionCapability,
   continueAfterCapabilitySetup,
   sessionCapabilityTools,
 } from "../session-capability-policy";
+import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
+/** Google's connectors only ever connect a person's own account; the API refuses sharing. */
+const PERSONAL_ONLY_MCP_URLS = new Set([
+  "https://gmailmcp.googleapis.com/mcp/v1",
+  GOOGLE_DRIVE_MCP_URL,
+  "https://calendarmcp.googleapis.com/mcp/v1",
+]);
 const RESTART_STATES = ["failed", "expired", "cancelled"];
+
+function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
+  const url = item?.mcpUrl ?? item?.endpointUrl;
+  return !!url && PERSONAL_ONLY_MCP_URLS.has(url);
+}
 
 /** The OAuth MCP connect card, as a renderer draws it. */
 export type McpCapabilityConnect = {
@@ -41,6 +62,11 @@ export type McpCapabilityConnect = {
   complete: boolean;
   /** An account is connected; the capability still has to be added here. */
   connected: boolean;
+  /**
+   * Your own login for this, added in another workspace and not turned on in
+   * this one: the card asks once whether to use it here too (D-54).
+   */
+  offHere: ConnectionMetadata | null;
   waiting: boolean;
   reconciling: boolean;
   busy: boolean;
@@ -55,12 +81,14 @@ export type McpCapabilityConnect = {
   open: () => void;
   signIn: () => void;
   addHere: () => void;
+  /** Turn `offHere` on in this workspace, then add it here like `addHere`. */
+  useHere: () => void;
   close: () => void;
   stopWaiting: () => void;
 };
 
 export type McpCapabilityConnectInput = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   /** Omit for connection management: no session tool selection is written. */
   sessionId?: string | undefined;
@@ -78,6 +106,12 @@ export type McpCapabilityConnectInput = {
    * someone's own account, or the person may only connect their own account.
    */
   personalOnly?: boolean | undefined;
+  /**
+   * The account the agent asked to reconnect: a connection of this person's
+   * that stopped working. When it is theirs to reconnect here, the card signs
+   * in again to that same connection instead of adding a new one.
+   */
+  reconnectConnectionId?: string | undefined;
 };
 
 /**
@@ -96,6 +130,7 @@ export function useMcpCapabilityConnect({
   dialogOnly = false,
   onClose,
   personalOnly: configuredPersonalOnly = false,
+  reconnectConnectionId,
 }: McpCapabilityConnectInput): McpCapabilityConnect {
   const t = useOpenGeniText();
   const [controller] = useState(
@@ -103,11 +138,14 @@ export function useMcpCapabilityConnect({
   );
   const view = useConnect(controller);
   const [item, setItem] = useState<CapabilityCatalogItem | null>(null);
-  const personalOnly =
-    configuredPersonalOnly || (item?.mcpUrl ?? item?.endpointUrl) === GOOGLE_DRIVE_MCP_URL;
+  // Nobody else is in this workspace: there is no one to share with, so the
+  // card connects the person's own account without asking.
+  const [alone, setAlone] = useState(false);
+  const personalOnly = configuredPersonalOnly || personalOnlyService(item) || alone;
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [offHere, setOffHere] = useState<ConnectionMetadata | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -163,17 +201,26 @@ export function useMcpCapabilityConnect({
     }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisRecommendationIsNotAn"));
+    // Only a choice the card would otherwise ask about needs the workspace's people.
+    const nobodyToShareWith =
+      !resolved.connectionRef && !personalOnly && !personalOnlyService(resolved)
+        ? await workspaceHasNobodyToShareWith(client, workspaceId)
+        : false;
+    if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     setItem(resolved);
+    if (nobodyToShareWith) setAlone(true);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
     else if (
       !item &&
       (personalOnly ||
-        (resolved.mcpUrl ?? resolved.endpointUrl) === GOOGLE_DRIVE_MCP_URL ||
+        nobodyToShareWith ||
+        personalOnlyService(resolved) ||
         resolved.metadata?.defaultConnectionOwnership === "personal")
     )
       setOwnership("personal");
     let accountReady = false;
+    let ownLoginElsewhere: ConnectionMetadata | null = null;
     if (resolved.enabled && resolved.connectionRef) {
       const connections =
         resolved.connectionRef.subjectScope === "subject"
@@ -181,7 +228,13 @@ export function useMcpCapabilityConnect({
           : await client.listConnections(workspaceId);
       if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
       const matches = matchingActiveMcpConnections(resolved, connections);
-      accountReady = matches.length === 1;
+      const usableHere = matches.filter((entry) => !ownLoginOffHere(entry));
+      // Asked to reconnect one account: another working account does not
+      // finish that, only this one working again does.
+      accountReady = reconnectConnectionId
+        ? usableHere.some((entry) => entry.id === reconnectConnectionId)
+        : usableHere.length === 1;
+      if (usableHere.length === 0) ownLoginElsewhere = matches.find(ownLoginOffHere) ?? null;
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     const selected =
@@ -189,6 +242,7 @@ export function useMcpCapabilityConnect({
         ? session.effectiveToolPolicy?.selectedIds
         : session?.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id);
     setConnected(accountReady);
+    setOffHere(ownLoginElsewhere);
     setComplete(
       accountReady &&
         !!selected &&
@@ -297,17 +351,31 @@ export function useMcpCapabilityConnect({
         ? previous.subjectScope === "subject"
         : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
     if (!alreadyBound) {
-      await client.enableCapability(workspaceId, capabilityId, {
-        connectionRef:
-          attempt.ownership === "personal"
-            ? { providerDomain: connection.providerDomain, kind: "oauth2", subjectScope: "subject" }
-            : {
-                providerDomain: connection.providerDomain,
-                kind: "oauth2",
-                subjectScope: "workspace",
-                connectionId: connection.id,
-              },
-      });
+      try {
+        await client.enableCapability(workspaceId, capabilityId, {
+          connectionRef:
+            attempt.ownership === "personal"
+              ? {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "subject",
+                }
+              : {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "workspace",
+                  connectionId: connection.id,
+                },
+        });
+      } catch (failure) {
+        // The account is connected, but turning the integration on here is an
+        // admin's step. Say so: the account is used once an admin turns it on.
+        if (failure instanceof OpenGeniApiError && failure.status === 403)
+          throw new ConnectCardMessage(
+            t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
+          );
+        throw failure;
+      }
       if (!active()) return;
     }
     const enabled = await load(active);
@@ -360,21 +428,41 @@ export function useMcpCapabilityConnect({
       try {
         const resolved = await load(active);
         if (!resolved || !active()) return;
+        const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
+        if (!mcpUrl)
+          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
+        // The agent asked to reconnect one exact account that stopped working.
+        // Only a connection this person can see here, for this same endpoint,
+        // is reconnected; anything else connects as before (a teammate viewing
+        // the card connects their own account).
+        const lapsed = reconnectConnectionId
+          ? (await client.listConnections(workspaceId)).find(
+              (entry) =>
+                entry.id === reconnectConnectionId &&
+                entry.kind === "oauth2" &&
+                entry.status !== "active" &&
+                (typeof entry.metadata.mcpUrl !== "string" || entry.metadata.mcpUrl === mcpUrl),
+            )
+          : undefined;
+        if (!active()) return;
+        const beginOwnership: ConnectOwnership = lapsed
+          ? lapsed.subjectId === null
+            ? "workspace"
+            : "personal"
+          : ownership;
+        if (beginOwnership !== ownership) setOwnership(beginOwnership);
         if (
           resolved.connectionRef &&
-          ownership !==
+          beginOwnership !==
             (resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace")
         )
           throw new ConnectCardMessage(
             t("sessionMcpCapabilityCard.theConnectionOwnershipChangedReview"),
           );
-        const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
-        if (!mcpUrl)
-          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
         // Never silently replace an already selected account. Reauthorization
         // stays on its exact native connection ID.
-        let reconnectAccountId = resolved.connectionRef?.connectionId ?? undefined;
-        if (resolved.connectionRef?.subjectScope === "subject") {
+        let reconnectAccountId = lapsed?.id ?? resolved.connectionRef?.connectionId ?? undefined;
+        if (!lapsed && resolved.connectionRef?.subjectScope === "subject") {
           const connections = reconnectablePersonalMcpConnections(
             await client.listConnections(workspaceId),
             mcpUrl,
@@ -387,7 +475,12 @@ export function useMcpCapabilityConnect({
         // A closed request can still have reached the server. Keep its key for
         // an exact replay, but never reuse it when ownership or another input
         // changes while the user reopens setup.
-        const input = JSON.stringify({ ownership, returnUrl, reconnectAccountId, mcpUrl });
+        const input = JSON.stringify({
+          ownership: beginOwnership,
+          returnUrl,
+          reconnectAccountId,
+          mcpUrl,
+        });
         if (startInput.current !== null && startInput.current !== input) {
           startKey.current = crypto.randomUUID();
           advanceKey.current = crypto.randomUUID();
@@ -395,7 +488,7 @@ export function useMcpCapabilityConnect({
         startInput.current = input;
         let attempt = await controller.begin({
           providerId: mcpUrl === GOOGLE_DRIVE_MCP_URL ? "google-drive" : "mcp-oauth",
-          ownership,
+          ownership: beginOwnership,
           returnUrl,
           // A browser popup ends on a page that closes itself instead of
           // loading this page a second time; a phone returns to the app.
@@ -495,7 +588,11 @@ export function useMcpCapabilityConnect({
     if (capability.connectionRef?.subjectScope === "subject") {
       const accounts = await client.listOwnConnectionAccounts(workspaceId);
       if (!active()) return;
-      if (matchingActiveMcpConnections(capability, accounts).length === 0)
+      if (
+        matchingActiveMcpConnections(capability, accounts).filter(
+          (entry) => !ownLoginOffHere(entry),
+        ).length === 0
+      )
         throw new ConnectCardMessage(
           t("sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore"),
         );
@@ -514,6 +611,22 @@ export function useMcpCapabilityConnect({
     await run(async (active) => {
       if (item) await finishConnection(item, active);
     });
+  }
+
+  async function useHere() {
+    let finished = false;
+    await run(async (active) => {
+      const login = offHere;
+      if (!item || !login) return;
+      await turnOnOwnLoginHere(client, workspaceId, login);
+      if (!active()) return;
+      setOffHere(null);
+      setConnected(true);
+      await finishConnection(item, active);
+      finished = true;
+    });
+    // Started from the closed card: open it so a failure is shown, not lost.
+    if (!finished && current()) setExpanded(true);
   }
 
   function close() {
@@ -548,6 +661,7 @@ export function useMcpCapabilityConnect({
     expanded,
     complete,
     connected,
+    offHere,
     waiting,
     reconciling,
     busy,
@@ -561,6 +675,7 @@ export function useMcpCapabilityConnect({
     open: () => void open(),
     signIn,
     addHere: () => void addHere(),
+    useHere: () => void useHere(),
     close,
     stopWaiting: () => authorization.current?.abort(new ConnectPopupClosedError()),
   };

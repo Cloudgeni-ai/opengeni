@@ -100,10 +100,15 @@ async fn start(
         .iter()
         .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
         .collect();
+    // Chunk 1 is never stored: only filled pages can bring it back.
+    let period = compute_storage::fresh::period_of(chunks.now());
+    let mut references = Vec::new();
     for (index, chunk) in encoded.iter().enumerate() {
-        if index != 1 {
-            chunks.put_chunk(chunk).await.unwrap();
-        }
+        references.push(Some(if index == 1 {
+            chunk.reference.on_day(period)
+        } else {
+            chunks.put_chunk(chunk).await.unwrap().reference
+        }));
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory");
@@ -122,10 +127,7 @@ async fn start(
     let (hydration, _arrivals) = Hydration::start(
         Arc::new(Fetcher::new(chunks, Arc::default())),
         &path,
-        encoded
-            .iter()
-            .map(|chunk| Some(chunk.reference.clone()))
-            .collect(),
+        references,
         plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
         PageSet::new(filled),
         &[],
@@ -222,6 +224,8 @@ async fn a_failed_fill_writes_until_its_writes_have_landed() {
 struct Flaky {
     inner: object_store::memory::InMemory,
     down: AtomicBool,
+    /// Reads asked for, answered or not.
+    gets: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Display for Flaky {
@@ -254,6 +258,7 @@ impl object_store::ObjectStore for Flaky {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
         if self.down.load(Ordering::Relaxed) {
             return Err(object_store::Error::Generic {
                 store: "flaky",
@@ -313,8 +318,9 @@ async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
         .iter()
         .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
         .collect();
+    let mut references = Vec::new();
     for chunk in &encoded {
-        chunks.put_chunk(chunk).await.unwrap();
+        references.push(Some(chunks.put_chunk(chunk).await.unwrap().reference));
     }
     backend.down.store(true, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
@@ -330,10 +336,7 @@ async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
     let (hydration, _arrivals) = Hydration::start(
         Arc::clone(&fetcher),
         &path,
-        encoded
-            .iter()
-            .map(|chunk| Some(chunk.reference.clone()))
-            .collect(),
+        references,
         plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
         PageSet::new(&[]),
         &[],
@@ -373,4 +376,30 @@ async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
     let mut held = vec![0; 3 * chunk];
     file.read_exact_at(&mut held, 0).unwrap();
     assert_eq!(held, plain.concat());
+}
+
+/// A demand fetch and its readahead, chunks that follow one another in a
+/// pack, come with one read of the store, and each still arrives as its
+/// own chunk.
+#[tokio::test]
+async fn a_fetch_and_its_readahead_in_one_pack_are_one_read() {
+    let chunk = usize::try_from(CHUNK_BYTES).unwrap();
+    let plain: Vec<Vec<u8>> = (1..=4_u8).map(|fill| vec![fill; chunk]).collect();
+    let backend = Arc::new(Flaky::default());
+    let chunks = ChunkStore::new(
+        Arc::clone(&backend) as Arc<dyn object_store::ObjectStore>,
+        object_store::path::Path::from("p"),
+    );
+    let mut packer = compute_storage::pack::Packer::new();
+    for bytes in &plain {
+        packer.push(&compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap());
+    }
+    let run = chunks.put_pack(packer).await.unwrap().references;
+    backend.gets.store(0, Ordering::Relaxed);
+    let fetcher = Fetcher::new(chunks, Arc::default());
+    fetcher.start_run(&run);
+    for (reference, bytes) in run.iter().zip(&plain) {
+        assert_eq!(**fetcher.get(reference, false).await.unwrap(), *bytes);
+    }
+    assert_eq!(backend.gets.load(Ordering::Relaxed), 1);
 }

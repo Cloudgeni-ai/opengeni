@@ -1,6 +1,5 @@
-import { isRetiredNativeGoogleDriveTask } from "@opengeni/contracts/google-drive-native-retirement";
-import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
 import type {
   ReasoningEffort,
@@ -66,7 +65,6 @@ export type ScheduledTaskFormState = {
   agentLearningBaselineScope?: "workspace" | "personal";
   agentLearningDestinationKey?: string;
   agentLearningDirty?: boolean;
-  knowledgeSource?: ScheduledTaskAgentConfig["knowledgeSource"];
   name: string;
   description: string;
   prompt: string;
@@ -123,40 +121,14 @@ export type ScheduledTaskFormState = {
   agentCapabilities?: import("@opengeni/contracts").AgentCapabilities;
 };
 
-/**
- * Runs for every row before the list is even grouped, so it reads `action` and
- * `metadata` defensively: this is a list read, and one malformed row must not
- * take the page down on the way to being rendered as one degraded card.
- */
+/** The state chip a schedule shows in lists and on its page. */
 export function scheduledTaskStateLabel(task: ScheduledTask): {
   label: string;
   active: boolean;
-  reason: "active" | "user_paused" | "connection_paused" | "source_disabled" | "provider_retired";
+  reason: "active" | "user_paused";
 } {
-  if (isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task))
-    return { label: "Sync retired", active: false, reason: "provider_retired" };
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
-  }
-  if (task.agentConfig?.knowledgeSource || task.action?.kind === "knowledge_source_sync") {
-    const value = task.metadata?.knowledgeSourceSync;
-    if (value && typeof value === "object") {
-      const control = value as Record<string, unknown>;
-      if (control.sourceEnabled === false) {
-        return {
-          label: "Sync disabled",
-          active: false,
-          reason: "source_disabled",
-        };
-      }
-      if (control.connectionPaused === true) {
-        return {
-          label: "Connection paused",
-          active: false,
-          reason: "connection_paused",
-        };
-      }
-    }
   }
   return { label: "Active", active: true, reason: "active" };
 }
@@ -335,7 +307,6 @@ export function formStateFromScheduledTask(
     pinnedAccounts:
       task.runMode === "existing_session" ? [] : (task.agentConfig.pinnedAccounts ?? []),
     name: task.name,
-    knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
@@ -531,9 +502,6 @@ export function agentConfigFromFormState(
     ...retainedConfig,
     prompt: existingTask ? form.prompt : form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
-    ...(existingTask?.agentConfig.knowledgeSource
-      ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
-      : {}),
     resources: form.resources,
     tools,
     ...(connectorPolicy ? { toolPolicy: connectorPolicy.toolPolicy } : {}),
@@ -734,12 +702,9 @@ export function summarizeLastRun(runs: ScheduledTaskRun[]): LastRunSummary | nul
     };
   }
   if (last.status === "succeeded") {
-    const summary = last.knowledgeSummary;
     return {
       run: last,
-      label: summary
-        ? `last sync imported ${summary.imported}, unchanged ${summary.unchanged}, failed ${summary.failed}`
-        : `last run succeeded ${formatTimestamp(last.completedAt ?? last.firedAt)}`,
+      label: `last run succeeded ${formatTimestamp(last.completedAt ?? last.firedAt)}`,
       tone: "ok",
     };
   }
@@ -900,43 +865,15 @@ export function scheduledTaskRunSessionAccess(
 ): ScheduledTaskRunSessionAccess {
   if (run.sessionId) return "open";
   // With the id readable, a null genuinely means no session was created (a
-  // connector sync, or a run that never reached dispatch).
+  // run that never reached dispatch).
   if (options.canReadSessionIds) return "none";
   if (run.actionKind !== "agent_turn") return "none";
   return run.status === "dispatched" || run.status === "succeeded" ? "restricted" : "none";
 }
 
-type KnowledgeSyncAction = Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>;
-
-const KNOWLEDGE_SCOPE_LABEL: Record<string, string> = {
-  organization: "Organization scope",
-  workspace: "Workspace scope",
-  personal: "Personal scope",
-};
-
-/**
- * Human descriptor for a connector-sync card, replacing the truncated source
- * uuid this line used to print. Eight hex characters named nothing a person
- * could look up; the destination scope and provider domain are what actually
- * distinguish two syncs.
- *
- * Both reads are defensive. The wire type promises `destination` and
- * `connection`, but this renders straight from a list read, and one legacy or
- * partially written action must degrade to a single vague card rather than
- * throwing the whole page into the error boundary.
- */
-export function knowledgeSyncSourceLabel(action: KnowledgeSyncAction): string {
-  const destinationKind = (action.destination as { kind?: string } | undefined)?.kind;
-  const scope =
-    (destinationKind ? KNOWLEDGE_SCOPE_LABEL[destinationKind] : undefined) ?? "Unknown scope";
-  const provider = (action.connection as { providerDomain?: string } | undefined)?.providerDomain;
-  const reach = action.allDescendants ? "with descendants" : "selected only";
-  return [scope, provider, reach].filter((part) => Boolean(part)).join(" · ");
-}
-
 /** Fetch every matching schedule without truncating the session navigation at one page. */
 export async function loadSessionSchedules(
-  client: Pick<OpenGeniClient, "listScheduledTasks">,
+  client: Pick<ChatClient<OpenGeniClient>, "listScheduledTasks">,
   workspaceId: string,
   sessionId: string,
 ): Promise<ScheduledTask[]> {
@@ -957,11 +894,7 @@ export async function loadSessionSchedules(
 
 /** Identity of the execution destination being edited, excluding unrelated form fields. */
 export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): string {
-  return JSON.stringify([
-    form.runMode,
-    form.targetSessionId,
-    form.knowledgeSource?.destination ?? null,
-  ]);
+  return JSON.stringify([form.runMode, form.targetSessionId]);
 }
 
 const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], string> = {

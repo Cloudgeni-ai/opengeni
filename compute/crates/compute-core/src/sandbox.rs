@@ -26,6 +26,13 @@ pub(crate) struct Retry {
     pub not_before: At,
 }
 
+/// A restart under way (see [`crate::Input::Restart`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Restart {
+    /// Whether its VM was asked to end since the restart was last asked.
+    pub ending: bool,
+}
+
 /// An outstanding request to be awake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Wake {
@@ -69,6 +76,14 @@ pub(crate) struct Sandbox {
     /// `None` until one is reported, except for a VM found running, which
     /// counts at its full size until then.
     pub resident: Option<u64>,
+    /// How its running VM uses memory beyond what `resident` says: what
+    /// the kernel compressed of it and how long it stalled (ADR 24).
+    pub paging: crate::host::outgrowth::Paging,
+    /// Whether its guest may still be shrunk for host memory (ADR 24).
+    pub shrink: crate::host::outgrowth::Shrink,
+    /// The memory bounds last asked of its running VM; `None` for those it
+    /// runs with from its start or resume (its request, no `memory.high`).
+    pub bound: Option<crate::host::outgrowth::Bound>,
     /// What it may take of host memory.
     pub size: Size,
     /// Where its wake stands with admission.
@@ -112,6 +127,9 @@ pub(crate) struct Sandbox {
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
     pub retry: Option<Retry>,
+    /// A restart under way: its programs end and its memory image is
+    /// forgotten before it runs again.
+    pub restart: Option<Restart>,
     pub queued: Option<(Step, QueueKey)>,
     pub timer: Option<At>,
     pub dirty: bool,
@@ -122,7 +140,7 @@ pub(crate) struct Sandbox {
 pub(crate) struct LocalDisk {
     /// Bytes its disk may still grow by while its VM runs: its size's
     /// `disk` until [`crate::Input::DiskGrowth`] measures it, and again
-    /// from the end of each pause whose guest trimmed its disk.
+    /// from the end of each pause that trimmed it or fetch that replaced it.
     pub growth: u64,
     /// Whether a wake from object storage may still be writing its local
     /// copy: from that wake's start until [`crate::Input::Hydrating`]
@@ -131,6 +149,10 @@ pub(crate) struct LocalDisk {
     /// What it booked on local disk as of its last reconcile, so what it
     /// stops booking is counted until a reading shows it.
     pub booked: DiskSpace,
+    /// What giving up its local copy frees at least, as last measured
+    /// while it slept with no VM (see [`crate::Input::LocalCopy`]);
+    /// nothing until then, and again once it wakes or its copy goes.
+    pub copy: DiskSpace,
 }
 
 /// What can still be done with a sandbox.
@@ -158,6 +180,9 @@ impl Sandbox {
             requested: Level::Running,
             // Until it is measured, a VM found running may hold all of it.
             resident: state.level.has_process().then_some(size.limit),
+            paging: crate::host::outgrowth::Paging::default(),
+            shrink: crate::host::outgrowth::Shrink::Open,
+            bound: None,
             size,
             room: WakeRoom::Open,
             fresh_until: None,
@@ -173,6 +198,7 @@ impl Sandbox {
                 growth: size.disk,
                 hydrating: false,
                 booked: DiskSpace::default(),
+                copy: DiskSpace::default(),
             },
             in_flight: None,
             // A copy found in object storage counts as taken at its last
@@ -182,6 +208,7 @@ impl Sandbox {
             running_since: last_activity,
             process_lost: false,
             retry: None,
+            restart: None,
             queued: None,
             timer: None,
             dirty: false,
@@ -331,6 +358,9 @@ impl Sandbox {
             self.health = Health::Sound;
         }
         self.resident = None;
+        self.paging = crate::host::outgrowth::Paging::default();
+        self.shrink = crate::host::outgrowth::Shrink::Open;
+        self.bound = None;
         self.balloon = None;
         self.balloon_sent = None;
         self.balloon_taken = None;
@@ -405,8 +435,17 @@ impl Sandbox {
         if self.backing_off(now) {
             return None;
         }
-        // Pausing and saving it for host memory goes on whoever wants it.
-        if self.wants_awake() && !self.leaving() {
+        if self.restart.is_some() {
+            // Its VM ends first, then its memory image goes, before any
+            // wake: the wake then boots it from its files.
+            if self.state.level.has_process() {
+                return None;
+            }
+            if self.state.memory_saved {
+                return Some(Step::Forget);
+            }
+        }
+        if self.wants_awake() {
             if self.room == WakeRoom::Refused {
                 return None;
             }

@@ -1,5 +1,1364 @@
 # @opengeni/worker-bundle
 
+## 6.14.0
+
+### Patch Changes
+
+- cb3cf2c: An archived session's purge now resumes at the table it left unfinished instead of calling every already-empty table again on each step, and still ends with one pass over every table that confirms nothing is left. It deletes the same rows with far fewer database calls.
+- 936423e: Archiving a session now writes its readable transcript from the event rows the bundle export already read, instead of reading every kept event from the database a second time. The transcript reads exactly as before. A compressed JSON lines file that fails while its producer is busy elsewhere now fails the producer's next write instead of waiting forever, and no longer leaves an unhandled rejection behind.
+- f80cd7a: Releases can roll out over the production binary again. Migration 1283 withholds the runtime grant on the inventory of meeting tracks not yet kept compact, because the binary in production rejects that grant on a routine it does not know. Until a later release grants it again, existing meetings' audio stays as it is; new meetings are still kept compact.
+- ce94cda: A turn refused at admission now says why in `turn.failed` instead of "Activity task failed". This covers fixed refusal messages such as a connected subscription used for API work, missing workspace or API credits, a paid plan or paid credit being required, and a monthly agent-run or token limit being reached. These refusals now throw `TurnAdmissionRefusedError`, which the workflow lists as a diagnosable turn failure. The refusal policy itself is unchanged.
+- Updated dependencies [23964f7]
+- Updated dependencies [c976c87]
+- Updated dependencies [cb3cf2c]
+- Updated dependencies [936423e]
+- Updated dependencies [6ae0528]
+- Updated dependencies [4664732]
+- Updated dependencies [e33947d]
+- Updated dependencies [537656b]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [68b9dc4]
+- Updated dependencies [904eae7]
+- Updated dependencies [c243348]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [cbb6761]
+- Updated dependencies [7c926f8]
+- Updated dependencies [f80cd7a]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+- Updated dependencies [0b65ea4]
+  - @opengeni/db@6.14.0
+  - @opengeni/core@6.14.0
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/storage@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/runtime@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/agent-proto@6.14.0
+  - @opengeni/documents@6.14.0
+  - @opengeni/events@6.14.0
+  - @opengeni/capabilities@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/decisions@6.14.0
+  - @opengeni/github@6.14.0
+  - @opengeni/interaction@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+  - @opengeni/vaults@6.14.0
+  - @opengeni/vaults-bitwarden@6.14.0
+  - @opengeni/vaults-keeper@6.14.0
+  - @opengeni/vaults-onepassword@6.14.0
+  - @opengeni/vaults-protonpass@6.14.0
+  - @opengeni/jev@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/subscriptions@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [b15212e]
+- Updated dependencies [83d6c60]
+- Updated dependencies [1c7aa2a]
+- Updated dependencies [67905a7]
+  - @opengeni/db@6.13.0
+  - @opengeni/core@6.13.0
+  - @opengeni/runtime@6.13.0
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+  - @opengeni/config@6.13.0
+  - @opengeni/documents@6.13.0
+  - @opengeni/events@6.13.0
+  - @opengeni/capabilities@6.13.0
+  - @opengeni/codemode@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/decisions@6.13.0
+  - @opengeni/github@6.13.0
+  - @opengeni/interaction@6.13.0
+  - @opengeni/observability@6.13.0
+  - @opengeni/storage@6.13.0
+  - @opengeni/tool-gateway@6.13.0
+  - @opengeni/vaults@6.13.0
+  - @opengeni/vaults-bitwarden@6.13.0
+  - @opengeni/vaults-keeper@6.13.0
+  - @opengeni/vaults-onepassword@6.13.0
+  - @opengeni/vaults-protonpass@6.13.0
+  - @opengeni/jev@6.13.0
+  - @opengeni/agent-proto@6.13.0
+  - @opengeni/network@6.13.0
+  - @opengeni/subscriptions@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- f1999bf: Every finished agent turn now gets a timing profile that says where its wall time went: queue, startup, dispatch, model inference, provider overhead, network, model requests without provider timing, stalled requests, hosted web search, remote MCP tools, sandbox tools, Opengeni's own tools, sandbox setup, human and capacity waits, the gaps after model requests and tool calls, recovery and turn end. The control maintenance schedule computes it from the turn's session event log after the turn settles, so nothing is added to the turn itself, and stores it in the new `turn_timing_profiles` table (migration 1351) with the turn's model, reasoning effort, status and the steps of every model request and tool call, including each remote MCP call's id, tool name, start, end and outcome. Profiles are kept as long as the turn and are visible under the same workspace and chat rules as the event log.
+
+  New metrics `opengeni_turn_timing_seconds_total` and `opengeni_turn_wall_seconds` feed dashboards, and `bun run db:backfill-turn-timing-profiles` profiles existing history. Migration 1352 adds a finished-turn index concurrently. `@opengeni/db` adds `computeTurnTimingProfile`, `recordTurnTimingProfile` and `recordMissingTurnTimingProfiles`. See `docs/turn-timing-profiles.md`.
+
+### Patch Changes
+
+- 64fd53f: An agent can now ask to attach a repository the workspace GitHub App offers to its own chat with the new first-party `github_repository_attach` tool. Every call waits for a person's approval through the ordinary tool approval card, in the app and in the Slack thread of a chat started from Slack. The card names the repository, the branch and the access, and says when a person removed the repository from the chat earlier. Where nobody can answer, such as a scheduled or unattended run, the call is refused.
+
+  The API attaches only a call a person approved for exactly that repository and branch, from the same workspace GitHub App catalog and `github:use` permission as the repository picker, and never an archived or empty repository. The repository joins the chat's repositories as best effort (`optional`), ends any earlier removal record, and is one of the chat's repositories from the next turn. Asking for a repository the chat already has reports the branch it has, and a repository the App has since stopped offering no longer blocks attaching another. A new `session.resources.added` event records it.
+
+  `@opengeni/core` adds `attachSessionRepositoryResource`, `@opengeni/db` adds `listPersonApprovedFirstPartyToolCalls`, and the timeline shows the call as "Attaching a code repository".
+
+  An approval card for a first-party call whose review states its target facts now lists those facts, in the app and in Slack, as app action cards do; the call's raw arguments stay in Details. The Slack bot message card shows its channel and message this way too.
+
+- 2aa8ba4: Consolidate response and tool-result persistence under their existing attempt fences and batch queued lifecycle observations, reducing per-step database round trips without changing model inputs.
+- 43d3a37: The agent's shell now has `rg` (ripgrep 15.2.0) and `jq` (1.8.2) on every placement, including sandboxes on custom images, Connected Machines and run_on targets. Official release builds, pinned by SHA-256, ship with Opengeni's own runtime tools: the machine agent embeds its target's build and the worker delivers the Linux builds to managed sandboxes beside the Codemode client (agents without Codemode on those sandboxes keep only the image's own tools). Their directory is appended to the end of PATH, so a system `rg` or `jq` always wins, and nothing is downloaded when a command runs. Licence notices ship beside the binaries.
+- af5b686: Report requested context checkpoints as normal transitions, preserve their trigger and size diagnostics, and distinguish context/request-size rejection and checkpoint failure from a generic worker failure. Compaction behavior and model inputs are unchanged.
+- a898141: Background maintenance no longer sweeps connected-command output that can never be captured. A live runner reports the finished operations it still holds, and that report collects their output. Output that is still uncaptured is now recorded as unavailable instead of being retried every few minutes forever:
+
+  - a day after its command exited, if its runner was seen alive at least an hour after the exit;
+  - otherwise, after a week.
+
+  A personal Connected Machine used from another workspace only gets the one-week limit, because its last-seen time is not visible from there.
+
+  For a runner that reports its own operation inventory, such as a compute sandbox, the database recheck now backs off to once every six hours. That runner still collects its output itself whenever it talks. Captured output, recent output and the legacy Connected Machine retry schedule are unchanged.
+
+- 2aa8ba4: Emit request lifecycle events for every generic model transport call, including AI Gateway tool-loop follow-ups, rather than only the first request of a turn.
+- ccb5188: Keep best-effort attempt-private secret-file deletion out of turn finalization. Clean each original recipient independently without resolving a new route or waiting for workspace capture, and retain mandatory run-credential cleanup and writer-drain guarantees.
+- bfe1ac6: Recover stalled workflow-wake dispatch through progress heartbeats and durable activity retries. Keep recovery discovery, pause timers, and title migration fanout off the committed-prompt delivery path, without shortening maintenance intervals.
+- 8a667e3: Turn startup latency alerts no longer fire when messages simply wait behind a turn still running in the same chat. The worker now also records `opengeni_turn_startup_since_attempt_start_seconds` for the provider-dispatch and first-byte milestones, measured from the start of the turn attempt that reached them, so it leaves out time behind an earlier turn, subscription capacity waits and recovery gaps. The provider-dispatch and first-byte p95 alerts use it, and the cumulative queue p95 alert is replaced by `OpenGeniTurnReadyPromptWaiting` (warning above 60 seconds) and `OpenGeniTurnReadyPromptWaitingCritical` (page above 300 seconds), which watch the oldest prompt nothing in its session holds back. The Helm value `observability.prometheusRule.turnStartupQueueP95Seconds` is replaced by `turnReadyPromptAgeSeconds` and `turnReadyPromptAgeCriticalSeconds`. The cumulative milestone histogram is unchanged and stays on the Turn Startup dashboard.
+- 76da55e: The `jq` bundled for Linux is now a static musl build of jq 1.8.2 instead of jq's official Linux release executable, which statically links glibc. Opengeni builds it reproducibly from the checksum-pinned jq source and zig toolchain (`scripts/build-static-jq.sh`); it gives the same results, runs on any Linux distribution, and is less than half the size. macOS and Windows keep jq's official builds, and the licence notices now list exactly what the Linux build contains.
+- 20b5646: The turn retry alert no longer fires on short model-provider outages, which the per-provider model-call failure alert already covers. Every turn attempt that ends recovering now also counts in `opengeni_turn_recoveries_total{cause}`, with a closed cause chosen where the recovery is requested: `provider`, `sandbox`, `tool`, `worker`, `database`, `control` or `other`. `OpenGeniTurnRecoveryRatioHigh` counts every cause except `provider`. `opengeni_turns_total` is unchanged.
+- 1445841: Pausing the whole workspace now stops turns waiting for subscription capacity, as a chat's Pause already did: the wait is released, the "continues by itself" notification is withdrawn, and Resume continues the turn, announcing the wait again if capacity is still missing.
+- Updated dependencies [64fd53f]
+- Updated dependencies [2aa8ba4]
+- Updated dependencies [7332869]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [34ff418]
+- Updated dependencies [d29c500]
+- Updated dependencies [43d3a37]
+- Updated dependencies [6c69279]
+- Updated dependencies [831f2ef]
+- Updated dependencies [4eb53af]
+- Updated dependencies [281af3a]
+- Updated dependencies [af5b686]
+- Updated dependencies [2117a2d]
+- Updated dependencies [a898141]
+- Updated dependencies [26c2fbd]
+- Updated dependencies [85622d5]
+- Updated dependencies [e9222e0]
+- Updated dependencies [f8b792f]
+- Updated dependencies [f817cf5]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [a43ce53]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [33a26d7]
+- Updated dependencies [a64e6e4]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [ccb5188]
+- Updated dependencies [752da12]
+- Updated dependencies [a17033b]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [bd4f53a]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [8099970]
+- Updated dependencies [76da55e]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [94360cf]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [913e2b4]
+- Updated dependencies [f1999bf]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+- Updated dependencies [1445841]
+  - @opengeni/config@6.12.0
+  - @opengeni/contracts@6.12.0
+  - @opengeni/core@6.12.0
+  - @opengeni/db@6.12.0
+  - @opengeni/sdk@6.12.0
+  - @opengeni/runtime@6.12.0
+  - @opengeni/subscriptions@6.12.0
+  - @opengeni/observability@6.12.0
+  - @opengeni/events@6.12.0
+  - @opengeni/network@6.12.0
+  - @opengeni/decisions@6.12.0
+  - @opengeni/documents@6.12.0
+  - @opengeni/github@6.12.0
+  - @opengeni/storage@6.12.0
+  - @opengeni/capabilities@6.12.0
+  - @opengeni/codemode@6.12.0
+  - @opengeni/codex@6.12.0
+  - @opengeni/interaction@6.12.0
+  - @opengeni/tool-gateway@6.12.0
+  - @opengeni/vaults@6.12.0
+  - @opengeni/vaults-bitwarden@6.12.0
+  - @opengeni/vaults-keeper@6.12.0
+  - @opengeni/vaults-onepassword@6.12.0
+  - @opengeni/vaults-protonpass@6.12.0
+  - @opengeni/xai-subscription@6.12.0
+  - @opengeni/jev@6.12.0
+  - @opengeni/agent-proto@6.12.0
+
+## 6.11.0
+
+### Minor Changes
+
+- 3f64150: Your GitHub can use **All my repositories** (offered once `OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is on, after every API and worker runs this release; `allRepositoriesAvailable` on the connection status), read only or read and write, instead of a chosen list: any repository the person can currently reach on GitHub works in chats, the git broker and the `github_personal__*` tools, checked live with GitHub (cached for a minute; renamed repositories are followed). A repository a person removed from a chat stays refused in that chat. The chosen list is kept, so switching back restores it; turning the mode off, or narrowing it, ends work accepted before, even if it is turned back on. Catalog items keep `selectedAccess` as the saved choice and add `effectiveAccess`, the access usable now. Repository search in the chooser and the session picker now asks GitHub, so it finds repositories beyond the first 100 (`query` on the personal repositories list; `allRepositoriesAccess` on the selection state and the replace request). New read tools work without a sandbox: `organizations_list`, `owner_repositories_list`, `workflow_runs_list`, `workflow_run_get` and `workflow_job_logs_get` (bounded, tail first, paged, read with HTTP ranges from the log storage). `organizations_list` comes from the person's repository access, which the connection's `repo` scope allows. One shared check, `checkPersonalGitHubRepositoryAccess` in `@opengeni/core`, decides repository access for every caller, including the `gh` gateway. GitHub REST bridge bodies and commit messages (issues, pull requests, comments, reviews, merges) keep their line breaks and tabs instead of being rejected as invalid.
+- 6abf872: Integration Knowledge sync is fully removed. A migration deletes the leftover Knowledge source sync tasks with their runs, sync state and wakes, and any saved `knowledge_source` facets; Automations no longer show "Sync retired" and the integration facets panel no longer shows "Retired" sources. Native Google Drive and Atlassian source connections left from the old sync stay hidden and inert; the generic connection DELETE still revokes them. Schedules only run agent turns. The native Google Drive and Atlassian source OAuth, callbacks, lifecycle and source routes are gone; Google Drive, OneDrive and Atlassian keep working through their agent-tool connections.
+
+  - Removed internal entry points: `@opengeni/documents/google-drive`, `@opengeni/documents/atlassian` and `@opengeni/contracts/google-drive-native-retirement`. `@opengeni/contracts/knowledge-source-sync-retirement` now exports only `KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE`, and `@opengeni/contracts/atlassian-native-retirement` only the historical tool names.
+  - Removed internal `@opengeni/contracts` root exports: `KnowledgeSourceSyncScheduleControl`, `scheduledTaskKnowledgeSource`, `requireScheduledTaskKnowledgeSource` and `knowledgeSourceAgentConfig`.
+  - The `OPENGENI_GOOGLE_DRIVE_CLIENT_ID`, `OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`, `OPENGENI_GOOGLE_DRIVE_SYNC_*`, `OPENGENI_GOOGLE_DRIVE_PROVIDER_*`, `OPENGENI_ATLASSIAN_CLIENT_ID` and `OPENGENI_ATLASSIAN_CLIENT_SECRET` settings are no longer read.
+  - Public SDK surface is unchanged until the next major: `browseAtlassianSources`, `saveAtlassianSources`, `setAtlassianLifecycle`, `transitionGoogleDriveLifecycle`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource`, `disconnectGoogleDriveConnection`, `CreateKnowledgeSourceSyncScheduledTaskRequest`, `agentConfig.knowledgeSource` and `KnowledgeSourceSyncRunSummary` are deprecated. Their routes answer 410, except `disconnectGoogleDriveConnection`, which now revokes through the generic connection DELETE.
+
+### Patch Changes
+
+- c69598a: The agent's own texts no longer name the product, so an agent that a host gives its own identity presents only that identity. The `privacy_facts` result says "this deployment" and "Request settings" instead of naming Opengeni, and the provider table describes requests in the passive voice ("Chat turns ask Azure not to store …"); every privacy, model and provider fact is unchanged. Three system-prompt clauses (secret references, GitHub app repositories, the GitHub app in integration setup) say "built-in workspace tools" and "the workspace's GitHub app". The `wait_for_input` and `goal_complete` descriptions say "the runtime", the GitHub, secret-profile, scheduled-trigger and Slack-suggestion descriptions drop the name, the Connected Machine descriptions and the setup-card description name the deployment's configured browser extension, and tool results such as workspace-machine faults, owned-box repairs, cross-workspace refusals and the secret-approval reply use the passive voice. The default identity, tool names, provenance markers such as `[Opengeni setup notice]`, and names of software a person installs are unchanged.
+- 8d1edfc: Self-hosted operators can let API-origin work (organization access keys, embedded products) use the organization's own connected subscriptions with `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` (`apiConnectedSubscriptionsEnabled`, default `false`). It is deployment configuration on the API and worker processes, never a request or tenant setting. With it on, agent turns, goals, schedules, stateless model calls, transcription, realtime voice, titles, model lists and defaults no longer refuse or skip connected subscriptions for API work; paid-plan requirements still apply where credit billing is active. Off, API selections of a subscription still return `403 subscription_api_unavailable`, as before. The operator is responsible for its provider's terms.
+- 276001c: An automation run in a chat now reads as what happened, not as its instructions. A run shows one plain, centered line (the automation's name and what the event that started it says, for example "Ticket assigned to you: T-4907 Refund request from Contoso"), then the agent's answer. The pending and delivered events for a run now carry the automation's name as their summary, plus `automation: {name, eventSummaries, eventCount}` on the member, so the instructions never reach a chat; the agent still reads them in the update as before. Older runs read "Automation run".
+
+  A run with nothing for the person stays out of the chat. New occurrences tell the agent to answer exactly `NO_REPLY` when nothing needs the person, and the web and native timelines then draw neither the run's line, its work nor its answer; the token itself is never drawn anywhere, even while it streams. `NO_REPLY_SENTINEL`, `isNoReplyText` and `mayBecomeNoReplyText` come from `@opengeni/contracts/no-reply`, shared with Slack replies.
+
+  `agentSignals={false}` on `SessionConversation`, `MessageTimeline`, `NativeSessionScreen` and the native `MessageTimeline` now also keeps turn rows to their status (no step preview or host `turnSummary` facets) and shows an automation run as only its line and answer: no work row, nothing while it works, and nothing for a failure only an operator can fix. `automationRunOutcomesOnly`, `automationRunLine`, `isAutomationRunBatch` and `readableWorkIsEmpty` are exported for hosts that build their own timeline.
+
+- 336970a: A queued turn no longer waits two minutes when the session's pre-turn peek attempt is lost. Every session run peeks at durable session state on the control queue before it dispatches a turn; that activity used the general two-minute control timeout, so a lost or stuck attempt was retried only after two minutes while the turn queue showed no backlog. The peek now has its own 15-second attempt bound with the same unbounded retry.
+
+  Migration 1274 grants the runtime role EXECUTE on the queued-turn hold summary that 0988 withheld, and readiness now requires it. The control worker therefore publishes `opengeni_turns_queued_by_hold{hold}` and `opengeni_turns_queued_oldest_age_seconds{hold}`; the `ready` class shows prompts waiting for dispatch wherever they wait, including before a turn-queue task exists. The startup-queue alert, launch runbook and worker-fleet dashboard now point at it next to the eligible turn backlog. The turn-slot gauge help explains that an idle worker's reserved slots are its open polls, which take turns as they arrive.
+
+- f12070a: A turn that waits a long time for subscription capacity is no longer silent, and switching the chat's model or pausing it now releases the waiting turn.
+
+  A wait is long when its reset is at least 15 minutes away, unknown, or needs a person. When one starts, a worker's parent gets a `child_waiting_capacity` notice right away: it now carries `resetsAt`, names the provider correctly, says how to continue sooner (switch the worker's model with `session_set_model`), wakes the parent instead of waiting for its next turn, and the worker delivers it as soon as the wait is armed. A top-level chat's person gets an inbox notification with the reset time, withdrawn when the wait ends. Short waits stay quiet. `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` now defaults to on; every image since August 2026 understands these notices.
+
+  Switching a chat's model moves a turn that is waiting for capacity onto the new model in the same commit, and the turn continues there now (the `session_set_model` receipt reports `capacityWaitingTurnContinuesNow`). Pausing a chat stops its capacity-waiting turn: the wait is removed and the turn waits for Resume, or for a model switch, like a paused running turn. A workspace pause still keeps the wait for Resume.
+
+- 73d3702: A model call that reported no token usage at all (for example a Responses terminal event without a usage object, which the SDK turns into all-zero counts) is now counted as `opengeni_model_cache_read_telemetry_total{status="no_usage"}` instead of `status="missing"`; `missing` is kept for calls that reported usage but left out the cached-token field. `OpenGeniCodexPromptCacheTelemetryMissing` now needs at least 3 missing calls and over 5% of the calls that reported usage in 30 minutes, so one call can no longer page, and its absent-usage clause ignores no-usage calls.
+- 8cdda9a: Codex model requests spend less time before dispatch when the database is busy. Each Codex request already rechecks the connection source (under the per-connection lock) and the subscription lease (with a key-share read) inside its reservation transaction, but the dispatch hook first repeated both reads in separate transactions. Under a lock-contended database every extra round trip costs tens of milliseconds, so those two redundant transactions are gone: the hook now checks the in-memory lease state and known credit usage, then reserves. A lost lease found by the reservation still marks the lease lost. Title requests, which do not reserve, keep the full checks.
+
+  Pre-dispatch time is now exported per stage as `opengeni_model_request_pre_dispatch_stage_seconds{provider,stage}` (settlement_wait, admission, request_build, credential, dispatch_checkpoint, request_audit, provider_admission, transport). Stages are exclusive and sum to the existing pre-dispatch total. The pre-dispatch p95 alert and launch runbook point at it, so the slow stage can be read directly.
+
+- 2a02889: A meeting's audio is now kept as one compact file per track: Opus at 16 kbit/s mono in MP4, about 7 MB an hour. Before, a meeting kept both its uploaded one-second pieces and a full prepared copy at 30 to 66 kbit/s. Once the compact file is stored, the worker deletes the track's uploaded pieces, and re-runs and speaker matching read the compact file. Models that name no audio formats get the same Opus in WebM. Existing meetings are converted by the retention sweep once a later release grants its new inventory (migration 1240 withholds it for one release). Dictations are unchanged.
+- f987b58: A turn that runs without the person's GitHub authority, such as the idle compaction checkpoint after a person's turn, now leaves the personal GitHub tools out instead of failing with "Personal GitHub delegation is unavailable". Other turns that leave them out log a warning, and a malformed or ambiguous delegation still fails. A compaction checkpoint whose turn would otherwise end in the generic failed state now settles as a failed compaction: the chat shows "Couldn’t compact conversation history", returns to idle instead of failed, and consumes the request so it is not claimed again. An automatic compaction's failure (labelled Auto) now reads "Chat history is unchanged." without asking the person to request it again.
+- f21e253: A compaction-only turn, such as the idle compaction checkpoint after a person's turn or an idle `/compact`, now runs with that person's current connection accounts, resolved the same way as other work that continues the turn. The compaction request normally carries the same account-routed connector and personal tools (such as personal GitHub) as the turn before it, so it reuses that turn's cached prompt prefix instead of missing the cache. A picked account that can no longer be used leaves its connector out. A private chat lends only its owner's accounts, and a turn from an external link or under a credential restriction lends none. If the accounts can't be resolved at all, the compaction still runs with only the session's shared tools and the worker logs a warning.
+- 9b96f0e: Fresh compute sandboxes can now start with a Sandbox Environment's setup already done. Verification captures the set-up sandbox as a compute template, proves it with a separate cold boot, and new sandboxes start from it. Previously, every fresh compute sandbox ran the whole setup script again. Only environments with a setup script get a template. A template is tied to the compute image name and the deployment revision, so each release builds a new one. On compute, a version with setup that has no template, a failed or stopped build from an earlier release, and a build abandoned mid-way each ask once for a background build; a failed build of the current content waits for the next release. A build deletes only a template it created and no other build now owns. A capture is requested once and, if its answer is lost, found by name. A turn looks up the compute team once with a short timeout and remembers a failure briefly; a build never reuses a turn's failed lookup. A template deleted after it was chosen falls back to the plain image and the ordinary setup.
+- 1ee6ee2: A compute sandbox whose guest agent stops answering is restarted where it is: its host ends its VM, forgets any saved memory image and boots it again from its files on the same host, without first archiving it (memory included) to object storage. Before, a restart was a hand-off of the whole sandbox, and on a slow store that archive could take hours while the host refused every wake, so every command failed with "sandbox was not ready". A hand-off that is still storing after two minutes now gives way to a wake: the wake cancels it and the sandbox runs on from its local copy, which stays the newest copy. Hosts also tell the server through the agent link while they hand a sandbox off; the server then no longer restarts that sandbox as unresponsive (the agent sees a plain "being moved or saved by its host" status instead of a restart loop) and `sandboxes_list` shows it as recovering, with `hostBusy: "handing_off"`, instead of ready. An older host without in-place restarts still gets the hand-off restart.
+- 9661aa1: Deleting a meeting archives its built-in notes chat and stops any work still waiting in it, so a notes chat that was waiting for model capacity no longer wakes up later to a meeting that is gone and ends asking someone to check access. A notes chat someone wrote in is theirs and stays as it is.
+- 2a02889: Dictated text arrives sooner after you stop. `GET /recordings/:id/transcripts` takes `waitSeconds` (at most 25) and an optional `waitFor` version, and answers the moment that version (or the newest) is complete or failed instead of at once; `listRecordingTranscriptVersions` passes them, and `useVoiceInput` waits this way instead of checking every second. The worker also downloads a track's uploaded pieces 16 at a time when preparing its audio, instead of one after another. A dictation longer than 25 seconds is cut at the speaker's pauses into pieces of about 15 seconds (never more than 50), found in its decoded 16 kHz audio, and all pieces are heard at once, at most 8 together, so a long dictation is ready about as soon as a short one. Before, it was cut every 50 seconds wherever that fell, and the pieces were heard one after another. A meeting's transcript is ready sooner too: a track's pieces go to the model 4 at a time instead of one after another, and each piece is cut by seeking to it rather than decoding the whole track up to it.
+- a2abf51: Drain save fallback follow-ups. A save that lands just before (or right after) the drain stops a box whose saves kept failing is now an ordinary saved teardown: the drain waits briefly for it after the stop, and the cold commit re-checks the claim's publication under its lock, so the chat no longer shows "Files changed after {time} couldn't be saved" next to a fresh save. A reduced save whose hard bound expired keeps the lease's only capture slot until its tar has actually returned, so a retry never starts a second tar beside it; past the hour of failures (or in the save window) the next drain stops the box instead. The "restored from an older save" notice is now pending on the lease until it is written and is retried at the next turn start, so a failed write is delivered exactly once instead of being lost. Compute and OpenSandbox workspace tars use the same anchored, glob-escaped exclusions as the workspace fingerprint (`workspaceTarExcludeArgs`), so a nested folder with an ephemeral path's name, or a path containing `*`, `?` or `[`, no longer makes a restore unverifiable.
+- 06606ef: A Modal sandbox whose drain snapshots keep failing no longer drains until the provider kills it. After three failed snapshots over at least 15 minutes (or one inside the pre-deadline save window) the drain saves the workspace without rebuildable folders such as `node_modules`, `.next`, `.venv` and caches (`omittedPaths` on the archive descriptor); the chat shows which folders were left out and the next turns' model input carries a note to rebuild them. The drain stops the box itself when that save fails or cannot be stored after an hour of failures or near the box's lifetime limit, or when near that limit it is still running at the end of the wait or cannot be tried at all; the chat then shows "Files changed after {time} couldn't be saved before this chat's workspace machine shut down." A re-armed box's drain failures no longer carry over to its next drain. New counter `opengeni_sandbox_drain_capture_fallback_total{backend,outcome}`.
+- b631728: An expired connector account is no longer invisible. When a refresh token is rejected and a connection moves to `needs_reauth`, the turn that hit it posts one inbox notice to the person who started that turn ("Gmail needs reconnecting", naming the account), deduplicated per connection. The turn notice for unavailable connectors now lists the accounts that need reconnecting with the day they stopped working, and `capability_catalog_search` says the same in the item's setup text and a new `setup.reconnect` list. `capability_authorization_request` takes an optional `connectionId` (picked automatically when exactly one account can be reconnected) and posts a card that reconnects that same account, instead of a fresh Connect card that could not finish because the account was already connected. The web and native cards show "Reconnect <service>" and skip the ownership choice.
+- 2553094: The workspace fingerprint, content manifest and size walk on compute and OpenSandbox now leave out leftover top-level `.opengeni-old-*` and `.opengeni-restore-*` restore folders, exactly as those backends' workspace archives always have. A save taken from now on while a failed cleanup has left one behind can be restored and verified; before, its fingerprint counted files the archive never held, so the restore could never verify. Saves already recorded beside such a folder still can't verify. The archive and the verification read one list of these folders and apply one check to it, so what the archive skips and what verification covers cannot drift apart again. Saves taken without such a folder keep the same fingerprint.
+- 8a8864c: `gh` in a managed sandbox acts as the person on repositories mounted through Your GitHub, as on their own computer: `gh repo`, `gh pr`, `gh run`, `gh workflow`, `gh issue`, `gh release` and `gh api` all work. A new personal GitHub gateway on the API (`/v1/github/personal/gateway/{api,uploads,git}/...`) adds the person's token per request after checking the session's short-lived broker pass, the connection, the repository allowlist and repositories removed from the chat; the token never enters the sandbox. The sandbox `gh` wrapper runs `gh` against the gateway through a per-command local proxy, and `gh repo clone` clones through it. Each request maps to the existing GitHub action policy, so one Allow/Ask/Block setting covers the `github_personal__*` tools and `gh`: reads pass, ordinary writes follow the policy, and destructive or unrecognised requests always ask. A request waiting for approval fails with a clear message and the normal approval card, and the exact same request runs once when sent again after approval. Git pushes as the person that delete a ref or force-push now ask. Sessions without a repository mounted as the person, Opengeni app repositories and Connected Machines are unchanged. The agent prompt tells the agent that `gh` acts as the person there.
+- 3345899: HEIC/HEIF photos (the iPhone camera format) now reach the model as an image. No model provider accepts HEIC, so an attached iPhone photo used to arrive as a file reference only and the agent had to convert it in its sandbox before it could look at it. The worker now decodes HEIC/HEIF attachments with libheif (WebAssembly) and shows them to the model as a JPEG, downscaled to the message's image bound like any other photo, with a note that the file itself is the original HEIC. This works for every upload path, including untyped `.heic` uploads, which qualify by their bytes. Messages are stamped with the converted formats when they are accepted, so images in earlier requests never change; older messages keep their reference-only receipt. `view_image` in the sandbox now converts HEIC/HEIF files the same way instead of answering that they are not a supported image.
+- 11550b6: `request_human_input` costs less on every model call: its description keeps the same rules in fewer words, drops what its schema already says, and no longer repeats the "Let the agent decide" instruction that the tool result carries when it applies. Its schema no longer sends `allowOther` (new choice questions always offer Other) or the `$schema` marker; calls are validated against the unchanged contract. A session created with `unattended: true` keeps getting no question tool, and the docs now say to use it, or `humanInput: false`, for sessions nobody answers. A tool result too large to show now names `files__files_get_download_url` and the shell only when the session has them; otherwise it says the result was saved, which reader the session is missing, and to call the tool again with narrower arguments if it can. A Skill review question whose strict-schema call carries `secret: null` is no longer rejected as altered.
+- 692d4d8: A machine whose `/bin/sh` or workspace folder was moved away keeps running commands. Before, after a command ran `mv /bin/sh …`, every later command failed with "not found: spawn or apply execution containment …", even after a restart, because the disk keeps the change; and after `/workspace` was moved away, every command failed with "not found: exec working directory /workspace" and the turn stopped until a later turn's setup made the folder again. The machine agent (0.1.153) now starts dash or bash when `/bin/sh` is missing or not executable and, running as root on Linux, points `/bin/sh` back at it. When it cannot restore the link, commands still start the fallback. A missing workspace root or home folder used as a command's working directory is created again, empty, and the command runs; placeholder homes such as `/nonexistent` and other missing folders still fail as not found. When no shell is left at all, the error says "the shell /bin/sh is missing and no dash or bash was found", the tool output says a restart does not bring the shell back, and on a Connected Machine the turn stops with "Your connected machine can't start programs because /bin/sh is missing. Put it back on the machine, then retry." The agent's other program starts (the self-update check, GPU and macOS metrics, service probes and the Linux app launcher) now also use the agent's retained `/dev/null`, so they keep working when `/dev/null` was removed.
+- 2a02889: A meeting's speakers are told apart while it is still being recorded, so its transcript is ready sooner after it ends. While a meeting records, the worker goes through each audio track's new audio every minute or so (at most five minutes behind in a long meeting) and keeps the voice windows it found beside the audio; when the meeting ends, speaker detection only goes through what came after the last scan. Before, all of it was gone through after the end, which for an hour-long meeting took minutes. Results are the same either way. The kept windows are deleted once the transcript is made, and with the meeting's audio. The workflow client gains an optional `startRecordingSpeakerScan`; without it speakers are told apart only after the meeting ends, as before.
+
+  A meeting's microphone and computer-audio tracks are also prepared and transcribed side by side instead of one after another.
+
+- 7850181: A meeting's transcript no longer waits for its compact kept audio. Each track is decoded once, straight to 16 kHz speech PCM (seconds even for an hour), and transcribed, told apart and searched for sound from that; the 16 kbit/s Opus kept copy, which takes most of a minute to encode for an hour, is written beside the transcript from the same downloaded chunks. The uploaded chunks stay until the attempt's transcript is settled, so a retry decodes exactly the same samples and reuses every piece already heard. Pieces of speech PCM are cut from the samples in-process and sent as lossless FLAC, half the size of WAV and written in seconds even for an hour; only a model that takes nothing but WAV gets WAV. The meeting page and `useRecording` keep polling a ready meeting for up to ten minutes after it ends while an audio track is still being kept, and the player waits for every track.
+- 9ea4868: A Modal sandbox whose `/bin/sh` is gone now recovers by itself. Modal runs every command through `/bin/sh`, so once the agent deleted it, every command failed with Modal's raw exec error, which repeats the whole command. The box stayed broken until it had been idle long enough to drain, and an open viewer could keep it alive. Now, when platform setup finds that the box cannot start programs, the worker checks that a trivial command also fails. It then asks the lease to replace that exact box, at most once per turn. New turns wait instead of reusing the box. The reaper saves `/workspace` with Modal's own snapshot, which needs no command in the box, and ends the box. The same turn then continues on a fresh box restored from that snapshot, shown as "Workspace machine restarted". If the fresh box still cannot start programs, or the replacement cannot be requested, the turn stops with the existing short message. If the box's save fails, the turns waiting on the replacement do not wait for it: they stop with "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then." A retry before the box is saved stops the same way. The box stays fenced, so no turn reuses it, and the existing capture policy keeps retrying the save. A command the model runs on such a box now returns a short explanation instead of Modal's command dump.
+- a0b081b: A session switched to another Responses provider (for example from a Codex model to an xAI model, including a turn that was waiting for capacity) now continues instead of failing with "Could not decrypt the provided encrypted_content". Encrypted reasoning can be read only by the provider that issued it, so each such reasoning item now records its issuing provider, and a request to any other provider carries the readable summary in its place ("[Historical reasoning from another model]", as Claude and Chat models already got) instead of the ciphertext. The issuing provider still receives exactly the same request bytes as before. Reasoning stored before this change has no record; if a provider refuses it, that request is sent once more with the summaries, and later requests to that provider send the summaries directly. `classifyEncryptedArtifactRejection` recognizes that refusal from any provider.
+- e10e748: Add configurable organization credit alerts, durable recipient/email receipts,
+  unusual-spend detection and billing-authorized notification APIs. Expose settings
+  and notices in the SDK without charging money or leaking organization billing
+  events into workspace feeds.
+- c663db0: A recovering session whose interrupted attempt lost its quiescence receipt is now re-woken by the workflow-wake reaper two minutes after its last delivered wake instead of ten (migration 1260), so it recovers about four minutes after the close. The ten-minute wait coincided with `OpenGeniSessionRecoveryBacklogStale` (ten minutes past due), so a normal self-repair paged. The windows are exported as `QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS` and `QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS`, and a test keeps the alert clearly longer than the worst-case repair.
+- 96443c4: Recording audio is put on its timeline in bounded memory. The timeline filter filled each hole in a track's timestamps with silence in a single step and held that whole stretch in memory, so a few-kilobyte chunk whose packets claimed a much later timestamp could make ffmpeg allocate gigabytes. Each run's packet timestamps are now read first, by a stream copy that never decodes; the run is then decoded plainly and put back on its timestamps while it streams to the encoder, with silence written in fixed-size pieces, so memory no longer depends on how long a hole is. No hole is too long: a browser track whose audio source stops or is suspended leaves a hole as long as the quiet, and such recordings are kept. A run whose timeline, or the audio its packets hold, runs more than five seconds and 1% past what its chunks declared fails as `invalid_audio` before anything is decoded, which is not retried. A file brought in without a known length, such as a WebM or Ogg file a phone cannot measure, may be as long as a recording can be (ten hours). A prepared file that still comes out materially longer than declared also fails as `invalid_audio` instead of being stored.
+- 9420c9b: Existing meetings' audio is now converted to the compact kept format too. The recording retention sweep converts a few tracks per run to one Opus file per track and deletes their uploaded pieces, as new meetings already are.
+- ba482ea: Archiving a chat no longer silently stops sub-chats that are still in use, and archived chats can be restored. Archive is refused (409 `session_archive_blocked`, blockers of kind `active_sub_chat`) while a sub-chat is running, waiting for input, working on a goal or was messaged by a person in the last 14 days; the refusal names each one with how many, and repeating the request with `confirmActiveSubChats` listing them archives them too. In the web app a notice names them and offers "Archive all". `{ "archived": false }` now restores a chat at any time: within the undo window it is the exact undo, and later the chat and the sub-chats archived with it come back, with content already in long-term storage put back from the verified bundle in the background (`retention.archive.restoring` until done). A restored chat whose running work the Archive stopped is put back to idle and resumed, so it takes new messages again; the turn the Archive cut off reads as interrupted. Archived chats show a "Restore chat" button.
+- 6e9af8a: A chat with a repository attached now answers without first waiting for its sandbox.
+
+  Indexing the repository's skills used to be the first workspace operation. On a lazily provisioned managed box, the first model request therefore waited for the box to start, the custom environment setup to run and the repository to clone, even when the turn needed no tool. On staging this took over a minute and a half for a one-word prompt.
+
+  - **Deferred index:** these sessions now leave the repository skills index out of the instructions. Instead, they tell the model which skill folders to check and how to name a skill for `repository_skill_read`.
+  - **Workspace preparation:** the workspace is still prepared when a sandbox tool first uses it, exactly as before, and the box create still starts early.
+  - **Stable instructions:** the choice holds for the whole session, so the instructions stay the same from turn to turn. Sessions on Connected Machines, or with lazy provisioning off, keep the live index.
+  - **Better errors:** a `repository_skill_read` call with an unknown identifier now lists the identifiers that exist, names skipped skill folders and why, or says the folders could not be read. A failed discovery is retried on the next call instead of being remembered for the rest of the run.
+  - **Accurate startup metrics:** repository skill discovery that starts after the first model request is no longer counted as model-preparation startup.
+  - **API:** `buildAgent` accepts `deferRepositorySkillIndex`, and `workspaceSkills` accepts `{ deferred: true }`. A deferred index never touches the sandbox session.
+
+- 23e280b: A workspace machine the agent damaged no longer fails every later turn during platform setup. Before, when a step of the setup that runs at the start of every turn failed because of the box itself (for example `/workspace` was full, or `/workspace/.opengeni` had been replaced by a file), the turn stopped before the model ran, and because the box's saved copy kept that state, every later turn stopped the same way. Now the run credential files, the Codemode client and token, repository setup, Azure CLI sign-in and the document tools check fail softly when the cause is the box's own state (no space, a used-up quota, a read-only file system, a blocked path or denied permission reported by a file operation, or a setup command that exited with an error): the turn starts, and the model gets one short notice naming what failed, the cause and what to do, for example "No space left on the workspace machine's disk. Free space in /workspace or /tmp …; then they are installed again at the start of the next turn". The notice is added to the turn's input before the model runs, including when the worker started setup before the input was ready; only when the workspace machine is set up lazily by the first tool call does it follow the next shell command's result, through the same setup notices as a repository folder moved aside. A setup command's failure is read from the command's own exit and output, never from words in an unrelated error, and a repository or Azure sign-in failure tells the model to run git or `az login` itself to see the error. Setup still fails as before when the attempt was cancelled, the machine agent did not answer, the machine cannot start programs (including a Modal box whose `/bin/sh` is gone), a setup command timed out, or the cause is not recognised, so the existing recovery for those keeps working.
+- b1b8f58: A scheduled task created over the API can now choose the Opengeni tools and permissions of the chats it starts, as on session create: `agentConfig.firstPartyMcpTools` and `agentConfig.firstPartyMcpPermissions` (tools within the deployment's allowed set, permissions the creating credential holds). They are stored as the task's creator selection, set once at creation (an update that names them is refused) and never on an existing-chat task. Before, these fields were dropped and every run got the full default tool list. Tasks that don't name them keep following the defaults. The schedule tools agents use are unchanged: an agent's task keeps its own chat's selection. A run of an ownerless task (created by a key or service, not as a person) is no longer offered `notify_user`, `notification_withdraw`, `inbox_tidy` or `call_user`, since nobody could receive them, and its chat keeps that exact tool list. Owned tasks' runs still notify their owner.
+- 9c65c34: A session no longer stays stuck when its turn worker goes away in the middle of a tool call. Before, only owned-box setup that a shutting-down worker left open was settled, so a file write, editor change, command or stdin request cut off by a worker restart kept `reconcileSessionAttemptQuiescence` answering `pending` on every wake, and neither the interrupted turn nor queued messages ever ran. Once Temporal proves the attempt's activity settled and the turn worker's process-exit deadline has passed since its `worker_shutdown` closure or its worker-death closure (`lease_lost_recoverable`, or `failed` after the redispatch limit), every one of the attempt's own requests that has no holder and no retained process is settled `rejected` (never replayed), and the session is woken so the interrupted turn resumes or the next input runs. Pause, Steer, cancellation, other closures, retained commands and setup with a recorded-unknown start keep their gate.
+- 5b15f1a: A Skill an agent saves for review now says plainly in the chat that it isn't in use yet. The collapsed "Review <name>" row is now a compact bar: the Skill's name, "New Skill · Not active until approved" (or "Skill update · Not applied until approved", or "Delete Skill · Can't be undone once approved") and inline Decline and Approve buttons. Clicking the name shows its description and files. Decline rejects the exact revision, as Knowledge > Review's Reject does, so the proposal leaves the chat and agents never use it. Approving or declining shows a one-line confirmation ("Approved · Agents can use it from your next message", or "Declined · Agents won't use it" or "Declined · The current version stays") that stays until the next turn and keeps focus on the card when the clicked button goes away. People who can't approve see no actions. The skill_save, skill_publish and skill_install descriptions and the skill-management Skill now tell agents that a Skill or change pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown (an edited Skill keeps its current version until then), and to say so in their reply. The Skill tool descriptions, including skill_remove's, now name the review tab "Review", as the app does, not "Needs review".
+- 54e9620: Files from a private Slack session now belong only to the person it belongs to. A bot DM or private handoff session was already visible only to its owner, but the images they attached to it and the files and screenshots its agent produced were ordinary workspace files that other members could list and download. Images imported from a private Slack interaction and files produced by agents in a session whose root a private Slack interaction owns now get that person as their private owner, as in an Only-me session; the Knowledge learning destination is unchanged. The session screenshot routes (`/sessions/:sessionId/artifacts/:artifactId` and its `/content`) now apply session read authorization to every caller, not only agent attempts, and answer a session the caller may not read like a missing artifact. Files created before this change keep their existing audience.
+- 04d36ce: A configured agent is sent `goal_resume` and its prompt sentence only once its session has a goal (in any state, so pausing or resuming never changes the tool list); the effective-tools projection follows the same rule. The "Images and video" guidance is left out when no image or video tool is attached, and the blocked-tool sentence mentions a setup card only when the agent has a capability that can show one.
+- bd6e642: The Helm chart's streaming p99 alerts (`OpenGeniEventAppendLatencyHigh`, `OpenGeniEventAppendLatencyCritical` and `OpenGeniEventPublishLatencyHigh`) now need at least 100 observations in their window before they can fire (`observability.prometheusRule.sessionEventMinSamples`, default 100), like the chart's other latency alerts. Below 100 observations a p99 is just the slowest single observation, so one or two slow writes on a quiet deployment could page as an outage. `OpenGeniModelProviderTtftRegression` is now suppressed only when the pre-dispatch latency condition holds with its own minimum request count, so a single slow pre-dispatch request no longer hides a provider regression. Promtool tests cover both.
+- 2cc86fe: One `tool_search` now loads every tool the decision model judges the search needs, whatever its `limit`. Before, the model's picks were cut to `limit`, so an agent that asked for four things with `limit: 2` got two of them, and the model was told to choose the smallest set and leave out prerequisites, so "create a checklist from a template" loaded the create tool but not the template lister. The model now answers one question per candidate: will the agent need it to do what the query asks, including a tool a chosen tool needs called first, for example to get an id it requires. `limit` bounds only keyword-only results and the suggestions listed by name.
+
+  Selection fallbacks: a selection still unanswered after 2.5 s sends one identical request beside it (the first answer wins, the other is cancelled), and the deadline is 8 s instead of 5 s. Fallbacks were almost all the old 5 s deadline cutting off slow decision calls. A fallback is now counted in `opengeni_tool_search_selection_fallbacks_total` by reason (`deadline`, `rate_limited`, `provider_error`, `request_failed`, `invalid_answer`) and logged with its time and attempts; before, its cause was discarded.
+
+- c8f15a3: A connector configured for a chat that runs a turn without its tools now tells the agent which connector it is and why, so the agent can tell the person accurately instead of guessing. Before, a connector whose account was not accepted with the turn (for example a person's own sign-in that was not yet usable in the workspace after a membership change) was dropped without a word: its tools were missing from tool search and tool lists and nothing said so. A workspace default or a scheduled run's connector missing from the turn's registry vanished the same way. The turn's own input now carries one notice that names each such connector with a plain reason (not available in this workspace, no signed-in account for this turn, account setup changed, or an unsupported sign-in) and what the person can do. Tool search and tool listing report the same connectors in `unavailableSources`, and a connector whose setup was refused a credential at run time now says why (for example an expired sign-in, or a personal sign-in not usable in this workspace) instead of a bare HTTP 401. The notice replaces the earlier id-only "disconnected or no longer registered" text, is part of the current turn's input and never changes text an earlier request sent. Connectors the agent configuration excludes are not reported.
+- e21c926: Agents get each waiting rule once, which costs about 450 fewer o200k tokens on every model call of a session that has `wait_for_input`. The `wait_for_input` description now opens with when not to use it (only waiting for the person's answer: reply and end the turn) and is the one place that explains `reply`, the deadline that persists across a question asked during a wait, the timeout minimum, and what starts the next turn; it no longer names goals, child sessions, Steer, Codemode or session tools a session may not have. Its `reply` field no longer invites agents to omit it; the description says when it is needed. The system prompt keeps only when to end a turn on a wait, and its other waiting guidance still follows the features the session has. Idempotency keys that agents make up for `wait_for_input`, goal updates and progress, and session messages, pauses, resumes, Steers and human-input answers now accept any 8-4-4-4-12 hex UUID, as their `format: "uuid"` says, instead of refusing keys without RFC version and variant digits; Opengeni's own tools no longer show the model the regular expression that only repeats that format. Wake behaviour and the reply guard are unchanged.
+- cf9358a: A chat's own compute box is now called its workspace machine in its fault copy and turn-setup note, matching the rest of the app. Its machine-protocol faults start with "[workspace machine]" instead of "[cloud computer]" (for example "[workspace machine] this chat's workspace machine stopped answering; it is most likely restarting"), and the turn-setup clock and DNS note starts with "[Opengeni checked this chat's workspace machine before this turn]". `isConnectedMachineOutcomeUnknownOutput` recognizes the new prefix and still recognizes "[cloud computer]" receipts stored in earlier chats. Connected Machine wording is unchanged.
+- 60a67e6: A command waiting for a workspace machine that is being saved, replaced or moved now settles as not started instead of "side-effect outcome unknown". This covers, for example, a Modal box replaced because it could not start programs. The model and the person both see "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run it again." A command that had already reached the machine keeps the unknown-outcome receipt. The command row in the timeline now shows such a receipt as its sentence instead of raw JSON.
+- Updated dependencies [7f1f108]
+- Updated dependencies [9bb1b56]
+- Updated dependencies [c69598a]
+- Updated dependencies [10ee575]
+- Updated dependencies [7e92bda]
+- Updated dependencies [ee15e95]
+- Updated dependencies [71395d6]
+- Updated dependencies [8d1edfc]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [80ff42d]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [336970a]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [10b6eb6]
+- Updated dependencies [56801f4]
+- Updated dependencies [2a02889]
+- Updated dependencies [f21e253]
+- Updated dependencies [a505ce8]
+- Updated dependencies [9b96f0e]
+- Updated dependencies [1ee6ee2]
+- Updated dependencies [9ca7447]
+- Updated dependencies [dd544c7]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [a2abf51]
+- Updated dependencies [06606ef]
+- Updated dependencies [8b01834]
+- Updated dependencies [d7252be]
+- Updated dependencies [b271f6d]
+- Updated dependencies [888aaf5]
+- Updated dependencies [0921bad]
+- Updated dependencies [b631728]
+- Updated dependencies [2553094]
+- Updated dependencies [217bd09]
+- Updated dependencies [8a8864c]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [b5d8da2]
+- Updated dependencies [11550b6]
+- Updated dependencies [f9f18f9]
+- Updated dependencies [aa5b122]
+- Updated dependencies [5853742]
+- Updated dependencies [692d4d8]
+- Updated dependencies [c016ff1]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [f45c58f]
+- Updated dependencies [ca69414]
+- Updated dependencies [2a02889]
+- Updated dependencies [9a7e698]
+- Updated dependencies [9ea4868]
+- Updated dependencies [bb33f35]
+- Updated dependencies [a31cd5d]
+- Updated dependencies [650e54a]
+- Updated dependencies [432bccf]
+- Updated dependencies [d48ab91]
+- Updated dependencies [7ab60df]
+- Updated dependencies [a0b081b]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [c663db0]
+- Updated dependencies [c8c10a8]
+- Updated dependencies [cd349e6]
+- Updated dependencies [386586f]
+- Updated dependencies [9420c9b]
+- Updated dependencies [99e117e]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [6e9af8a]
+- Updated dependencies [33fa324]
+- Updated dependencies [23e280b]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [9c65c34]
+- Updated dependencies [52302ae]
+- Updated dependencies [5b15f1a]
+- Updated dependencies [57748cf]
+- Updated dependencies [54e9620]
+- Updated dependencies [04d36ce]
+- Updated dependencies [1a207de]
+- Updated dependencies [3ef0bd4]
+- Updated dependencies [84647c6]
+- Updated dependencies [0b91aac]
+- Updated dependencies [a531446]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [de1210c]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [2495d3e]
+- Updated dependencies [2cc86fe]
+- Updated dependencies [547c03e]
+- Updated dependencies [c8f15a3]
+- Updated dependencies [b9523c1]
+- Updated dependencies [e21c926]
+- Updated dependencies [cf9358a]
+- Updated dependencies [60a67e6]
+- Updated dependencies [b1e049b]
+  - @opengeni/runtime@6.11.0
+  - @opengeni/contracts@6.11.0
+  - @opengeni/db@6.11.0
+  - @opengeni/sdk@6.11.0
+  - @opengeni/codemode@6.11.0
+  - @opengeni/core@6.11.0
+  - @opengeni/config@6.11.0
+  - @opengeni/github@6.11.0
+  - @opengeni/codex@6.11.0
+  - @opengeni/observability@6.11.0
+  - @opengeni/capabilities@6.11.0
+  - @opengeni/documents@6.11.0
+  - @opengeni/tool-gateway@6.11.0
+  - @opengeni/xai-subscription@6.11.0
+  - @opengeni/events@6.11.0
+  - @opengeni/interaction@6.11.0
+  - @opengeni/storage@6.11.0
+  - @opengeni/vaults@6.11.0
+  - @opengeni/vaults-bitwarden@6.11.0
+  - @opengeni/vaults-keeper@6.11.0
+  - @opengeni/vaults-onepassword@6.11.0
+  - @opengeni/vaults-protonpass@6.11.0
+  - @opengeni/agent-proto@6.11.0
+  - @opengeni/decisions@6.11.0
+  - @opengeni/jev@6.11.0
+  - @opengeni/network@6.11.0
+  - @opengeni/subscriptions@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- 14f3221: An approval decided at the very moment a turn paused for it now always resumes the turn. If the decision was saved while the session was still checking what to do next, its wake-up was missed and the turn could wait forever for a decision it already had. The wait now counts wake-ups from before that check, so a decision that lands mid-check triggers one more look. The same applies to a session waiting for provider capacity or retrying a recovering turn: a Pause, Steer or message that lands during that check now takes effect at once instead of at the end of the wait. Sessions already recorded before this change replay as they were; a session that is already stuck this way resumes on its next wake-up, such as a new message.
+- 9f0b440: Before each turn on a chat's own cloud computer (a compute box), Opengeni checks the box's clock against the worker's and checks that the box can look up Opengeni's host. A clock more than five minutes off is set to the worker's time. A resolver that cannot look up Opengeni is restored to the name servers the platform gave the box, keeping the replaced file at `/etc/resolv.conf.opengeni-replaced`; a working resolver, a lookup that cannot be judged, or a file that lists only the platform's servers is never changed. A failed check never fails the turn. When setup runs before the first model request, the model gets a short note about what was repaired or is still broken. Connected Machines, Modal and every other backend are never touched.
+- 1fd358c: A command that fails because the chat's own cloud computer stopped answering no longer says "[connected machine] the machine is unreachable … the enrolled machine did not respond; it appears offline". It now reads "[cloud computer] the cloud computer this chat runs on stopped answering; it is most likely restarting". A command that never reached the box says nothing ran and to retry; one that was in flight says to check whether it took effect, fully or partly, before re-running it. A box that does not come back after a wake says so, that nothing ran, and to tell the person if a retry fails. Other machine-protocol faults from a cloud computer carry the "[cloud computer]" prefix. Connected Machines keep their existing wording. `isConnectedMachineOutcomeUnknownOutput` also recognizes the cloud computer receipt, so the timeline shows "outcome unknown" for it.
+- b032ab0: Drain snapshot failures are now visible. The worker records each settled drain snapshot failure with the lease's consecutive failure count (`opengeni_sandbox_drain_capture_failures_total`, `opengeni_sandbox_drain_capture_consecutive_failures`) and the `/workspace` file count and bytes when a drain snapshot settles (`opengeni_sandbox_workspace_snapshot_files`, `opengeni_sandbox_workspace_snapshot_bytes`; from the archive itself, or one bounded walk after a failed provider snapshot). New alerts fire when one lease's drain snapshot fails a fourth time in a row (`OpenGeniSandboxDrainSnapshotFailing`) and when a sandbox has been stuck draining for over an hour (`OpenGeniSandboxDrainExpiredLong`, critical). When a lost sandbox is restored from an older verified save, every chat sharing it now shows a notice with the save's time; the model's existing discontinuity instruction is unchanged.
+- 2e02796: A chat computer whose workspace snapshot takes longer than the drain wait now finishes saving and shuts down, instead of retrying the same snapshot until Modal ends the box after 24 hours. The drain wait (`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`, or `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`) no longer doubles as Modal's own snapshot deadline: a drain gives the provider `OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, and at least twice the wait), and a snapshot still running when the wait ends publishes late under its claim. After a snapshot fails, the next full attempt for the same box waits 30 seconds, doubling up to 10 minutes, and never past the start of the final save window before the provider deadline. Migration 1253 adds the per-lease count of drain snapshot failures since the last successful save that drives this backoff.
+- a143aaf: A configured agent no longer gets `wait_for_input` and its waiting guidance only because it can ask a person a question: an answer resumes the paused turn and a new message starts one, so the prompt is the same whether the API or a person started the turn. A configured session with no sandbox, Connected Machine or `run_on` no longer gets the Codemode guidance. The Final answer sentence about reporting web sources needs `webSearch` or `browser`, and "Answer in chat by default" needs `artifacts`. Sessions that have these features keep the same prompt.
+- fb37d99: A configured agent now pays only for what it can use on every model call. Under `capabilities: "none"` it gets a neutral introduction unless it shares a workspace, and no tool search when nothing is deferred. A configured session that cannot install the tool router (lazy tool search off for the deployment) no longer gets the Tool discovery guidance. It gets `wait_for_input` and its waiting guidance only when something can resume it (compute, children, goals, schedules, a browser, media, or a person who can answer). It gets no Skill index when it has no Skills. `request_human_input` offers the secret question only with `secrets`, Skill reviews only with Skill management, and parent-agent guidance only in child sessions. Prompt sections about web search, learning, monitoring, design choices with workspace tools and goal audits appear only with their capability. Two new capabilities, `notifications` (notify, withdraw, inbox tidy and call) and `privacyFacts` (`privacy_facts` and its prompt rule), are on under `"all"` and off under `"none"` for a session create request. Sessions stored before keep the tools they had, and saved workspace defaults and schedules that start from `"none"` keep both. The built-in meeting-summary and Site chats turn `privacyFacts` on and, with nothing that could wake them, no longer get `wait_for_input`. Sessions that have a feature get the same prompt as before; outside child sessions `request_human_input` no longer carries its parent-agent guidance. The model-context snapshot for the native Anthropic route now fills its instructions, layers and tools.
+- be54294: A chat whose active sandbox is a Connected Machine always starts its turn on that machine. Turn start used to treat a failed read of the chat's route (for example while database connections were re-established after a redeploy) as "no machine", so the turn ran setup, credential seeding and file downloads on the chat's managed cloud box and was then discarded. These reads are now retried briefly and, if they still fail, stop the attempt before any box is touched so it is retried.
+- 7fb4b0d: `ogtool` and the Codemode client now say why they cannot reach Opengeni instead of printing only "fetch failed". A broken DNS setup reads "Can't reach Opengeni: DNS lookup for <host> failed (ENOTFOUND). Check /etc/resolv.conf." (other systems are pointed at their DNS settings), and a wrong clock reads "Can't reach Opengeni: TLS certificate not yet valid. This machine's clock says <time>, so it is probably wrong." An expired certificate names both possibilities, the clock or the server. Refused, timed-out, unanswered and closed connections, unreachable networks and certificates that cannot be verified get their own sentence, including a connection lost while reading the answer. When a call was already submitted, the message adds that it may have run and how to check it with `ogtool read <operationId>`. The error is a new `CodemodeConnectionError` that keeps the original error as its `cause`; a failure with an unknown reason, or a caller's own abort, keeps its original error.
+- 8acae3d: Repository setup no longer deletes work in a repository folder. It used to wipe and re-clone a folder Git could not read (another owner after `chown -R`, a corrupt `.git`, an interrupted clone) or whose `HEAD` was not the pinned commit, which lost uncommitted files and unpushed commits. A folder another user owns is now added to the workspace machine's global `safe.directory` and kept. Any other unreadable or mismatched folder is renamed to `<folder>.opengeni-recovered-<UTC time>`, a fresh clone takes its place, and the model is told where the moved copy is (in the turn's input, or with the next tool result when the workspace machine starts on demand). A pinned clone records the commit it materialized, so the agent's own commits and branches stay in place until the pin changes. The `repository-clone` completed event lists each move in `recoveredRepositories`.
+- 783d955: Repository skill discovery no longer fails a turn when the workspace answers but its skill folders cannot be used (for example a permission error on Modal, a Connected Machine refusal, or too many skill folders). The turn starts without repository skills and the model sees a short notice naming the reason. Box, route, fence, transport, cancellation and unrecognized errors still reach the turn's existing recovery. An absent `.agents/skills` or `.claude/skills` folder now records `outcome="not_found"` instead of `failed` in `opengeni_sandbox_setup_operation_duration_seconds`, and failed discovery is counted by error class in `opengeni_repository_skill_discovery_failures_total`.
+- 6674146: A sandbox that can no longer start programs now gets a short, actionable message instead of a raw script. Before, when a machine's `/dev/null` had been removed (for example by a command that ran `rm -rf /dev/null` as root), every command failed with "not found: spawn or apply execution containment for …" followed by the whole command text, such as the Codemode client install script, and the chat stopped with that text as its error. Now the error names only the program that was started (the machine agent quotes it), never the command text, and tool output says the machine could not start the program and what to try. When the machine itself can't start programs (its `/dev/null` is gone), a compute sandbox is restarted from its disk once per turn (files are kept, running programs stop). The restarted turn continues, shown as "Workspace machine restarted". The box is checked first: unless a trivial program also fails to start, it is not restarted (another session sharing it may have restarted it already), and the turn retries as an ordinary sandbox wait; one missing program, or brief memory or process pressure on a machine other sessions may share, never restarts anything; if it still cannot start programs, or on a Connected Machine, the turn stops with a message that says what to do. The machine agent also keeps starting programs when `/dev/null` is gone: it keeps the null device open from startup and, running as root on Linux, puts a missing or replaced `/dev/null` back. Compute's control service gains `POST /v1/sandboxes/{id}/restart`, which boots a sandbox afresh from its disk keeping its files and shape.
+- 3b162f4: A turn paused or cancelled while a platform setup command runs no longer stalls its finalization. The setup command's registered shell kept the turn's cancellation signal on the reads the writer drain uses to prove the command exited, so after the cancel every proof read was refused, and a command that had already exited on its own could never be proven settled; the drain now reads without that signal, as it does for ordinary shells. A worker contained by a stalled finalizer now stops cleanly once every other in-flight turn has settled or checkpointed, instead of running into the Temporal SDK force stop, whose native worker finalization fails with "Worker still in use" while the stalled activity keeps its poll open, and exiting non-zero. Each containment request is a hold the finalizer releases if its stage recovers, so a worker never stops under a live turn. `CodemodeClient` treats `agent_attempt_caller_stale` as permanent for that bearer: later requests with the same bearer, from any client in the process, fail locally with the same non-retryable refusal instead of reaching the API again, while a renewed bearer is tried normally (`isCodemodeCallerStaleError`).
+- 0ac2ae9: A model provider error that arrives without an HTTP status and asks to retry, such as an OpenAI-compatible server reporting "model returned malformed tool_call output; please retry" in the middle of a streamed response, now recovers the same turn within the usual provider recovery budget instead of failing the turn on the first bad generation. A real 4xx status still fails the turn as a request fault.
+- 7a5607c: A Steer sent just as a running turn finished a tool call now takes over within moments. The turn checks for a waiting Steer before each model request, and that check runs alongside slower ones; when the Steer arrived while they were still running, the turn could treat its own earlier read as proof that the Steer had been withdrawn, send one more model request that could no longer be cut short, and leave the Steer waiting for that whole extra step (often 10 seconds or more when the step was a long command wait). The turn now reads again before it concludes the Steer is gone, and a restarted Steer watch checks at once instead of at its next 10-second safety recheck.
+- 9cf9b58: Refuse connected subscriptions for API-origin work, including scheduled and
+  goal continuations, transcription and realtime voice, and skip them when choosing API defaults. Keep app
+  subscription use fee-free and own-key billing configuration-driven. Clarify
+  paid-plan and API pricing in the billing page, docs and bundled help.
+- Updated dependencies [2caf31f]
+- Updated dependencies [c9e5547]
+- Updated dependencies [9f0b440]
+- Updated dependencies [1fd358c]
+- Updated dependencies [232e713]
+- Updated dependencies [2a27f11]
+- Updated dependencies [f96cab4]
+- Updated dependencies [25a0452]
+- Updated dependencies [681bbac]
+- Updated dependencies [b032ab0]
+- Updated dependencies [2e02796]
+- Updated dependencies [b5a7db4]
+- Updated dependencies [168d812]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [f619179]
+- Updated dependencies [7fb4b0d]
+- Updated dependencies [b5201d5]
+- Updated dependencies [15763a2]
+- Updated dependencies [b089060]
+- Updated dependencies [8acae3d]
+- Updated dependencies [783d955]
+- Updated dependencies [c672cf7]
+- Updated dependencies [6674146]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [3b162f4]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [f0d27b2]
+- Updated dependencies [d717b72]
+- Updated dependencies [3cb57d8]
+- Updated dependencies [2c39231]
+  - @opengeni/db@6.10.0
+  - @opengeni/contracts@6.10.0
+  - @opengeni/sdk@6.10.0
+  - @opengeni/config@6.10.0
+  - @opengeni/runtime@6.10.0
+  - @opengeni/codex@6.10.0
+  - @opengeni/observability@6.10.0
+  - @opengeni/capabilities@6.10.0
+  - @opengeni/core@6.10.0
+  - @opengeni/codemode@6.10.0
+  - @opengeni/network@6.10.0
+  - @opengeni/documents@6.10.0
+  - @opengeni/tool-gateway@6.10.0
+  - @opengeni/events@6.10.0
+  - @opengeni/github@6.10.0
+  - @opengeni/interaction@6.10.0
+  - @opengeni/storage@6.10.0
+  - @opengeni/vaults@6.10.0
+  - @opengeni/vaults-bitwarden@6.10.0
+  - @opengeni/vaults-keeper@6.10.0
+  - @opengeni/vaults-onepassword@6.10.0
+  - @opengeni/vaults-protonpass@6.10.0
+  - @opengeni/xai-subscription@6.10.0
+  - @opengeni/agent-proto@6.10.0
+  - @opengeni/decisions@6.10.0
+  - @opengeni/jev@6.10.0
+  - @opengeni/subscriptions@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- fdc2747: A chat no longer stays stuck when its worker crashes during shutdown while the sandbox is still being set up. Once the worker's shutdown exit deadline (about two minutes by default) has passed and Temporal shows the closed attempt's activity has settled, the unfinished setup step is settled, so the recovery, a waiting Steer or the next message runs within minutes. Pause, Steer and cancellation, a setup whose start outcome is recorded unknown, and model commands keep their existing protection.
+- 0037e79: Sandbox environments start from a prebuilt image again after a platform release: a turn that finds its version's image built on an older base starts one background rebuild on the current base, and re-verifying a version no longer fails because an earlier verification left its lease behind.
+- Updated dependencies [ff8b164]
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/db@6.9.0
+  - @opengeni/sdk@6.9.0
+  - @opengeni/runtime@6.9.0
+  - @opengeni/contracts@6.9.0
+  - @opengeni/core@6.9.0
+  - @opengeni/documents@6.9.0
+  - @opengeni/events@6.9.0
+  - @opengeni/codemode@6.9.0
+  - @opengeni/capabilities@6.9.0
+  - @opengeni/codex@6.9.0
+  - @opengeni/config@6.9.0
+  - @opengeni/github@6.9.0
+  - @opengeni/interaction@6.9.0
+  - @opengeni/observability@6.9.0
+  - @opengeni/storage@6.9.0
+  - @opengeni/tool-gateway@6.9.0
+  - @opengeni/vaults@6.9.0
+  - @opengeni/vaults-bitwarden@6.9.0
+  - @opengeni/vaults-keeper@6.9.0
+  - @opengeni/vaults-onepassword@6.9.0
+  - @opengeni/vaults-protonpass@6.9.0
+  - @opengeni/agent-proto@6.9.0
+  - @opengeni/decisions@6.9.0
+  - @opengeni/jev@6.9.0
+  - @opengeni/network@6.9.0
+  - @opengeni/subscriptions@6.9.0
+  - @opengeni/xai-subscription@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- 58b04d1: Known-value secret masking no longer rewrites unrelated text. A saved value that is weak (one or two dictionary words, a word with a few digits, a camelCase or snake_case name, a host or an email) is replaced only where it is the credential: alone on its line, as a URL's password, as a whole token that a credential name leads into (`password=…`, `"token": "…"`, `--password …`), after a password option of a program that takes one (`mysql -p…`, `docker login -p …`, `redis-cli -a …`, `ldapsearch -w …`, `curl -u user:…`), in a `.pgpass` line, an XML password element or `IDENTIFIED BY '…'`, printed into a command that reads a password, or as the value under a key that names a credential. File names, paths, imports, identifiers, hosts and URL segments that merely contain the word stay as written. Distinctive values (tokens, keys, random passwords, including random letters, which a letter pair and triple test tells apart from words) are masked everywhere and in every form, as before, and browser typed values and the history scrub still search weak values anywhere. New shape detectors catch Google OAuth client secrets, Hugging Face, SendGrid, Shopify, PyPI, Databricks, DigitalOcean, Linear, Doppler and Atlassian tokens, AWS secret access keys next to their name, and Bearer, token and Basic authorization values. Run-credential and MCP header names still match a credential word anywhere (`PRIVATEKEYPEM`, `AUTHHEADER`), but ordinary words that contain one are set aside, so `GIT_AUTHOR_NAME` and `SESSION_NAME` are no longer treated as secrets. `secret_save` saves a new plain field whose value looks like a secret as concealed and reports it in `fieldNotes`; an explicit `text` kind, and a standard text field such as a login's username, is kept with a note. The item editor offers "Make concealed" under a text field whose value looks secret. `secretValueStrength`, `plainFieldSecretHint`, `credentialNameSaysSecret` and `credentialNameMayHoldSecret` are exported from `@opengeni/contracts`, and the worker counts occurrences in `opengeni_secret_mask_matches_total` (metadata only).
+- 15606f6: A turn working on a Connected Machine no longer keeps sending commands to that machine after the chat is moved to its own managed box mid-turn. Every later tool call used to fail with a raw database query error, because the machine's per-operation authority (correctly) refuses a machine that is no longer the chat's active sandbox. The turn now hands off typed to the chat's managed box and continues there in a fresh attempt, as chats that started on a managed box already did. When a Connected Machine authority check is refused, the worker now logs the database's SQLSTATE, its raised reason and the refusing function, so the next such failure is diagnosable from logs. The tool result text the model sees is unchanged.
+- 3cd5677: Turns no longer fail because a provider rejects a tool name. Just before each model request is sent (OpenAI Responses including the Codex websocket, Chat Completions and gateways, and Anthropic Messages), every tool name in the request is checked: valid names are sent unchanged, and any other name gets a stable alias used consistently across the tools list, tool choice and history. Calls to an alias are mapped back to the original tool. If a provider still rejects a tool name, the request is resent once with portable names, and later requests to that model alias the rejected name straight away. New metrics count these repairs and resends.
+- Updated dependencies [58b04d1]
+- Updated dependencies [b0e03f8]
+- Updated dependencies [fbb70bc]
+- Updated dependencies [15606f6]
+- Updated dependencies [3cd5677]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/core@6.8.0
+  - @opengeni/db@6.8.0
+  - @opengeni/runtime@6.8.0
+  - @opengeni/sdk@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/capabilities@6.8.0
+  - @opengeni/codemode@6.8.0
+  - @opengeni/config@6.8.0
+  - @opengeni/documents@6.8.0
+  - @opengeni/events@6.8.0
+  - @opengeni/github@6.8.0
+  - @opengeni/interaction@6.8.0
+  - @opengeni/observability@6.8.0
+  - @opengeni/storage@6.8.0
+  - @opengeni/tool-gateway@6.8.0
+  - @opengeni/vaults@6.8.0
+  - @opengeni/vaults-bitwarden@6.8.0
+  - @opengeni/vaults-keeper@6.8.0
+  - @opengeni/vaults-onepassword@6.8.0
+  - @opengeni/vaults-protonpass@6.8.0
+  - @opengeni/agent-proto@6.8.0
+  - @opengeni/decisions@6.8.0
+  - @opengeni/jev@6.8.0
+  - @opengeni/network@6.8.0
+  - @opengeni/subscriptions@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- c08233e: Background commands that finish while the agent is working now report themselves. Their exit status and the start and end of their output follow the agent's next plain-text tool result (including `apply_patch` edits), and are recorded as read exactly like a terminal `command_read`, so the same result is never delivered again. The agent no longer spends a `command_read` only to learn that a command finished. The `background_command_result` input that wakes a waiting session, or reaches its next turn, now carries the same bounded output, so that turn needs no extra read either. Earlier history never changes, JSON and image tool results are left as they were, and results not delivered during a turn still arrive as ordinary input. The timeline keeps showing each tool's own output. Results only use the room a tool's own output leaves in the model's tool-output budget, and are masked for known secret values. `OPENGENI_EXPERIMENT_CUT_POLLING=false` turns the in-turn delivery off, along with the prompt sentence that tells the agent not to poll.
+- 6659742: Agents receive less fixed guidance on every model call: the Codemode guidance is shorter, Knowledge and instruction-saving guidance is left out when that learning is Off for the chat, and how to work with an open browser now comes with the browser_open result instead of its description.
+- 6659742: Sessions that cannot create child sessions (their nesting depth has reached its maximum) no longer receive delegation and child-integration guidance in their instructions, about 470 fewer prompt tokens on every model call. The bundled projects Skill is listed only when the session has the project tools.
+- 57237db: Your GitHub keeps working past its token's 8-hour lifetime. Opengeni now asks GitHub for a JSON reply when it renews the token. Without that, GitHub answered form-encoded and every renewal failed silently. The connection still showed as connected, while Git and the `github_personal__*` tools failed with "authorization is no longer current" or "credential is unavailable".
+
+  When GitHub refuses a renewal, which it reports as a successful response carrying an error, the connection is now marked as needing a reconnect instead of staying "connected". Temporary GitHub errors, such as `slow_down` or a server error, leave the connection connected and Git and the tools say GitHub is temporarily unavailable. The GitHub settings page shows "needs to reconnect" with a Reconnect button. A Reconnect toast stays until the person acts on it or closes it, and appears once per stale connection. Git and the GitHub tools say the person must reconnect. A repository list that couldn't load no longer reads "0 repos", and a background read that needs nothing from the person no longer shows a toast.
+
+  Disconnecting Your GitHub always works for its owner. If the connection changed while the dialog was open, for example after a reconnect, Opengeni reads it again and disconnects the current one instead of asking the person to refresh.
+
+- cedf9f8: After a chat whose home box starts on demand switches to a machine with another workspace root, the attempt now ends before the next model request and the turn continues on the new machine. Previously the check read the raw home box, saw no route, and every later sandbox call in that attempt was refused as "Not run".
+- 1d0386f: A chat no longer stays stuck in "recovering" after a worker shuts down while its sandbox is still being set up. The attempt's writer drain now also settles a setup step that only ever writes through the drained command fence, so the attempt reaches quiescence and the recovery or next turn runs. A turn also no longer fails when the sandbox's machine agent is briefly offline, reconnecting, draining, timed out or replaced during setup: nothing the model asked for has run yet, so the same turn retries after a short delay within the usual recovery limit.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [e764a94]
+- Updated dependencies [6659742]
+- Updated dependencies [6659742]
+- Updated dependencies [a064a2a]
+- Updated dependencies [b0736b7]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [af08d2a]
+- Updated dependencies [d7a740f]
+- Updated dependencies [4a7da4c]
+  - @opengeni/runtime@6.7.0
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@6.7.0
+  - @opengeni/sdk@6.7.0
+  - @opengeni/core@6.7.0
+  - @opengeni/subscriptions@6.7.0
+  - @opengeni/documents@6.7.0
+  - @opengeni/events@6.7.0
+  - @opengeni/capabilities@6.7.0
+  - @opengeni/codemode@6.7.0
+  - @opengeni/codex@6.7.0
+  - @opengeni/config@6.7.0
+  - @opengeni/github@6.7.0
+  - @opengeni/interaction@6.7.0
+  - @opengeni/observability@6.7.0
+  - @opengeni/storage@6.7.0
+  - @opengeni/tool-gateway@6.7.0
+  - @opengeni/vaults@6.7.0
+  - @opengeni/vaults-bitwarden@6.7.0
+  - @opengeni/vaults-keeper@6.7.0
+  - @opengeni/vaults-onepassword@6.7.0
+  - @opengeni/vaults-protonpass@6.7.0
+  - @opengeni/agent-proto@6.7.0
+  - @opengeni/decisions@6.7.0
+  - @opengeni/jev@6.7.0
+  - @opengeni/network@6.7.0
+  - @opengeni/xai-subscription@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- 3d82830: Claude Opus 5.5 and Sonnet 5.5 ask for summarized thinking again, so their reasoning shows in the chat timeline instead of only occasional progress notes. A progress note is still told apart from reasoning, by the marker in its signature.
+- 09bc485: An agent can now finish a goal and answer in one step: `goal_complete` takes an optional `reply`, and once the completion succeeds that reply ends the turn as its final answer, shown exactly as written. A session created through the API with `unattended: true` and a first message now gets a goal to complete that message unless the request names a goal. Like any goal, it makes the run continue when the agent stops without completing or pausing it, within the deployment's continuation and budget limits, so such runs can take more turns than before; pass `goal: null` to create one without a goal, as before. A keyed retry of such an unattended create now returns the original session instead of a conflict. A task that seems infeasible, missing data or a result the agent cannot verify is no longer by itself a reason to pause a goal: the agent tries the plausible alternatives first and, if it still pauses, names them in the rationale. The goal tools' and `wait_for_input`'s descriptions are shorter.
+- 7608f89: A turn whose model provider address answers with a web page (for example a wrong base URL) fails with a plain explanation and the page's title instead of the page's HTML.
+- 4930632: When no sandbox can be created or woken because the sandbox fleet has no free capacity (compute's "no host can take it now", or E2B's typed busy error), the turn no longer reports the chat model or its provider as unavailable. It now records `sandbox_capacity_unavailable`, shows "No sandbox capacity is available right now" while the same turn retries about once a minute, and says so again if the retries run out. Other retryable sandbox control service failures record `sandbox_service_unavailable`; refusals that retrying cannot fix record `sandbox_service_refused` and stop. A capacity failure inside a tool call, which previously stopped the turn with raw error text, now retries the same way, unless an uncertain sandbox action in the same failure forbids a replay. Other sandbox provider SDK failures that read as a model provider outage are relabelled as the sandbox service. The person-facing text for these failures never includes the sandbox service's raw message.
+- ddd5f50: Speaker detection tells voices apart better on phone and laptop meetings. The worker image now ships 3D-Speaker CAM++ "common advanced", trained on about 200,000 speakers, instead of the VoxCeleb-only CAM++. On real meetings it confuses two voices about half as often (12 instead of 22 percent equal error rate) and attributes fewer words to the wrong person; on AMI it scores the same. WeSpeaker models also get the mean-normalized features they were trained on. Voiceprints learned with the earlier model are kept apart from the new model's, so people need confirming again before they are suggested.
+- c0ba1cc: Opengeni now refuses to build a sandbox on the worker or API host (`local` or `docker`) when that is not the deployment's configured default, for existing sessions too. Creating such sessions is already rejected, but sessions stored before that check, and shared-box children inheriting a parent's backend, could still name one. A turn on such a session now fails before any box, repository clone, setup, Rig or hydration hook or credential is prepared, with the terminal, non-retryable code `sandbox_backend_not_served` and a message telling the person to start a new chat. Terminal, files, browser, computer and viewer requests for it get a 409 with the same message. The deployment default is kept in `Settings.deploymentSandboxBackend`, which per-session settings rebinds preserve, so the sandbox client builder applies the same rule to every other caller, whatever is installed on the host. Remote providers and the default backend are unchanged.
+- Updated dependencies [01b3fcd]
+- Updated dependencies [3d82830]
+- Updated dependencies [fb49abf]
+- Updated dependencies [074f212]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [80eb21d]
+- Updated dependencies [58a7f9f]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [538a433]
+- Updated dependencies [4930632]
+- Updated dependencies [3cb05f9]
+- Updated dependencies [5a26902]
+- Updated dependencies [c0ba1cc]
+  - @opengeni/runtime@6.6.0
+  - @opengeni/config@6.6.0
+  - @opengeni/db@6.6.0
+  - @opengeni/sdk@6.6.0
+  - @opengeni/contracts@6.6.0
+  - @opengeni/core@6.6.0
+  - @opengeni/documents@6.6.0
+  - @opengeni/github@6.6.0
+  - @opengeni/storage@6.6.0
+  - @opengeni/events@6.6.0
+  - @opengeni/codemode@6.6.0
+  - @opengeni/capabilities@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/interaction@6.6.0
+  - @opengeni/observability@6.6.0
+  - @opengeni/tool-gateway@6.6.0
+  - @opengeni/vaults@6.6.0
+  - @opengeni/vaults-bitwarden@6.6.0
+  - @opengeni/vaults-keeper@6.6.0
+  - @opengeni/vaults-onepassword@6.6.0
+  - @opengeni/vaults-protonpass@6.6.0
+  - @opengeni/agent-proto@6.6.0
+  - @opengeni/decisions@6.6.0
+  - @opengeni/jev@6.6.0
+  - @opengeni/network@6.6.0
+  - @opengeni/subscriptions@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- 3f9ef93: The agent knows both GitHub identities, and the GitHub sheet names them. `github_connect_link` adds a `personal` field for the person's own account ("Your GitHub"): `{ enabled, connected, status, login, repositoryCount, connectUrl, manageUrl }`, with links only for `connections:write` and no token; the App fields are unchanged. `capability_catalog_search` offers a new `api:github-personal` capability ("Your GitHub") when personal OAuth is enabled, and `capability_authorization_request` posts its in-chat card (connect, then choose repos). Agent guidance maps "connect my GitHub" or "do it as me" to Your GitHub and "install the GitHub app" to the Opengeni app. The repositories prompt lists each mounted GitHub repository's identity (as the person, with their login, or as the Opengeni app) and says that `gh` and raw API calls do not act as the person. The GitHub sheet shows two sections, "Your GitHub" and "Opengeni app", each with one action; the header's "Connect another account" is gone, and the repository chooser opens right after connecting. New exports: `PERSONAL_GITHUB_CAPABILITY_ID`, `PERSONAL_GITHUB_SETUP_QUERY_VALUE` and `personalGitHubSetupPath` in `@opengeni/contracts/personal-github`; `AgentPromptRepositoryIdentity`, `repositoryIdentitiesFor` and the `personalGitHubLogin` build option in `@opengeni/runtime`; and `IntegrationSection` with `IntegrationViewModel.sections` in `@opengeni/react`.
+
+### Patch Changes
+
+- ab9d32d: Drain completed tool events before context compaction so successful tools do not remain unfinished in the chat timeline.
+- ebfd447: A value that JSON cannot carry (a symbol key, a function, a bigint, a cycle, a class instance such as a Response, Headers, AbortSignal or Error) no longer fails a turn where it is stored or sent. Every protocol JSON boundary (history, tool receipts, run events, approvals, MCP results and custom data, the sandbox envelope) and the database's canonical JSON encoder now convert or drop such a value as `JSON.stringify` would and log the paths and kinds they changed, never the values. A `JSON.stringify` refusal from any other serializer ends the turn with the same clear, recoverable failure instead of stopping the chat.
+- 468e8c3: A meeting's transcript can be told how many people spoke. `transcription.speakers` (1 to 32) on a recording or a transcript re-run makes Opengeni's speaker detection find exactly that many on a recording with one track, and is each track's upper bound when the recording has several. Models with their own diarization get it as their speaker count. The meeting page's "Transcribe again" asks for the "Number of speakers", also for models that rely on Opengeni's speaker detection, and "Wrong number of speakers?" under the speakers list opens it.
+- 7f81248: Older images no longer ride along in every model request. When a turn attempt starts, tool-result images older than the newest three are replaced, five at a time, by a short note, one per tool result. For `view_image` the note names the path to view again; for other tools it asks for a fresh screenshot or observation instead of repeating an action. The model keeps three to seven recent images with their pixels when an attempt starts, plus any it adds during the attempt. The note is fixed for the whole attempt and the omitted set only grows, so the provider's prompt cache stays valid between batches. Stored history is unchanged, omitted images are not read from storage, and user attachments and native `computer_call_result` screenshots are not affected.
+- 1aa4b2d: When a protocol JSON boundary refuses a value a turn prepared (such as "Protocol JSON value at $ cannot contain symbol keys"), the turn now ends with a clear message and the chat takes the next message, instead of the chat stopping with a Retry that fails the same way. A goal does not keep continuing into the same refusal, and a turn whose completed work cannot be saved still stops the chat. As hardening, the history identity check also leaves out request-local marks below the top level of an item.
+- c314c95: A meeting transcript retried after its worker was lost no longer pays the provider again for audio it already transcribed. Each piece of a track is kept with its version as soon as the provider answers (before a text-only model's words are placed), keyed by the model, options, piece and a hash of the audio, and a retry reuses it. Kept pieces are removed when the version completes or fails (migration 1227).
+- 707c444: Creating a session now fails with a clear 422 when it asks for a sandbox backend the deployment does not serve. Previously any `sandboxBackend` value was accepted, so on a cloud deployment an agent's `session_create`, a REST/SDK create or a schedule could ask for `local` and get a box that ran as processes on the worker host. A deployment serves its configured default backend, `none`, `selfhosted` when Connected Machines are enabled, and any provider whose credentials are configured; `local` and `docker` only as the default. Forks of a session on an unserved backend are refused too. Schedules are checked when saved and again when a run is admitted, and `session_create` advertises only the served backends. A keyed retry of an already-created session still returns it. Shared children, Connected Machine targets and `new` boxes on a served backend are unchanged.
+- f866a11: Schedules that start a new chat per run and were saved before the secret permission names were unified run again. Every run of such a schedule was refused with `scheduled_run_authority_proof_rejected`, because its chat stored the current permission names while the run still named the retired ones. A run now names the same canonical permissions as the chat it creates.
+- ce4921e: Recover the same turn when a shared sandbox creator outlasts a sibling's warming wait, preserving the elected owner and crash recovery instead of terminally failing waiting sessions.
+- Updated dependencies [4e4f77e]
+- Updated dependencies [e797d94]
+- Updated dependencies [4b67778]
+- Updated dependencies [7de2adf]
+- Updated dependencies [89eabf0]
+- Updated dependencies [b1f7c2c]
+- Updated dependencies [f1998df]
+- Updated dependencies [564efe9]
+- Updated dependencies [ab9d32d]
+- Updated dependencies [6bdd4d0]
+- Updated dependencies [89eabf0]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [02e68d1]
+- Updated dependencies [8a5a03a]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [d5ce7de]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [c649c2e]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [05ce0d6]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [a8d1310]
+- Updated dependencies [7b0f510]
+- Updated dependencies [1aa4b2d]
+- Updated dependencies [c314c95]
+- Updated dependencies [707c444]
+- Updated dependencies [6099e32]
+- Updated dependencies [27ac6cd]
+- Updated dependencies [f866a11]
+- Updated dependencies [a6f7072]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/db@6.5.0
+  - @opengeni/core@6.5.0
+  - @opengeni/capabilities@6.5.0
+  - @opengeni/runtime@6.5.0
+  - @opengeni/contracts@6.5.0
+  - @opengeni/config@6.5.0
+  - @opengeni/sdk@6.5.0
+  - @opengeni/subscriptions@6.5.0
+  - @opengeni/documents@6.5.0
+  - @opengeni/events@6.5.0
+  - @opengeni/codemode@6.5.0
+  - @opengeni/codex@6.5.0
+  - @opengeni/github@6.5.0
+  - @opengeni/interaction@6.5.0
+  - @opengeni/observability@6.5.0
+  - @opengeni/storage@6.5.0
+  - @opengeni/tool-gateway@6.5.0
+  - @opengeni/vaults@6.5.0
+  - @opengeni/vaults-bitwarden@6.5.0
+  - @opengeni/vaults-keeper@6.5.0
+  - @opengeni/vaults-onepassword@6.5.0
+  - @opengeni/vaults-protonpass@6.5.0
+  - @opengeni/agent-proto@6.5.0
+  - @opengeni/decisions@6.5.0
+  - @opengeni/jev@6.5.0
+  - @opengeni/network@6.5.0
+  - @opengeni/xai-subscription@6.5.0
+
+## 6.4.0
+
+### Minor Changes
+
+- cdb9d27: Agents answer privacy, retention, training and "where does it run" questions from server facts. The new always-visible `privacy_facts` tool reports the chat's model, provider route and how it is paid for, the route's declared region, whether the workspace is EU-only, the provider's training, retention and processing location from one reviewed table with source links and the date checked, Opengeni's own retention facts, where the deployment hosts app data and where this chat's sandbox runs, and the deployment's privacy policy, subprocessor list, terms and support contact. New optional settings `OPENGENI_DATA_HOSTING_LOCATION` and `OPENGENI_LEGAL_SUBPROCESSORS_URL` declare the hosting and subprocessor list; unset, they are reported as unknown and the agent is pointed to the privacy policy. Unknowns are stated as unknown. The operational contract tells agents to call it for these questions and answer only from it.
+- 237329e: A schedule runs as its owner, so its owner's own (personal) Connected Machine can now run it whoever can see it: Workspace schedules included, not only Only me ones. Picking the machine on the schedule is the consent; following a workspace default that is a personal machine is still refused. Each run's chat gets the schedule's audience and a grant for that chat alone, and other people's messages in a shared run chat wait for the owner, as in any chat on a personal machine. Nobody else's schedule can use the machine.
+
+  Create and update no longer refuse a Workspace schedule on the owner's machine, and widening such a schedule to Workspace is allowed. The schedule form offers your own machines whatever the schedule's audience. When a machine becomes someone's Only me machine, that person's schedules on it keep running unchanged; before, their Workspace schedules there became Only me or paused. Everyone else's still pause. The audience preview no longer produces the `make_only_me` action, and `summary.schedulesMadeOnlyMe` is always 0.
+
+### Patch Changes
+
+- 3d34521: Speaker detection no longer splits one voice into many speakers on room
+  recordings. After clustering, speakers whose average voices nearly match are
+  joined. A one-hour in-room meeting that showed 16 speakers now shows 3, and
+  the AMI reference meetings ES2004a and EN2002a still find all 4 of 4 speakers
+  with unchanged error rates.
+- d82064d: Meeting transcription no longer pays to transcribe silence. Before sending a
+  track, the worker finds its quiet stretches (below -55 dBFS for at least
+  20 seconds). A track that is silent throughout, like the computer's audio in
+  a room meeting, is not sent at all. When our own diarizer tells the speakers
+  apart, or the model doesn't, only the stretches with sound are sent, each
+  with a second of margin. A model's own speakers don't carry across pieces, so
+  a track that relies on them is still sent whole. The transcript's provider
+  cost counts only the audio sent, and the new
+  `opengeni_recording_sent_audio_seconds_total` counter and the
+  `sentAudioSeconds` log field show it. `@opengeni/core` exports
+  `planRecordingSoundPieces`.
+- 8a7d1c8: Provider-hosted web search and OpenAI hosted image generation now cost credit on turns whose model Opengeni pays for while credit billing is active (one check point, `paidHostedToolsChargeCredits`). Such a turn gets Opengeni's billed `web_search`/`web_fetch` tools instead of hosted search whenever a search provider is configured. Without one, the hosted searches each response reports (Claude's count, and now OpenAI `web_search_call` items) are charged at $10 per 1,000 plus the 5% web-search margin, as a separate, idempotent web-search debit per response, including a response that reported no token usage. Gateway-reported costs already include search and are not charged again. OpenAI hosted image generation on the deployment's own key is no longer offered on those turns. They use the priced Gateway image tool, so they have no image tool unless the managed Gateway image credential or a workspace Gateway key is configured.
+
+  Paid tools on those turns are paid like other app tools: plan credit first (the Free plan's monthly credit included, whatever models its scope lists), then grants that list the turn's model, then general credit. The new tool credit usage (`toolCreditUsage`) applies to Gateway images too, so Free plan credit now pays for them on any model. These debits keep the turn's billing origin, so API work pays from credits only. Turns on the user's own keys or subscriptions, free models, billing-off deployments and legacy billing accounts (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`, CloudGeni's host account by default) are unchanged. `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false` (default `true`) turns the new charges off and restores free hosted search and images on every turn.
+
+- bafcf53: A meeting or dictation whose processing is cut off by the worker stopping (a deploy or a lost pod) is retried on another worker instead of failing. ffmpeg or the speaker models killed by a signal, ffmpeg's "received signal" exit, and Temporal's shutdown cancellation are now interruptions, not invalid audio, and an interrupted speaker detection no longer silently falls back to the model's speakers.
+- d15a531: Main agent turns on Azure OpenAI and the OpenAI platform now send `store: false`, so the provider no longer keeps each response for 30 days. Compaction and single model calls on Azure are storeless too. Nothing read stored responses back: history is resent in full (WebSocket continuations chain only on the same connection), provider item ids are stripped, and reasoning round-trips encrypted. Operator registry providers, compatible servers and gateways are unchanged. The agent's `privacy_facts` tool now says Opengeni sends `store: false` on the routes that do, and that storage is not turned off for every request on the others.
+- cfce969: Integration Knowledge sync is retired. Integrations give agents tools and access; for recurring work, create an ordinary agent schedule that uses the integration's tools.
+
+  - Google Drive and OneDrive no longer offer a "Knowledge source" (`drive-content`) facet. Configuring a `knowledge_source` facet, or browsing or saving a source, returns 410.
+  - Creating a schedule with `agentConfig.knowledgeSource`, or changing a saved task's source, returns 410.
+  - Saved source tasks (a `knowledge_source_sync` action or `agentConfig.knowledgeSource`) for any provider now read as retired. Fires, manual runs and resume are refused, and queued runs fail with `knowledge_source_sync_retired`. Google Drive and Atlassian tasks keep their existing retirement reasons. You can still read and delete these tasks.
+  - The worker no longer contains the source sync workflow, its activities, or the `knowledge_source_fetch` and `knowledge_source_read` attempt tools.
+  - New in `@opengeni/contracts/knowledge-source-sync-retirement`: `retiredKnowledgeSourceSyncTask`, `isRetiredKnowledgeSourceSyncTask` and the shared retirement reasons. `isRetiredNativeGoogleDriveTask` and `isRetiredNativeAtlassianTask` are deprecated.
+  - Imported Documents, Knowledge entries, source provenance and run history stay readable. Public schemas and SDK types are unchanged, and no data or tables are removed.
+
+- 0082071: A session whose agent may not use secrets no longer tries to save secrets found in tool output into a Task vault it does not have; the values are masked with their marker from the start, without failing vault writes and warnings.
+- 3b9a997: Add `POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove` and SDK `removeSessionResources` to remove repositories from a running session and its child sessions, recorded as `session.resources.removed` events. Access through Opengeni-brokered paths and new credential mints ends on the next call: the personal Git broker, the GitHub tools and Git token minting refuse a removed repository, including for running turns, children and goal continuations. Tokens already in a sandbox stay valid until they expire, except that a dedicated token Opengeni's own GitHub App minted is best-effort revoked. The next managed-sandbox turn removes the repository folder and credential binding.
+
+  `Session` gains an optional `removedRepositories` list (migration 1140). A removal lasts until a person attaches the repository again: an agent cannot re-attach it (with a message or a child session, which now returns 403), turns queued earlier leave it out, and child sessions inherit it. Only a person or an API caller can remove repositories. `SessionAuthorizationOperation` gains `"session.resources.write"`; hosts with an exhaustive switch over it must handle the new value.
+
+  In the chat composer, a mounted repository can now be switched off in the repository picker. A confirmation names the repository and warns when its folder has uncommitted or unpushed changes. The SDK `Session` type gains the optional `removedRepositories` field and the `SessionRemovedRepository` type.
+
+- ed0ba73: A short personal Skill, such as a saved standing preference ("always answer in Norwegian"), now applies without an extra model round trip. The Skill index shows the complete instructions of a single-file personal Skill whose body renders in at most 1,024 bytes (counted as JSON-escaped in the index), up to 4,096 bytes in total, in an `instructions` field on its entry, and its descriptor notice line then also explains that field. Larger, multi-file, workspace and organization Skills, and Skills whose frontmatter has no closing line, stay descriptors that the agent reads on demand, and an index without such Skills renders byte for byte as before.
+
+  `SkillCatalogDescriptor` gains an optional `instructions` field, `formatSkillCatalog` applies the per-entry and total bounds and lists shown-in-full entries first, and `skillInstructionsBody` returns a SKILL.md body without its frontmatter, with line endings normalised. `listSkillDescriptors` takes an optional `personalSkillMarkdownMaxBytes` that also returns `personalSkillMarkdown` for small single-file personal Skills.
+
+- 082e479: A session with repositories from more than one GitHub App installation, or with an installation next to your own GitHub, now starts. The built-in GitHub App credential broker echoes the repository binding it minted for, which mixed sessions require.
+
+  Your GitHub's pull request, review and merge tools now get your credential. They were refused as "Personal GitHub credential is unavailable" because the frozen-connection check only knew connectors listed as MCP servers.
+
+- 0118724: Automatic chat titles now use the language the person writes in, and a chat that opens with only a greeting, thanks or small talk is no longer named after the greeting (for example "Casual Greeting"). It stays untitled, so apps keep showing the first message, until a message with a task, question or subject arrives; that message then sets the title.
+- Updated dependencies [1f918a4]
+- Updated dependencies [106652b]
+- Updated dependencies [92f419c]
+- Updated dependencies [21d0e30]
+- Updated dependencies [1cc48d0]
+- Updated dependencies [000c023]
+- Updated dependencies [6708419]
+- Updated dependencies [940e7aa]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [5b3b5d2]
+- Updated dependencies [f13df88]
+- Updated dependencies [7a9dc90]
+- Updated dependencies [b4e780e]
+- Updated dependencies [d82064d]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [b3cc70d]
+- Updated dependencies [53f851d]
+- Updated dependencies [237329e]
+- Updated dependencies [8a7d1c8]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [3c16116]
+- Updated dependencies [d55f740]
+- Updated dependencies [227e8e6]
+- Updated dependencies [5ebed12]
+- Updated dependencies [4a48589]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [0d409a7]
+- Updated dependencies [bafcf53]
+- Updated dependencies [d15a531]
+- Updated dependencies [1e98c19]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [67f4f3e]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [ed0ba73]
+- Updated dependencies [1adc5d2]
+- Updated dependencies [082e479]
+- Updated dependencies [e9e5640]
+- Updated dependencies [0118724]
+- Updated dependencies [1984d0e]
+- Updated dependencies [af8a173]
+- Updated dependencies [dbfcd1e]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/db@6.4.0
+  - @opengeni/sdk@6.4.0
+  - @opengeni/runtime@6.4.0
+  - @opengeni/observability@6.4.0
+  - @opengeni/config@6.4.0
+  - @opengeni/core@6.4.0
+  - @opengeni/capabilities@6.4.0
+  - @opengeni/documents@6.4.0
+  - @opengeni/codemode@6.4.0
+  - @opengeni/codex@6.4.0
+  - @opengeni/events@6.4.0
+  - @opengeni/github@6.4.0
+  - @opengeni/interaction@6.4.0
+  - @opengeni/storage@6.4.0
+  - @opengeni/tool-gateway@6.4.0
+  - @opengeni/vaults@6.4.0
+  - @opengeni/vaults-bitwarden@6.4.0
+  - @opengeni/vaults-keeper@6.4.0
+  - @opengeni/vaults-onepassword@6.4.0
+  - @opengeni/vaults-protonpass@6.4.0
+  - @opengeni/agent-proto@6.4.0
+  - @opengeni/decisions@6.4.0
+  - @opengeni/jev@6.4.0
+  - @opengeni/network@6.4.0
+  - @opengeni/subscriptions@6.4.0
+  - @opengeni/xai-subscription@6.4.0
+
+## 6.3.1
+
+### Minor Changes
+
+- c35704f: Meetings name themselves. Nobody has to type a name: a meeting started without one is named after the event on its owner's connected Google or Outlook calendar at the time it started, or else, once its notes are written, from what was said (the built-in summary passes a short name to `meeting_notes_save` as the new `title`). A name someone types, at start or by renaming, always wins and is never replaced. Recordings carry `titleSource` (`person`, `calendar`, `conversation`, `app` or `default`; migration 1132 adds it, and existing recordings are `person`), and create requests may pass `titleSource: "app"` for a title the app only guessed, such as the desktop app's "Zoom meeting". The web and phone recorders no longer send a made-up date name, the recorder shows the calendar name once the server has it (`serverTitle` in the upload status), and the meeting page shows the new name when the notes arrive. Private, declined, cancelled and all-day events are never used, and the calendar lookup never holds up capture.
+
+### Patch Changes
+
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+- bb16142: Hosted web-search results reach the model as a labelled search record in the user role instead of as the assistant's own message, so models stop imitating them and writing raw search JSON into the chat. The form belongs to the session: new sessions use the record from their first turn, and an existing session switches only once its history no longer holds a search (after compaction or clearing), so no text an earlier request sent changes and prompt caches stay intact. A record never separates a tool call from its result. In every session, a model-written copy is not shown while it streams, and a reply that is only a copy gets the usual nudge for a real final answer.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [c2e0db6]
+- Updated dependencies [923c161]
+- Updated dependencies [e104fbb]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [4260008]
+- Updated dependencies [d872b12]
+- Updated dependencies [64beb77]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [98542ad]
+- Updated dependencies [6bbd24f]
+- Updated dependencies [c0b945b]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [99159e9]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [83520e5]
+- Updated dependencies [a550481]
+- Updated dependencies [278ad58]
+- Updated dependencies [59d708c]
+- Updated dependencies [79605f2]
+- Updated dependencies [af8fb16]
+- Updated dependencies [bb16142]
+- Updated dependencies [94ba6a2]
+- Updated dependencies [3a47d0b]
+- Updated dependencies [139a2be]
+- Updated dependencies [2c3a01c]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+  - @opengeni/contracts@6.3.0
+  - @opengeni/db@6.3.0
+  - @opengeni/core@6.3.0
+  - @opengeni/config@6.3.0
+  - @opengeni/runtime@6.3.0
+  - @opengeni/subscriptions@6.3.0
+  - @opengeni/codemode@6.3.0
+  - @opengeni/capabilities@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/documents@6.3.0
+  - @opengeni/events@6.3.0
+  - @opengeni/github@6.3.0
+  - @opengeni/interaction@6.3.0
+  - @opengeni/observability@6.3.0
+  - @opengeni/storage@6.3.0
+  - @opengeni/tool-gateway@6.3.0
+  - @opengeni/vaults@6.3.0
+  - @opengeni/vaults-bitwarden@6.3.0
+  - @opengeni/vaults-keeper@6.3.0
+  - @opengeni/vaults-onepassword@6.3.0
+  - @opengeni/vaults-protonpass@6.3.0
+  - @opengeni/agent-proto@6.3.0
+  - @opengeni/decisions@6.3.0
+  - @opengeni/jev@6.3.0
+  - @opengeni/network@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/sdk@6.2.0
+  - @opengeni/core@6.2.0
+  - @opengeni/db@6.2.0
+  - @opengeni/config@6.2.0
+  - @opengeni/runtime@6.2.0
+  - @opengeni/capabilities@6.2.0
+  - @opengeni/codemode@6.2.0
+  - @opengeni/codex@6.2.0
+  - @opengeni/documents@6.2.0
+  - @opengeni/events@6.2.0
+  - @opengeni/github@6.2.0
+  - @opengeni/interaction@6.2.0
+  - @opengeni/observability@6.2.0
+  - @opengeni/storage@6.2.0
+  - @opengeni/tool-gateway@6.2.0
+  - @opengeni/vaults@6.2.0
+  - @opengeni/vaults-bitwarden@6.2.0
+  - @opengeni/vaults-keeper@6.2.0
+  - @opengeni/vaults-onepassword@6.2.0
+  - @opengeni/vaults-protonpass@6.2.0
+  - @opengeni/agent-proto@6.2.0
+  - @opengeni/decisions@6.2.0
+  - @opengeni/jev@6.2.0
+  - @opengeni/network@6.2.0
+  - @opengeni/subscriptions@6.2.0
+  - @opengeni/xai-subscription@6.2.0
+
+## 6.1.1
+
+### Minor Changes
+
+- 6573dc7: The system instructions and tool list follow how a chat started and never change mid-chat, so earlier requests stay cacheable. A chat that a scheduled task or event trigger starts unattended is told so from its first turn, like a session created with `unattended: true`. When the switch, or a person writing in an automation's chat, makes a turn's attendance differ from how the chat started, that turn's input carries a short note saying so (the unattended guidance, or that a person is now present and can answer). In a chat switched to unattended after it started, a question or hand-off to a person returns at once with a result saying no one will answer.
+
+  Unattended sessions no longer wait on a person anywhere. A call that needs someone's approval under the workspace's tool permissions is refused at once with an error result saying nobody can approve it in an unattended session, in model tool calls and in Codemode, so the agent works around it and lists it as a step left for a person. Nothing is approved and no approval request is opened; permissions stay exactly as configured. Chats that scheduled tasks and event triggers start are unattended by default; a task chooses with `agentConfig.unattended`, and a task that sets `approvalTimeoutSeconds` without it stays attended. A new **Work without me** switch in a chat's Agent tab turns unattended mode on or off from the next turn, through `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` (SDK `updateSessionUnattended`); session reads include `unattended`. Explicit choices (the switch, the create option, a task's `agentConfig.unattended`) stay; only the automatic default of a scheduled or event-triggered chat ends when a person writes in it from the web app, Slack or a voice call. Interactive sessions are unchanged.
+
+### Patch Changes
+
+- 258accd: Pass the acquired lease identity when creating a clean sandbox for Sandbox Environment verification, so compute-backed verification can start successfully.
+- c042f45: A turn reaches its first model request sooner. The startup progress receipts a turn writes while it prepares (credentials ready, preparing tools, tools ready, client ready, preparing the model request) no longer hold up the next startup step: each starts at once in an ordered per-attempt lane, and the model-request audit and every other awaited append or settlement still commit after the receipts issued before them, so the event log keeps the same order. A receipt that cannot be delivered no longer fails the turn; a fenced attempt is still refused by its next awaited append. Model requests are byte-for-byte unchanged.
+- Updated dependencies [9552358]
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/core@6.1.0
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/runtime@6.1.0
+  - @opengeni/db@6.1.0
+  - @opengeni/capabilities@6.1.0
+  - @opengeni/codemode@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/config@6.1.0
+  - @opengeni/documents@6.1.0
+  - @opengeni/events@6.1.0
+  - @opengeni/github@6.1.0
+  - @opengeni/interaction@6.1.0
+  - @opengeni/observability@6.1.0
+  - @opengeni/storage@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+  - @opengeni/vaults@6.1.0
+  - @opengeni/vaults-bitwarden@6.1.0
+  - @opengeni/vaults-keeper@6.1.0
+  - @opengeni/vaults-onepassword@6.1.0
+  - @opengeni/vaults-protonpass@6.1.0
+  - @opengeni/agent-proto@6.1.0
+  - @opengeni/decisions@6.1.0
+  - @opengeni/jev@6.1.0
+  - @opengeni/network@6.1.0
+  - @opengeni/subscriptions@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- 449bcae: An MCP server can now ask the person a question in the middle of a tool call (MCP form elicitation, revision 2026-07-28, multi round-trip): a confirmation or a form to fill in. Model calls to third-party MCP servers declare that they can answer forms (form mode only; URL mode is not offered, and a server that asks for a page anyway ends the call with an error result). When the server answers `input_required`, the call pauses as an approval of the same call, the person answers in the approval card (possibly hours later, including in unattended runs), and the call is retried with the answer and the server's byte-exact `requestState`. Declining is sent to the server too (`action: "decline"`), so it can release what it was holding and finish the call its own way; the model then sees the server's result followed by a short note that the person declined. The model never sees the question or the answers. `session.requiresAction` approvals carry a new `elicitation` field (`{ server, round, requests }`); `user.approvalDecision` takes `content` and `elicitationRound`. Approving an approval with `elicitation` requires `elicitationRound` to be the current question's round, and the API checks `content` against the server's form (422 with the reason otherwise), so a stale card or a surface that never showed the question cannot answer a newer one. The question shows on every approval surface: the session card (web and native), the inbox (the question as the title; Allow for a short confirmation, Answer for a form), phone push ("<server> asks: …", opening the app, with no lock-screen actions) and private Slack cards (Allow for a confirmation, a link to answer a form in Opengeni). Connector action records gain `input_round`, so a tool with an Ask policy or saved rule can be asked more than once and answered in a later worker attempt. New exports: the `McpElicitation*` schemas, `MCP_ELICITATION_MAX_ROUNDS` and helpers in `@opengeni/contracts` (also at `@opengeni/contracts/mcp-elicitation`), and their types including `McpElicitationAnswer` in `@opengeni/sdk`; `InboxItem.serverQuestion` (`{ server, kind, round }`); `sendApprovalDecision` accepts `content` and `elicitationRound`; React `ApprovalSurface` renders the question and passes `{ content, elicitationRound }` to `onApprove` as its second argument, and `McpElicitationRequest` is exported from `@opengeni/react/session-ui`; React Native `ApprovalStrip`'s `onDecide` receives the same answer as its third argument; `@opengeni/testing/mcp-elicitation-server` is a fake server for client tests. See `docs/mcp-elicitation.md`.
+
+### Patch Changes
+
+- 073127d: A session parked in `wait_for_input` now resumes as soon as its background command's result is settled, instead of on the wake dispatcher's next 10-second sweep. Terminal background-command settlement returns the wake it commits. Its callers signal the session workflow after commit, concurrently and for at most 5 seconds: a Connected Machine's pushed completion, in-turn, API and reaper retained-process settlement, the selfhosted reaper, and lost or contained sandbox boxes. The dispatcher still delivers any wake a caller could not signal. Local Temporal (`docker compose` and the native dev stack) now serves each task queue from one partition, so queued turns start in the order they were queued. Start an existing local stack with no queued work, or reset its Temporal state, so no backlog is left in the removed partitions.
+- 765e264: Compress the managed Codemode client transfer to reduce cold sandbox setup traffic while preserving the exact release digest, installed files, warm verification, and plain staging fallback.
+- 36fd213: A dictation's text no longer waits for the worker to store its prepared audio. That copy was only ever used for meeting playback and re-runs, and a dictation is deleted soon after, so writing it put a slow or busy object store between the person and their text. The worker now builds the dictation's audio from its uploaded chunks and transcribes it straight away. Meetings still store their prepared audio as before.
+- f249828: Allow operators to configure a registry model's hosted-search context size. Omitted settings preserve the existing SDK default and execution identity. Explicit changes are bound to the model definition so accepted turns cannot silently switch search settings.
+- cebc433: Question cards offer "Let the agent decide". On every ordinary question (never a secret, a Skill review or a secret approval; tool approvals stay human-only) one secondary action replaces Skip and settles the request as `{ outcome: "skipped", agentDecides: true }`, accepted even when the request does not allow an ordinary skip. The agent's tool result carries a note to make its own best choice and say in one sentence what it chose, and the settled card reads "You let the agent decide". On a sub-session's question shown in a parent chat, the action instead sends the parent's own agent a message naming the exact request; the card says "Your agent is deciding" and stays answerable, and the message shows what the agent decided once the sub-session's request settles. `HumanInputForm` takes `onLetAgentDecide` and `agentDeciding`, `HumanInputSurface` forwards them, and `humanInputAgentMayDecide` tells which requests qualify.
+
+  A sub-session's blocking question now also wakes a parent whose goal is completed (the goal is not reopened), so the parent agent can answer it before the person has to. Before, such a parent kept the notice unread and the person was the only one asked. Agents are told to answer a child's question from their task context before the person has to, and to do the agent work it asks for (such as starting a reviewer) and then answer. The `request_human_input` description tells a sub-session to message its parent agent, rather than ask the person, when what it needs is agent work.
+
+- 0854386: Deliver file attachments to local sandboxes through verified downloads so adding files to an existing conversation does not fail with a live mount error.
+- 37538aa: Meetings get their notes written automatically. When a meeting's transcript is ready, Opengeni starts one chat for the meeting's owner (Only me for an Only me meeting, a workspace chat for a shared one) that writes the notes: an overview, topics, decisions and action items, with speakers and people linked as `speaker:` and `person:` mentions. The chat can only read that one meeting and save its notes, and nobody can widen it later. It runs on the workspace's shared Codex or Claude subscription accounts like other background work, and doesn't start when no subscription account can serve it, so it never spends credits or an API key. It never writes over saved notes and steps aside when the owner has their own automation for ready transcripts. Admins can turn it off with "Write notes after each meeting" in the meeting settings (`settings.recordings.autoSummary: false`). `meeting_read` now gives each speaker's label, and the "Meeting notes" template asks for the same format.
+- 6e33a98: A meeting recorded with computer or tab audio now tells apart the people in the room with the person recording. Before, its microphone was never diarized and every word on it was named after the owner, so someone sitting next to them disappeared into the owner's speaker. Now every track is diarized. One voice on the microphone is still the owner. With several, the owner's voice is the one matching their remembered voice when the workspace recognizes voices, else the one that spoke the most, and the others become `Speaker 1`, `Speaker 2`…. Echo removal runs first, so the call's echo never counts as the owner. The owner's voice vector is now kept under `track-N` too. Diarized labels are numbered across the whole recording (`speaker_0`, `speaker_1`, …) instead of per track with a `t1_` prefix, so two tracks no longer both show a "Speaker 1". `RecordingTrackPlan` now has `recorderLabel` instead of `fixedLabel` and `diarize`, `RecordingTrackWords` has `recorder` instead of `fixedLabel`, and `withRecorderVoice` (core) plus `memberVoiceprints`, `voiceMatchingVoiceprints` and the `KnownVoice` type (db) are new exports. Re-run a transcript to apply this to an earlier meeting.
+- d9df3db: The built-in meeting notes no longer step aside when the meeting's owner has an automation on `recording.transcript.ready`. That check was a guess: it ignored the automation's filters and could not tell whether the automation writes notes at all, so an automation that only posted somewhere else still stopped the notes. The notes now start whenever the workspace's switch is on and the meeting has none. Nothing is overwritten: the built-in notes and the "Meeting notes" template both save only the first notes. `meetingSummaryCandidate` no longer takes `eventTriggersEnabled`, and its `own_automation` reason is gone.
+- 8b727bf: An image whose declared type does not match its bytes, such as a JPEG screenshot that a chat app or MCP tool labels `image/png`, no longer fails the turn on Claude models. The model image sizer used to require the declared type to match the bytes and threw otherwise, and because the image stays in the chat's history, every later turn failed the same way until someone edited the stored label. The sizer now identifies PNG, JPEG, WebP and GIF from the bytes and labels the image with its real format; anything else (SVG, HEIC, damaged data) is still refused before any decoder runs. On the Claude transport, a mislabeled image that needs no resizing is sent with its real type and no resize note. Stored attachments under the wrong type keep exactly the projection they always had, so earlier requests stay byte-identical.
+- f74d748: Work the owner starts in their own Personal workspace (their chats and scheduled tasks) can now remove that workspace's Skills, as it can already save and edit them. Removal follows the chat's Skills mode: Automatic removes, Review first leaves a deletion proposal for the owner, Off refuses. In shared workspaces a private chat still removes only the person's own Skills, another person's personal Skill stays out of reach, and an agent removal that names a scope is refused. When a removal is refused, the agent now points to the Skills page for workspace Skills and the person's own Skills.
+- 0e2b0af: A recording whose container header is split across its first chunks is now transcribed instead of failing as unreadable audio. Chromium sometimes hands out the first byte of a WebM recording on its own, before any audio has arrived, and the rest of the header in the next chunk; the worker required the whole header in the first chunk, so such a dictation or meeting failed with `invalid_audio`. A chunk too short to tell whether a header starts there is now held and judged together with the chunks after it, both at the start of a track and at a later capture session.
+- 21856c5: An agent can now ask a person to act on a browser tab or computer target it has just observed without passing the target's internal generation values. `interaction_request_human` with `operation: "request"` no longer requires `expectedControllerGeneration`, `expectedTargetGeneration` or `expectedDocumentGeneration`.
+
+  When the turn pauses, every request without an `authRunId` reads its target as it is then. Generations left out are taken from that reading; generations given must equal it, or the request is refused. If the target cannot be read, a request that gives all three is recorded as given, and one that leaves any out is refused. A request with an `authRunId` takes and checks its generations against that auth run instead. In every case the controller generation is checked against the live browser or computer session.
+
+  A call that cannot be recorded (the session or tab is gone or has changed, a given generation does not match, the target is unreadable, the auth run does not match, another open request already asks a person to act on the same target, including one opened at the same moment, or an `operation: "wait"` for an intervention that is not open or not this turn's) no longer fails the turn. Nothing is written for it, and the call's result says in plain words why and what to do next: observe again and ask again, leave the expected generation fields out, or wait for the request `browser_auth` returned. Each refused call gets its own result. A pause resumes on one answer at a time, so when several calls of one step are refused, the turn resumes on the first refusal and the next is refused when the turn pauses again. Refused requests are not counted as opened in the intervention metric.
+
+- 3c0113c: Models a deployment lists under the same name now say what differs, so a person
+  never sees two choices they can't tell apart. When two routes of a model share a
+  name in the same picker group, a route whose residency record names its
+  processing geography gets it in brackets ("GPT-6.1 Sol" and "GPT-6.1 Sol (EU)");
+  twins in the same place get their connection's name instead ("Sonnet 4.6 (Your
+  OpenRouter)"). Models with a unique name, and organization and workspace copies
+  of one model, keep their plain name. The picker search, the trigger and the
+  Models settings view use the same names, and `list_models` shows the agent the
+  same name for such twins. The SDK's `ClientModel` type now includes the
+  `residency` record the server already sends; `@opengeni/sdk/model-picker-order`
+  exports `modelLabelDistinctions` and `@opengeni/react/model-policy` exports
+  `withDistinctLabels` for hosts that build their own picker rows. EU
+  status still comes only from residency records, never a name.
+- fb41dfd: Known secret values are masked before they are stored or shown to the model. Each agent attempt remembers the values its secret references resolve to, the credentials Opengeni injects (Codemode bearer, git and broker tokens, host run credentials, MCP header values) and, best effort, the hosted vault values the session tree used before. Tool results, tool-call arguments, model input, context compaction, model-context snapshots and stored conversation text (events, history, messages, goals, notes, run state) replace a known value, and its JSON-escaped, percent-encoded and base64 forms, with the reference that resolved it. Values shorter than 8 characters are left alone, and masking never fails a tool call or a turn. The pure matchers (`SecretValueMemory`, `compileSecretValueMasks`, `maskSecretValues`, `maskSecretValuesInText`) are exported from `@opengeni/contracts`.
+- 31e07a6: Secret-shaped strings in tool output are masked. High-precision detectors find URL passwords (any scheme), connection-string passwords, Azure account keys, shared access keys and SAS signatures, PEM private keys and well-known token formats (GitHub, OpenAI, Anthropic, Slack, Stripe, npm, GitLab, Google, 1Password, Opengeni bearers, JWTs), and replace only the secret part. Each value is captured into the root session's Task vault under a stable keyed-HMAC item name and replaced by its reference, so the agent can keep using it without seeing it; when capture is not possible a `[masked <kind>]` marker is written and the tool call still succeeds. The detectors (`detectSecretShapes`, `maskSecretShapes`, `maskSecretShapesInText`, `collectSecretShapes`) are exported from `@opengeni/contracts`.
+- 35387c2: Turning video on from a chat asks the person once. Where each change waits for a confirmation card, the video tools tell the agent to run the turn-on action instead of asking first, and the card reads "Let every chat in this workspace make videos? A 5-second 480p clip costs … in Opengeni credits." with "Paid with: Opengeni credits" underneath, instead of "Update video generation policy in this workspace?" and the raw funding code. Full-access chats still ask in the chat first, since nothing else would.
+
+  A video whose start the provider refuses now says which side refused and that nothing was charged: the service's own video account ("Video isn't working on this service right now … Trying again won't help until the service is fixed."), the workspace's own gateway or SuperGrok account (a workspace admin can fix it in Settings), or the description itself ("Rewording it may help."). Other failures of credit-paid videos add "Nothing was charged.", since their credits are always refunded.
+
+- Updated dependencies [907e806]
+- Updated dependencies [f252d90]
+- Updated dependencies [205b05a]
+- Updated dependencies [e1ebd25]
+- Updated dependencies [b1cffc3]
+- Updated dependencies [83ed5c0]
+- Updated dependencies [073127d]
+- Updated dependencies [44ba53b]
+- Updated dependencies [9a450e3]
+- Updated dependencies [202e3fd]
+- Updated dependencies [c7e16f0]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [d8a1b83]
+- Updated dependencies [4d88263]
+- Updated dependencies [aa6b340]
+- Updated dependencies [765e264]
+- Updated dependencies [f2e1953]
+- Updated dependencies [df7dd0d]
+- Updated dependencies [3ef97dc]
+- Updated dependencies [12b773f]
+- Updated dependencies [050ca2f]
+- Updated dependencies [86c3295]
+- Updated dependencies [7f627c9]
+- Updated dependencies [1271da5]
+- Updated dependencies [3742a21]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [7bb4ea9]
+- Updated dependencies [d25f0d4]
+- Updated dependencies [9abe3cc]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [089abc5]
+- Updated dependencies [09972b5]
+- Updated dependencies [8b06d0a]
+- Updated dependencies [54f07b1]
+- Updated dependencies [f249828]
+- Updated dependencies [a6004c8]
+- Updated dependencies [7b98d86]
+- Updated dependencies [cebc433]
+- Updated dependencies [ac9aeba]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [28a87b9]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [6e33a98]
+- Updated dependencies [bd7200d]
+- Updated dependencies [d9df3db]
+- Updated dependencies [0230e1a]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [755adaf]
+- Updated dependencies [a02dca4]
+- Updated dependencies [8b727bf]
+- Updated dependencies [a1a060b]
+- Updated dependencies [7c481a8]
+- Updated dependencies [b5e61c5]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [8e0b7e2]
+- Updated dependencies [a2d28b5]
+- Updated dependencies [3b411ff]
+- Updated dependencies [840d3fc]
+- Updated dependencies [d166d88]
+- Updated dependencies [047bf8c]
+- Updated dependencies [f74d748]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6833d1b]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [bdac9fc]
+- Updated dependencies [a133a9d]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [676426c]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [46f1de4]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [fd80817]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [4246602]
+- Updated dependencies [c47b489]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [e4f699c]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5c4f5b0]
+- Updated dependencies [ac2e841]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [c21b3f6]
+- Updated dependencies [05a3728]
+- Updated dependencies [067d06b]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [af0437b]
+- Updated dependencies [149a15c]
+  - @opengeni/runtime@6.0.0
+  - @opengeni/contracts@6.0.0
+  - @opengeni/db@6.0.0
+  - @opengeni/core@6.0.0
+  - @opengeni/sdk@6.0.0
+  - @opengeni/subscriptions@6.0.0
+  - @opengeni/codemode@6.0.0
+  - @opengeni/config@6.0.0
+  - @opengeni/decisions@6.0.0
+  - @opengeni/observability@6.0.0
+  - @opengeni/documents@6.0.0
+  - @opengeni/capabilities@6.0.0
+  - @opengeni/tool-gateway@6.0.0
+  - @opengeni/storage@6.0.0
+  - @opengeni/vaults@6.0.0
+  - @opengeni/vaults-bitwarden@6.0.0
+  - @opengeni/vaults-protonpass@6.0.0
+  - @opengeni/codex@6.0.0
+  - @opengeni/events@6.0.0
+  - @opengeni/github@6.0.0
+  - @opengeni/interaction@6.0.0
+  - @opengeni/vaults-keeper@6.0.0
+  - @opengeni/vaults-onepassword@6.0.0
+  - @opengeni/jev@6.0.0
+  - @opengeni/agent-proto@6.0.0
+  - @opengeni/network@6.0.0
+  - @opengeni/xai-subscription@6.0.0
+
+## 5.5.1
+
+### Minor Changes
+
+- 1908715: Dictation listens for a vocabulary, and dictation from anywhere keeps each dictation's speech to play and transcribe again.
+
+  - A dictation recording's `transcription` takes `keyterms` as well as `language`. The worker passes them to the voice input model when it takes keyterms: ElevenLabs Scribe and Azure Speech as keyterms, OpenAI and Azure OpenAI as the prompt (their text models now report `keyterms: true`, so meetings on them listen for keyterms too).
+  - `useVoiceInput` takes `keyterms` and `onAudio`, which hands over each dictation's microphone audio with its text, and returns `transcribe(blob)` to transcribe audio kept earlier as a new dictation.
+  - `@opengeni/sdk/recordings`: `uploadRecordingAudio()` uploads finished audio as a one-track recording.
+  - `@opengeni/desktop/dictation`: settings gain `vocabulary`, `retryShortcut` (transcribes the last dictation again and types it) and `cancelShortcut`; the status reports `actionShortcutErrors`. The history keeps each dictation's speech on the computer (private to the person, deleted with the history), and `historyAudio(id)` and `transcribeAgain(id)` play and re-transcribe it. While dictation is on, the app opens at login.
+  - `DesktopDictationSettings` offers the vocabulary, the retry and cancel shortcuts, and Play and Transcribe again on each recent dictation.
+
+### Patch Changes
+
+- Updated dependencies [a6b3a97]
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [b2e3119]
+- Updated dependencies [c09ae08]
+- Updated dependencies [729329e]
+- Updated dependencies [5729b13]
+- Updated dependencies [cc59c02]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [9e8fb2f]
+- Updated dependencies [83bd1e4]
+- Updated dependencies [45eec8d]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [d450fe5]
+- Updated dependencies [5eb6eb8]
+- Updated dependencies [f980186]
+- Updated dependencies [22fa944]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/runtime@5.5.0
+  - @opengeni/sdk@5.5.0
+  - @opengeni/codemode@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/db@5.5.0
+  - @opengeni/observability@5.5.0
+  - @opengeni/interaction@5.5.0
+  - @opengeni/core@5.5.0
+  - @opengeni/config@5.5.0
+  - @opengeni/agent-proto@5.5.0
+  - @opengeni/tool-gateway@5.5.0
+  - @opengeni/capabilities@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/documents@5.5.0
+  - @opengeni/events@5.5.0
+  - @opengeni/github@5.5.0
+  - @opengeni/storage@5.5.0
+  - @opengeni/vaults@5.5.0
+  - @opengeni/vaults-bitwarden@5.5.0
+  - @opengeni/vaults-keeper@5.5.0
+  - @opengeni/vaults-onepassword@5.5.0
+  - @opengeni/vaults-protonpass@5.5.0
+  - @opengeni/decisions@5.5.0
+  - @opengeni/jev@5.5.0
+  - @opengeni/network@5.5.0
+  - @opengeni/subscriptions@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes

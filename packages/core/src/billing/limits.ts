@@ -4,6 +4,23 @@ import {
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
+import {
+  API_CREDITS_REQUIRED_CODE,
+  API_CREDITS_REQUIRED_MESSAGE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+  type BillingOrigin,
+} from "@opengeni/contracts";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
+  ownModelFunding,
+  ownSubscriptionPlanAllows,
+} from "./byok-platform-fee";
 import type {
   LimitAction,
   LimitDecision,
@@ -17,11 +34,12 @@ import {
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
+  chargeBillingOrigin,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   isCodexBilledTurn,
-  readSubscriptionCoreRouteFunding,
+  readSubscriptionCoreFunding,
   recordUsageEvent,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   sumUsageQuantity,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -62,7 +80,20 @@ export type LimitCheckInput = {
   // controls the token cap. Connected subscriptions still require live workspace
   // readiness. Non-model infra actions leave this undefined.
   model?: string | null;
+  /**
+   * Who pays for the work (`BillingOrigin`). API work spends credits only,
+   * never plan or promotional credit. Omitted uses the request's origin.
+   */
+  billingOrigin?: BillingOrigin | null;
 };
+
+/** Credit refusals: payment stops (402) with an Add credits action. */
+export const CREDIT_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "insufficient_credits",
+  API_CREDITS_REQUIRED_CODE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+]);
 
 export function modelFundingForAdmission(
   settings: Settings,
@@ -74,11 +105,21 @@ export function modelFundingForAdmission(
    * keeps the legacy answer.
    */
   coreRoutedFunding?: boolean,
-): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean } {
+): {
+  fundedWithoutCredits: boolean;
+  countsTowardTokenCap: boolean;
+  byok: boolean;
+  ownSubscription: boolean;
+} {
   const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
   const codexSubscriptionModel =
     resolvedModel?.credentialSource.kind === "connected_subscription" &&
     resolvedModel.credentialSource.provider === "codex";
+  const funding = ownModelFunding(resolvedModel);
+  const fundedWithoutCredits =
+    codexBilled ||
+    (coreRoutedFunding ??
+      (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits"));
   return {
     // A Codex namespace/definition never bypasses credits by itself: the live
     // workspace credential predicate above remains authoritative. Claude's
@@ -86,29 +127,23 @@ export function modelFundingForAdmission(
     // worker/provider admission owns live account selection before any
     // upstream request can occur. On the core route (the only SuperGrok
     // route) the core's funding answer is authoritative instead.
-    fundedWithoutCredits:
-      codexBilled ||
-      (coreRoutedFunding ??
-        (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits")),
+    fundedWithoutCredits,
     countsTowardTokenCap:
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
+    // The person's own API key serves it: it pays the platform fee from paid
+    // credit. Their own subscription pays no fee but needs a paid plan. A
+    // deployment-funded free model is neither.
+    byok: fundedWithoutCredits && !codexBilled && funding === "api_key",
+    ownSubscription: fundedWithoutCredits && (codexBilled || funding === "subscription"),
   };
 }
-
-/**
- * Connected subscriptions whose legacy runtime was deleted after their
- * cutover: only the shared core funds them, so any other route is unfunded.
- */
-const CORE_ONLY_SUBSCRIPTION_PROVIDERS: ReadonlySet<string> = new Set([
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
-]);
 
 /**
  * The shared core's funding answer for a non-Codex connected subscription
  * whose provider has cut over (design 5.3, EP-N19): the provider-neutral form
  * of `isCodexBilledTurn`, with explicit workspace, causal human, accepted
- * work and model. Undefined on the provider's legacy route (one receipt
- * read) and for every other model (no read). Codex keeps `isCodexBilledTurn`.
+ * work and model. Undefined for every other model (no read). Codex keeps
+ * `isCodexBilledTurn`.
  * A provider opts in at its own chat placement step and only while it is
  * enabled on the deployment, as its catalog readiness does.
  */
@@ -132,7 +167,7 @@ export async function coreRoutedSubscriptionFunding(
   const source = resolveModelProviderForTurn(settings, input.model)?.model.credentialSource;
   if (source?.kind !== "connected_subscription") return undefined;
   if (!CORE_ROUTED_FUNDING[source.provider]?.(settings)) return undefined;
-  const answer = await readSubscriptionCoreRouteFunding(db, {
+  return await readSubscriptionCoreFunding(db, {
     provider: source.provider,
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -140,8 +175,6 @@ export async function coreRoutedSubscriptionFunding(
     productModelId: input.model,
     ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
-  if (answer.route === "core") return answer.value;
-  return CORE_ONLY_SUBSCRIPTION_PROVIDERS.has(source.provider) ? false : undefined;
 }
 
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {
@@ -150,7 +183,11 @@ export async function requireLimit(deps: LimitDependencies, input: LimitCheckInp
     return;
   }
   throw new HTTPException(
-    decision.code === "insufficient_credits" || decision.code === "allowance_exhausted" ? 402 : 429,
+    decision.code === SUBSCRIPTION_API_UNAVAILABLE_CODE
+      ? 403
+      : CREDIT_REFUSAL_CODES.has(decision.code) || decision.code === "allowance_exhausted"
+        ? 402
+        : 429,
     {
       message: decision.message,
       cause: decision,
@@ -162,6 +199,24 @@ export async function checkLimit(
   deps: LimitDependencies,
   input: LimitCheckInput,
 ): Promise<LimitDecision> {
+  // Refuse the route even when its connection is unavailable. A paid plan or
+  // credits cannot make an API request eligible for a connected subscription.
+  if (
+    isCostlyAction(input.action) &&
+    connectedSubscriptionsRefusedForOrigin(
+      deps.settings,
+      chargeBillingOrigin(input.billingOrigin),
+    ) &&
+    ownModelFunding(
+      input.model ? resolveModelProviderForTurn(deps.settings, input.model)?.model : null,
+    ) === "subscription"
+  ) {
+    return {
+      allowed: false,
+      code: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    };
+  }
   // Resolve the canonical codex-billed predicate ONCE. Returns false for any
   // action that carries no model (infra caps) or any codex/<slug> model without
   // an active credential — so the bypass never triggers on the prefix alone.
@@ -187,13 +242,15 @@ export async function checkLimit(
         ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : undefined;
-  const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(
-    deps.settings,
-    input.model,
-    codexBilled,
-    coreFunding,
+  const { fundedWithoutCredits, countsTowardTokenCap, byok, ownSubscription } =
+    modelFundingForAdmission(deps.settings, input.model, codexBilled, coreFunding);
+  const creditDecision = await checkCreditBalance(
+    deps,
+    input,
+    fundedWithoutCredits,
+    byok,
+    ownSubscription,
   );
-  const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
@@ -219,20 +276,45 @@ async function checkCreditBalance(
   deps: LimitDependencies,
   input: LimitCheckInput,
   externallyBilled: boolean,
+  byok = false,
+  ownSubscription = false,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
-    return { allowed: true }; // paid outside Opengeni — zero Opengeni credits
+    // The person's own subscription pays no fee but needs a paid plan.
+    if (ownSubscription && isCostlyAction(input.action)) {
+      return await checkOwnSubscriptionPlan(deps, input.accountId, input.billingOrigin);
+    }
+    // Paid outside Opengeni; the person's own key still pays the platform fee.
+    if (
+      byok &&
+      byokPlatformFeeActive(deps.settings, input.accountId) &&
+      isCostlyAction(input.action)
+    ) {
+      return await checkByokPaidCredit(deps, input.accountId, input.billingOrigin);
+    }
+    return { allowed: true };
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
+  const origin = chargeBillingOrigin(input.billingOrigin);
   const balance = await getSpendableCreditBalance(
     deps.db,
     input.accountId,
     input.model ? canonicalizeConfiguredModelId(deps.settings, input.model) : undefined,
+    undefined,
+    undefined,
+    origin,
   );
   if (balance.balanceMicros > 0) {
     return { allowed: true };
+  }
+  if (origin === "api") {
+    return {
+      allowed: false,
+      code: API_CREDITS_REQUIRED_CODE,
+      message: API_CREDITS_REQUIRED_MESSAGE,
+    };
   }
   return {
     allowed: false,
@@ -241,6 +323,50 @@ async function checkCreditBalance(
       ? "No credits available for this model. Choose a model covered by your promotional credits or add credits."
       : "No general credits available. Promotional credits cover eligible models only.",
   };
+}
+
+/**
+ * Bring-your-own-key admission: the platform fee is payable only from paid
+ * credit (a paid plan's credit for app use, then paid-for credits).
+ */
+export async function checkByokPaidCredit(
+  deps: Pick<LimitDependencies, "db">,
+  accountId: string,
+  billingOrigin?: BillingOrigin | null,
+): Promise<LimitDecision> {
+  const balance = await getByokFeeSpendableBalance(deps.db, accountId, billingOrigin);
+  return balance.balanceMicros > 0
+    ? { allowed: true }
+    : {
+        allowed: false,
+        code: BYOK_PAID_CREDIT_REQUIRED_CODE,
+        message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
+      };
+}
+
+/**
+ * Own-subscription admission: unlimited use on a paid plan of at least $20 a
+ * month, refused on Free with the one action that fixes it (upgrading).
+ */
+export async function checkOwnSubscriptionPlan(
+  deps: Pick<LimitDependencies, "db" | "settings">,
+  accountId: string,
+  billingOrigin?: BillingOrigin | null,
+): Promise<LimitDecision> {
+  if (connectedSubscriptionsRefusedForOrigin(deps.settings, chargeBillingOrigin(billingOrigin))) {
+    return {
+      allowed: false,
+      code: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    };
+  }
+  return (await ownSubscriptionPlanAllows(deps.db, deps.settings, accountId))
+    ? { allowed: true }
+    : {
+        allowed: false,
+        code: SUBSCRIPTION_PLAN_REQUIRED_CODE,
+        message: SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+      };
 }
 
 async function checkStaticCaps(

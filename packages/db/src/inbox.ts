@@ -20,6 +20,8 @@ export type InboxItemRow = {
   link: { url: string; label: string } | null;
   eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
+  /** An approval its tool's MCP server asks a question about (1113); null otherwise. */
+  serverQuestion: { server: string; kind: "confirm" | "form"; round: number } | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   unread: boolean;
@@ -73,6 +75,30 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
   });
 }
 
+/**
+ * The server question an approval item carries as one `{serverQuestion}`
+ * element of its choices (1113), so the list keeps its shipped signature.
+ * choicesOf keeps only `{id, label}` entries and drops it.
+ */
+function serverQuestionOf(choices: unknown): InboxItemRow["serverQuestion"] {
+  const parsed = jsonValue(choices);
+  if (!Array.isArray(parsed)) return null;
+  for (const choice of parsed as unknown[]) {
+    if (typeof choice !== "object" || choice === null) continue;
+    const question = (choice as { serverQuestion?: unknown }).serverQuestion;
+    if (typeof question !== "object" || question === null) continue;
+    const { server, kind, round } = question as {
+      server?: unknown;
+      kind?: unknown;
+      round?: unknown;
+    };
+    if (typeof server !== "string" || !server) return null;
+    if (typeof round !== "number" || !Number.isInteger(round) || round < 1) return null;
+    return { server, kind: kind === "confirm" ? "confirm" : "form", round };
+  }
+  return null;
+}
+
 function jsonValue(value: unknown): unknown {
   return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
 }
@@ -122,6 +148,7 @@ export async function listInboxItems(
     link: linkOf(row.link),
     eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
+    serverQuestion: serverQuestionOf(row.choices),
     urgency: row.urgency,
     status: row.status,
     unread: row.unread,

@@ -71,6 +71,19 @@ export class OrganizationAzureOpenAIUnavailableError extends Error {
 }
 
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
+export const INCOMPLETE_CHAT_COMPLETION_CODE = "provider_incomplete_response";
+
+/** Clean transport EOF is not proof that the provider completed its response.
+ * Throw before the SDK's synthetic response_done can commit partial output or
+ * execute tool calls. No automatic replay is authorized by this error. */
+export class IncompleteChatCompletionError extends Error {
+  readonly code = INCOMPLETE_CHAT_COMPLETION_CODE;
+
+  constructor() {
+    super("The model provider ended its response before confirming completion.");
+    this.name = "IncompleteChatCompletionError";
+  }
+}
 
 /**
  * A Chat Completions provider emitted a syntactically valid terminal chunk but

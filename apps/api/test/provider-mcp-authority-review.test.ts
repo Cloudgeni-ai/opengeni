@@ -154,7 +154,6 @@ test.each(["undelegated_personal", "unpinned_workspace"] as const)(
         effectiveTools: routes.tools,
         attemptId: crypto.randomUUID(),
         effectiveSandboxBackend: "docker",
-        variableSet: null,
       });
       const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
       let nativeCalls = 0;

@@ -17,6 +17,7 @@ import { createObjectStorage, type ObjectStorage } from "../packages/storage/src
 import {
   CURATED_CATALOG,
   canonicalMcpUrl,
+  catalogIdentityEntriesByMcpUrl,
   curatedCatalogEntriesByMcpUrl,
   curatedCatalogFingerprintInput,
   type CuratedCatalog,
@@ -48,7 +49,7 @@ const MIT_ATTRIBUTION =
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 4;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 5;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -155,9 +156,9 @@ export type NormalizedCatalogSnapshot = {
   }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
   /**
-   * Curated overlay entries whose MCP URL matched no surviving snapshot row.
-   * A dead entry means a reviewed contract silently applies to nothing, so it
-   * is reported like a skip rather than dropped.
+   * Curated overlay entries and identities whose MCP URL matched no surviving
+   * snapshot row. A dead entry means a reviewed contract silently applies to
+   * nothing, so it is reported like a skip rather than dropped.
    */
   unmatchedCurated: string[];
   /** Requirement entries whose mcpUrl matches no importable row (reported, not fatal). */
@@ -342,6 +343,8 @@ export function normalizeCatalogSnapshot(
       }
     }
     const official = curatedCatalogEntriesByMcpUrl.get(mcpUrl);
+    // Display identity only: never curation, tier, auth or tool policy.
+    const identity = catalogIdentityEntriesByMcpUrl.get(mcpUrl);
     const oauthClientRequirement = oauthClientRequirementsEntriesByMcpUrl.get(mcpUrl);
     const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
@@ -354,15 +357,17 @@ export function normalizeCatalogSnapshot(
     const logoSourceUrl =
       official?.logoSourceUrl !== undefined
         ? official.logoSourceUrl
-        : candidate.logoSourceUrl === null
-          ? null
-          : (safeCatalogUrl(candidate.logoAsset) ??
-            safeCatalogUrl(candidate.logoSourceUrl) ??
-            `https://integrations.sh/logo/${domain}`);
+        : identity?.logoSourceUrl !== undefined
+          ? identity.logoSourceUrl
+          : candidate.logoSourceUrl === null
+            ? null
+            : (safeCatalogUrl(candidate.logoAsset) ??
+              safeCatalogUrl(candidate.logoSourceUrl) ??
+              `https://integrations.sh/logo/${domain}`);
     const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
-      name: official?.name ?? stringValue(candidate.name) ?? domain,
+      name: official?.name ?? identity?.name ?? stringValue(candidate.name) ?? domain,
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
       ...(official ? { curated: true } : {}),
       ...optionalString("category", official?.category),
@@ -406,7 +411,7 @@ export function normalizeCatalogSnapshot(
       logoSourceUrl,
       ...optionalString(
         "homepageUrl",
-        official?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
+        official?.homepageUrl ?? identity?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
       ),
       ...optionalString("installUrl", official?.installUrl ?? safeCatalogUrl(candidate.installUrl)),
       ...optionalString(
@@ -468,7 +473,12 @@ export function normalizeCatalogSnapshot(
       continue;
     }
     seen.add(key);
-    const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(row.name)}`;
+    // An identity is display-only: dedupe junk clusters by the name the row
+    // would have without it, so naming one alias never splits its cluster.
+    const dedupeName = identity?.name
+      ? (official?.name ?? stringValue(candidate.name) ?? domain)
+      : row.name;
+    const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(dedupeName)}`;
     const existing = candidatesByDomainName.get(domainNameKey);
     if (!existing) {
       candidatesByDomainName.set(domainNameKey, row);
@@ -512,7 +522,10 @@ export function normalizeCatalogSnapshot(
   );
 
   const matchedCurated = new Set(rows.map((row) => row.mcpUrl));
-  const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
+  const unmatchedCurated = [
+    ...curatedCatalogEntriesByMcpUrl.keys(),
+    ...catalogIdentityEntriesByMcpUrl.keys(),
+  ]
     .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
     .sort();
   const unmatchedOAuthClientRequirements = [...oauthClientRequirementsEntriesByMcpUrl.keys()]
@@ -669,6 +682,8 @@ export function catalogRowToDbInput(
     tier: row.tier,
     provenance: row.provenance,
     logoAssetPath: input.logoAssetPath ?? null,
+    // No logo source means no logo by policy: clear an asset a past import stored.
+    ...(row.logoSourceUrl ? {} : { clearLogoAsset: true }),
     importBatchId: input.importBatchId,
     scopesHint: row.scopesHint,
     homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
@@ -1053,9 +1068,19 @@ function deriveAuthContract(surface: UnknownRecord): Record<string, unknown> | n
 }
 
 /**
+ * Reviewed endpoints whose query string is a documented, non-secret part of the
+ * MCP URL. Atlassian's `?tools=all` lists every tool flat instead of gateway
+ * discover/execute tools, so each tool keeps its own approval policy.
+ */
+const REVIEWED_QUERY_MCP_URLS: ReadonlySet<string> = new Set([
+  "https://mcp.atlassian.com/v2/mcp?tools=all",
+]);
+
+/**
  * Reject URL forms whose authority cannot be proven public during catalog
  * import. Query strings, opaque path segments, and credentials must never be
- * persisted as an MCP endpoint or retained in a rejected diagnostic.
+ * persisted as an MCP endpoint or retained in a rejected diagnostic, except an
+ * exact reviewed URL in REVIEWED_QUERY_MCP_URLS.
  */
 export function catalogMcpUrlRejection(value: string | null | undefined): string | null {
   if (!value) {
@@ -1075,7 +1100,7 @@ export function catalogMcpUrlRejection(value: string | null | undefined): string
     if (parsed.hash) {
       return "url_fragment";
     }
-    if (parsed.search) {
+    if (parsed.search && !REVIEWED_QUERY_MCP_URLS.has(parsed.href)) {
       return "credential_query_parameter";
     }
     if (parsed.pathname.split("/").some((segment) => segment.length >= 24)) {

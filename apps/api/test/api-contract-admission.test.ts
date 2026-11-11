@@ -112,9 +112,7 @@ describe("API contract admission", () => {
     for (const { headers, advertised } of [
       {
         headers: { authorization: "Bearer ogk_integration", [OPENGENI_API_CONTRACT_HEADER]: stale },
-        // A pinned SDK throws on any mismatched response revision, so a bearer
-        // that claimed a different revision receives no revision header.
-        advertised: null,
+        advertised: OPENGENI_API_CONTRACT_REVISION,
       },
       {
         headers: { authorization: "Bearer ogk_integration" },

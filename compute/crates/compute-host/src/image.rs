@@ -118,6 +118,28 @@ pub(crate) struct Meta {
     /// image unreadable when no VMM the host keeps reads its format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// How many virtual processors the VM it was saved from had, which a
+    /// restore brings back whatever the sandbox's shape is now (its memory
+    /// is [`Self::memory_len`]). Images made before it was recorded do not
+    /// say, and are taken to be at the shape of the record they belong to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u8>,
+    /// How long the VM's root disk was when it was saved, which its guest
+    /// still takes it to be when restored: a disk made longer since is
+    /// told to it again. Images made before it was recorded do not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_len: Option<u64>,
+}
+
+/// What an image was made by and from, as its [`Meta`] records it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Made<'a> {
+    /// See [`Meta::runtime`].
+    pub runtime: Option<&'a str>,
+    /// See [`Meta::vcpus`].
+    pub vcpus: Option<u8>,
+    /// See [`Meta::disk_len`].
+    pub disk_len: Option<u64>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -228,12 +250,15 @@ pub(crate) enum Parts<'a> {
         len: u64,
     },
     /// The pages that changed since `base`, merged over a copy of it; holes
-    /// in `diff` are pages equal to `base`. `state` and `diff` are moved in
-    /// or consumed.
+    /// in `diff` are pages equal to `base`. `freed` (sorted and apart) reads
+    /// as zeros, whatever `base` or `diff` hold there: memory the guest gave
+    /// back, which a diff leaves out. `state` and `diff` are moved in or
+    /// consumed.
     Diff {
         base: Generation,
         state: &'a Path,
         diff: &'a Path,
+        freed: &'a [Range<u64>],
     },
     /// Another directory's verified generation, such as a template's.
     /// Published files are never modified, so memory and state are shared
@@ -438,17 +463,13 @@ impl Images {
     /// points `current` at it. Blocking: run off the async executor.
     #[cfg(test)]
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
-        self.publish_made_by(parts, None)
+        self.publish_made_by(parts, Made::default())
     }
 
     /// Builds, checks and publishes a new generation from `parts`, made
-    /// under `runtime` (see [`Meta::runtime`]), then points `current` at
-    /// it. Blocking: run off the async executor.
-    pub fn publish_made_by(
-        &self,
-        parts: Parts<'_>,
-        runtime: Option<&str>,
-    ) -> Result<Verified, Suspect> {
+    /// as `made` says, then points `current` at it. Blocking: run off the
+    /// async executor.
+    pub fn publish_made_by(&self, parts: Parts<'_>, made: Made<'_>) -> Result<Verified, Suspect> {
         // The record vouches for what is published here, so the directory
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
@@ -487,9 +508,12 @@ impl Images {
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
             filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
-            runtime: runtime
+            runtime: made
+                .runtime
                 .filter(|runtime| !runtime.is_empty())
                 .map(str::to_owned),
+            vcpus: made.vcpus,
+            disk_len: made.disk_len,
         };
         write_synced(
             &staging.join(META),
@@ -546,7 +570,12 @@ impl Images {
                 remote: None,
                 filled: None,
             },
-            Parts::Diff { base, state, diff } => {
+            Parts::Diff {
+                base,
+                state,
+                diff,
+                freed,
+            } => {
                 let parent = self.verify(base, Depth::Light)?;
                 if parent.meta.remote {
                     return Err(Suspect::Damaged {
@@ -556,7 +585,7 @@ impl Images {
                 }
                 let mut chunks = self.chunk_map(&parent)?;
                 let memory_len = parent.meta.memory_len;
-                let touched = merge(&self.memory(base), diff, memory, memory_len)?;
+                let touched = merge(&self.memory(base), diff, memory, memory_len, freed)?;
                 let file = File::open(memory)?;
                 for (index, hash) in touched
                     .iter()
@@ -790,9 +819,16 @@ pub(crate) fn chunk_range(index: usize, len: u64) -> Range<u64> {
     start..(start + CHUNK_BYTES).min(len)
 }
 
-/// Writes `base` with `diff`'s data ranges laid over it into `target`, and
-/// returns the chunks those ranges touch.
-fn merge(base: &Path, diff: &Path, target: &Path, len: u64) -> io::Result<Vec<usize>> {
+/// Writes `base` with `diff`'s data ranges laid over it into `target`, then
+/// zeros over `freed` (sorted and apart), and returns the chunks that
+/// changed: those the diff touches, and those where zeros replaced data.
+fn merge(
+    base: &Path,
+    diff: &Path,
+    target: &Path,
+    len: u64,
+    freed: &[Range<u64>],
+) -> io::Result<Vec<usize>> {
     let diff = File::open(diff)?;
     let diff_len = diff.metadata()?.len();
     if diff_len != len {
@@ -804,19 +840,67 @@ fn merge(base: &Path, diff: &Path, target: &Path, len: u64) -> io::Result<Vec<us
     for range in &ranges {
         copy_range(&diff, &out, range.clone())?;
     }
+    // A hole reads as zeros already: only data is zeroed, and only the
+    // chunks it was in change.
+    let zeroed = within(&data_ranges(&out, len)?, freed, len);
+    for range in &zeroed {
+        punch_hole(&out, range.clone())?;
+    }
     out.sync_all()?;
     let mut touched: Vec<usize> = Vec::new();
-    for range in &ranges {
+    for range in ranges.iter().chain(&zeroed) {
         let first = usize::try_from(range.start / CHUNK_BYTES).unwrap_or(usize::MAX);
         let last = usize::try_from((range.end - 1) / CHUNK_BYTES).unwrap_or(usize::MAX);
-        for index in first..=last {
-            if touched.last() != Some(&index) {
-                touched.push(index);
-            }
-        }
+        touched.extend(first..=last);
     }
+    touched.sort_unstable();
     touched.dedup();
     Ok(touched)
+}
+
+/// The parts of `ranges` within `of`, both sorted and apart, below `len`.
+fn within(ranges: &[Range<u64>], of: &[Range<u64>], len: u64) -> Vec<Range<u64>> {
+    let mut found = Vec::new();
+    let (mut a, mut b) = (0, 0);
+    while a < ranges.len() && b < of.len() {
+        let start = ranges[a].start.max(of[b].start);
+        let end = ranges[a].end.min(of[b].end).min(len);
+        if start < end {
+            found.push(start..end);
+        }
+        if ranges[a].end <= of[b].end {
+            a += 1;
+        } else {
+            b += 1;
+        }
+    }
+    found
+}
+
+/// Makes `range` of `file` read as zeros, freeing its blocks where the
+/// filesystem can.
+#[cfg(target_os = "linux")]
+pub(crate) fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
+    use rustix::fs::{FallocateFlags, fallocate};
+    fallocate(
+        file,
+        FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
+        range.start,
+        range.end - range.start,
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
+    let zeros = vec![0_u8; usize::try_from(CHUNK_BYTES).unwrap_or(0)];
+    let mut at = range.start;
+    while at < range.end {
+        let length = usize::try_from((range.end - at).min(CHUNK_BYTES)).unwrap_or(0);
+        file.write_all_at(&zeros[..length], at)?;
+        at += length as u64;
+    }
+    Ok(())
 }
 
 /// Hashes chunks `indices` of `file` (a memory image of `len` bytes) in

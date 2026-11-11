@@ -6,6 +6,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
   evaluateOpenGeniSlackBotScopes,
+  hasOpenGeniSlackBotIdentityScope,
   hasOpenGeniSlackFileUploadScope,
   hasOpenGeniSlackBotSearchScopes,
   hasOpenGeniSlackReactionScope,
@@ -33,8 +34,11 @@ import {
   completeSlackBotUpdateOperation,
   getScheduledTask,
   getSession,
+  getSessionBotIdentity,
+  getSlackAgentForSession,
   getSlackBotPostOperation,
   availableSlackBotConnectionMetadata,
+  hasAvailableSlackBot,
   sharedOrganizationSlackBots,
   prepareBotMessage,
   readPreparedBotMessage,
@@ -55,6 +59,7 @@ import {
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import sharp from "sharp";
+import { sessionAvatarImageUrl } from "./session-avatar-image";
 
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
@@ -209,6 +214,7 @@ export type SlackMessageBlock =
       type: "section";
       block_id?: string;
       text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
+      accessory?: { type: "image"; image_url: string; alt_text: string };
     }
   | {
       type: "actions";
@@ -218,6 +224,8 @@ export type SlackMessageBlock =
         action_id: string;
         value: string;
         text: { type: "plain_text"; text: string; emoji?: boolean };
+        /** A link button: Slack opens it and still sends the action. */
+        url?: string;
         style?: "primary" | "danger";
       }>;
     }
@@ -238,12 +246,14 @@ export type SlackHomeBlock =
       type: "section";
       block_id?: string;
       text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
-      accessory?: {
-        type: "button";
-        action_id: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        url: string;
-      };
+      accessory?:
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            url: string;
+          }
+        | { type: "image"; image_url: string; alt_text: string };
     }
   | {
       type: "context";
@@ -253,13 +263,22 @@ export type SlackHomeBlock =
   | {
       type: "actions";
       block_id: string;
-      elements: Array<{
-        type: "button";
-        action_id: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        url: string;
-        style?: "primary" | "danger";
-      }>;
+      elements: Array<
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            url: string;
+            style?: "primary" | "danger";
+          }
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            value: string;
+            style?: "primary" | "danger";
+          }
+      >;
     }
   | { type: "divider" };
 
@@ -274,6 +293,8 @@ type SlackBotOperation =
   | "file.content.read"
   | "file.upload"
   | "home.publish"
+  | "view.open"
+  | "dm.open"
   | "message.post"
   | "message.update"
   | "message.delete";
@@ -507,6 +528,30 @@ export async function verifyOpenGeniSlackBotCredential(
       verifiedAt: now.toISOString(),
     },
   };
+}
+
+/**
+ * Whether this workspace has an active Opengeni Slack bot it can use: one
+ * installed here, or one an organization administrator shared with it. The
+ * first-party MCP lists the `slack_bot_*` tools only when it does, so a chat
+ * in a workspace without a bot is offered the Slack Connect card instead of
+ * tools that can only fail. The same installs the tools' own connection
+ * resolver selects, read in one statement on each tool listing; it never
+ * reads credentials. A failed read keeps the tools listed, as they were
+ * before this check existed.
+ */
+export async function slackBotToolsAvailable(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  try {
+    return await hasAvailableSlackBot(db, scope);
+  } catch (error) {
+    console.warn("[slack-bot] bot availability unavailable; listing bot tools", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
 }
 
 export async function resolveSlackBotConnectionForTool(input: {
@@ -789,12 +834,14 @@ export async function sendSlackBotPost(input: {
     );
   }
   const client = createOpenGeniSlackBotClient(input, target);
+  const identity = await client.sessionIdentity(input.grant.workspaceId, input.sessionId);
   return client.postMessage({
     operationId: message.id,
     channelId: message.channelId,
     ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
     text: message.text,
     requireActiveNonSharedChannel: true,
+    ...(identity ? { identity } : {}),
   });
 }
 
@@ -912,6 +959,7 @@ export async function sendScheduledSlackBotPost(input: {
     },
     target,
   );
+  const identity = await client.sessionIdentity(input.grant.workspaceId, input.sessionId);
   const post = () =>
     client.postMessage({
       operationId: message.id,
@@ -919,6 +967,7 @@ export async function sendScheduledSlackBotPost(input: {
       ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
       text: message.text,
       requireActiveNonSharedChannel: true,
+      ...(identity ? { identity } : {}),
     });
   if (!channelChanged && !botChanged) return await post();
   // The destination moved after this message was prepared, so it is never sent
@@ -989,6 +1038,11 @@ export async function verifyScheduledTaskSlackChannel(
     });
   }
 }
+
+/** Slack's limit on a post's custom display name. */
+const SLACK_BOT_USERNAME_MAX = 80;
+
+export type SlackBotPostIdentity = { username: string; iconUrl?: string };
 
 export class OpenGeniSlackBotClient {
   private readonly resolveCredential: ReturnType<typeof buildConnectionTokenResolver>;
@@ -1193,6 +1247,32 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * Open a modal for the person whose click or command carried `triggerId`.
+   * Slack accepts a trigger once, within three seconds, so this is never
+   * retried; the caller falls back to a plain reply.
+   */
+  async openView(input: { triggerId: string; view: Record<string, unknown> }) {
+    const triggerId = requiredSlackString(input.triggerId, "trigger_id");
+    const view = JSON.stringify(input.view);
+    if (Buffer.byteLength(view, "utf8") > 48 * 1024) {
+      throw new RangeError("Slack modal exceeds the supported byte size");
+    }
+    return await this.withAudit("view.open", async (headers) => {
+      const payload = await this.call(headers, "views.open", { trigger_id: triggerId, view });
+      return { viewId: requiredSlackString(slackRecord(payload.view)?.id, "view.id") };
+    });
+  }
+
+  /** The channel id of the bot's direct message with one person. */
+  async openDirectMessage(userId: string) {
+    const user = requiredSlackString(userId, "user_id");
+    return await this.withAudit("dm.open", async (headers) => {
+      const opened = await this.call(headers, "conversations.open", { users: user });
+      return { channelId: requiredSlackString(slackRecord(opened.channel)?.id, "channel.id") };
+    });
+  }
+
   async slackTaskPolicyFacts(channelId: string, userId: string) {
     return await this.withAudit("channel_history.read", async (headers) => {
       const conversation = await this.requireMemberChannel(headers, channelId);
@@ -1209,6 +1289,111 @@ export class OpenGeniSlackBotClient {
         throw new SlackBotProviderError("slack_task_initiator_unavailable");
       }
       return { conversation, initiator };
+    });
+  }
+
+  /**
+   * Live facts for someone asking an open Slack agent: the conversation, and
+   * who they are in Slack from `users.info` (always read, unlike the task
+   * policy). Guest and external facts are null when Slack did not say, so a
+   * caller can fail closed.
+   */
+  async slackOpenAgentAskerFacts(channelId: string, userId: string) {
+    return await this.withAudit("channel_history.read", async (headers) => {
+      const conversation = await this.requireMemberChannel(headers, channelId);
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = slackRecord(payload.user);
+      const asker = projectSlackTaskPolicyUser(payload.user, this.metadata.slackTeamId);
+      if (!asker || asker.id !== userId) {
+        throw new SlackBotProviderError("slack_task_initiator_unavailable");
+      }
+      return {
+        conversation,
+        asker: {
+          ...asker,
+          isBot: user?.is_bot === true || user?.is_app_user === true,
+          deleted: user?.deleted === true,
+          isStranger: user?.is_stranger === true,
+        },
+      };
+    });
+  }
+
+  /**
+   * One Slack person's profile facts for update messages: time zone, and
+   * whether they are deactivated, a guest, external or an app. On the app's
+   * own user, `apiAppId` names the installed Slack app.
+   */
+  async userProfileFacts(userId: string) {
+    return await this.withAudit("users.list", async (headers) => {
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = slackRecord(payload.user);
+      const policy = projectSlackTaskPolicyUser(payload.user, this.metadata.slackTeamId);
+      if (!user || !policy || policy.id !== userId) {
+        throw new SlackBotProviderError("user_not_found");
+      }
+      const tzOffset = user.tz_offset;
+      return {
+        id: policy.id,
+        tz: nullableBoundedSlackString(user.tz, 128),
+        tzOffset:
+          typeof tzOffset === "number" && Number.isInteger(tzOffset) && Math.abs(tzOffset) <= 86_400
+            ? tzOffset
+            : null,
+        deleted: user.deleted === true,
+        isBot: user.is_bot === true || user.id === "USLACKBOT",
+        // Unknown counts as excluded: update messages only go to people
+        // Slack says are full members of this team.
+        isGuest: policy.isGuest !== false,
+        isExternal: policy.isExternal !== false || user.is_stranger === true,
+        apiAppId: nullableBoundedSlackString(slackRecord(user.profile)?.api_app_id, 64),
+      };
+    });
+  }
+
+  /**
+   * Names for people a message mentions, so the request reads "@Sam" rather
+   * than "<@U0123>": the Slack display name, else the real name, else the
+   * username. Best effort: someone Slack doesn't return is left out.
+   */
+  async userDisplayNames(userIds: readonly string[]) {
+    return await this.withAudit("users.list", async (headers) => {
+      const looked = await Promise.all(
+        userIds.map(async (userId) => {
+          try {
+            const payload = await this.call(headers, "users.info", { user: userId });
+            const user = projectUser(payload.user);
+            const name = user?.displayName || user?.realName || user?.name;
+            return user?.id === userId && name ? { id: userId, name } : null;
+          } catch {
+            // Shown as written.
+            return null;
+          }
+        }),
+      );
+      return { names: looked.filter((entry) => entry !== null) };
+    });
+  }
+
+  /**
+   * How a Slack account is named when someone confirms linking it to
+   * themselves: "@Kari (Kari Nordmann, kari.n) in Acme Slack". Display and
+   * real names are chosen by their owner, so the username, unique in this
+   * Slack workspace, is included too. Null when Slack doesn't return the user.
+   */
+  async userLinkLabel(userId: string) {
+    return await this.withAudit("users.list", async (headers) => {
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = projectUser(payload.user);
+      const primary = user?.id === userId && (user.displayName || user.realName || user.name);
+      if (!user || !primary) return { label: null };
+      const others = [...new Set([user.realName, user.name])].filter(
+        (name) => name && name !== primary,
+      );
+      const label = `@${primary}${others.length > 0 ? ` (${others.join(", ")})` : ""} in ${
+        this.metadata.slackTeamName
+      } Slack`;
+      return { label: label.slice(0, 256) };
     });
   }
 
@@ -1666,6 +1851,52 @@ export class OpenGeniSlackBotClient {
   }
 
   /**
+   * How a bot chat signs its posts: its name and avatar instead of the app's.
+   * Only a chat with an avatar is a bot here, and only when this Slack app was
+   * granted `chat:write.customize`; otherwise posts stay the app's. Slack still
+   * labels every such post as an app message.
+   */
+  async sessionIdentity(
+    workspaceId: string,
+    sessionId: string | null | undefined,
+  ): Promise<SlackBotPostIdentity | undefined> {
+    if (!sessionId || !hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)) {
+      return undefined;
+    }
+    // A Slack agent's chat posts as the agent, whatever the chat is titled.
+    // Once the agent is deleted its chats post as the app.
+    const slackAgent = await getSlackAgentForSession(this.db, { workspaceId, sessionId }).catch(
+      () => null,
+    );
+    if (slackAgent?.agentChat) {
+      if (!slackAgent.agent) return undefined;
+      return this.postIdentity(slackAgent.agent.targetWorkspaceId, {
+        title: slackAgent.agent.name,
+        avatar: slackAgent.agent.avatar,
+      });
+    }
+    const bot = await getSessionBotIdentity(this.db, workspaceId, sessionId).catch(() => null);
+    if (!bot?.avatar || !bot.title) return undefined;
+    return this.postIdentity(workspaceId, { title: bot.title, avatar: bot.avatar });
+  }
+
+  /** How posts are signed with a given name and avatar. Requires the identity scope. */
+  postIdentity(
+    workspaceId: string,
+    bot: { title: string; avatar: Parameters<typeof sessionAvatarImageUrl>[2]["avatar"] },
+  ): SlackBotPostIdentity {
+    const username = [...bot.title.replace(/\s+/gu, " ")].slice(0, SLACK_BOT_USERNAME_MAX).join("");
+    const secret = this.settings.slackSigningSecret;
+    const base = this.settings.publicBaseUrl;
+    return {
+      username,
+      ...(secret && base
+        ? { iconUrl: sessionAvatarImageUrl(base, secret, { workspaceId, avatar: bot.avatar }) }
+        : {}),
+    };
+  }
+
+  /**
    * Internal server-owned delivery only. Generic model-facing MCP callers do
    * not have a trustworthy durable logical-delivery identity and must never
    * reach this method with a caller-generated operation ID.
@@ -1678,6 +1909,8 @@ export class OpenGeniSlackBotClient {
     text: string;
     blocks?: SlackMessageBlock[];
     requireActiveNonSharedChannel?: boolean;
+    /** A bot chat's own name and picture, from {@link sessionIdentity}. */
+    identity?: SlackBotPostIdentity;
   }) {
     const operation = "message.post" as const;
     const claimHolderId = crypto.randomUUID();
@@ -1788,6 +2021,12 @@ export class OpenGeniSlackBotClient {
         unfurl_links: "false",
         unfurl_media: "false",
         ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
+        ...(input.identity && hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)
+          ? {
+              username: input.identity.username,
+              ...(input.identity.iconUrl ? { icon_url: input.identity.iconUrl } : {}),
+            }
+          : {}),
       });
       const slackChannelId = requiredSlackString(posted.channel, "channel");
       const slackMessageTimestamp = requiredSlackString(posted.ts, "ts");

@@ -52,7 +52,9 @@ the inventory; never automatically repeat the create.
 ## Other symptoms
 
 - A literal `{{secret:...}}` reached a website or file: it was escaped
-  (`\{{secret:...}}`) or written where nothing executes. Write it unescaped in
-  the command, typing action or tool call itself.
+  (`\{{secret:...}}`), written where nothing executes, or passed through an
+  Opengeni tool that stores or hands on text (messages, schedules, goals, notes,
+  Knowledge), which keeps references by design. Write it unescaped in the
+  command, typing action or connector call that uses it.
 - The site rejects a correct-looking login: see "When the login fails" in
   `login-playbook.md`.

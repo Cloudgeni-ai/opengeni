@@ -94,9 +94,11 @@ pub(crate) struct Allocation {
     pub gid: u32,
     /// Its link to the host, when it is networked.
     pub link: Option<LinkAddresses>,
-    /// Its disk's length, from when its first files were written. A disk
-    /// keeps its length, in object storage too, whatever base image the
-    /// host has since; unknown only until then, before it is recorded.
+    /// Its disk's length, from when its first files were written, or for
+    /// one adopted, its stored copy's grown to the length its config asks
+    /// for, which its first fetch makes it. A disk keeps its length, in
+    /// object storage too, whatever base image the host has since; unknown
+    /// only until then, before it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
@@ -136,6 +138,19 @@ pub(crate) struct Record {
     pub image: bool,
     /// The store holds a copy matching the local files.
     pub archived: bool,
+    /// No copy of the sandbox was ever put in the store, nor taken from
+    /// it: it was created or claimed here, and nothing has begun an
+    /// archive of it since. The control service gives a sandbox to another
+    /// host only from such a copy, so this host's VM of it is the only one
+    /// that can ever run, and it is marked so for the guard, which then
+    /// never stops it to fence it while the agent that marked it runs (see
+    /// [`compute_engine::Engine::set_only_copy`]). An agent of an earlier
+    /// release drops the field when it rewrites the record, as it does
+    /// before any archive, which leaves it cleared.
+    /// Cleared, the VM's mark first, before any archive begins, and never
+    /// set again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_copy: bool,
     /// Removal has begun; it finishes even across a restart.
     pub removing: bool,
     /// Whether its guest knows it is this sandbox.
@@ -162,6 +177,12 @@ pub(crate) struct Record {
     /// or was handed on: the host drops only what it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
+    /// Its removal, a hand-off, keeps this host's copy aside instead of
+    /// deleting it: the service declared this host gone and went on
+    /// without it from an older copy, so this one may hold writes nothing
+    /// else has (see [`crate::layout::aside_dir`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub set_aside: bool,
     /// Until when the host keeps the room of its first wake booked, in
     /// milliseconds since the Unix epoch: set as it is created, claimed
     /// or adopted here, so an agent that starts before then and finds it
@@ -204,6 +225,7 @@ impl Record {
             disk: Disk::Local,
             image: false,
             archived: false,
+            only_copy: false,
             removing: false,
             identity: Identity::Known,
             last_used_ms: None,
@@ -211,6 +233,7 @@ impl Record {
             owner_epoch: OwnerEpoch::FIRST.0,
             saves: 0,
             handed_off: false,
+            set_aside: false,
             first_wake_by_ms: None,
         }
     }
@@ -290,6 +313,7 @@ pub(crate) struct Change {
     disk: Option<Disk>,
     image: Option<bool>,
     archived: Option<bool>,
+    copied: bool,
     execution: bool,
     removing: bool,
     identity: Option<Identity>,
@@ -297,6 +321,7 @@ pub(crate) struct Change {
     backed_up_ms: Option<u64>,
     next_save: bool,
     handed_off: bool,
+    set_aside: bool,
     woke: bool,
     owner: Option<OwnerEpoch>,
     /// The agent link the control service sent last, `None` inside for none;
@@ -321,6 +346,13 @@ impl Change {
 
     pub fn archived(mut self, archived: bool) -> Self {
         self.archived = Some(archived);
+        self
+    }
+
+    /// A copy of the sandbox may be put in the store from now on: it is no
+    /// longer its only copy (see [`Record::only_copy`]).
+    pub fn copied(mut self) -> Self {
+        self.copied = true;
         self
     }
 
@@ -390,6 +422,13 @@ impl Change {
         self
     }
 
+    /// [`Self::handed_off`], keeping this host's copy aside rather than
+    /// deleting it.
+    pub fn set_aside(mut self) -> Self {
+        self.set_aside = true;
+        self.handed_off()
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -399,6 +438,9 @@ impl Change {
         }
         if let Some(archived) = self.archived {
             record.archived = archived;
+        }
+        if self.copied {
+            record.only_copy = false;
         }
         if let Some(identity) = self.identity {
             record.identity = identity;
@@ -417,6 +459,7 @@ impl Change {
             record.saves += 1;
         }
         record.handed_off |= self.handed_off;
+        record.set_aside |= self.set_aside;
         if self.woke {
             record.first_wake_by_ms = None;
         }
@@ -985,6 +1028,9 @@ impl Records {
                     owner_epoch: owner.0,
                     saves: 0,
                     handed_off: false,
+                    set_aside: false,
+                    // Made from a ready sandbox, which is never saved.
+                    only_copy: true,
                     first_wake_by_ms: Some(first_wake_by_ms),
                     ..current
                 };

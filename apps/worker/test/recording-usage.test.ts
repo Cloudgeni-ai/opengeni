@@ -62,7 +62,8 @@ describe("recording usage", () => {
     );
     expect(generated.exitCode).toBe(0);
     const prepare = usage.stages().get("prepare")!;
-    expect(prepare.processes).toBe(1);
+    // The run's timestamp check, then its decoder and the encoder.
+    expect(prepare.processes).toBe(3);
     expect(prepare.cpuSeconds).toBeGreaterThan(0);
     expect(prepare.wallSeconds).toBeGreaterThan(0);
     const segment = usage.stages().get("segment")!;
@@ -105,6 +106,7 @@ describe("recording usage", () => {
         outcome: "complete",
         errorCode: null,
         audioSeconds: 600,
+        sentAudioSeconds: 480,
         wallSeconds: 20,
         queueSeconds: 1.5,
         preparedBytes: 2_000_000,
@@ -153,6 +155,9 @@ describe("recording usage", () => {
       counters.find((item) => item.name === "opengeni_recording_audio_seconds_total")?.amount,
     ).toBe(600);
     expect(
+      counters.find((item) => item.name === "opengeni_recording_sent_audio_seconds_total")?.amount,
+    ).toBe(480);
+    expect(
       counters.find((item) => item.name === "opengeni_recording_provider_cost_usd_total")?.amount,
     ).toBe(0.04);
     expect(counters.find((item) => item.name === "opengeni_recording_stored_bytes_total")).toEqual({
@@ -162,7 +167,12 @@ describe("recording usage", () => {
     });
     expect(logs[0]).toMatchObject({
       message: "recording processed",
-      attributes: { recordingId: "r1", diarizeCpuSeconds: 4, transcribeWallSeconds: 12 },
+      attributes: {
+        recordingId: "r1",
+        diarizeCpuSeconds: 4,
+        transcribeWallSeconds: 12,
+        sentAudioSeconds: 480,
+      },
     });
   });
 
@@ -178,6 +188,7 @@ describe("recording usage", () => {
         outcome: "retry",
         errorCode: "voice_unavailable",
         audioSeconds: 0,
+        sentAudioSeconds: null,
         wallSeconds: 1,
         queueSeconds: null,
         preparedBytes: 0,

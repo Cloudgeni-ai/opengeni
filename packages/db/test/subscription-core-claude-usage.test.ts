@@ -35,6 +35,12 @@ import {
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRow,
 } from "../src/subscription-core-claude-usage";
+import {
+  subscriptionCoreOperations,
+  subscriptionCoreUsageMergeOptions,
+} from "../src/subscription-core/operations";
+import { decodeSubscriptionQuota } from "../src/subscription-core-repository";
+import { quotaCapacity } from "@opengeni/subscriptions";
 
 const realFetch = globalThis.fetch;
 const denied: string[] = [];
@@ -228,6 +234,8 @@ describe("decodeQuota", () => {
     expect(quota.exhaustedUntil).toBeNull();
     const opusReset = Date.parse("2026-10-14T00:00:00.000Z");
     expect(quota.modelCooldowns).toEqual({
+      "claude/claude-opus-4-1": opusReset,
+      "claude/claude-opus-4-5": opusReset,
       "organization-claude-subscription/claude-opus-4-1": opusReset,
       "workspace-claude-subscription/claude-opus-4-1": opusReset,
       "organization-claude-subscription/claude-opus-4-5": opusReset,
@@ -304,16 +312,28 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     expect(adapter.usageReadingsComplete).toBe(false);
   });
 
-  test("availability needs both account windows reported below the limit", async () => {
+  test("availability needs each account window below the limit or explicitly absent", async () => {
     expect(
       subscriptionCoreClaudeUsageConfirmsAvailability(
         await read({ five_hour: window(3), seven_day: window(99.9) }),
       ),
     ).toBe(true);
+    // A verified Ultra plan has no five-hour limit: the endpoint answers null.
+    expect(
+      subscriptionCoreClaudeUsageConfirmsAvailability(
+        await read({ five_hour: null, seven_day: window(41), seven_day_opus: null }),
+      ),
+    ).toBe(true);
     for (const body of [
+      // An omitted window is not evidence that it has no limit.
       { five_hour: window(3) },
       { seven_day: window(41) },
-      { five_hour: window(3), seven_day: null },
+      // A reached limit stays reached beside a window without a limit.
+      { five_hour: null, seven_day: window(100) },
+      { five_hour: window(100), seven_day: null },
+      // Some window must be reported below the limit.
+      { five_hour: null, seven_day: null },
+      { five_hour: null, seven_day: { utilization: null, resets_at: null } },
       { five_hour: window(100), seven_day: window(41) },
       { five_hour: window(3), seven_day: window(100) },
       {
@@ -331,6 +351,112 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     ]) {
       expect(subscriptionCoreClaudeUsageConfirmsAvailability(response)).toBe(false);
     }
+  });
+
+  describe("through the quota merge", () => {
+    const models = ["organization-claude-subscription/claude-opus-5-5"];
+    const future = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+    /** The stored quota after a refusal claimed on `claim`, observed a minute ago. */
+    const refusedRow = (claim: "five_hour" | "seven_day") => {
+      const refusedAt = new Date(Date.now() - 60_000);
+      const reset = String(Math.floor(refusedAt.getTime() / 1000) + 7_200);
+      const prefix = claim === "five_hour" ? "5h" : "7d";
+      const observation = parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": claim,
+          "anthropic-ratelimit-unified-reset": reset,
+          [`anthropic-ratelimit-unified-${prefix}-utilization`]: "1",
+          [`anthropic-ratelimit-unified-${prefix}-status`]: "rejected",
+          [`anthropic-ratelimit-unified-${prefix}-reset`]: reset,
+        }),
+        refusedAt,
+      )!;
+      const decoded = decodeSubscriptionCoreClaudeQuota({
+        observation,
+        refreshGeneration: 1,
+        upstreamModelIds: subscriptionCoreClaudeUpstreamModelIds(models),
+      });
+      const write = subscriptionCoreOperations(
+        SUBSCRIPTION_CORE_CLAUDE,
+      ).mergeSubscriptionCoreUsageObservation(null, 1, { ...decoded, revision: 0 })!;
+      return {
+        quota: write.stored,
+        quota_revision: 1,
+        quota_observed_refresh_generation: 1,
+        quota_updated_at: refusedAt,
+      };
+    };
+    /** The stored quota's capacity now, after merging one usage-endpoint body. */
+    const afterReading = async (
+      row: ReturnType<typeof refusedRow>,
+      body: Record<string, unknown>,
+    ) => {
+      const reading = await read(body);
+      const observation = decodeSubscriptionCoreClaudeUsage({
+        response: reading,
+        observedAt: Date.now(),
+        refreshGeneration: 1,
+        modelIds: models,
+      });
+      const write = observation
+        ? subscriptionCoreOperations(
+            SUBSCRIPTION_CORE_CLAUDE,
+          ).mergeSubscriptionCoreUsageObservation(
+            row,
+            1,
+            observation,
+            subscriptionCoreUsageMergeOptions(SUBSCRIPTION_CORE_CLAUDE.adapter, reading),
+          )
+        : null;
+      const quota = decodeSubscriptionQuota(write ? { ...row, quota: write.stored } : row)!;
+      return quotaCapacity(quota, Date.now()).kind;
+    };
+
+    test("a refusal on the 5h limit stands through a reading that answers 5h with null", async () => {
+      const row = refusedRow("five_hour");
+      expect(quotaCapacity(decodeSubscriptionQuota(row)!, Date.now()).kind).toBe("exhausted");
+      for (const body of [
+        { five_hour: null, seven_day: { utilization: 40, resets_at: future(48) } },
+        { seven_day: { utilization: 40, resets_at: future(48) } },
+        { five_hour: null, seven_day: null },
+      ])
+        expect(await afterReading(row, body)).toBe("exhausted");
+    });
+
+    test("a weekly refusal ends early on an Ultra reading without a 5h limit", async () => {
+      const row = refusedRow("seven_day");
+      expect(quotaCapacity(decodeSubscriptionQuota(row)!, Date.now()).kind).toBe("exhausted");
+      // Still at the limit, or no percentage: it stands.
+      expect(
+        await afterReading(row, {
+          five_hour: null,
+          seven_day: { utilization: 100, resets_at: future(2) },
+        }),
+      ).toBe("exhausted");
+      expect(
+        await afterReading(row, { five_hour: null, seven_day: { resets_at: future(2) } }),
+      ).toBe("exhausted");
+      expect(await afterReading(row, { five_hour: null })).toBe("exhausted");
+      // Reset early, and the plan has no 5h limit: the account serves again.
+      expect(
+        await afterReading(row, {
+          five_hour: null,
+          seven_day: { utilization: 3, resets_at: future(160) },
+        }),
+      ).not.toBe("exhausted");
+    });
+  });
+
+  test("an explicitly absent window never ends a block that claims it", async () => {
+    const ultra = await read({ five_hour: null, seven_day: window(41) });
+    const ends = subscriptionCoreClaudeUsageEndsClaimedBlock(ultra);
+    // The weekly limit that refused the account has reset early: it ends.
+    expect(ends(block(ultra, ["seven_day"]))).toBe(true);
+    expect(ends({ ...block(ultra, ["seven_day"]), modelId: null })).toBe(true);
+    // A refusal that named the five-hour limit is not cleared by its null.
+    expect(ends(block(ultra, ["five_hour"]))).toBe(false);
+    expect(ends({ ...block(ultra, ["five_hour", "seven_day"]), modelId: null })).toBe(false);
   });
 
   test("a block ends only when every window it claims is reported below the limit", async () => {
@@ -405,6 +531,7 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
       windowIds,
     });
     const workspaceOpus = "workspace-claude-subscription/claude-opus-4-6";
+    const canonicalOpus = "claude/claude-opus-4-6";
 
     const fiveHour = decode(
       { "anthropic-ratelimit-unified-representative-claim": "five_hour" },
@@ -414,6 +541,7 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     expect(fiveHour.modelCooldownClaims).toEqual({
       [opus]: claim(["five_hour"]),
       [workspaceOpus]: claim(["five_hour"]),
+      [canonicalOpus]: claim(["five_hour"]),
     });
 
     // A full Opus window and the refusal's own claim both explain the cooldown.

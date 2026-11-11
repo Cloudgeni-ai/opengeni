@@ -34,6 +34,8 @@ export function needsFinalReply(input: {
   maintenance: boolean;
   toolsExecuted: boolean;
   completedGoal: boolean;
+  /** The model's final text was a copied web-search record that was hidden. */
+  suppressedEcho?: boolean;
 }): boolean {
   return (
     typeof input.output === "string" &&
@@ -41,6 +43,6 @@ export function needsFinalReply(input: {
     !input.inputWaitYielded &&
     !input.interrupted &&
     !input.maintenance &&
-    (input.toolsExecuted || input.completedGoal)
+    (input.toolsExecuted || input.completedGoal || input.suppressedEcho === true)
   );
 }

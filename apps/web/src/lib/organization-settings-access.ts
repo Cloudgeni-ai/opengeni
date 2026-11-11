@@ -7,7 +7,10 @@ import {
   type OrganizationAdminSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
-import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
+import {
+  administersOrganization,
+  canAdministerOrganization,
+} from "@opengeni/react/app/lib/workspaces";
 import type {
   AccessContext,
   ClientConfig,
@@ -25,15 +28,37 @@ export type OrganizationSettingsAccess = {
   /** An owner or admin in an administrator session. */
   administrator: boolean;
   /**
+   * Administers the organization's subscription accounts (Codex, SuperGrok,
+   * Claude): an owner or admin, or any account administrator such as the
+   * deployment's access key or a service with account:admin. The API and the
+   * database accept the same set.
+   */
+  modelsAdministrator: boolean;
+  /**
    * Shared workspaces in this organization the person administers. A workspace
    * admin who isn't an organization admin manages those workspaces' models.
    */
   administeredWorkspaceIds: readonly string[];
   canReadBilling: boolean;
   canManageBilling: boolean;
+  /** Recurring card charges require the directly signed-in organization owner. */
+  canManageAutomaticTopUp: boolean;
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
+  /**
+   * Organization API keys and service accounts: a literal `api_keys:manage`
+   * (the owner), or an organization admin who manages only member-level ones.
+   */
   canManageOrganizationApiKeys: boolean;
+  /** Keys and service accounts that manage people, keys or billing: the owner only. */
+  canManageOwnerLevelApiKeys: boolean;
+  /**
+   * Organization webhooks and the credential provider: the owner or an admin
+   * signed in as themselves (or the single local user), as the server allows.
+   */
+  canManageOrganizationIntegrations: boolean;
+  /** Only a literal `account:admin` (the owner) makes a service account an admin. */
+  canMakeServiceAccountAdmin: boolean;
   /** Pages this person can use. The rest are hidden. */
   visibleSections: ReadonlySet<OrganizationAdminSection>;
 };
@@ -49,15 +74,14 @@ export function organizationSettingsAccess(input: {
   const canManageBilling = hasAccountPermission(accessContext, accountId, "billing:manage");
   const canReadBilling =
     canManageBilling || hasAccountPermission(accessContext, accountId, "billing:read");
-  const canManageOrganizationKnowledge = hasAccountPermission(
-    accessContext,
-    accountId,
-    "account:admin",
-  );
+  // Organization Knowledge and the company profile: the owner or an admin.
+  const canManageOrganizationKnowledge = canAdministerOrganization(input);
   const accountGrant =
     accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
-  const canManageOrganizationApiKeys = hasAccountPermission(
+  const canManageCompanyProfileAgentPolicy =
+    canManageOrganizationKnowledge &&
+    (accountGrant?.role === "owner" || accountGrant?.role === "admin");
+  const canManageOwnerLevelApiKeys = hasAccountPermission(
     accessContext,
     accountId,
     "api_keys:manage",
@@ -70,9 +94,25 @@ export function organizationSettingsAccess(input: {
       : null;
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
+  const canManageAutomaticTopUp =
+    canManageBilling &&
+    managedHumanSession &&
+    actorRole === "owner" &&
+    accessContext.subjectId.startsWith("user:");
   const organizationAdministratorSession = managedHumanSession || singleUser;
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession && canAdministerOrganization(input);
+  const canManageOrganizationApiKeys =
+    canManageOwnerLevelApiKeys || canManageOrganizationIntegrations;
+  const canMakeServiceAccountAdmin =
+    organizationAdministratorSession &&
+    hasAccountPermission(accessContext, accountId, "account:admin");
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
+  // Subscription accounts keep their own rule: an owner-or-admin session or a
+  // literal account:admin grant (a key or service), not organization Knowledge's.
+  const modelsAdministrator =
+    administrator || hasAccountPermission(accessContext, accountId, "account:admin");
   const administeredWorkspaceIds = accessContext.workspaceGrants
     .filter(
       (grant) =>
@@ -87,13 +127,26 @@ export function organizationSettingsAccess(input: {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
+    visible.add("shared");
     visible.add("integrations");
   }
-  // Every model setting lives on Organization > Models: owners and admins manage
-  // all of it, workspace admins the workspaces they administer, and every
-  // signed-in member their own Personal workspace (each membership has one).
+  // Every signed-in member sees who is in the organization, by name only;
+  // owners and admins manage people on the same page.
   if (
-    administrator ||
+    managedHumanSession &&
+    !singleUser &&
+    actorRole === "member" &&
+    accessContext.subjectId.startsWith("user:")
+  ) {
+    visible.add("people");
+  }
+  // Every model setting lives on Organization > Models: owners and admins manage
+  // all of it, an account administrator without a person (a key or service)
+  // the organization's subscription accounts, workspace admins the workspaces
+  // they administer, and every signed-in member their own Personal workspace
+  // (each membership has one).
+  if (
+    modelsAdministrator ||
     (organizationAdministratorSession && administeredWorkspaceIds.length > 0) ||
     (managedHumanSession && !singleUser && actorRole !== null)
   ) {
@@ -125,12 +178,17 @@ export function organizationSettingsAccess(input: {
     managedHumanSession,
     organizationAdministratorSession,
     administrator,
+    modelsAdministrator,
     administeredWorkspaceIds,
     canReadBilling,
     canManageBilling,
+    canManageAutomaticTopUp,
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     visibleSections: visible,
   };
 }

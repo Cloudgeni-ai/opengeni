@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { AttemptToolCatalogIntegrityError, createAttemptToolEnvironment } from "@opengeni/codemode";
 import type { AttemptToolCall, McpConnectionAccountBinding } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -39,7 +40,7 @@ import {
   markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
-  appendSessionEventsForTurnAttempt,
+  getCodemodeCallExecutionSandboxId,
   createConnection,
   encryptEnvironmentValue,
 } from "../src";
@@ -188,6 +189,40 @@ function codemodeCall(
 }
 
 describe("durable attempt tool catalogs", () => {
+  test("fresh persistence verifies RETURNING without reloading the header; replay reads it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const prior = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_connection, query) => {
+      queries.push(query);
+    };
+    const headerReads = () =>
+      queries.filter(
+        (query) => /^select\b/i.test(query) && query.includes('"session_attempt_tool_catalogs"'),
+      );
+    try {
+      expect(await persistAttemptToolCatalog(client.db, first)).toEqual(first);
+      expect(headerReads()).toHaveLength(0);
+      expect(
+        queries.some(
+          (query) =>
+            /^insert\b/i.test(query) &&
+            query.includes('"session_attempt_tool_catalogs"') &&
+            query.includes("returning"),
+        ),
+      ).toBe(true);
+      queries.length = 0;
+      const replay = catalog(scope, "search", new Date("2026-08-09T13:00:00.000Z"));
+      expect(await persistAttemptToolCatalog(client.db, replay)).toEqual(first);
+      expect(headerReads()).toHaveLength(1);
+    } finally {
+      driver.options.debug = prior;
+    }
+  });
+
   test("persists one exact verified catalog idempotently and reads it under RLS", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -316,6 +351,45 @@ describe("durable attempt tool catalogs", () => {
 
     expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
     expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
+  test("records the machine a run_on exec's Codemode call came from, and only for its session", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const machine = crypto.randomUUID();
+    const remote = codemodeCall(exactCatalog.digest);
+    const local = codemodeCall(exactCatalog.digest);
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: remote,
+      executionSandboxId: machine,
+    });
+    await submitCodemodeOperation(client.db, { ...scope, call: local, executionSandboxId: null });
+    const lookup = (operationId: string, sessionId = scope.sessionId) =>
+      getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId,
+        operationId,
+      });
+    expect(await lookup(remote.operationId)).toBe(machine);
+    // Code on the session's own sandbox, and ids that name no Codemode call
+    // (a model call's operation), resolve paths on the active sandbox.
+    expect(await lookup(local.operationId)).toBeNull();
+    expect(await lookup(crypto.randomUUID())).toBeNull();
+    // Another session cannot borrow the call's machine.
+    expect(await lookup(remote.operationId, crypto.randomUUID())).toBeNull();
+    const other = await fixture();
+    expect(
+      await getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        sessionId: scope.sessionId,
+        operationId: remote.operationId,
+      }),
+    ).toBeNull();
   });
 
   test("claims once and records one durable result under the owning claim fence", async () => {
@@ -531,160 +605,6 @@ describe("durable attempt tool catalogs", () => {
 });
 
 describe("durable programmatic review", () => {
-  for (const [provider, proof] of [
-    ["gmailmcp.googleapis.com", true],
-    ["mail.example.test", true],
-    [undefined, true],
-    ["gmailmcp.googleapis.com", false],
-  ] as const) {
-    test(`legacy reviews use immutable catalog/account proof: ${provider ?? "no binding"}${proof ? "" : ", no catalog"}`, async () => {
-      if (!available) throw new Error("Real database is required");
-      const scope = await fixture(provider);
-      const turn = (await getSessionTurn(client.db, scope.workspaceId, scope.turnId))!;
-      const approvalId = crypto.randomUUID();
-      const args = {
-        messageIds: ["synthetic-a", "synthetic-b"],
-        addLabelIds: ["TRASH"],
-        removeLabelIds: ["INBOX"],
-        privateNote: "hidden-by-schema",
-      };
-      const name = "opaque_wire_identity";
-      const pending = [{ rawItem: { callId: approvalId, name, arguments: JSON.stringify(args) } }];
-      const environment = createAttemptToolEnvironment({
-        scope,
-        generation: 1,
-        definitions: [
-          {
-            identity: { serverId: "mail", toolName: "batch_modify_messages" },
-            modelName: name,
-            inputSchema: {
-              type: "object",
-              properties: { privateNote: { type: "string", writeOnly: true } },
-            },
-            source: "mcp",
-            approval: "human",
-            execute: () => ({ content: [] }),
-          },
-        ],
-      });
-      if (proof) await persistAttemptToolCatalog(client.db, environment.catalog);
-      expect(
-        await saveRunState(client.db, {
-          ...scope,
-          expectedExecutionGeneration: scope.executionGeneration,
-          expectedAttemptId: scope.attemptId,
-          serializedRunState: "{}",
-          pendingApprovals: pending,
-        }),
-      ).toBe(true);
-      const events = await appendSessionEventsForTurnAttempt(
-        client.db,
-        scope.workspaceId,
-        scope.sessionId,
-        scope.turnId,
-        scope.executionGeneration,
-        scope.attemptId,
-        [
-          {
-            type: "agent.toolCall.created",
-            payload: {
-              id: approvalId,
-              name,
-              arguments: args,
-              display: {
-                toolName: "batch_modify_messages",
-                accountLabel: "Untrusted display label Gmail",
-              },
-            },
-          },
-        ],
-      );
-      expect(events.accepted).toBe(true);
-      await applySessionTurnSettlement(client.db, scope.workspaceId, {
-        sessionId: scope.sessionId,
-        turnId: scope.turnId,
-        attemptId: scope.attemptId,
-        triggerEventId: turn.triggerEventId,
-        turnStatus: "requires_action",
-        sessionStatus: "requires_action",
-        activeTurnId: scope.turnId,
-        events: [{ type: "session.requiresAction", payload: { approvals: pending } }],
-      });
-      const input = { ...scope, approvalId };
-      const review = await getToolActionReview(client.db, input);
-      if (!proof) {
-        // Without the catalog, schema-protected values cannot be identified: show
-        // no argument value, offer no details, and let the person only decline.
-        expect(review?.availableActions).toEqual(["reject"]);
-        expect(review?.fields).toEqual([]);
-        expect(review?.detailsAvailable).toBe(false);
-        expect(JSON.stringify(review)).not.toContain("hidden-by-schema");
-        expect(JSON.stringify(review)).not.toContain("synthetic-a");
-        expect(
-          await getToolReviewDetailsPage(client.db, {
-            ...input,
-            actionDigest: review!.actionDigest,
-            path: "",
-            offset: 0,
-          }),
-        ).toBeNull();
-        expect(
-          (
-            await acceptSessionApprovalDecision(client.db, {
-              accountId: scope.accountId,
-              workspaceId: scope.workspaceId,
-              sessionId: scope.sessionId,
-              subjectId: "human:fixture",
-              payload: { approvalId, decision: "reject" },
-              clientEventId: crypto.randomUUID(),
-            })
-          ).action,
-        ).toBe("accepted");
-        return;
-      }
-      expect(review?.availableActions).toEqual(["approve", "reject"]);
-      expect(review?.title).toBe(
-        provider === "gmailmcp.googleapis.com" ? "Move 2 messages to Trash" : "Modify messages",
-      );
-      expect(review?.selectionCount).toBe(provider === "gmailmcp.googleapis.com" ? 2 : undefined);
-      expect(JSON.stringify(review)).not.toContain("hidden-by-schema");
-      if (provider) expect(review?.accountLabel).toBe("mail@example.test");
-      const detail = await getToolReviewDetailsPage(client.db, {
-        ...input,
-        actionDigest: review!.actionDigest,
-        path: "/messageIds",
-        offset: 0,
-      });
-      expect(detail?.items.map((item) => item.value)).toEqual(["synthetic-a", "synthetic-b"]);
-      expect(
-        await getToolReviewDetailsPage(client.db, {
-          ...input,
-          actionDigest: "0".repeat(64),
-          path: "",
-          offset: 0,
-        }),
-      ).toBeNull();
-      expect(
-        await getToolActionReview(client.db, { ...input, accountId: crypto.randomUUID() }),
-      ).toBeNull();
-      expect(
-        await getToolActionReview(client.db, { ...input, approvalId: crypto.randomUUID() }),
-      ).toBeNull();
-      const outcome = await acceptSessionApprovalDecision(client.db, {
-        accountId: scope.accountId,
-        workspaceId: scope.workspaceId,
-        sessionId: scope.sessionId,
-        subjectId: "human:fixture",
-        payload: { approvalId, decision: "reject" },
-        clientEventId: crypto.randomUUID(),
-      });
-      expect(outcome.action).toBe("accepted");
-      expect(await getToolActionReview(client.db, input)).toMatchObject({
-        status: "rejected",
-        availableActions: [],
-      });
-    });
-  }
   test("review facts and paginated details are bound to saved arguments and tenant", async () => {
     if (!available) throw new Error("Real database is required");
     const scope = await fixture();

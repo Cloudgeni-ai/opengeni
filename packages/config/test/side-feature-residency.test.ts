@@ -1,0 +1,593 @@
+import { describe, expect, spyOn, test } from "bun:test";
+import { testSettings } from "@opengeni/testing/settings";
+import {
+  codeSearchDeploymentPolicy,
+  decisionModelConfiguration,
+  decisionModelRoute,
+  getSettings,
+  parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
+  SIDE_FEATURE_ROUTE_IDS,
+  SIDE_FEATURE_ROUTES,
+  sideFeatureProcessingResidency,
+  sideFeatureRouteAllowed,
+  sideFeatureRouteIsEu,
+  sideFeatureRouteResidency,
+  webSearchProviderConfig,
+  webSearchToolPlan,
+  type Settings,
+} from "../src";
+
+const euSelfHosted = {
+  geography: "eu",
+  deploymentType: "self_hosted",
+  regions: ["fsn1"],
+  evidence: {
+    source: "operator_declaration",
+    reference: "SearXNG on the deployment's Hetzner host",
+    verifiedAt: "2026-10-26",
+  },
+} as const;
+
+const euDataZone = {
+  geography: "eu",
+  deploymentType: "azure_data_zone",
+  regions: ["swedencentral"],
+  evidence: {
+    source: "operator_declaration",
+    reference: "Azure OpenAI decision deployment, DataZoneStandard",
+    verifiedAt: "2026-10-26",
+  },
+} as const;
+
+const SEARXNG = "https://search.internal.example";
+const searxngTarget = { route: "web_search.searxng", endpoint: SEARXNG } as const;
+
+/** One declaration in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`: a route at one endpoint. */
+function declarations(
+  entries: Record<string, { endpoint: string; deployment?: string; residency: unknown }>,
+): string {
+  return JSON.stringify(entries);
+}
+
+function settings(overrides: Partial<Settings> = {}): Settings {
+  return testSettings(overrides);
+}
+
+describe("side-feature residency records", () => {
+  test("every route without an operator declaration is not EU", () => {
+    const base = settings();
+    for (const route of SIDE_FEATURE_ROUTE_IDS) {
+      expect(sideFeatureRouteIsEu(base, { route, endpoint: SEARXNG })).toBe(false);
+    }
+  });
+
+  test("code-owned rules carry built-in evidence and are never EU", () => {
+    const residency = sideFeatureRouteResidency(settings(), "image_generation.openai_hosted");
+    expect(residency.geography).toBe("us");
+    expect(residency.evidence.source).toBe("built_in_rule");
+    expect(sideFeatureRouteResidency(settings(), "web_search.hosted").geography).toBe("global");
+    expect(sideFeatureRouteResidency(settings(), "decision_model.jev").deploymentType).toBe(
+      "gateway",
+    );
+  });
+
+  test("an undeclared declarable route is unknown, and a declaration makes it EU", () => {
+    expect(sideFeatureRouteResidency(settings(), searxngTarget).geography).toBe("unknown");
+    const declared = settings({
+      sideFeatureResidencyJson: declarations({
+        "web_search.searxng": { endpoint: `${SEARXNG}/`, residency: euSelfHosted },
+      }),
+    });
+    // The declaration names an origin; any path at it is the same deployment.
+    expect(
+      sideFeatureRouteIsEu(declared, { ...searxngTarget, endpoint: `${SEARXNG}/search` }),
+    ).toBe(true);
+    expect(sideFeatureRouteResidency(declared, searxngTarget)).toMatchObject({
+      geography: "eu",
+      deploymentType: "self_hosted",
+      regions: ["fsn1"],
+    });
+  });
+
+  test("a declaration covers only the endpoint it names", () => {
+    const declared = settings({
+      sideFeatureResidencyJson: declarations({
+        "web_search.searxng": { endpoint: SEARXNG, residency: euSelfHosted },
+        "decision_model.openai": {
+          endpoint: "https://decide.example.com/v1",
+          residency: euDataZone,
+        },
+      }),
+    });
+    // Another host, or no endpoint at all, is unknown.
+    for (const endpoint of ["https://search.other.example", "not a url", null, undefined]) {
+      expect(sideFeatureRouteIsEu(declared, { route: "web_search.searxng", endpoint })).toBe(false);
+    }
+    // A declaration for one route does not cover another at the same endpoint.
+    expect(sideFeatureRouteIsEu(declared, { route: "web_search.jina", endpoint: SEARXNG })).toBe(
+      false,
+    );
+    // A declarable route named without its endpoint is unknown.
+    expect(
+      sideFeatureRouteIsEu(declared, { route: "decision_model.openai", endpoint: undefined }),
+    ).toBe(false);
+  });
+
+  test("vendor default hosts keep their code-owned rule and cannot be declared", () => {
+    for (const [route, endpoint, geography] of [
+      ["decision_model.openai", "https://api.openai.com/v1", "us"],
+      // DNS reads a trailing dot and any case as the same host.
+      ["decision_model.openai", "https://api.openai.com./v1", "us"],
+      ["decision_model.openai", "https://API.OpenAI.com../v1", "us"],
+      ["knowledge.embeddings", "https://api.openai.com/v1", "us"],
+      ["knowledge.embeddings", "https://api.openai.com.:443/v1", "us"],
+      ["web_search.firecrawl", "https://api.firecrawl.dev", "unknown"],
+      ["web_search.firecrawl", "https://api.firecrawl.dev.", "unknown"],
+      ["web_search.jina", "https://s.jina.ai", "unknown"],
+      ["web_search.jina", "https://r.jina.ai", "unknown"],
+    ] as const) {
+      const residency = sideFeatureRouteResidency(settings(), { route, endpoint });
+      expect(residency.geography).toBe(geography);
+      expect(residency.evidence.source).toBe("built_in_rule");
+      expect(() =>
+        parseSideFeatureResidencyJson(
+          declarations({ [route]: { endpoint, residency: euDataZone } }),
+        ),
+      ).toThrow(/vendor default host/u);
+    }
+  });
+
+  test("a route's id never grants EU: only its record does", () => {
+    // Every route id names an integration, not a region; none is EU by default.
+    for (const route of SIDE_FEATURE_ROUTE_IDS) {
+      expect(route).not.toMatch(/(^|[._-])eu([._-]|$)/u);
+    }
+    const azure = "https://live.example.azure.com";
+    const declaredUnknown = settings({
+      sideFeatureResidencyJson: declarations({
+        "realtime_voice.azure_live": {
+          endpoint: azure,
+          deployment: "gpt-live-1",
+          residency: { ...euSelfHosted, geography: "unknown" },
+        },
+      }),
+    });
+    expect(
+      sideFeatureRouteIsEu(declaredUnknown, {
+        route: "realtime_voice.azure_live",
+        endpoint: azure,
+        deployment: "gpt-live-1",
+      }),
+    ).toBe(false);
+  });
+
+  test("an Azure deployment route's declaration covers only the deployment it names", () => {
+    // One Azure resource can hold an EU Data Zone deployment and a global
+    // one, so these declarations name the deployment the call names. Nothing
+    // in the request (a body model, a `?deployment=` query) is read.
+    const azure = "https://res.openai.azure.com";
+    for (const route of [
+      "realtime_voice.azure_live",
+      "transcription.azure-openai",
+      "transcription.azure-openai-realtime",
+    ] as const) {
+      const declared = settings({
+        sideFeatureResidencyJson: declarations({
+          [route]: { endpoint: azure, deployment: "gpt-eu", residency: euDataZone },
+        }),
+      });
+      expect(sideFeatureRouteIsEu(declared, { route, endpoint: azure, deployment: "gpt-eu" })).toBe(
+        true,
+      );
+      for (const deployment of [
+        "gpt-global",
+        "GPT-EU",
+        "gpt-eu/../gpt-global",
+        "",
+        null,
+        undefined,
+      ]) {
+        expect(sideFeatureRouteIsEu(declared, { route, endpoint: azure, deployment })).toBe(false);
+      }
+      // The route appends its own path, so an endpoint with a path, query or
+      // deployment marker is unknown, even one naming the declared deployment.
+      for (const endpoint of [
+        `${azure}/openai/deployments/gpt-global`,
+        `${azure}/openai/deployments/gpt-eu`,
+        `${azure}/openai/deployments/gpt-eu/`,
+        `${azure}/openai/deployments/`,
+        `${azure}/openai`,
+        `${azure}/openai/v1`,
+        `${azure}/?deployment=gpt-eu`,
+        `${azure}/#gpt-eu`,
+      ]) {
+        expect(sideFeatureRouteIsEu(declared, { route, endpoint, deployment: "gpt-eu" })).toBe(
+          false,
+        );
+      }
+      expect(
+        sideFeatureRouteIsEu(declared, { route, endpoint: `${azure}/`, deployment: "gpt-eu" }),
+      ).toBe(true);
+      // The same at declaration time: a declared endpoint with a path stays
+      // unknown, with one warning, and never stops boot.
+      for (const endpoint of [
+        `${azure}/openai/deployments/gpt-global`,
+        `${azure}/openai/deployments/gpt-eu`,
+        `${azure}/openai`,
+      ]) {
+        const json = declarations({
+          [route]: { endpoint, deployment: "gpt-eu", residency: euDataZone },
+        });
+        expect(parseSideFeatureResidencyJson(json)[route]).toEqual({
+          endpoint: azure,
+          residency: euDataZone,
+        });
+        expect(sideFeatureResidencyDeclarationWarnings(json)).toEqual([
+          expect.stringContaining(`${route} must declare the bare Azure resource URL`),
+        ]);
+        expect(
+          sideFeatureRouteIsEu(settings({ sideFeatureResidencyJson: json }), {
+            route,
+            endpoint: azure,
+            deployment: "gpt-eu",
+          }),
+        ).toBe(false);
+      }
+      // The query form names a deployment the endpoint origin never carries.
+      expect(
+        sideFeatureRouteIsEu(declared, {
+          route,
+          endpoint: `${azure}/openai/realtime?deployment=gpt-eu`,
+          deployment: "gpt-global",
+        }),
+      ).toBe(false);
+      // A declaration without the deployment, or with an unreadable one,
+      // still parses (a config mismatch must not stop the service), but it
+      // names no deployment, so the route is unknown and a warning says why.
+      for (const deployment of [undefined, "gpt-eu/x", "..", "gpt eu"]) {
+        const json = declarations({
+          [route]: {
+            endpoint: azure,
+            ...(deployment === undefined ? {} : { deployment }),
+            residency: euDataZone,
+          },
+        });
+        expect(parseSideFeatureResidencyJson(json)[route]).toEqual({
+          endpoint: azure,
+          residency: euDataZone,
+        });
+        expect(sideFeatureResidencyDeclarationWarnings(json)).toEqual([
+          expect.stringMatching(
+            new RegExp(
+              `^${route.replace(/\./gu, "\\.")} must name the deployment.*unknown \\(not EU\\)$`,
+              "u",
+            ),
+          ),
+        ]);
+        const unknown = settings({ sideFeatureResidencyJson: json, requiredModelGeography: "eu" });
+        for (const called of ["gpt-eu", deployment]) {
+          expect(
+            sideFeatureRouteIsEu(unknown, { route, endpoint: azure, deployment: called }),
+          ).toBe(false);
+          expect(
+            sideFeatureRouteAllowed(unknown, { route, endpoint: azure, deployment: called }),
+          ).toBe(false);
+        }
+        // Without the EU requirement nothing changes.
+        expect(
+          sideFeatureRouteAllowed(settings({ sideFeatureResidencyJson: json }), {
+            route,
+            endpoint: azure,
+            deployment: "gpt-eu",
+          }),
+        ).toBe(true);
+      }
+      expect(
+        sideFeatureResidencyDeclarationWarnings(
+          declarations({
+            [route]: { endpoint: azure, deployment: "gpt-eu", residency: euDataZone },
+          }),
+        ),
+      ).toEqual([]);
+    }
+    // Other routes don't call a named deployment: one there is ignored, with a warning.
+    const searxng = declarations({
+      "web_search.searxng": { endpoint: SEARXNG, deployment: "x", residency: euSelfHosted },
+    });
+    expect(parseSideFeatureResidencyJson(searxng)["web_search.searxng"]).toEqual({
+      endpoint: SEARXNG,
+      residency: euSelfHosted,
+    });
+    expect(sideFeatureResidencyDeclarationWarnings(searxng)).toEqual([
+      'web_search.searxng does not call a named deployment; its "deployment" is ignored',
+    ]);
+    expect(
+      sideFeatureRouteIsEu(settings({ sideFeatureResidencyJson: searxng }), searxngTarget),
+    ).toBe(true);
+    expect(sideFeatureResidencyDeclarationWarnings(undefined)).toEqual([]);
+    expect(sideFeatureResidencyDeclarationWarnings("[")).toEqual([]);
+  });
+
+  test("declarations are rejected for unknown or code-owned routes and bad endpoints", () => {
+    const valid = { endpoint: SEARXNG, residency: euSelfHosted };
+    expect(() => parseSideFeatureResidencyJson(declarations({ "web_search.eu": valid }))).toThrow(
+      /unknown side-feature route/u,
+    );
+    expect(() =>
+      parseSideFeatureResidencyJson(declarations({ "web_search.hosted": valid })),
+    ).toThrow(/code-owned rule/u);
+    expect(() => parseSideFeatureResidencyJson("[")).toThrow(/JSON object/u);
+    expect(() =>
+      parseSideFeatureResidencyJson(
+        declarations({
+          "web_search.searxng": { endpoint: SEARXNG, residency: { geography: "eu" } },
+        }),
+      ),
+    ).toThrow(/invalid/u);
+    // The old shape, a bare residency with no endpoint, is refused.
+    expect(() =>
+      parseSideFeatureResidencyJson(JSON.stringify({ "web_search.searxng": euSelfHosted })),
+    ).toThrow(/endpoint/u);
+    expect(() =>
+      parseSideFeatureResidencyJson(
+        declarations({
+          "web_search.searxng": { endpoint: "ftp://search", residency: euSelfHosted },
+        }),
+      ),
+    ).toThrow(/http\(s\) URL/u);
+    expect(
+      Object.entries(SIDE_FEATURE_ROUTES)
+        .filter(([, spec]) => spec.declarable)
+        .map(([route]) => route),
+    ).toEqual([
+      "web_search.firecrawl",
+      "web_search.jina",
+      "web_search.searxng",
+      "realtime_voice.azure_live",
+      "transcription.azure-openai",
+      "transcription.azure-speech",
+      "transcription.azure-openai-realtime",
+      "knowledge.embeddings",
+      "decision_model.openai",
+    ]);
+  });
+
+  test("an invalid environment declaration fails boot", () => {
+    const boot = (declaration: unknown) =>
+      getSettings({
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: JSON.stringify(declaration),
+      });
+    const valid = { endpoint: SEARXNG, residency: euSelfHosted };
+    expect(() => boot({ nope: valid })).toThrow();
+    expect(() => boot({ "web_search.hosted": valid })).toThrow();
+    expect(() => boot({ "web_search.searxng": euSelfHosted })).toThrow();
+    expect(() =>
+      boot({
+        "decision_model.openai": { endpoint: "https://api.openai.com/v1", residency: euDataZone },
+      }),
+    ).toThrow();
+    expect(sideFeatureRouteIsEu(boot({ "web_search.searxng": valid }), searxngTarget)).toBe(true);
+  });
+
+  test("an Azure deployment declaration without its deployment boots, warns once and stays unknown", () => {
+    const azure = "https://voice.example.azure.com";
+    const env = {
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: declarations({
+        "realtime_voice.azure_live": { endpoint: azure, residency: euDataZone },
+      }),
+    };
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const booted = getSettings(env);
+      getSettings(env);
+      const warnings = warn.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"));
+      expect(warnings).toEqual([
+        expect.stringContaining("realtime_voice.azure_live must name the deployment"),
+      ]);
+      expect(
+        sideFeatureRouteIsEu(booted, {
+          route: "realtime_voice.azure_live",
+          endpoint: azure,
+          deployment: booted.azureLiveDeployment,
+        }),
+      ).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("routes may run anywhere without the EU requirement and only on EU records under it", () => {
+    expect(sideFeatureRouteAllowed(settings(), "web_search.hosted")).toBe(true);
+    const eu = settings({ requiredModelGeography: "eu" });
+    expect(sideFeatureRouteAllowed(eu, "web_search.hosted")).toBe(false);
+    expect(sideFeatureRouteAllowed(eu, searxngTarget)).toBe(false);
+    expect(
+      sideFeatureRouteAllowed(
+        {
+          ...eu,
+          sideFeatureResidencyJson: declarations({
+            "web_search.searxng": { endpoint: SEARXNG, residency: euSelfHosted },
+          }),
+        },
+        searxngTarget,
+      ),
+    ).toBe(true);
+  });
+
+  test("the recorded processing residency is the claim, never the evidence", () => {
+    const declared = settings({
+      sideFeatureResidencyJson: declarations({
+        "web_search.searxng": { endpoint: SEARXNG, residency: euSelfHosted },
+      }),
+    });
+    expect(sideFeatureProcessingResidency(declared, searxngTarget)).toEqual({
+      geography: "eu",
+      deploymentType: "self_hosted",
+      regions: ["fsn1"],
+    });
+    expect(sideFeatureProcessingResidency(declared, "web_search.exa")).toEqual({
+      geography: "unknown",
+      deploymentType: "provider_default",
+      regions: [],
+    });
+  });
+});
+
+describe("web search under EU-only inference", () => {
+  const searchProviders = {
+    webSearchEnabled: true,
+    webSearchProvider: "exa,searxng",
+    webSearchProviderCredentials: {
+      exa: { apiKey: "exa-key" },
+      searxng: { baseUrl: SEARXNG },
+    },
+  } satisfies Partial<Settings>;
+
+  test("hosted search and non-EU providers are removed; no fallback leaves the EU", () => {
+    const base = settings(searchProviders);
+    const unrestricted = webSearchProviderConfig(base);
+    // Precondition: both providers configured, in order.
+    expect(unrestricted?.search.map((endpoint) => endpoint.provider)).toEqual(["exa", "searxng"]);
+
+    const euUndeclared = { ...base, requiredModelGeography: "eu" as const };
+    expect(webSearchProviderConfig(euUndeclared)).toBeNull();
+    expect(
+      webSearchToolPlan(euUndeclared, { hostedWebSearch: true, transportHostedSearch: false }),
+    ).toEqual({ hostedWebSearch: false, providerTools: [] });
+
+    const euDeclared = {
+      ...euUndeclared,
+      sideFeatureResidencyJson: declarations({
+        "web_search.searxng": { endpoint: SEARXNG, residency: euSelfHosted },
+      }),
+    };
+    expect(
+      webSearchProviderConfig(euDeclared)?.search.map((endpoint) => endpoint.provider),
+    ).toEqual(["searxng"]);
+    const plan = webSearchToolPlan(euDeclared, {
+      hostedWebSearch: true,
+      transportHostedSearch: true,
+    });
+    expect(plan.hostedWebSearch).toBe(false);
+    expect(plan.providerTools).toContain("web_search");
+  });
+
+  test("Firecrawl and Jina at their vendor hosts are not EU, even when a declaration exists", () => {
+    const selfHosted = "https://crawl.internal.example";
+    const declared = declarations({
+      "web_search.firecrawl": { endpoint: selfHosted, residency: euSelfHosted },
+      "web_search.jina": { endpoint: selfHosted, residency: euSelfHosted },
+    });
+    const vendor = settings({
+      webSearchEnabled: true,
+      webSearchProvider: "firecrawl,jina",
+      webSearchProviderCredentials: {
+        firecrawl: { apiKey: "fc-key" },
+        jina: { apiKey: "jina-key" },
+      },
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declared,
+    });
+    expect(webSearchProviderConfig(vendor)).toBeNull();
+    const own = settings({
+      webSearchEnabled: true,
+      webSearchProvider: "firecrawl",
+      webSearchProviderCredentials: { firecrawl: { apiKey: "fc-key", baseUrl: selfHosted } },
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declared,
+    });
+    expect(webSearchProviderConfig(own)?.search.map((endpoint) => endpoint.provider)).toEqual([
+      "firecrawl",
+    ]);
+  });
+
+  test("without the EU requirement nothing changes", () => {
+    const base = settings(searchProviders);
+    expect(
+      webSearchToolPlan(base, { hostedWebSearch: true, transportHostedSearch: false })
+        .hostedWebSearch,
+    ).toBe(true);
+  });
+});
+
+describe("decision models under EU-only inference", () => {
+  const jev = {
+    decisionModelProvider: "jev",
+    decisionModelId: "jev-decide",
+    decisionModelApiKey: "jev-key",
+  } as const;
+  const openai = {
+    decisionModelProvider: "openai",
+    decisionModelApiKey: "key",
+    decisionModelId: "gpt-decide",
+    decisionModelBaseUrl: "https://decide.example.com/v1",
+  } as const;
+
+  test("a gateway decision model is switched off, so code search is unavailable", () => {
+    const base = settings({ ...jev, codeSearchMode: "default_on" });
+    expect(decisionModelConfiguration(base)?.provider).toBe("jev");
+    expect(codeSearchDeploymentPolicy(base).available).toBe(true);
+    const eu = { ...base, requiredModelGeography: "eu" as const };
+    expect(decisionModelConfiguration(eu)).toBeUndefined();
+    expect(codeSearchDeploymentPolicy(eu)).toEqual({ available: false, workspaceDefault: "off" });
+    // The route is still known, for recording where calls ran.
+    expect(decisionModelRoute(eu)).toBe("decision_model.jev");
+  });
+
+  test("an OpenAI-compatible decision model declared EU stays on", () => {
+    const eu = settings({
+      ...openai,
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declarations({
+        "decision_model.openai": { endpoint: openai.decisionModelBaseUrl, residency: euDataZone },
+      }),
+    });
+    expect(decisionModelConfiguration(eu)?.provider).toBe("openai");
+    const undeclared = settings({ ...openai, requiredModelGeography: "eu" });
+    expect(decisionModelConfiguration(undeclared)).toBeUndefined();
+  });
+
+  test("an OpenAI decision model without a base URL calls api.openai.com and is switched off", () => {
+    const { decisionModelBaseUrl: _unused, ...defaultHost } = openai;
+    const declaredElsewhere = declarations({
+      "decision_model.openai": { endpoint: openai.decisionModelBaseUrl, residency: euDataZone },
+    });
+    const eu = settings({
+      ...defaultHost,
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declaredElsewhere,
+    });
+    expect(decisionModelRoute(eu)).toEqual({
+      route: "decision_model.openai",
+      endpoint: "https://api.openai.com/v1",
+    });
+    expect(decisionModelConfiguration(eu)).toBeUndefined();
+    // A base URL other than the declared one is unknown too.
+    expect(
+      decisionModelConfiguration(
+        settings({
+          ...openai,
+          decisionModelBaseUrl: "https://other.example.com/v1",
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: declaredElsewhere,
+        }),
+      ),
+    ).toBeUndefined();
+    // Nor does a trailing dot reach the vendor host past its rule.
+    expect(
+      decisionModelConfiguration(
+        settings({
+          ...openai,
+          decisionModelBaseUrl: "https://api.openai.com./v1",
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: declaredElsewhere,
+        }),
+      ),
+    ).toBeUndefined();
+  });
+});

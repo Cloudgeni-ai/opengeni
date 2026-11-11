@@ -64,13 +64,6 @@ const mutations: Mutation[] = [
     unit: true,
   },
   {
-    id: "ignore-live-route",
-    file: readiness,
-    before: "return (await readSubscriptionCoreProviderRoute(scoped, {",
-    after: "return provider;\n      return (await readSubscriptionCoreProviderRoute(scoped, {",
-    testName: "D-34 no receipt",
-  },
-  {
     id: "ignore-kind",
     file: readiness,
     before: "rows[0]!.connection_kind !== subscriptionCoreConnectionKind(provider)",

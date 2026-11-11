@@ -33,8 +33,8 @@ describe("client error report projection", () => {
     );
     expect(clientRoutePattern("/workspaces/$workspaceId/")).toBe("/workspaces/$workspaceId");
     expect(clientRoutePattern("/")).toBe("/");
-    expect(clientRoutePattern("/workspaces/$workspaceId/variable-sets")).toBe(
-      "/workspaces/$workspaceId/variable-sets",
+    expect(clientRoutePattern("/workspaces/$workspaceId/secrets")).toBe(
+      "/workspaces/$workspaceId/secrets",
     );
     for (const concrete of [
       "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7/sessions",

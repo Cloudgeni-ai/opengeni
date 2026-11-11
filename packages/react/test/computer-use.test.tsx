@@ -161,3 +161,64 @@ test("the sidebar shows only while turning on, waiting on a permission or with a
   expect(permissions).not.toContain("text-danger");
   expect(problem).toContain("text-danger");
 });
+
+test("turning on that has waited too long says why, with the agent's words and one fix", () => {
+  const waiting = {
+    state: "connected" as const,
+    management: "service" as const,
+    reconnecting: true,
+    waitingOn: "sign_in" as const,
+    waitingDetail:
+      "Authentication rejected; transport retries paused while credentials are renewed.",
+  };
+  // Within the limit it is still turning on.
+  expect(row(desktop(waiting))).toContain("Turning on…");
+
+  const stalled = row(desktop(waiting, { stalled: true }));
+  expect(stalled).not.toContain("Turning on…");
+  expect(stalled).not.toContain("animate-spin");
+  expect(stalled).toContain(
+    "The server isn't accepting Kari's Mac's sign-in, so it can't connect.",
+  );
+  expect(stalled).toContain(waiting.waitingDetail);
+  expect(stalled).toContain("Try again<svg");
+  expect(stalled).toContain("text-danger");
+  expect(checked(stalled)).toBe(true);
+  // The switch and one fix: no other buttons.
+  expect(stalled.match(/<button/gu)).toHaveLength(2);
+
+  const reasons: [Partial<ThisComputerStatus>, string][] = [
+    [{ waitingOn: "server" }, "The agent is running, but the server can't see Kari's Mac yet."],
+    [{ waitingOn: "agent" }, "The agent on this computer isn't starting."],
+    [{ waitingOn: "another_agent" }, "Another copy of the agent on this computer is in the way."],
+    [{ waitingOn: "handover" }, "Moving the agent into the app is taking too long."],
+    // An older app that doesn't say what it waits for.
+    [{}, "Kari's Mac is taking too long to connect."],
+  ];
+  for (const [patch, line] of reasons) {
+    const html = row(
+      desktop({ state: "connected", reconnecting: true, ...patch }, { stalled: true }),
+    );
+    expect(html).toContain(line);
+    expect(html).toContain("Try again<svg");
+  }
+
+  const sidebar = notice(desktop(waiting, { stalled: true }));
+  expect(sidebar).toContain("Computer use can't connect");
+  expect(sidebar).toContain("Try again<svg");
+  expect(sidebar).not.toContain("animate-spin");
+});
+
+test("a sign-in the server stopped accepting is a problem at once, fixed by turning on again", () => {
+  const html = row(
+    desktop({
+      state: "connected",
+      errorCode: "reconnect_required",
+      error:
+        "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.",
+    }),
+  );
+  expect(html).toContain("The server no longer accepts this computer's sign-in.");
+  expect(html).toContain("Try again<svg");
+  expect(html).not.toContain("Turning on…");
+});

@@ -167,6 +167,8 @@ export type CodemodeBrowserScreenshotMetadata = Readonly<{
   scrollY: number;
   capturedAt: string;
   fullPage: boolean;
+  /** Present only when a full-page capture is not exact, saying why. */
+  note?: string;
 }>;
 
 export type CodemodeBrowserScreenshot = CodemodeLocalImage &
@@ -254,6 +256,7 @@ export type CodemodeBrowserAgentObservation = Readonly<{
   diagnostics?: BrowserObservation["diagnostics"];
   dialog?: NonNullable<BrowserObservation["dialog"]>;
   screenshot?: NonNullable<BrowserObservation["screenshot"]>;
+  notice?: string;
   agentView: CodemodeBrowserAgentView;
 }>;
 

@@ -32,11 +32,15 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
-    // Send saved the draft before each refused create: exhausting the retries
-    // must not leave "Draft not saved" up or autosave paused.
+    // Send is never checked against the draft, so there is no retry loop. Only
+    // an older server can still refuse it; that one attempt must not leave
+    // "Draft not saved" up or autosave paused.
     expect(route).toMatch(
-      /await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: DRAFT_CHANGED_DURING_SEND_TEXT,/,
+      /if \(draftConflict\) \{\s*await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: draftConflictDuringSendText\(draftChangedElsewhere\),/,
     );
+    // Other tabs are named only when the refusal showed the draft moved on.
+    expect(route).toContain("newSessionDraftConflictRevision(error) !== flushed.revision");
+    expect(route).not.toContain("for (let attempt");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
@@ -78,14 +82,14 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
-  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+  test("an existing chat's Chat settings opens the dock's Settings tab at Agent learning", async () => {
     const route = await source("../../../packages/react/src/app/routes/session.tsx");
     // The composer hands the click to the route, which opens the dock...
     expect(route).toContain("onOpen: props.onOpenAgentSettings,");
-    // (Only where the dock exists: an embed without it has no Agent tab to open.)
+    // (Only where the dock exists: an embed without it has no Settings tab to open.)
     expect(route).toContain("onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}");
     expect(route).toContain("openAgentSettingsRequest={");
-    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    // ...on its Settings tab (always present for a loaded chat), focused on Agent learning.
     expect(route).toContain('tab: "agent",');
     expect(route).toContain("openTabRequest={currentTabRequest}");
     expect(route).toContain("learningFocusRequest={agentLearningFocus}");
@@ -109,9 +113,17 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
+    // The status row and the composer region share one gutter (narrower when
+    // the chat sits in a panel beside a Site).
     expect(route).toContain(
-      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+      'const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";',
     );
+    expect(route).toContain(
+      'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
+    );
+    expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
+    // An archived chat is read-only, so a failed last turn offers no Retry.
+    expect(route).toMatch(/const failureRecovery =\s*!props\.hasNewer &&\s*!readOnlyArchive &&/);
     // The wait status is a chip in SessionChrome, not a separate banner row.
     expect(route).not.toContain("<LazySessionWaitStatus");
   });
@@ -231,10 +243,10 @@ describe("session control surface architecture", () => {
     expect(header).toBeGreaterThan(voice);
     expect(setup).toBeGreaterThan(header);
 
-    const setupImplementation = route.slice(
-      route.indexOf("function SessionSetupStrip"),
-      route.indexOf("function SessionModelControl"),
+    const setupImplementation = await source(
+      "../../../packages/react/src/app/components/session/new-session-setup-strip.tsx",
     );
+    expect(setupImplementation).toContain("export function SessionSetupStrip");
     expect(route).toContain("<ComposerMobilePlus");
     expect(route).toContain("<RepositoryContextMenuBody");
     expect(setupImplementation).not.toContain("<SessionToolPicker");
@@ -371,13 +383,16 @@ describe("session control surface architecture", () => {
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
     expect(quickActions).toContain('label={session.pinned ? "Unpin session" : "Pin session"}');
-    // Someone who cannot pause the chat only hides it for themselves (#5711).
-    expect(quickActions).toMatch(
-      /archiveLabel === "Hide for me"\s*\? "Hide for me"\s*: session\.archived\s*\? "Restore session"\s*: "Archive session"/,
+    // There is one archive, for people who can control the chat: no personal
+    // hide and no Restore (an archived chat is not in the list at all).
+    expect(quickActions).toContain(
+      'label={session.parentSessionId !== null ? archiveLabel : "Archive session"}',
     );
+    expect(quickActions).not.toContain("Hide for me");
+    expect(quickActions).not.toContain("Restore session");
     // A spawned row archives its workstream instead of offering nothing.
     expect(quickActions).not.toContain("parentSessionId === null");
-    expect(quickActions).toContain("onArchive(target, !target.archived");
+    expect(quickActions).toContain("onArchive(target, true");
     // Session and Site rows share one placement and one tooltip button.
     expect(quickActions).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
     expect(siteRow).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
@@ -590,5 +605,26 @@ describe("session control surface architecture", () => {
 
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
+  });
+
+  // A Codex remote-compaction chat whose ChatGPT plan was disconnected used to
+  // show "Connect a model" with nothing to pick: the picker and the
+  // unavailable-model replacement were limited to Codex models.
+  test("a Codex chat's picker and model replacement offer every model", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const picker = route.slice(
+      route.indexOf("<ModelPicker"),
+      route.indexOf("/>", route.indexOf("<ModelPicker")),
+    );
+    expect(picker).toContain("rows={modelCatalog.rows}");
+    expect(picker).not.toContain("codexOnly");
+    const replacement = route.slice(
+      route.indexOf("unavailableModelReplacement({"),
+      route.indexOf("})", route.indexOf("unavailableModelReplacement({")),
+    );
+    expect(replacement).toContain("rows: modelCatalog.rows");
+    expect(replacement).not.toContain("codexOnly");
+    const mobile = await source("../../mobile/app/session/[id].tsx");
+    expect(mobile).not.toContain("codexOnly");
   });
 });

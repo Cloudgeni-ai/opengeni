@@ -6,12 +6,12 @@
 import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   CalendarClockIcon,
   CopyIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  RefreshCwIcon,
   Trash2Icon,
   ZapIcon,
 } from "lucide-react";
@@ -26,7 +26,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { creatorInitials } from "@opengeni/react/app/lib/creator-initials";
+import { creatorInitials, creatorType } from "@opengeni/react/app/lib/creator-initials";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
 import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
@@ -37,7 +37,6 @@ import type { ScheduledTask, ScheduledTaskRun } from "@opengeni/react/app/types"
 import {
   hasEventTriggers,
   isFinishedOnce,
-  isKnowledgeSync,
   nextRunOf,
   ownerName,
   ownsSchedule,
@@ -77,15 +76,12 @@ export function useScheduleAccess(workspaceId: string): ScheduleAccess {
 /** What this viewer can do with one schedule. */
 export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess) {
   const own = ownsSchedule(task, access.viewerSubjectId);
-  const knowledge = isKnowledgeSync(task);
-  const retired = scheduledTaskStateLabel(task).reason === "provider_retired";
   return {
     own,
-    canEdit: own && access.canManage && !retired,
-    canRun: own && access.canRun && !retired,
+    canEdit: own && access.canManage,
+    canRun: own && access.canRun,
     canPauseOrDelete: own && access.canManage,
-    /** Knowledge syncs belong to their source; they aren't copied. */
-    canDuplicate: access.canManage && !knowledge && !retired,
+    canDuplicate: access.canManage,
   };
 }
 
@@ -188,30 +184,14 @@ export function ScheduleTile({ task }: { task: ScheduledTask }) {
   return (
     <LogoTile
       name={task.name}
-      icon={
-        isKnowledgeSync(task) ? (
-          <RefreshCwIcon />
-        ) : hasEventTriggers(task) ? (
-          <ZapIcon />
-        ) : (
-          <CalendarClockIcon />
-        )
-      }
+      icon={hasEventTriggers(task) ? <ZapIcon /> : <CalendarClockIcon />}
     />
   );
 }
 
-/**
- * Whether the list row shows the on/off switch: the viewer can pause it, and
- * turning it on would make it run. A retired sync, or one stopped by its
- * source or connection (paused or not), keeps Pause in the menu instead, so
- * the switch never reads On while nothing runs and never vanishes under focus.
- */
+/** Whether the list row shows the on/off switch: the viewer can pause it. */
 export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
-  return (
-    schedulePermissions(task, access).canPauseOrDelete &&
-    scheduledTaskStateLabel({ ...task, status: "active" }).reason === "active"
-  );
+  return schedulePermissions(task, access).canPauseOrDelete;
 }
 
 /**
@@ -301,11 +281,16 @@ export function OwnerValue({
     <span className="inline-flex max-w-full min-w-0 items-center gap-1.5 align-middle">
       <Avatar className={size === "md" ? "size-6" : "size-5"}>
         <AvatarFallback className="bg-surface-3 text-2xs font-semibold text-fg-muted">
-          {creatorInitials({
-            kind: "subject",
-            subjectId: task.ownerSubjectId ?? "",
-            label: name,
-          }) ?? "?"}
+          {creatorType({ kind: "subject", subjectId: task.ownerSubjectId ?? "" }) === "api_key" ? (
+            // An API key is not a person: no initials, the same bot icon as the sidebar.
+            <BotIcon aria-hidden="true" data-owner-api-key className="size-3" />
+          ) : (
+            (creatorInitials({
+              kind: "subject",
+              subjectId: task.ownerSubjectId ?? "",
+              label: name,
+            }) ?? "?")
+          )}
         </AvatarFallback>
       </Avatar>
       <span className="min-w-0 truncate">{name}</span>
@@ -346,7 +331,6 @@ export function ScheduleMenuItems({
   const paused = !scheduleSwitchedOn(task);
   const state = scheduledTaskStateLabel(task);
   const active = state.active;
-  const retired = state.reason === "provider_retired";
   return (
     <>
       {perms.own ? null : (
@@ -358,13 +342,13 @@ export function ScheduleMenuItems({
           <DropdownMenuSeparator />
         </>
       )}
-      {perms.canRun && !retired ? (
+      {perms.canRun ? (
         <DropdownMenuItem disabled={busy || !active} onSelect={onRunNow}>
           <PlayIcon />
           Run now
         </DropdownMenuItem>
       ) : null}
-      {pauseItem && perms.canPauseOrDelete && !retired ? (
+      {pauseItem && perms.canPauseOrDelete ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}

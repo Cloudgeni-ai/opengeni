@@ -58,7 +58,7 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/design/automations-and-events.md` (event sources and event-triggered scheduled tasks).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Subscription policy and lifecycle: `packages/subscriptions/` and
@@ -114,7 +114,7 @@ Then open the smallest source files that answer the question:
   new Slack sessions. The worker renders those modes and the Knowledge destination
   in governance; source text and feedback cannot widen policy or access. Older
   Slack sessions can retain their stored explicit-save restriction.
-- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured Opengeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
+- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, allowlist sync with GitHub (webhooks and listings) in `apps/api/src/github-installation-sync.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `packages/react/src/app/types.tsx` (the shared session app layer under `packages/react/src/app/`), relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
@@ -160,7 +160,7 @@ Keep these boundaries explicit:
   kind is `"shared"`; Personal workspaces (`"personal"`) are excluded from
   `ensureWorkspace` and must not be selected through a default-workspace
   fallback.
-- Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
+- The old unscoped operational routes were removed before the 2026-11-03 compatibility policy and stay removed; do not reintroduce them. New changes follow Public API compatibility below.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
 - Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
   and its canonical identity/database guards. Discover the current contract in
@@ -184,7 +184,7 @@ Keep these concepts straight while working:
 
 - **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
-- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
+- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. An owner-proved binding's allowlist then follows GitHub's repository selection for the installation (webhooks plus every listing; removals immediate, additions only from GitHub's live list); see `docs/github-app.md`. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
@@ -251,6 +251,71 @@ Before editing, identify which layer owns the behavior:
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
+
+### Model-facing text (prompts and tool descriptions)
+
+Every model request carries the prompt modules in
+`packages/runtime/src/agent-instructions/` and every attached tool's
+description and schema, so each sentence there is paid on every call of every
+session. Embedded product agents pay for it too, and their customers compare
+the cost with leaner platforms. Before you add or change this text:
+
+- Gate it on the fact that makes it relevant: a capability, an attached tool,
+  a sandbox, a feature flag or a session kind. It must disappear when that fact
+  is absent. Never write always-on text about a feature that can be off, and
+  name a tool only where it is attached.
+- Say each rule once, where it belongs: tool mechanics go in that tool's
+  description, and a cross-cutting rule goes in the section that owns it. Do
+  not restate a rule elsewhere for emphasis.
+- Fix a behaviour problem by changing the sentence that causes it before you
+  add a new one, and check whether your change makes existing text redundant.
+  Add an example or an edge case only when it changes behaviour.
+- Keep the cached prefix stable. Per-turn data, times and caller context go in
+  the user message, never in instructions or tool definitions (see
+  `AGENTS.md`).
+- Measure the change. Record the byte or token delta in
+  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
+  tests green, and do not raise a budget without a reason stated in the PR.
+- Shortening existing behavioural text needs before/after behaviour evidence,
+  for example from `scripts/agent-behavior-eval`, because most of it guards a
+  known failure. Omitting text for a feature that is switched off does not.
+
+### Public API compatibility
+
+Canonical policy: `docs/design/api-compatibility-policy.md`. Existing customer
+integrations must keep working across every production update. Before changing
+an API route, a `@opengeni/contracts` schema, the SDK, React exports or
+documented behaviour, decide how the change stays compatible:
+
+- The public surface is every SDK-reachable `/v1` route and its request and
+  response shapes (including every route a **published** SDK calls), session
+  event types and payload fields, `@opengeni/sdk`/`@opengeni/react` exports,
+  public ingress routes, and the defaults, error codes and semantics the docs
+  describe. Web-only routes, worker protocols and the database are internal.
+- Never remove, rename, retype or narrow any of it. A major release, changeset
+  or deprecation period does not permit a break; neither does marking an
+  existing public method `@internal` or retiring a feature.
+- Make it additive: a new optional field whose absence keeps the old behaviour
+  and defaults, a new response field, event type, error code or route.
+- For a redesign, add a new API version beside the old one: thin
+  version-specific adapters (routing, validation, response mapping) over
+  shared `packages/core` logic. Mark the old surface `@deprecated` with its
+  replacement; it keeps working.
+- Run `bun run public-api:refresh` for additive changes and
+  `bun run check:public-api` before pushing. A breaking finding means
+  redesign, not allowlisting. Do not add a `breaking-changes.json` entry, a
+  `Compatibility exception:` changeset line or an `--accept-gaps` reason
+  without a recorded security exception or owner approval for that exact
+  change.
+- The checks cannot see behaviour, defaults or payload semantics; state them in
+  the PR template's "External API impact" section and keep them unchanged
+  unless the caller opts in.
+- Do not declare a major release of any package in a changeset. All published
+  packages share one lockstep version, so any major (including
+  `@opengeni/contracts` or `@opengeni/runtime`) ships `@opengeni/sdk` and
+  `@opengeni/react` majors; CI rejects it without a linked exception.
+- After a stable SDK publication, record it with
+  `bun run public-api:published-refresh` so the check covers that version.
 
 For pull-request delivery, preserve immutable candidates across a moving base:
 
@@ -439,11 +504,10 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 ## Scheduling Discovery
 
 For chat Archive, inspect `archiveHumanSessionWorkstream` and the archive request
-contract before treating it as personal visibility alone. The stock console uses
-native recursive Pause atomically with personal archive, with server-confirmed
-active-work warnings; explicit Hide for me and the embedded session proxy remain
-personal-only. Restore does not resume, and schedule definitions retain their own
-authority. See `docs/run-lifecycle.md` for the control/admission boundary.
+contract. There is one archive: it is for everyone, needs control of the chat,
+stops the chat's work, offers Undo for a few seconds and then moves the chat to
+long-term storage for good (read-only, never restored). See
+`docs/session-storage-lifecycle.md` and `docs/run-lifecycle.md`.
 
 Scheduled bot posting uses ordinary selected capabilities and instructions, not a
 separate schedule-only approval field. Slack installation availability, incoming
@@ -505,6 +569,8 @@ Update this skill in the same change whenever the repo changes any of these:
 - Product integration boundary: organization API-key administration,
   `ensureWorkspace`, organization-workspace wire kind, Personal-workspace
   exclusion, and external inline Skill ownership.
+- Public API compatibility rules or their checks (keep the summary above in
+  line with `docs/design/api-compatibility-policy.md`).
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
 - Compute targeting: the Connected Machine (`selfhosted`) primary-compute model, the machines/enrollment routes, per-session `workingDir`, and the `targetSandboxId` create field.
 - Source layout: if important files move or names change.

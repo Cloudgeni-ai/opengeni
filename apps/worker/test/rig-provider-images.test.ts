@@ -14,15 +14,22 @@ import {
 import { rigSetupScriptCommand } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS,
   resolveRigProviderImageSelection,
+  rigProviderImageBuildSupported,
+  rigProviderImageContentSourceImage,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
 } from "@opengeni/core";
 import {
+  RIG_VERIFICATION_OWNER_TTL_MS,
+  buildVerifiedRigProviderImage,
+  recordComputeEnvironmentVerificationFailure,
   rigPlatformChecksForSettings,
   rigProviderImageContentMarkerCommand,
   settingsForRigVerification,
   verifyRigProviderImageColdBoot,
+  type BuildVerifiedRigProviderImageDependencies,
   type RigProviderImageColdBootDependencies,
 } from "../src/activities/rig-verification";
 
@@ -52,7 +59,6 @@ function version(overrides: Partial<RigVersion> = {}): RigVersion {
     setupScript: "printf setup-ran > /tmp/rig-setup-proof",
     checks: [{ name: "shell", command: "bash --version" }],
     credentialHooks: [],
-    defaultVariableSetIds: [],
     changelog: null,
     providerImages: {},
     createdBy: "user:test",
@@ -136,7 +142,6 @@ describe("build-once rig provider image runtime", () => {
     ): Promise<T> => {
       expect(input.settings.modalImageId).toBe("im-built-rig-image");
       expect(input.settings.modalWorkspacePersistence).toBe("snapshot_directory");
-      expect(input.sandboxGroupId).toBe("33333333-3333-4333-8333-333333333333");
       return await run(
         {
           backendId: "modal",
@@ -167,7 +172,6 @@ describe("build-once rig provider image runtime", () => {
         observability: {} as never,
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
-        buildRequestId: "33333333-3333-4333-8333-333333333333",
         rigVersionId: VERSION_ID,
         sessionIdPrefix: "rig-provider-image-test",
         imageId: "im-built-rig-image",
@@ -419,5 +423,553 @@ describe("build-once rig provider image runtime", () => {
 
     const rigOverride = settingsForRigVerification(deployment, "rig:pinned");
     expect(rigOverride).toBe(deployment);
+  });
+});
+
+describe("compute environment templates", () => {
+  const COMPUTE_BINDING_KEY = "compute:https://compute.test:team-a";
+
+  function computeSettings(overrides: Partial<Settings> = {}): Settings {
+    return testSettings({
+      sandboxBackend: "compute",
+      computeImage: "opengeni",
+      deploymentRevision: "release-1",
+      ...overrides,
+    });
+  }
+
+  function readyTemplate(settings: Settings, definition: RigVersion): RigProviderImage {
+    const sourceImage = rigProviderImageContentSourceImage(settings, "compute");
+    const contentHash = rigProviderImageContentHash({
+      backend: "compute",
+      sourceImage,
+      definition,
+    });
+    return {
+      backend: "compute",
+      provider: "compute",
+      status: "ready",
+      contentHash,
+      setupHash: rigProviderImageSetupHash(definition),
+      sourceImage,
+      buildRequestId: rigProviderImageBuildRequestId({
+        targetId: definition.id,
+        backend: "compute",
+        contentHash,
+      }),
+      imageId: "tpl-env",
+      imageDigest: "captured-env",
+      artifactId: null,
+      providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(COMPUTE_BINDING_KEY),
+      coldBootValidation: { version: 1, checkedAt: "2026-08-10T00:00:00.500Z" },
+      provenance: { kind: "rig_verification", targetKind: "version", targetId: definition.id },
+      startedAt: "2026-08-10T00:00:00.000Z",
+      finishedAt: "2026-08-10T00:00:01.000Z",
+      error: null,
+    };
+  }
+
+  test("a verified template boots fresh compute sandboxes with the environment already set up", async () => {
+    const settings = computeSettings();
+    const base = version();
+    const template = readyTemplate(settings, base);
+    const selection = await resolveRigProviderImageForRun(
+      settings,
+      { ...base, providerImages: { compute: template } },
+      "compute",
+      async (_settings, backend) => {
+        expect(backend).toBe("compute");
+        return { key: COMPUTE_BINDING_KEY };
+      },
+    );
+    expect(selection.reason).toBe("selected");
+    expect(selection.imageId).toBe("tpl-env");
+    expect(selection.settings.computeTemplate).toBe("tpl-env");
+    expect(selection.settings.modalImageId).toBeUndefined();
+    // The logical image stays the deployment's: only fresh creates change.
+    expect(selection.settings.computeImage).toBe("opengeni");
+  });
+
+  test("a template captured for an earlier release is stale once the image name moves on", () => {
+    const base = version();
+    const template = readyTemplate(computeSettings(), base);
+    const nextRelease = computeSettings({ deploymentRevision: "release-2" });
+    const selection = resolveRigProviderImageSelection(
+      nextRelease,
+      { ...base, providerImages: { compute: template } },
+      "compute",
+      template.providerBindingKeyHash,
+    );
+    expect(selection.reason).toBe("content_mismatch");
+    expect(selection.settings.computeTemplate).toBeUndefined();
+    expect(selection.contentHash).not.toBe(template.contentHash);
+
+    // A compute image name, even one that looks digest-pinned, names an image
+    // the hosts build with their own guest programs, so the release is
+    // always part of the identity.
+    const pinned = `registry.test/sandbox@sha256:${"d".repeat(64)}`;
+    expect(
+      rigProviderImageContentSourceImage(computeSettings({ computeImage: pinned }), "compute"),
+    ).toBe(`${pinned} release release-1`);
+    expect(
+      rigProviderImageContentSourceImage(
+        computeSettings({ computeImage: pinned, deploymentRevision: "release-2" }),
+        "compute",
+      ),
+    ).toBe(`${pinned} release release-2`);
+  });
+
+  test("compute without an identifiable image keeps the setup path", () => {
+    for (const settings of [
+      computeSettings({ computeImage: undefined }),
+      computeSettings({ deploymentRevision: "dev" }),
+    ]) {
+      expect(rigProviderImageBuildSupported(settings, "compute")).toBe(false);
+      const selection = resolveRigProviderImageSelection(settings, version(), "compute", null);
+      expect(selection).toEqual({
+        settings,
+        reason: "provider_unsupported",
+        contentHash: null,
+        imageId: null,
+      });
+    }
+    expect(rigProviderImageBuildSupported(computeSettings(), "compute")).toBe(true);
+  });
+
+  test("a version with setup that was never built for the backend is unbuilt", () => {
+    const settings = computeSettings();
+    const never = resolveRigProviderImageSelection(settings, version(), "compute", null);
+    expect(never.reason).toBe("unbuilt");
+    expect(never.contentHash).toBe(
+      rigProviderImageContentHash({
+        backend: "compute",
+        sourceImage: rigProviderImageContentSourceImage(settings, "compute"),
+        definition: version(),
+      }),
+    );
+    expect(never.settings).toBe(settings);
+
+    const recordedUnsupported = resolveRigProviderImageSelection(
+      settings,
+      version({
+        providerImages: {
+          compute: { ...readyTemplate(settings, version()), status: "unsupported", imageId: null },
+        },
+      }),
+      "compute",
+      null,
+    );
+    expect(recordedUnsupported.reason).toBe("unbuilt");
+
+    // Nothing to skip: no build is worth asking for.
+    const noSetup = resolveRigProviderImageSelection(
+      settings,
+      version({ setupScript: "  " }),
+      "compute",
+      null,
+    );
+    expect(noSetup.reason).toBe("missing");
+    expect(noSetup.contentHash).toBeNull();
+  });
+
+  test("a failed or stopped build of other content, or an abandoned build, asks for a rebuild", () => {
+    const settings = computeSettings();
+    const base = version();
+    const current = readyTemplate(settings, base);
+    const earlier = readyTemplate(computeSettings({ deploymentRevision: "release-0" }), base);
+    const now = Date.parse("2026-08-10T01:00:00.000Z");
+    const select = (image: RigProviderImage) =>
+      resolveRigProviderImageSelection(
+        settings,
+        { ...base, providerImages: { compute: image } },
+        "compute",
+        null,
+        now,
+      );
+    for (const status of ["failed", "building"] as const) {
+      const other = select({
+        ...earlier,
+        status,
+        imageId: null,
+        startedAt: new Date(now).toISOString(),
+      });
+      expect(other.reason).toBe("content_mismatch");
+      expect(other.contentHash).toBe(current.contentHash);
+    }
+    const stale = select({
+      ...current,
+      status: "building",
+      imageId: null,
+      startedAt: new Date(now - RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toISOString(),
+    });
+    expect(stale.reason).toBe("build_abandoned");
+    expect(stale.contentHash).toBe(current.contentHash);
+    const running = select({
+      ...current,
+      status: "building",
+      imageId: null,
+      startedAt: new Date(now - RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS + 1).toISOString(),
+    });
+    expect(running.reason).toBe("not_ready");
+    // A failed build of this exact content waits for the content to change.
+    expect(select({ ...current, status: "failed", imageId: null }).reason).toBe("not_ready");
+    // Without setup a template saves nothing: never selected or rebuilt.
+    const noSetup = { ...base, setupScript: "" };
+    for (const image of [current, { ...earlier }, { ...current, status: "failed" as const }]) {
+      const selection = resolveRigProviderImageSelection(
+        settings,
+        { ...noSetup, providerImages: { compute: image } },
+        "compute",
+        image.providerBindingKeyHash,
+        now,
+      );
+      expect(selection.reason).toBe("missing");
+      expect(selection.settings.computeTemplate).toBeUndefined();
+    }
+    // The window matches the build claim's, so a rebuild can take the claim over.
+    expect(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toBe(RIG_VERIFICATION_OWNER_TTL_MS);
+  });
+
+  test("Modal selection is unchanged: a version with no record is missing", () => {
+    const settings = platformSettings();
+    expect(resolveRigProviderImageSelection(settings, version(), "modal", null).reason).toBe(
+      "missing",
+    );
+  });
+
+  describe("a build's template ownership", () => {
+    const settings = computeSettings();
+    const definition = version();
+    const STARTED = "2026-08-10T00:00:00.000Z";
+
+    function harness(options: {
+      created?: boolean;
+      buildFails?: boolean;
+      coldBootFails?: boolean;
+      finalizeSucceeds?: boolean;
+      replaced?: RigProviderImage | null;
+      current?: (claimed: RigProviderImage) => RigProviderImage | null;
+      currentThrows?: boolean;
+      abortDuringColdBoot?: boolean;
+      definition?: RigVersion;
+    }) {
+      const deleted: string[] = [];
+      let builds = 0;
+      const finalized: RigProviderImage[] = [];
+      const stop = new AbortController();
+      let claimed: RigProviderImage | null = null;
+      const dependencies: BuildVerifiedRigProviderImageDependencies = {
+        buildImage: async () => {
+          builds += 1;
+          if (options.buildFails) throw new Error("capture failed");
+          return {
+            provider: "compute",
+            backend: "compute",
+            imageId: "tpl-new",
+            imageDigest: "blake3-new",
+            providerBindingKey: COMPUTE_BINDING_KEY,
+            providerBinding: { provider: "compute" },
+            ...(options.created === undefined ? {} : { created: options.created }),
+          };
+        },
+        verifyColdBoot: async () => {
+          if (options.abortDuringColdBoot) stop.abort(new Error("cancelled"));
+          if (options.coldBootFails) throw new Error("cold boot failed");
+          return "2026-08-10T00:00:02.000Z";
+        },
+        claim: async (_db, input) => {
+          claimed = { ...input.image, startedAt: STARTED };
+          return { status: "claimed", image: claimed, replaced: options.replaced ?? null };
+        },
+        finalize: async (_db, input) => {
+          finalized.push(input.image);
+          return options.finalizeSucceeds ?? true;
+        },
+        currentImage: async () => {
+          if (options.currentThrows) throw new Error("database unavailable");
+          return options.current ? options.current(claimed!) : claimed;
+        },
+        deleteComputeTemplate: async (_settings, template) => {
+          deleted.push(template);
+        },
+      };
+      const run = () =>
+        buildVerifiedRigProviderImage(
+          {
+            settings,
+            db: {} as never,
+            observability: { warn: () => undefined } as never,
+            accountId: "33333333-3333-4333-8333-333333333333",
+            workspaceId: "44444444-4444-4444-8444-444444444444",
+            existingVersionId: VERSION_ID,
+            definition: options.definition ?? definition,
+            target: { kind: "version", id: VERSION_ID },
+            established: {
+              backendId: "compute",
+              client: {},
+              instanceId: "sbx-build",
+              session: { state: { sandboxId: "sbx-build" } },
+              sessionState: {},
+            } as never,
+            ownership: {
+              leaseId: "lease-build",
+              leaseEpoch: 1,
+              workspaceGeneration: 0,
+              instanceId: "sbx-build",
+            },
+            lifecycle: { signal: stop.signal, cleanupDeadlineAtMs: null, dispose: () => undefined },
+            signal: stop.signal,
+          },
+          dependencies,
+        );
+      return { run, deleted, finalized, builds: () => builds };
+    }
+
+    test("an environment without setup is not captured, and a template it replaced is deleted", async () => {
+      const replaced = { ...readyTemplate(settings, definition), imageId: "tpl-old" };
+      const noSetup = harness({ replaced, definition: version({ setupScript: " " }) });
+      const result = await noSetup.run();
+      expect(result.status).toBe("unsupported");
+      expect(result.error?.code).toBe("provider_image_build_unsupported");
+      expect(noSetup.builds()).toBe(0);
+      expect(noSetup.deleted).toEqual(["tpl-old"]);
+    });
+
+    test("publishing deletes the template it replaced and keeps its own", async () => {
+      const replaced = { ...readyTemplate(settings, definition), imageId: "tpl-old" };
+      const { run, deleted } = harness({ replaced });
+      const published = await run();
+      expect(published.status).toBe("ready");
+      expect(published.imageId).toBe("tpl-new");
+      expect(deleted).toEqual(["tpl-old"]);
+    });
+
+    test("a failed build deletes the template it made while its claim still holds", async () => {
+      const { run, deleted, finalized } = harness({ coldBootFails: true });
+      const result = await run();
+      expect(result.status).toBe("failed");
+      expect(finalized.at(-1)?.status).toBe("failed");
+      expect(deleted).toEqual(["tpl-new"]);
+    });
+
+    test("a failed build keeps a template a takeover now owns or the record references", async () => {
+      const takenOver = harness({
+        coldBootFails: true,
+        current: (claimed) => ({ ...claimed, startedAt: "2026-08-10T00:30:00.000Z" }),
+      });
+      await takenOver.run();
+      expect(takenOver.deleted).toEqual([]);
+
+      const published = harness({
+        coldBootFails: true,
+        current: (claimed) => ({ ...claimed, status: "ready", imageId: "tpl-new" }),
+      });
+      await published.run();
+      expect(published.deleted).toEqual([]);
+
+      // When the record cannot be read the template stays for the next build.
+      const unreadable = harness({ coldBootFails: true, currentThrows: true });
+      await unreadable.run();
+      expect(unreadable.deleted).toEqual([]);
+    });
+
+    test("a template found under the build's name is never deleted by this build", async () => {
+      const { run, deleted } = harness({ created: false, coldBootFails: true });
+      expect((await run()).status).toBe("failed");
+      expect(deleted).toEqual([]);
+    });
+
+    test("a fenced publication keeps the template for a same-request takeover", async () => {
+      const sameRequest = harness({
+        finalizeSucceeds: false,
+        current: (claimed) => ({ ...claimed, startedAt: "2026-08-10T00:30:00.000Z" }),
+      });
+      const fenced = await sameRequest.run();
+      expect(fenced.error?.code).toBe("provider_image_publication_fenced");
+      expect(sameRequest.deleted).toEqual([]);
+
+      const otherBuild = harness({
+        finalizeSucceeds: false,
+        current: (claimed) => ({ ...claimed, buildRequestId: crypto.randomUUID() }),
+      });
+      await otherBuild.run();
+      expect(otherBuild.deleted).toEqual(["tpl-new"]);
+    });
+
+    test("a cancelled build deletes the template it made and rethrows", async () => {
+      const { run, deleted, finalized } = harness({ abortDuringColdBoot: true });
+      await expect(run()).rejects.toThrow("cancelled");
+      expect(deleted).toEqual(["tpl-new"]);
+      expect(finalized).toEqual([]);
+    });
+  });
+
+  test("a verification that fails before any build records a failed build of this content", async () => {
+    const settings = computeSettings();
+    const definition = version();
+    const replaced = {
+      ...readyTemplate(computeSettings({ deploymentRevision: "release-0" }), definition),
+      imageId: "tpl-old",
+    };
+    const finalized: RigProviderImage[] = [];
+    const deleted: string[] = [];
+    const recorded = await recordComputeEnvironmentVerificationFailure(
+      {
+        settings,
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        version: definition,
+        message: "setup exited with status 1",
+      },
+      {
+        claim: async (_db, input) => ({ status: "claimed", image: input.image, replaced }),
+        finalize: async (_db, input) => {
+          finalized.push(input.image);
+          return true;
+        },
+        deleteComputeTemplate: async (_settings, template) => {
+          deleted.push(template);
+        },
+      },
+    );
+    expect(recorded).toBe(true);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      status: "failed",
+      contentHash: readyTemplate(settings, definition).contentHash,
+      error: { code: "provider_image_verification_failed", message: "setup exited with status 1" },
+    });
+    expect(deleted).toEqual(["tpl-old"]);
+    // The record then holds the turn back from asking again for this content.
+    expect(
+      resolveRigProviderImageSelection(
+        settings,
+        { ...definition, providerImages: { compute: finalized[0]! } },
+        "compute",
+        null,
+      ).reason,
+    ).toBe("not_ready");
+
+    // Another backend, or a claim another build holds, records nothing.
+    expect(
+      await recordComputeEnvironmentVerificationFailure({
+        settings: platformSettings(),
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        version: definition,
+        message: "x",
+      }),
+    ).toBe(false);
+    const busy = await recordComputeEnvironmentVerificationFailure(
+      {
+        settings,
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        version: definition,
+        message: "x",
+      },
+      {
+        claim: async (_db, input) => ({ status: "in_progress", image: input.image }),
+        finalize: async () => {
+          throw new Error("not asked");
+        },
+        deleteComputeTemplate: async () => {
+          throw new Error("not asked");
+        },
+      },
+    );
+    expect(busy).toBe(false);
+
+    const deleteFails = await recordComputeEnvironmentVerificationFailure(
+      {
+        settings,
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        version: definition,
+        message: "x",
+      },
+      {
+        claim: async (_db, input) => ({ status: "claimed", image: input.image, replaced }),
+        finalize: async () => true,
+        deleteComputeTemplate: async () => {
+          throw new Error("control service unavailable");
+        },
+      },
+    );
+    expect(deleteFails).toBe(true);
+
+    expect(
+      await recordComputeEnvironmentVerificationFailure(
+        {
+          settings,
+          db: {} as never,
+          observability: { warn: () => undefined } as never,
+          workspaceId: "44444444-4444-4444-8444-444444444444",
+          version: version({ setupScript: "" }),
+          message: "x",
+        },
+        {
+          claim: async () => {
+            throw new Error("not asked");
+          },
+          finalize: async () => {
+            throw new Error("not asked");
+          },
+          deleteComputeTemplate: async () => {
+            throw new Error("not asked");
+          },
+        },
+      ),
+    ).toBe(false);
+  });
+
+  test("a template's cold-boot proof boots the template, with no Modal settings", async () => {
+    let seen: Settings | null = null;
+    const runOwnedSandbox: RigProviderImageColdBootDependencies["runOwnedSandbox"] = async <T>(
+      input,
+      run,
+    ): Promise<T> => {
+      seen = input.settings;
+      return await run(
+        { backendId: "compute", client: {}, instanceId: "sbx-cold", session: {}, sessionState: {} },
+        {
+          signal: new AbortController().signal,
+          commandRunner: async () => ({ exitCode: 0, output: "ok" }),
+          ownership: {
+            leaseId: "lease-cold-boot",
+            leaseEpoch: 1,
+            workspaceGeneration: 0,
+            instanceId: "sbx-cold",
+          },
+        },
+      );
+    };
+    await verifyRigProviderImageColdBoot(
+      {
+        settings: computeSettings(),
+        db: {} as never,
+        observability: {} as never,
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        rigVersionId: VERSION_ID,
+        sessionIdPrefix: "rig-provider-image-test",
+        imageId: "tpl-env",
+        contentHash: `sha256:${"a".repeat(64)}`,
+        checks: [],
+        lifecycle: {
+          signal: new AbortController().signal,
+          cleanupDeadlineAtMs: null,
+          dispose: () => undefined,
+        },
+      },
+      { runOwnedSandbox, now: () => new Date("2026-08-10T00:00:00.500Z") },
+    );
+    expect(seen!.computeTemplate).toBe("tpl-env");
+    expect(seen!.modalImageId).toBeUndefined();
+    expect(seen!.modalWorkspacePersistence).toBe(computeSettings().modalWorkspacePersistence);
   });
 });

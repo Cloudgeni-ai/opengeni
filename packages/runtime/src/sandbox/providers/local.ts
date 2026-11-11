@@ -84,6 +84,7 @@ export const localProvider: ProviderRegistration = {
   instanceIdFields: ["workspaceRootPath"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.local,
+  sessionSupportsPty: true,
   // UnixLocalSandboxClient runs in-process — no credentials, no options.
   validateCredentials() {},
   build() {

@@ -115,6 +115,23 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
+/** The owner turns their own subscription on for their turns in a workspace (D-53). */
+async function turnOn(connectionId: string, workspaceId: string): Promise<void> {
+  await fixture.admin`insert into organization_user_resource_grants (
+      account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+    )
+    select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+      ${workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+    from subscription_connections connection where connection.id = ${connectionId}::uuid`;
+}
+
+async function turnOff(workspaceId: string): Promise<void> {
+  await fixture.admin`update organization_user_resource_grants
+    set status = 'revoked', revoked_at = clock_timestamp()
+    where workspace_id = ${workspaceId}::uuid and action = 'subscription_connection.use'
+      and status = 'active'`;
+}
+
 describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role", () => {
   test("sharing a running private continuation preserves learning through failover and Retry", async () => {
     const org = await fixture.organization();
@@ -267,12 +284,10 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         from pg_roles role cross join pg_class relation where role.rolname = current_user and relation.oid = 'session_turns'::regclass`,
         );
         expect(role).toEqual({ rolsuper: false, rolbypassrls: false, owner: false });
-        expect(
-          await readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
-        ).toBe(target);
-        expect(
-          await readSubscriptionCoreFailoverProvider(tx, org.accountId, "unregistered"),
-        ).toBeNull();
+        expect(await readSubscriptionCoreFailoverProvider(tx, target.adapter.provider)).toBe(
+          target,
+        );
+        expect(await readSubscriptionCoreFailoverProvider(tx, "unregistered")).toBeNull();
         await expect(
           tx.transaction((inner) =>
             inner.execute(sql`select * from opengeni_private.subscription_core_providers`),
@@ -402,58 +417,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     }
   });
 
-  test("D-34 no receipt, uncommitted receipt and maintenance never lease target; commit enables it", async () => {
-    const org = await fixture.organization();
-    const source = await fixture.connection(org, home);
-    const destination = await fixture.connection(org, target);
-    await fixture.exhausted(org.accountId, source);
-    const work = await fixture.turn(org);
-    // Reproduce the historical pre-receipt switch/connection state only in
-    // this disposable clone; runtime roles cannot delete append-only receipts.
-    await fixture.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`delete from opengeni_private.subscription_provider_cutover_receipts where provider = ${target.adapter.provider}`;
-    });
-    const noTargetLease = async () => {
-      expect(await place(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
-      const [row] = await fixture.admin<
-        { count: number }[]
-      >`select count(*)::int as count from subscription_leases where connection_id = ${destination}::uuid`;
-      expect(row!.count).toBe(0);
-    };
-    await noTargetLease();
-    let inserted!: () => void;
-    let commit!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      inserted = resolve;
-    });
-    const proceed = new Promise<void>((resolve) => {
-      commit = resolve;
-    });
-    const writer = fixture.admin.begin(async (tx) => {
-      await tx`insert into opengeni_private.subscription_provider_cutover_receipts(provider, migration, committed_at, seed_rotation)
-        values (${target.adapter.provider}, '9999_failover_fixture.sql', '-infinity', '{"mode":"spread"}')`;
-      inserted();
-      await proceed;
-    });
-    await ready;
-    try {
-      await noTargetLease();
-    } finally {
-      commit();
-      await writer;
-    }
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await noTargetLease();
-    await fixture.admin`delete from subscription_provider_cutovers where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await noTargetLease();
-    await fixture.admin`insert into subscription_provider_cutovers(account_id, provider, enabled) values (${org.accountId}::uuid, ${target.adapter.provider}, true)`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({
-      kind: "run",
-      connectionId: destination,
-    });
-  });
-
   test("D-35 effective empty order wins, missing order derives adapter tier; restrictions and switches apply", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
@@ -476,6 +439,15 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       values (${org.accountId}::uuid, ${org.workspaceId}::uuid, array['home/model'])`;
     expect(await evaluate(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
     await fixture.admin`update workspace_model_policies set allowed_models = array['target/model'] where workspace_id = ${org.workspaceId}::uuid`;
+    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      modelId: "target/model",
+    });
+    // The organization's list is a ceiling the workspace's own list can't widen.
+    await fixture.admin`insert into organization_model_defaults(account_id, allowed_models)
+      values (${org.accountId}::uuid, array['home/model'])`;
+    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
+    await fixture.admin`update organization_model_defaults set allowed_models = array['home/model', 'target/model'] where account_id = ${org.accountId}::uuid`;
     expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       modelId: "target/model",
@@ -535,7 +507,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     }
   });
 
-  test("B1 no-mapping diagnostic distinguishes empty order, disabled gates, pins and unavailable mapped targets", async () => {
+  test("B1 no-mapping diagnostic distinguishes empty order, disabled failover, pins and unavailable mapped targets", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const destination = await fixture.connection(org, target);
@@ -561,26 +533,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     });
     await fixture.pin(org, work, home.adapter.provider, source, "home/model", false, "automatic");
     await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/model"] })}::jsonb where account_id = ${org.accountId}::uuid`;
-    // Readiness is not mapping: committed registry/receipt with disabled live switch.
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await checkWait();
-    await fixture.admin`update subscription_provider_cutovers set enabled = true where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await fixture.admin.begin(async (tx) => {
-      // Reproduce pre-receipt state only in this disposable fixture clone.
-      await tx`set local session_replication_role = replica`;
-      await tx`delete from opengeni_private.subscription_provider_cutover_receipts where provider = ${target.adapter.provider}`;
-      // Uncommitted deletion must not affect the app's mapped target.
-      expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-        kind: "run",
-        connectionId: destination,
-      });
-    });
-    try {
-      await checkWait();
-    } finally {
-      await fixture.admin`insert into opengeni_private.subscription_provider_cutover_receipts(provider, migration, committed_at, seed_rotation)
-        values (${target.adapter.provider}, '9999_failover_fixture.sql', '-infinity', '{"mode":"spread"}')`;
-    }
     await fixture.exhausted(org.accountId, destination);
     await checkWait();
     // A mapped but policy-denied target is not an absent mapping.
@@ -596,7 +548,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await evaluate(fixture.client.db, home, privateWork)).toMatchObject(ordinaryWait);
   });
 
-  test("B1 no-mapping diagnostic preserves same-provider fallback and home maintenance", async () => {
+  test("B1 no-mapping diagnostic preserves same-provider fallback", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home, { allowedModelIds: ["home/second"] });
     const work = await fixture.turn(org);
@@ -610,13 +562,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "wait",
       reason: "failover_no_model_mapping",
-    });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${home.adapter.provider}`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({
-      kind: "cutover_not_enabled",
-    });
-    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-      kind: "cutover_not_enabled",
     });
   });
 
@@ -995,65 +940,60 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       await fixture.admin`insert into subscription_turn_failures(account_id, workspace_id, session_id, turn_id, connection_id, provider, failure_kind, recovery_evidence)
         values (${org.accountId}::uuid, ${org.workspaceId}::uuid, ${work.identity.sessionId}::uuid, ${work.identity.turnId}::uuid,
           ${connectionId}::uuid, ${provider}, 'exhausted', ${fixture.admin.json({ refusals })}::jsonb)`;
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid`;
     expect(await count(fixture.client.db, work.identity)).toBe(3);
     expect(
       await count(fixture.client.db, { ...work.identity, workspaceId: crypto.randomUUID() }),
     ).toBeNull();
   });
 
-  test("D-12/D-28 personal home precedes provider fallback; target personal requires its own frozen authority", async () => {
+  test("D-53 own subscriptions turned on here come first; failover reaches only own turned-on targets", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const ownHome = await fixture.connection(org, home, { personal: true });
     const ownTarget = await fixture.connection(org, target, { personal: true });
     const sharedTarget = await fixture.connection(org, target);
-    await fixture.exhausted(org.accountId, source);
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true) on conflict do nothing`;
+    await turnOn(ownHome, org.workspaceId);
+    await turnOn(ownTarget, org.workspaceId);
     const work = await fixture.turn(org, { private: true });
+    // Each provider freezes the one account turned on here, for this session.
     expect(
-      work.identity.acceptedAuthorityV2.personal.map((value) => String(value.provider)),
-    ).toContain(home.adapter.provider);
-    expect(
-      work.identity.acceptedAuthorityV2.personal.map((value) => String(value.provider)),
-    ).toContain(target.adapter.provider);
+      Object.fromEntries(
+        work.identity.acceptedAuthorityV2.personal.map((value) => [
+          String(value.provider),
+          value.sharedSessionChoice,
+        ]),
+      ),
+    ).toEqual({
+      [home.adapter.provider]: { sessionId: work.identity.sessionId, connectionId: ownHome },
+      [target.adapter.provider]: { sessionId: work.identity.sessionId, connectionId: ownTarget },
+    });
+    // Your own plan comes first even while the shared account could serve.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: ownHome,
       personal: true,
     });
     await fixture.release(work);
+    await fixture.exhausted(org.accountId, source);
     await fixture.exhausted(org.accountId, ownHome);
-    await fixture.pin(org, work, target.adapter.provider, ownTarget, "target/model");
+    // Failover prefers your own turned-on target over the shared one too.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: ownTarget,
       personal: true,
     });
-    const { TurnExecutionPolicyV1 } = await import("@opengeni/contracts");
-    const [row] = await fixture.admin<{ metadata: Record<string, unknown> }[]>`
-      select metadata from session_turns where id = ${work.identity.turnId}::uuid`;
-    const policy = TurnExecutionPolicyV1.parse({
-      ...(row!.metadata.turnExecutionPolicyV1 as object),
-      productModelId: "target/model",
-      providerId: target.adapter.modelPolicyProviderId,
-      upstreamModelId: "target-upstream",
-      reasoningEffort: "medium",
-    });
-    expect(
-      await recordServing(fixture.client.db, {
-        ...work.identity,
-        ...work,
-        policy,
-        connectionId: ownTarget,
-        reason: "failover_cross_provider",
-      }),
-    ).toMatchObject({ accepted: true });
     await fixture.release(work);
-    await fixture.admin`update subscription_person_preferences set personal_fallback_opt_in = false where account_id = ${org.accountId}::uuid`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
-    // Personal workspace participation does not require fallback opt-in (D-28).
+    // Turned off here: the next turn's own accounts serve explicit choices only.
+    await turnOff(org.workspaceId);
+    const next = await fixture.turn(org, { private: true });
+    expect(
+      next.identity.acceptedAuthorityV2.personal.some((value) => value.sharedSessionChoice),
+    ).toBe(false);
+    expect(await evaluate(fixture.client.db, home, next)).toMatchObject({
+      kind: "run",
+      connectionId: sharedTarget,
+    });
+    // The Personal workspace needs no switch (D-28).
     const personal = await fixture.turn(org, { workspaceId: org.personalWorkspaceId });
     await fixture.exhausted(org.accountId, sharedTarget);
     expect(await place(fixture.client.db, home, personal)).toMatchObject({
@@ -1064,13 +1004,12 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await evaluate(fixture.client.db, home, sharedWork)).toMatchObject({ kind: "wait" });
   });
 
-  test("SUB-STICK-02 D-27/D-42 opt-out retains only an existing warm automatic personal fallback", async () => {
+  test("SUB-STICK-02 D-27/D-53 turning your own plan off keeps only a warm automatic Only me binding", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const personal = await fixture.connection(org, target, { personal: true });
     await fixture.exhausted(org.accountId, source);
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true)`;
+    await turnOn(personal, org.workspaceId);
     const work = await fixture.turn(org, { private: true });
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
@@ -1095,8 +1034,8 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         reason: "failover_cross_provider",
       }),
     ).toMatchObject({ accepted: true });
-    await fixture.admin`update subscription_person_preferences set personal_fallback_opt_in = false where account_id = ${org.accountId}::uuid`;
-    // An already placed attempt also keeps its exact lease after opting out.
+    await turnOff(org.workspaceId);
+    // An already accepted turn keeps its frozen authority after turning off.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: personal,
@@ -1112,7 +1051,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(
       await evaluate(fixture.client.db, home, { ...next, now: new Date(Date.now() + 25 * 60_000) }),
     ).toMatchObject({ kind: "run", connectionId: source });
-    // Unlike an opt-out, revocation of the exact frozen authority is immediate.
+    // Unlike turning it off, revoking the exact frozen authority is immediate.
     await fixture.admin`update organization_user_resource_authorities set status = 'revoked', revoked_at = now()
       where resource_id = ${personal}::uuid`;
     expect(await place(fixture.client.db, home, next)).toMatchObject({ kind: "wait" });
@@ -1124,9 +1063,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     await fixture.exhausted(org.accountId, source);
     // Accept before the target personal account exists: it cannot be captured.
     const work = await fixture.turn(org, { private: true });
-    await fixture.connection(org, target, { personal: true });
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true) on conflict do nothing`;
+    await turnOn(await fixture.connection(org, target, { personal: true }), org.workspaceId);
     expect(
       work.identity.acceptedAuthorityV2.personal.some(
         (value) => value.provider === target.adapter.provider,
@@ -1164,12 +1101,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       kind: "wait",
       earliestResetAt: new Date(soon),
       healthRetryAt: retry,
-    });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-      kind: "wait",
-      earliestResetAt: new Date(later),
-      healthRetryAt: null,
     });
   });
 
@@ -1233,9 +1164,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       kind: "wait",
       reason: "compaction_provider_locked",
     });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${home.adapter.provider}`;
-    expect(await place(fixture.client.db, home, work)).toEqual({ kind: "cutover_not_enabled" });
-    expect(await fixture.binding(work, target.adapter.provider)).toBeNull();
   });
 
   test("D-35 per-model upstream entitlement and absent/mismatched tiers fail closed", async () => {
@@ -1322,7 +1250,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     ).resolves.toHaveProperty("operationId");
   });
 
-  test("D-42 frozen target shared pools never widen with live organization settings", async () => {
+  test("D-42/D-51 a frozen carrier without shared capacity never widens; either legacy shared pool uses the shared accounts reaching the workspace", async () => {
     for (const pool of ["none", "workspace", "organization"] as const) {
       const org = await fixture.organization();
       const source = await fixture.connection(org, home);
@@ -1340,7 +1268,10 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         values (${org.accountId}::uuid, ${org.workspaceId}::uuid, ${target.adapter.provider}, 'session_turn',
           ${work.identity.turnId}::uuid, '[]'::jsonb, ${pool}, ${pool === "none" ? "missing" : pool})`;
       });
-      if (pool === "organization")
+      // Who manages a shared account no longer divides shared capacity (D-51):
+      // the destination is an organization account, and a carrier that
+      // accepted either legacy shared pool may use it.
+      if (pool !== "none")
         expect(await place(fixture.client.db, home, work)).toMatchObject({
           kind: "run",
           connectionId: destination,
@@ -1362,7 +1293,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     try {
       expect(
         await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
-          readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
+          readSubscriptionCoreFailoverProvider(tx, target.adapter.provider),
         ),
       ).toEqual({ status: "completed", value: null });
     } finally {
@@ -1375,7 +1306,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     try {
       expect(
         await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
-          readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
+          readSubscriptionCoreFailoverProvider(tx, target.adapter.provider),
         ),
       ).toEqual({ status: "completed", value: null });
     } finally {

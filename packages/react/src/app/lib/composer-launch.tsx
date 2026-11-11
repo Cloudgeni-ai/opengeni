@@ -16,6 +16,12 @@ export type ComposerLaunchSearch = {
   channelId?: string | undefined;
   /** One installed session-selected Skill to freeze onto the new session. */
   skillCapabilityId?: string | undefined;
+  /** `?agent=`: start the new chat with this agent selected and an empty composer. */
+  agent?: string | undefined;
+  /** `?botTemplateId=` from older links: bot templates are agents with the same ids. */
+  botTemplateId?: string | undefined;
+  /** Continue an archived chat's work: the composer starts with a link to it. */
+  continueSessionId?: string | undefined;
   /**
    * `?modelSource=default`: the model/effort/latency carry the resolved default
    * (a credit purchase return), not the person's choice.
@@ -25,6 +31,13 @@ export type ComposerLaunchSearch = {
 
 /** Stable empty search — safe default prop (no per-render object literal). */
 export const EMPTY_COMPOSER_LAUNCH: ComposerLaunchSearch = {};
+
+const LAUNCH_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** The agent a launch starts the chat with: `?agent=`, or an older `?botTemplateId=` link. */
+export function composerLaunchAgentId(launch: ComposerLaunchSearch): string | undefined {
+  return launch.agent ?? launch.botTemplateId;
+}
 
 export function parseComposerLaunchSearch(search: Record<string, unknown>): ComposerLaunchSearch {
   const out: ComposerLaunchSearch = {};
@@ -48,6 +61,20 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
     ) {
       out.channelId = search.channelId;
     }
+  }
+  if (typeof search.agent === "string" && LAUNCH_UUID.test(search.agent)) {
+    out.agent = search.agent;
+  }
+  if (typeof search.botTemplateId === "string" && LAUNCH_UUID.test(search.botTemplateId)) {
+    out.botTemplateId = search.botTemplateId;
+  }
+  if (
+    typeof search.continueSessionId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      search.continueSessionId,
+    )
+  ) {
+    out.continueSessionId = search.continueSessionId;
   }
   if (search.modelSource === "default") out.followDefault = true;
   if (typeof search.skillCapabilityId === "string") {
@@ -102,4 +129,20 @@ export function composerLaunchSearchAfterPolicyApply(
     ...(launch.realtime ? { realtime: launch.realtime } : {}),
     ...(launch.skillCapabilityId ? { skillCapabilityId: launch.skillCapabilityId } : {}),
   };
+}
+
+/**
+ * The first message of a chat that continues an archived one: a link to it,
+ * which people can open and agents read through their session tools.
+ */
+export function continueArchivedChatMessage(
+  origin: string,
+  workspaceId: string,
+  sessionId: string,
+): string {
+  const link = new URL(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+    origin,
+  ).href;
+  return `Continue the work from this archived chat: ${link}\n\n`;
 }

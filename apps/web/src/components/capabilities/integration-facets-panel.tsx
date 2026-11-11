@@ -1,6 +1,5 @@
 import {
   BellRingIcon,
-  BookOpenIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   CirclePauseIcon,
@@ -11,6 +10,7 @@ import {
   SlidersHorizontalIcon,
   Trash2Icon,
 } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
@@ -21,7 +21,6 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 
-import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { Badge } from "@opengeni/react/ui/badge";
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -51,6 +50,8 @@ import type {
 } from "@opengeni/react/app/types";
 
 type FacetEntry = IntegrationInstanceFacetsResponse["facets"][number];
+/** The SDK still lists the removed `knowledge_source` kind; this panel never shows it. */
+type ShownFacetKind = Exclude<IntegrationFacetDefinitionSummary["kind"], "knowledge_source">;
 type FormValue = string | boolean;
 type FacetFormState = Record<string, FormValue>;
 type FacetMutationToken = {
@@ -58,21 +59,15 @@ type FacetMutationToken = {
   generation: number;
   sequence: number;
 };
-type GoogleDriveDialogProps = GoogleDriveKnowledgeSourceDialogProps;
 
 const KIND_DETAILS: Record<
-  IntegrationFacetDefinitionSummary["kind"],
+  ShownFacetKind,
   {
     label: string;
     description: string;
     icon: ComponentType<{ className?: string }>;
   }
 > = {
-  knowledge_source: {
-    label: "Knowledge source",
-    description: "Choose what this account contributes to searchable workspace knowledge.",
-    icon: BookOpenIcon,
-  },
   inbound_trigger: {
     label: "Inbound trigger",
     description: "Choose what Opengeni watches for new work from this account.",
@@ -96,22 +91,14 @@ export function IntegrationFacetsPanel({
   instance,
   facetCount,
   canManage,
-  canManagePersonalDestination,
-  canManageWorkspaceDestination,
-  canManageOrganizationDestination,
   refreshRevision,
-  GoogleDriveDialog,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;
   canManage: boolean;
-  canManagePersonalDestination: boolean;
-  canManageWorkspaceDestination: boolean;
-  canManageOrganizationDestination: boolean;
   refreshRevision: number;
-  GoogleDriveDialog: ComponentType<GoogleDriveDialogProps>;
 }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<IntegrationInstanceFacetsResponse | null>(null);
@@ -119,7 +106,6 @@ export function IntegrationFacetsPanel({
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const [busyFacetKeys, setBusyFacetKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [editor, setEditor] = useState<FacetEntry | null>(null);
-  const [googleDriveEditor, setGoogleDriveEditor] = useState<FacetEntry | null>(null);
   const [form, setForm] = useState<FacetFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FacetEntry | null>(null);
   const operationGeneration = useRef(0);
@@ -160,7 +146,6 @@ export function IntegrationFacetsPanel({
       setBusyFacetKeys(new Set());
       setOpen(false);
       setEditor(null);
-      setGoogleDriveEditor(null);
       setRemoveTarget(null);
       seenRefreshRevision.current = refreshRevision;
     }
@@ -192,7 +177,6 @@ export function IntegrationFacetsPanel({
     setError(null);
     setBusyFacetKeys(new Set());
     setEditor(null);
-    setGoogleDriveEditor(null);
     setRemoveTarget(null);
     if (open) void load();
     // load is deliberately scoped to the current exact panel identity.
@@ -239,10 +223,6 @@ export function IntegrationFacetsPanel({
   }
 
   function edit(entry: FacetEntry): void {
-    if (isGoogleDriveKnowledgeSource(entry)) {
-      setGoogleDriveEditor(entry);
-      return;
-    }
     setEditor(entry);
     setForm(facetFormState(entry.definition, entry.binding));
   }
@@ -401,8 +381,8 @@ export function IntegrationFacetsPanel({
     }
   }
 
-  const activeCount =
-    data?.facets.filter((entry) => entry.binding?.status === "active").length ?? 0;
+  const visibleFacets = data ? visibleIntegrationFacets(data.facets) : [];
+  const activeCount = visibleFacets.filter((entry) => entry.binding?.status === "active").length;
 
   return (
     <>
@@ -420,7 +400,7 @@ export function IntegrationFacetsPanel({
               Facets
               {data ? (
                 <span className="text-fg-subtle">
-                  {activeCount}/{data.facets.length}
+                  {activeCount}/{visibleFacets.length}
                 </span>
               ) : null}
             </span>
@@ -457,7 +437,7 @@ export function IntegrationFacetsPanel({
                 </ErrorMessage>
               )
             ) : data ? (
-              data.facets.map((entry) => (
+              visibleFacets.map((entry) => (
                 <FacetRow
                   key={entry.definition.facetKey}
                   entry={entry}
@@ -484,30 +464,6 @@ export function IntegrationFacetsPanel({
         onClose={() => setEditor(null)}
         onSubmit={save}
       />
-
-      {googleDriveEditor ? (
-        <GoogleDriveDialog
-          client={client}
-          workspaceId={workspaceId}
-          instance={instance}
-          entry={googleDriveEditor}
-          canManage={canManage}
-          canManagePersonalDestination={canManagePersonalDestination}
-          canManageWorkspaceDestination={canManageWorkspaceDestination}
-          canManageOrganizationDestination={canManageOrganizationDestination}
-          onClose={() =>
-            setGoogleDriveEditor((current) => (current === googleDriveEditor ? null : current))
-          }
-          onMutationStart={() => {
-            const token = beginMutation(googleDriveEditor.definition.facetKey);
-            return {
-              apply: (binding) => applyMutationBinding(token, binding),
-              isCurrent: () => isCurrentMutation(token),
-              finish: () => finishMutation(token),
-            };
-          }}
-        />
-      ) : null}
 
       <ConfirmDialog
         open={removeTarget !== null}
@@ -560,7 +516,7 @@ function FacetRow({
   onResume: () => void;
   onRemove: () => void;
 }) {
-  const detail = KIND_DETAILS[entry.definition.kind];
+  const detail = KIND_DETAILS[entry.definition.kind as ShownFacetKind];
   const Icon = detail.icon;
   const binding = entry.binding;
   const configured = binding !== null && binding.status !== "disabled";
@@ -642,7 +598,8 @@ function FacetRow({
             type="button"
             variant="ghost"
             size="xs"
-            disabled={!canManage || busy}
+            // Admins remove any facet, a member only one they added.
+            disabled={!(binding?.canRemove ?? canManage) || busy}
             onClick={onRemove}
           >
             <Trash2Icon />
@@ -670,9 +627,9 @@ function FacetStatusBadge({ binding }: { binding: IntegrationFacetBindingSummary
       className={cn(
         "text-2xs",
         status === "active"
-          ? "border-success/30 bg-success/5 text-success"
+          ? "border-status-success/30 bg-status-success/5 text-status-success"
           : status === "needs_attention"
-            ? "border-warning/30 text-warning"
+            ? "border-status-waiting/30 text-status-waiting"
             : "text-fg-subtle",
       )}
     >
@@ -733,14 +690,16 @@ function FacetEditorDialog({
         <DialogHeader>
           <DialogTitle>{entry ? facetTitle(entry.definition) : "Configure facet"}</DialogTitle>
           <DialogDescription>
-            {entry ? KIND_DETAILS[entry.definition.kind].description : "Configure this facet."}
+            {entry
+              ? KIND_DETAILS[entry.definition.kind as ShownFacetKind].description
+              : "Configure this facet."}
           </DialogDescription>
         </DialogHeader>
         {entry ? (
           <form className="grid gap-4" onSubmit={onSubmit}>
             {fields.length === 0 ? (
               unsupportedRequiredFields.length > 0 ? (
-                <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm leading-6 text-fg-muted">
+                <div className="rounded-lg border border-status-waiting/30 bg-status-waiting/10 p-4 text-sm leading-6 text-fg-muted">
                   This provider needs a dedicated setup flow for:{" "}
                   {unsupportedRequiredFields.join(", ")}. The generic editor will not submit an
                   incomplete configuration.
@@ -946,7 +905,7 @@ function requiredFieldsComplete(
 
 function facetTitle(definition: IntegrationFacetDefinitionSummary): string {
   const specific = humanize(definition.facetKey);
-  const generic = KIND_DETAILS[definition.kind].label;
+  const generic = KIND_DETAILS[definition.kind as ShownFacetKind].label;
   return specific.toLowerCase() === generic.toLowerCase() ? generic : specific;
 }
 
@@ -964,10 +923,8 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isGoogleDriveKnowledgeSource(entry: FacetEntry): boolean {
-  return (
-    entry.definition.facetKey === "drive-content" &&
-    entry.definition.kind === "knowledge_source" &&
-    entry.definition.capabilities.provider === "google-drive"
-  );
+export function visibleIntegrationFacets(
+  facets: IntegrationInstanceFacetsResponse["facets"],
+): IntegrationInstanceFacetsResponse["facets"] {
+  return facets.filter((entry) => entry.definition.kind !== "knowledge_source");
 }

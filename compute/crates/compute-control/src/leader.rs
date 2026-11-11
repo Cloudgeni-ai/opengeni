@@ -15,12 +15,18 @@
 //! The lease only says when giving up is safe, not when it is worth it.
 //! A host whose renewals stopped has frozen its VMs, but one cut off only
 //! by the network still has them, and runs them on once it renews again;
-//! giving up on it costs every sandbox it holds its running programs and
-//! what it wrote since its last archive, and resets the whole machine. So
-//! while a silent host holds sandboxes the leader waits for it, up to
-//! `give_up_after` from its last renewal, unless its group finds its
-//! instance stopped or gone, which leaves nothing to keep. One that holds
-//! none goes as soon as its lease allows.
+//! giving up on it costs every sandbox it holds its running programs, and
+//! resets the whole machine. So while a silent host holds sandboxes the
+//! leader waits for it, up to `give_up_after` from its last renewal, unless
+//! its group finds its instance stopped or gone, which leaves nothing to
+//! keep. One that holds none goes as soon as its lease allows.
+//!
+//! Giving up never costs a sandbox its files: the host keeps owning its
+//! sandboxes, which wait for it to register again with its copies, newer
+//! than the store's (ADR 32). Only a host whose instance its group finds
+//! deleted, disks and all, has its copies given up for gone here, so its
+//! sandboxes go on from their stored copies; any other is declared gone
+//! by an operator.
 //!
 //! A host of the group it sizes is fenced before it is given up on: its
 //! instance is reset (or found stopped or gone) through the cloud's API,
@@ -41,7 +47,7 @@ use tokio::time::Instant;
 
 use crate::group::{Fenced, GcpGroup, Member, Started};
 use crate::metrics::{GaveUp, GroupSeen, Metrics};
-use crate::store::{self, Counted, Store};
+use crate::store::{self, Counted, Gone, Store};
 use crate::view::{GroupHost, View};
 
 /// How often the leader looks at renewal counts.
@@ -83,6 +89,10 @@ pub trait Leases: Send + Sync + 'static {
         host: HostId,
         renewals: u64,
     ) -> impl Future<Output = store::Result<Option<usize>>> + Send;
+
+    /// Gives up for gone the copies of `host`, given up on, whose machine
+    /// was found deleted; see [`Store::declare_gone`].
+    fn deleted(&self, host: HostId) -> impl Future<Output = store::Result<()>> + Send;
 }
 
 impl<S: Store> Leases for S {
@@ -96,6 +106,18 @@ impl<S: Store> Leases for S {
         renewals: u64,
     ) -> impl Future<Output = store::Result<Option<usize>>> + Send {
         Store::give_up(self, host, renewals, crate::service::now_ms())
+    }
+
+    async fn deleted(&self, host: HostId) -> store::Result<()> {
+        let at_ms = crate::service::now_ms();
+        if let Some(forsaken) = Store::declare_gone(self, host, Gone::Deleted, at_ms).await? {
+            tracing::warn!(
+                host = host.0,
+                sandboxes = forsaken.len(),
+                "a host's machine is gone, disks and all: its sandboxes go on from their stored copies"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -538,6 +560,13 @@ async fn fence_and_give_up<L: Leases>(
             .give_up(host, renewals)
             .await
             .map_err(|error| error.to_string())?;
+        if given_up.is_some()
+            && fenced == Fenced::Gone
+            && let Err(error) = leases.deleted(host).await
+        {
+            // Its sandboxes wait for it until an operator declares it gone.
+            tracing::error!(%error, %name, "giving up a deleted host's copies failed");
+        }
         if given_up.is_some() && fenced == Fenced::Stopped {
             match group.start(&name).await {
                 Ok(Started::Asked) => {}
@@ -825,6 +854,10 @@ mod tests {
             };
             std::future::ready(Ok(answer))
         }
+
+        fn deleted(&self, _host: HostId) -> impl Future<Output = store::Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
     }
 
     /// A read that takes longer than the margin shows a renewal sent just
@@ -897,6 +930,10 @@ mod tests {
             std::future::ready(Err(store::StoreError::Database(
                 "the connection closed".into(),
             )))
+        }
+
+        fn deleted(&self, _host: HostId) -> impl Future<Output = store::Result<()>> + Send {
+            std::future::ready(Ok(()))
         }
     }
 

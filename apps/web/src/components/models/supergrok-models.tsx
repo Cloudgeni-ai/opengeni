@@ -1,4 +1,5 @@
 import { SubscriptionAccountPoolRows, subscriptionListedCount } from "./subscription-account-rows";
+import type { ChatClient } from "@opengeni/sdk";
 import { SubscriptionAccountPage } from "./subscription-account-detail";
 import type { SuperGrokAccount } from "@opengeni/sdk";
 import {
@@ -29,7 +30,16 @@ import { FieldStack } from "@opengeni/react/ui/field";
 import { ListRow } from "@opengeni/react/ui/list-row";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { UsageMeterGroup, UsageReadout } from "@opengeni/react/ui/usage-meter";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
+import {
+  SubscriptionUsageCell,
+  subscriptionUsageReadings,
+} from "@opengeni/react/app/components/models/subscription-usage";
+import {
+  subscriptionPlanLabel,
+  subscriptionWindows,
+  type SubscriptionWindow,
+} from "@opengeni/react/app/lib/subscription-accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /* ----------------------------------------------------------------------------
@@ -49,7 +59,16 @@ export interface SuperGrokPlaces {
   openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
   sharePersonal?: ((accountId: string) => void) | undefined;
+  /** A workspace's name in the organization, where the viewer can read it. */
+  workspaceName?: ((workspaceId: string) => string | undefined) | undefined;
+  /**
+   * Workspace admins: stop using another workspace's own account that was
+   * shared with this one. Absent for everyone else.
+   */
+  removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
   backToList: () => void;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
 }
 
 function needsReconnect(account: SuperGrokAccount): boolean {
@@ -57,16 +76,24 @@ function needsReconnect(account: SuperGrokAccount): boolean {
 }
 
 export function planOf(account: SuperGrokAccount): string {
-  const plan = account.plan ?? account.quota?.subscriptionTier;
-  if (!plan) return "SuperGrok plan";
-  // The tier may already carry the product name ("SuperGrok", "SuperGrok Heavy").
-  const tier = plan.replace(/^super\s*grok[\s_-]*/i, "").trim();
-  return tier ? `SuperGrok ${tier.charAt(0).toLocaleUpperCase()}${tier.slice(1)}` : "SuperGrok";
+  return (
+    subscriptionPlanLabel("xai", account.plan ?? account.quota?.subscriptionTier) ??
+    "SuperGrok plan"
+  );
 }
 
-export function percentLeft(account: SuperGrokAccount): number | null {
-  const used = account.quota?.usedPercent;
-  return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
+/** The billing-period credits xAI reports, as the one shared usage window ("Credits"). */
+export function superGrokUsageWindows(
+  account: SuperGrokAccount,
+  now: number = Date.now(),
+): SubscriptionWindow[] {
+  const quota = account.quota;
+  if (!quota || (typeof quota.usedPercent !== "number" && !quota.periodEnd)) return [];
+  return subscriptionWindows(
+    "xai",
+    [{ id: "billing", usedPercent: quota.usedPercent, resetsAt: quota.periodEnd }],
+    now,
+  );
 }
 
 function accountStatus(account: SuperGrokAccount): "connected" | "disabled" | "needs_reconnect" {
@@ -175,7 +202,6 @@ export function SuperGrokRow({
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;
-  const left = percentLeft(account);
   const status = accountStatus(account);
   return (
     <SubscriptionAccountRow
@@ -188,11 +214,7 @@ export function SuperGrokRow({
         usage: needsReconnect(account) ? null : status === "disabled" ? (
           <StatusBadge status="disabled" variant="dot" />
         ) : (
-          <UsageReadout
-            percent={left}
-            window="this period"
-            {...(account.quota?.periodEnd ? { resets: [{ at: account.quota.periodEnd }] } : {})}
-          />
+          <SubscriptionUsageCell windows={superGrokUsageWindows(account)} />
         ),
       }}
       indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
@@ -210,7 +232,7 @@ export function SuperGrokAccountPage({
   grok: SuperGrokSubscriptions;
   accountId: string;
   places: SuperGrokPlaces;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
 }) {
   return (
     <SubscriptionAccountPage
@@ -223,19 +245,12 @@ export function SuperGrokAccountPage({
       connectionKind="supergrok"
       plan={planOf}
       renderUsage={(account) => {
-        const left = percentLeft(account);
-        return left === null ? null : (
+        const now = Date.now();
+        const windows = superGrokUsageWindows(account, now);
+        return windows.length === 0 ? null : (
           <DetailSection title="Usage">
             <UsageMeterGroup
-              windows={[
-                {
-                  label: "This period",
-                  percent: left,
-                  ...(account.quota?.periodEnd
-                    ? { resetsLabel: formatReset(account.quota.periodEnd) }
-                    : {}),
-                },
-              ]}
+              windows={subscriptionUsageReadings(windows, now)}
               checked={
                 account.quota?.checkedAt ? (
                   <RelativeTime date={account.quota.checkedAt} prefix="Checked" />
@@ -249,22 +264,17 @@ export function SuperGrokAccountPage({
   );
 }
 
-export function formatReset(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short" });
-}
-
 export function SuperGrokAccessPage({
   grok,
   accountId,
   client,
+  organizationName,
   onClose,
 }: {
   grok: SuperGrokSubscriptions;
   accountId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const account = grok.accounts.find((candidate) => candidate.id === accountId);
@@ -279,6 +289,7 @@ export function SuperGrokAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={Boolean(grok.organizationId)}
+      organizationName={organizationName}
       canManage={account ? managesSubscriptionAccount(grok, account) : grok.canManageAccounts}
       name={account ? superGrokAccountName(account) : "this account"}
       onClose={onClose}
@@ -323,6 +334,7 @@ export function SuperGrokConnectPage({
   const signingIn = Boolean(grok.pending);
   return (
     <ModelsFormPage
+      connectStep
       title="Connect SuperGrok"
       description="Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
       onClose={onClose}

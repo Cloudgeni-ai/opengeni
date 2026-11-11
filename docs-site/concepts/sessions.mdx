@@ -32,7 +32,7 @@ A reload, a second client, or an audit all see the same history.
 - **Pause** and **Resume** hold and release the session.
 - **Cancel** stops the session and its children for good.
 
-A workspace admin can make the console's normal Send act as Steer while the agent is working (**Workspace settings → Chats**). Cmd/Ctrl+Enter then queues instead. Products that embed the session screen choose the same with the composer's `busySend` option.
+A workspace admin can make the console's normal Send act as Steer while the agent is working (**Workspace settings → Chats**). Cmd/Ctrl+Enter then queues instead. Products that embed the session screen choose the same with the composer's `busySend` option. In this mode the server, not the browser or app, decides at the moment the message arrives: if a turn is running or about to start, the message steers it; otherwise it starts a turn (or waits, if the chat is paused). API callers get the same choice by passing `delivery: "steer_or_send"` to `steerMessage` or to a draft submit.
 
 If the session is waiting on you for an approval or a question, Send replaces that wait with your new prompt.
 
@@ -58,7 +58,7 @@ Sessions in a shared workspace are visible to its members. An organization owner
 
 ## Connected accounts
 
-Open **Connectors** in the composer to choose which connected accounts the agent may use. Each account is marked **Only me** or **This workspace**. Add accounts from the connector's **Capabilities** page.
+Open **Connectors** in the composer to choose which connected accounts the agent may use. Each account is marked **Yours** or **Shared** (the whole workspace can use it). Add accounts from the connector's **Capabilities** page. If a service doesn't say which account you signed in with, you can connect one account of it: your own or a shared one, not both.
 
 Personal accounts belong to whoever sends the message, even in a shared session; other participants can't use them by replying. Scheduled tasks use their owner's accounts. If you attach several accounts, say which one to use for actions that send or change data.
 
@@ -80,6 +80,16 @@ The chat API defaults to private chats with `agentAccess: "session"` (`chats: "s
 
 The sidebar groups sessions by project or creator. **Active** hides archived sessions; **All** shows them in a collapsed **Archived** folder. Archiving offers **Undo** for a few seconds, and you can restore later from **Archived**.
 
+## Chat name, description and icon
+
+Any session has a title, and can also have a one-line description and an avatar (an emoji, an icon, letters, or an image from the workspace). Set them from the session header or the sidebar menu, or ask the agent to; the agent can change them itself, for example to an image it generated. They are display-only and never sent to the model. `PATCH /v1/workspaces/{workspaceId}/sessions/{sessionId}` accepts `title`, `description` and `avatar`, and `createSession` accepts the same under `profile`. Forking a session copies them with its history.
+
+## Agents
+
+An **agent** is a named helper people chat with: a name, an icon, what it helps with, **Instructions** it follows in every chat, and an optional **First message** that fills the composer when someone starts a chat with it in the app (use it for one-time setup or a first question). **Remember across chats** gives it its own Memory; put long reference material there rather than in Instructions. **Who can use it** is **Only me** or everyone in the workspace.
+
+Open **Agents** in the sidebar to browse, create or import agents. **Export** on an agent's page saves it as an `.agent.json` file with its Instructions and First message, to import in another workspace; older `.bot.json` files still import. An agent's page shows its chats, settings and where it is available: always in the app, and optionally in each connected Slack workspace as `@Opengeni +handle` (a workspace admin turns that on; it needs **People in** the workspace). Start a chat with **Chat** on its page, the agent chip in the composer, or a link with `?agent=<id>`; the chat header then shows the agent. **Make this an agent** in a chat's ⋯ menu turns that chat's name, icon, description and instructions into a new agent. Agents replace bot templates and Slack agents; both kept their ids, so older `?botTemplateId=` links still work.
+
 ## Model settings
 
 Follow-ups without an explicit choice reuse the model, reasoning effort, and speed of the latest turn. Child sessions inherit the parent's model and reasoning effort but start at **Standard** speed.
@@ -88,7 +98,7 @@ Subscription accounts belong to the organization and can be made available to ev
 
 If you own a personal subscription and are also an organization administrator, its Models account page offers **Share account**. Choose which workspaces may use it and explicitly confirm sharing. This makes it organization-managed without changing its credentials or conversation history. Other administrators cannot share your personal account for you. Consumer plans may limit use to the account holder.
 
-Codex, Claude and SuperGrok share account selection and capacity recovery. Cross-provider fallback requires an administrator-enabled policy, an exact configured model mapping, and a compatible conversation. Codex conversations using remote compaction remain Codex-only; deployments must separately activate cross-provider serving before those policies take effect.
+Codex, Claude and SuperGrok share account selection and capacity recovery. Cross-provider fallback requires an administrator-enabled policy, an exact configured model mapping, and a compatible conversation. A Codex conversation that uses remote compaction can still switch to another model by hand: Opengeni first rebuilds a portable summary of its earlier messages from stored history. Automatic fallback serves only portable conversations, and deployments must separately activate cross-provider serving before those policies take effect.
 
 ## Voice input
 

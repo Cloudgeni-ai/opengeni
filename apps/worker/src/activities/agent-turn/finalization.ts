@@ -9,6 +9,7 @@ import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
+import { turnFailureOriginMetricFields } from "./failure-attribution";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
@@ -137,6 +138,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   });
   try {
     monitor.enter("tool_writers");
+    // Startup progress receipts still in flight finish before cleanup, so no
+    // append of this attempt outlives it. They never reject.
+    await deps.eventing.backgroundEventsSettled?.();
     await finalizeTurnAttemptSteps(deps, monitor);
   } finally {
     monitor.stop();
@@ -247,20 +251,28 @@ async function finalizeTurnAttemptSteps(
       codemodeTokenRenewal: codemodeRenewalToStop,
       runCredentialRenewal: runRenewalToStop,
     });
-    // W1 / SEC-4: remove this attempt's secret files (`secretfile` paths and
-    // any leftover env file) once every writer has drained. Best effort: the
-    // files are 0600 under a 0700 attempt directory and a later attempt never
-    // reads them, so a failure is logged rather than holding the receipt.
+    // Secret files live outside the workspace in an attempt-private directory;
+    // a successor never reads them. Start their best-effort deletion after the
+    // writers drain, but do not make provider availability a prerequisite for
+    // quiescence, lease release, or activity completion. The cleanup targets the
+    // original backend, never a newly resolved route. Run-credential pointer
+    // deletion below is different: it remains a mandatory workspace write.
     if (toolCancellationFence?.clearSecretFiles) {
-      monitor.enter("credential_cleanup");
+      const reportSecretCleanupFailure = (error: unknown) => {
+        try {
+          observability.warn("attempt secret file cleanup failed", {
+            "opengeni.session_id": input.sessionId,
+            "opengeni.attempt_id": input.attemptId,
+            "error.type": error instanceof Error ? error.name : "unknown",
+          });
+        } catch {
+          // Neither a late provider rejection nor diagnostics owns the turn.
+        }
+      };
       try {
-        await toolCancellationFence.clearSecretFiles();
+        void toolCancellationFence.clearSecretFiles().catch(reportSecretCleanupFailure);
       } catch (error) {
-        observability.warn("attempt secret file cleanup failed", {
-          "opengeni.session_id": input.sessionId,
-          "opengeni.attempt_id": input.attemptId,
-          "error.type": error instanceof Error ? error.name : "unknown",
-        });
+        reportSecretCleanupFailure(error);
       }
     }
     // Attempt-qualified credential deletion is also a real workspace write,
@@ -303,6 +315,10 @@ async function finalizeTurnAttemptSteps(
         },
       });
     }
+    // The drain above cancelled and quiesced this exact fence. Platform setup
+    // writes only through it, so a setup still waiting on something else (a
+    // read, an unanswered agent) cannot write any more either.
+    sandboxState.drainedCommandFence = toolCancellationFence ?? null;
     sandboxState.attemptWritersDrained = true;
     if (control.acknowledgeQuiescence) {
       // A cancellation before sandbox-backed capabilities exist still has
@@ -835,6 +851,8 @@ async function finalizeTurnAttemptSteps(
       turnLifecycleMetricsFor(observability).finish({
         attemptId: input.attemptId,
         outcome: control.turnMetricOutcome,
+        recoveryCause: control.turnRecoveryCause,
+        ...turnFailureOriginMetricFields(control),
         durationSeconds,
       });
     }
@@ -842,7 +860,6 @@ async function finalizeTurnAttemptSteps(
       attributes: {
         "opengeni.turn_id": attempt.turnId ?? "",
         "opengeni.status": control.activityStatus,
-        "opengeni.variable_set_id": workspaceRefs.variableSetId,
         "opengeni.rig_id": workspaceRefs.rigId,
         "opengeni.rig_version_id": workspaceRefs.rigVersionId,
         "opengeni.codex_credential_id": providerTurn.effectiveCodexCredentialId ?? "",

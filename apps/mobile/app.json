@@ -59,11 +59,14 @@
         "../../packages/react-native/app.plugin.js",
         {
           "recording": true,
+          "audioImport": true,
           "call": {
             "title": "Call Opengeni",
             "description": "Start a voice call with your agent.",
             "phrases": ["Call {app}", "Start a call with {app}", "Talk to {app}", "Ring {app}"],
-            "control": true
+            "control": true,
+            "androidSystemCall": true,
+            "iosAudioDevice": true
           }
         }
       ]

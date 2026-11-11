@@ -1,10 +1,12 @@
 import {
+  OpenGeniApiError,
   resolveWorkspaceVoiceInputEnabled,
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -20,6 +22,7 @@ import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { LazyPart } from "./lazy-part";
 import {
   useSessionConversation,
   type SessionConversationController,
@@ -27,6 +30,7 @@ import {
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
 import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
+import { useLiveSessionEvents } from "../hooks/use-live-session-events";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -38,7 +42,12 @@ import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
 import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
+import { savedToolReviewLoaders } from "./saved-tool-reviews";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../interactive-answer-model";
 import type {
   ComposerTranscriptionControlProps,
   ComposerVoiceInputOptions,
@@ -46,6 +55,7 @@ import type {
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { AuthNeededRow } from "./auth-needed-row";
+import { capabilityReconnectConnectionId } from "../auth-needed-presentation";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import {
   inChatConnectDecision,
@@ -55,7 +65,7 @@ import {
 } from "./conversation-capability-connect";
 import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
 import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
-import type { AuthNeededItem } from "../timeline";
+import { timelineLivePause, type AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
@@ -69,6 +79,11 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import {
+  resolveAgentSignals,
+  type AgentSignals,
+  type ResolvedAgentSignals,
+} from "../session-agents-model";
 import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
@@ -96,7 +111,7 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
   sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
 });
 
-export type SessionConversationProps = ClientOverride &
+export type SessionConversationProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /**
      * `null` while your server is still creating the session. Render the
@@ -209,6 +224,19 @@ export type SessionConversationProps = ClientOverride &
     modelPicker?: boolean | undefined;
     /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
     modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
+    /**
+     * Show how the agent works behind the scenes: above the composer, the
+     * goal pill and the agents and commands segments a host passes in
+     * `chromeProps`; on each turn row, the live step and step facets.
+     * Defaults to true. Set `false` for end users to whom a paused goal, a
+     * count of helper agents, a running command or a tool step means
+     * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+     * Or hide only some of them, for example `{ goal: false }` to drop the
+     * goal pill and keep helper agents and turn-row detail (see
+     * `AgentSignalOptions`). Queued messages, the agent's wait, incoming
+     * updates, approvals and the agent's questions always show.
+     */
+    agentSignals?: AgentSignals | undefined;
     /** Localized actions for already-sent user-message disclosure. */
     userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
     loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -273,7 +301,11 @@ export type SessionConversationProps = ClientOverride &
       HumanInputSurfaceProps,
       "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
     >;
-    /** Product approval presentation; permission decisions remain stock. */
+    /**
+     * Product approval presentation; permission decisions remain stock.
+     * Where `loadReview` resolves `null` (or is omitted), the card shows the
+     * server's saved review of the action, which the conversation reads itself.
+     */
     approvalProps?: Omit<
       ComponentProps<typeof ApprovalSurface>,
       "approvals" | "onApprove" | "onReject" | "responding" | "error"
@@ -348,37 +380,6 @@ export function SessionConversation({
   );
 }
 
-/**
- * `onEvent` for each event newer than any seen since the history first
- * loaded. The first ready read only sets where "new" starts, so loading the
- * history, an older page or a reconnect's replay calls nothing again.
- */
-function useLiveEvents(
-  sessionId: string | null,
-  events: readonly SessionEvent[],
-  ready: boolean,
-  onEvent: ((event: SessionEvent) => void) | undefined,
-) {
-  const callback = useRef(onEvent);
-  callback.current = onEvent;
-  const seen = useRef<{ sessionId: string | null; sequence: number | null }>({
-    sessionId,
-    sequence: null,
-  });
-  useEffect(() => {
-    if (seen.current.sessionId !== sessionId) seen.current = { sessionId, sequence: null };
-    if (!ready || sessionId === null) return;
-    const previous = seen.current.sequence;
-    const newest = events.reduce((max, event) => Math.max(max, event.sequence), previous ?? 0);
-    seen.current = { sessionId, sequence: newest };
-    if (previous === null) return;
-    const fresh = events
-      .filter((event) => event.sequence > previous)
-      .sort((a, b) => a.sequence - b.sequence);
-    for (const event of fresh) callback.current?.(event);
-  }, [events, ready, sessionId]);
-}
-
 function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
@@ -426,6 +427,7 @@ function ConversationView({
   realtimeVoiceProps,
   genieLoading,
   modelPickerProps,
+  agentSignals,
   userMessageDisclosureLabels,
   loadSkillReview,
   className,
@@ -443,6 +445,8 @@ function ConversationView({
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
   const t = useOpenGeniText();
+  const signals = resolveAgentSignals(agentSignals);
+  const hostChrome = withoutHiddenSignals(chromeProps, signals);
   const {
     sessionId,
     config,
@@ -467,6 +471,7 @@ function ConversationView({
   const context = conversation;
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerView = useComposerWithStreamState(
     composer,
     feed.connectionState,
@@ -481,7 +486,7 @@ function ConversationView({
   // One recall drives both the composer key and the queue row's ↑ hint.
   const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
-  useLiveEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
+  useLiveSessionEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
   // Read means seen: the timeline itself must be on screen (hosts may hide it
@@ -514,6 +519,30 @@ function ConversationView({
     labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
+  // Approval cards read the server's saved review of each action, after any
+  // review of the host's own: a Code Mode request carries no inline arguments.
+  // A client without saved reviews (a hand-written session client) keeps the
+  // host's loaders as they are.
+  const hostLoadReview = approvalProps?.loadReview;
+  const hostLoadDetails = approvalProps?.loadDetails;
+  const { client: reviewClient, workspaceId: reviewWorkspaceId } = context;
+  const reviewLoaders = useMemo(() => {
+    const client = reviewClient;
+    const workspaceId = reviewWorkspaceId;
+    if (!sessionId || !client.getToolActionReview || !client.getToolReviewDetails) return null;
+    return savedToolReviewLoaders({
+      readReview: async (approvalId) =>
+        await client.getToolActionReview!(workspaceId, sessionId, approvalId),
+      readDetails: async (review, path, offset) =>
+        await client.getToolReviewDetails!(workspaceId, sessionId, review.id, {
+          actionDigest: review.actionDigest,
+          path,
+          offset,
+        }),
+      loadReview: hostLoadReview,
+      loadDetails: hostLoadDetails,
+    });
+  }, [reviewClient, reviewWorkspaceId, sessionId, hostLoadReview, hostLoadDetails]);
   const transcription = useComposerTranscription(
     context.client,
     context.workspaceId,
@@ -596,6 +625,7 @@ function ConversationView({
           capabilityId={decision.item.id}
           name={decision.item.name}
           personalOnly={decision.personalOnly}
+          reconnectConnectionId={capabilityReconnectConnectionId(item)}
           rationale={item.capability?.rationale ?? ""}
           // OAuth returns to this exact host page; the card follows the
           // attempt's durable state, so the page needs no return handler.
@@ -641,7 +671,7 @@ function ConversationView({
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
     sessionId && voiceModels.length > 0 && status && !terminal && voiceControl ? (
-      <Suspense fallback={null}>
+      <LazyPart onLoadFailure="hide" fallback={null}>
         <LazyEmbeddedRealtimeVoice
           {...realtimeVoiceProps}
           client={
@@ -657,7 +687,7 @@ function ConversationView({
           getModelContext={conversation.getModelContext}
           onVoiceActiveChange={onVoiceActiveChange}
         />
-      </Suspense>
+      </LazyPart>
     ) : null;
   const view = (
     <SingleSendWording enabled={composer.singleSend === true}>
@@ -704,56 +734,71 @@ function ConversationView({
             </button>
           </div>
         ) : (
-          <MessageTimeline
-            renderMessageText={renderMessageText}
-            resolveLink={links}
-            renderInteractiveBlock={
-              renderInteractiveBlock === false
-                ? undefined
-                : (renderInteractiveBlock ?? defaultInteractiveBlock)
-            }
-            userMessageDisclosureLabels={userMessageDisclosureLabels}
-            genieLoading={loadingOptions}
-            renderAllowanceExhausted={renderAllowanceExhausted}
-            allowanceExhaustedLabels={allowanceExhaustedLabels}
-            // Isolated and clipped: floating navigation stays inside the timeline.
-            className="isolate min-h-0 flex-1 overflow-hidden"
-            {...(toolRegistry ? { toolRegistry } : {})}
-            {...retainedLoaders}
-            {...(onOpenSession ? { onOpenSession } : {})}
-            {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
-            events={feed.events}
-            items={conversation.timeline}
-            turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-            renderAuthNeeded={(item) =>
-              timelineProps?.renderAuthNeeded?.(item) ??
-              (item.capability?.id === "api:connected-machine" && computerConnection ? (
-                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
-              ) : (
-                renderStockAuthNeeded(item)
-              ))
-            }
-            emptyState={timelineProps?.emptyState}
-            renderMessageSender={timelineProps?.renderMessageSender}
-            status={status}
-            hasOlder={feed.hasOlder}
-            loadingOlder={feed.loadingOlder}
-            onLoadOlder={feed.loadOlder}
-            hasNewer={feed.hasNewer}
-            loadingNewer={feed.loadingNewer}
-            onLoadNewer={feed.loadNewer}
-            onJumpToStart={async () => {
-              await feed.loadOldest();
-            }}
-            loadingOldest={feed.loadingOldest}
-            onJumpToLatest={feed.jumpToLatest}
-            onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-            // A narrow embed above a decision card has no room for the pill.
-            questionNavMinViewportHeight={320}
-          />
+          <InteractiveAnswerProvider
+            send={composer.send}
+            scope={sessionId ?? undefined}
+            store={answerStore}
+            readOnly={Boolean(importedArchive) || terminal || sessionId === null}
+          >
+            <MessageTimeline
+              renderMessageText={renderMessageText}
+              artifactScope={{
+                client: context.client,
+                workspaceId: context.workspaceId,
+                sessionId: sessionId ?? undefined,
+                override: resolveLink,
+              }}
+              resolveLink={links}
+              renderInteractiveBlock={
+                renderInteractiveBlock === false
+                  ? undefined
+                  : (renderInteractiveBlock ?? defaultInteractiveBlock)
+              }
+              userMessageDisclosureLabels={userMessageDisclosureLabels}
+              genieLoading={loadingOptions}
+              renderAllowanceExhausted={renderAllowanceExhausted}
+              allowanceExhaustedLabels={allowanceExhaustedLabels}
+              // Isolated and clipped: floating navigation stays inside the timeline.
+              className="isolate min-h-0 flex-1 overflow-hidden"
+              {...(toolRegistry ? { toolRegistry } : {})}
+              {...retainedLoaders}
+              {...(onOpenSession ? { onOpenSession } : {})}
+              {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
+              events={feed.events}
+              items={conversation.timeline}
+              turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+              agentSignals={signals.turnDetail}
+              renderAuthNeeded={(item) =>
+                timelineProps?.renderAuthNeeded?.(item) ??
+                (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                  <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+                ) : (
+                  renderStockAuthNeeded(item)
+                ))
+              }
+              emptyState={timelineProps?.emptyState}
+              renderMessageSender={timelineProps?.renderMessageSender}
+              status={status}
+              pause={timelineLivePause(voiceControl)}
+              hasOlder={feed.hasOlder}
+              loadingOlder={feed.loadingOlder}
+              onLoadOlder={feed.loadOlder}
+              hasNewer={feed.hasNewer}
+              loadingNewer={feed.loadingNewer}
+              onLoadNewer={feed.loadNewer}
+              onJumpToStart={async () => {
+                await feed.loadOldest();
+              }}
+              loadingOldest={feed.loadingOldest}
+              onJumpToLatest={feed.jumpToLatest}
+              onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+              // A narrow embed above a decision card has no room for the pill.
+              questionNavMinViewportHeight={320}
+            />
+          </InteractiveAnswerProvider>
         )}
         {importedArchive ? (
-          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-fg-muted" role="status">
             {t("sessionConversation.archivedConversationReadOnly")}
           </p>
         ) : (
@@ -768,15 +813,23 @@ function ConversationView({
                 <ApprovalSurface
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
+                  {...reviewLoaders}
                   approvals={approvals}
-                  onApprove={async (approval) => {
-                    await control.approve(approval.id);
+                  // A refusal rejects, so the card (or Approve all) names it
+                  // and keeps the action waiting.
+                  onApprove={async (approval, answer) => {
+                    await control.approve(approval.id, undefined, answer, { throwOnError: true });
                   }}
                   onReject={async (approval) => {
-                    await control.reject(approval.id);
+                    await control.reject(approval.id, undefined, { throwOnError: true });
                   }}
                   responding={control.responding}
-                  error={control.error}
+                  // A 409 means it was already decided: nothing to show.
+                  error={
+                    control.error instanceof OpenGeniApiError && control.error.status === 409
+                      ? null
+                      : control.error
+                  }
                 />
               ) : null}
               <ProviderRecoveryNotice
@@ -784,7 +837,15 @@ function ConversationView({
                 recovery={providerRecovery}
               />
               {/* Links in agent questions resolve like links in its replies. */}
-              <OpenGeniLinkProvider resolveLink={links}>
+              <OpenGeniLinkProvider
+                resolveLink={links}
+                artifactScope={{
+                  client: context.client,
+                  workspaceId: context.workspaceId,
+                  sessionId: sessionId ?? undefined,
+                  override: resolveLink,
+                }}
+              >
                 <HumanInputSurface
                   className="mx-auto max-w-3xl"
                   autoFocus={false}
@@ -808,17 +869,18 @@ function ConversationView({
                 client={context.client}
                 workspaceId={context.workspaceId}
                 events={feed.events}
+                goal={signals.goal}
                 chrome={
                   terminal
                     ? {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         sessionStatus: status,
                         readOnly: true,
                         onOpenSession,
                       }
                     : {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         composer,
                         queuedRecall,
@@ -870,9 +932,6 @@ function ConversationView({
                       loading={catalog.loading}
                       error={catalog.error?.message}
                       disabled={sessionId === null || terminal}
-                      // A session frozen on Codex remote compaction refuses
-                      // other providers' models; offer them only as disabled.
-                      codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
                       sessionKey={sessionId ?? undefined}
                       onOpenChange={(open) => {
                         if (open) void catalog.refresh();
@@ -922,13 +981,42 @@ type ConversationChromeProps = {
   client: unknown;
   workspaceId: string;
   events: UseGoalOptions["events"];
+  /** Show the goal pill (and read the goal) when the client can reach goals. */
+  goal: boolean;
   chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
 };
+
+type ConversationChromeExtras = NonNullable<SessionConversationProps["chromeProps"]>;
+
+/**
+ * The host's chrome extras without the segments it hides, in the composer's
+ * readable column: the row lines up with the composer in a wide panel.
+ */
+function withoutHiddenSignals(
+  chrome: SessionConversationProps["chromeProps"],
+  signals: ResolvedAgentSignals,
+): ConversationChromeExtras {
+  const {
+    agentsPanel,
+    agentsSignal,
+    commandsPanel,
+    commandsCount,
+    className,
+    ...rest
+  }: ConversationChromeExtras = chrome ?? {};
+  return {
+    ...rest,
+    ...(signals.agents ? { agentsPanel, agentsSignal } : {}),
+    ...(signals.commands ? { commandsPanel, commandsCount } : {}),
+    className: cn("mx-auto max-w-3xl", className),
+  };
+}
 
 /** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
 function ConversationChrome(props: ConversationChromeProps) {
   const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
   const canReachGoals =
+    props.goal &&
     typeof goals.getGoal === "function" &&
     typeof goals.updateGoal === "function" &&
     typeof goals.deleteGoal === "function";
@@ -1028,7 +1116,7 @@ function useDefaultInteractiveBlock(
 
 type RetainedLoaderClient = Partial<
   Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createRetainedArtifactDownloadUrl"
     | "downloadRetainedArtifact"
     | "downloadRetainedScreenshot"
@@ -1106,7 +1194,9 @@ export function useComposerTranscription(
     key: string;
     enabled: boolean;
   } | null>(null);
-  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const reader = client as Partial<
+    Pick<ChatClient<OpenGeniClient>, "getWorkspace" | "transcribeAudio">
+  >;
   const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
     if (!supported) return;
@@ -1138,8 +1228,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
-              Partial<Pick<OpenGeniClient, "requestJson">>,
+            client: reader as Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+              Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

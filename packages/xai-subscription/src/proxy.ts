@@ -1,13 +1,18 @@
 import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "@opengeni/network";
 
 import { runBoundedXaiOperation } from "./bounded-operation";
+import { adoptXaiClientVersionFloor, currentXaiClientVersion } from "./client-version";
 import {
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
   XAI_SUBSCRIPTION_PROXY_BASE_URL,
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
-import { XaiSubscriptionReloginRequired, XaiSubscriptionTransientError } from "./errors";
+import {
+  readBoundedXaiErrorText,
+  XaiSubscriptionClientOutdatedError,
+  XaiSubscriptionReloginRequired,
+  XaiSubscriptionTransientError,
+} from "./errors";
 import type { XaiFetchLike } from "./fetch";
 import type { XaiSubscriptionTokenSnapshot } from "./request-context";
 
@@ -38,8 +43,10 @@ export async function fetchXaiProxyJson<T>(input: {
   const timeoutMs = input.timeoutMs ?? 15_000;
   const maxBytes = input.maxBytes ?? OAUTH_MAX_RESPONSE_BYTES;
   const url = `${(input.baseUrl ?? XAI_SUBSCRIPTION_PROXY_BASE_URL).replace(/\/+$/, "")}/${input.path.replace(/^\/+/, "")}`;
+  let presented = currentXaiClientVersion(input.context.clientVersion);
   const request = async (token: XaiSubscriptionTokenSnapshot, signal: AbortSignal) => {
-    const headers = xaiSubscriptionProxyHeaders(token, input.context.clientVersion);
+    presented = currentXaiClientVersion(input.context.clientVersion);
+    const headers = xaiSubscriptionProxyHeaders(token, presented);
     return await fetchImpl(url, { method: "GET", redirect: "error", headers, signal });
   };
   const fetched = await runBoundedXaiOperation(async (signal) => {
@@ -48,28 +55,44 @@ export async function fetchXaiProxyJson<T>(input: {
       await response.body?.cancel().catch(() => undefined);
       response = await request(await input.context.refresh(), signal);
     }
-    if (response.status === 401 || response.status === 403) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new XaiSubscriptionReloginRequired();
+    let text = "";
+    if (!response.ok) {
+      text = await readBoundedXaiErrorText(response);
+      if (adoptXaiClientVersionFloor(text, presented)) {
+        // The provider named a newer minimum client: one retry presents it.
+        response = await request(await input.context.getToken(), signal);
+        text = response.ok ? "" : await readBoundedXaiErrorText(response);
+      }
     }
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      const outdated = XaiSubscriptionClientOutdatedError.fromText(text, response.status);
+      if (outdated) return { outdated };
+      if (response.status === 401 || response.status === 403) {
+        throw new XaiSubscriptionReloginRequired();
+      }
       throw new XaiSubscriptionTransientError(
         `xAI ${input.label} failed (${response.status})`,
         response.status,
       );
     }
-    return await readResponseJsonBounded<T>(response, maxBytes, `xAI ${input.label}`, { signal });
+    return {
+      value: await readResponseJsonBounded<T>(response, maxBytes, `xAI ${input.label}`, {
+        signal,
+      }),
+    };
   }, timeoutMs);
   if (!fetched.ok) {
     throw new XaiSubscriptionTransientError(`xAI ${input.label} ${fetched.reason}`);
   }
-  return fetched.value;
+  // The bounded operation reports any throw as a network error, so the one
+  // refusal that must stay distinguishable leaves it as a value.
+  if ("outdated" in fetched.value) throw fetched.value.outdated;
+  return fetched.value.value;
 }
 
 export function xaiSubscriptionProxyHeaders(
   token: XaiSubscriptionTokenSnapshot,
-  clientVersion = XAI_CLIENT_VERSION,
+  clientVersion = currentXaiClientVersion(),
 ): Headers {
   return new Headers({
     accept: "application/json",

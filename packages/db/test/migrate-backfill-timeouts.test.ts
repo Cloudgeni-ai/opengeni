@@ -1,17 +1,44 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
-import { readFileSync } from "node:fs";
 import postgres from "postgres";
 import { executeMigrationFile } from "../src/migrate";
 
 let blank: BlankTestDatabase;
-const backfillFile = "0867_member_teammate_permissions_backfill.sql";
-const backfill = readFileSync(new URL(`../drizzle/${backfillFile}`, import.meta.url), "utf8");
-const legacyPermissions = JSON.parse(backfill.match(/permissions @> '([\s\S]*?)'::jsonb/)![1]!);
-const indexFiles = [
-  "0875_realtime_history_reference_index.sql",
-  "0879_unsettled_admissions_session_index.sql",
-] as const;
+const legacyPermissions = ["workspace:read", "sessions:read"];
+const backfillFile = "0999_member_permissions_backfill.sql";
+const backfill = `-- deployment-mode: rolling
+-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
+WITH candidates AS MATERIALIZED (
+  SELECT membership.id
+  FROM workspace_memberships membership
+  WHERE membership.permissions = '${JSON.stringify(legacyPermissions)}'::jsonb
+  ORDER BY membership.id
+  LIMIT 500
+  FOR UPDATE OF membership
+), backfilled AS (
+  UPDATE workspace_memberships membership
+  SET permissions = '${JSON.stringify([...legacyPermissions, "connections:write"])}'::jsonb,
+      updated_at = pg_catalog.clock_timestamp()
+  FROM candidates
+  WHERE membership.id = candidates.id
+  RETURNING membership.id
+)
+SELECT id FROM backfilled;
+`;
+const indexMigrations: Record<string, string> = {
+  "0997_realtime_history_reference_index.sql": `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+CREATE INDEX CONCURRENTLY IF NOT EXISTS session_realtime_entries_history_item_idx
+ON session_realtime_entries (history_item_id)
+WHERE history_item_id IS NOT NULL;
+`,
+  "0998_unsettled_admissions_session_index.sql": `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sandbox_workspace_mutation_admissions_unsettled_session_idx
+ON sandbox_workspace_mutation_admissions (workspace_id, session_id)
+WHERE settled_at IS NULL;
+`,
+};
 
 beforeAll(async () => {
   const acquired = await acquireBlankTestDatabase("backfill-timeouts");
@@ -42,7 +69,7 @@ async function fixture(schema: string) {
   return runner;
 }
 
-test("0867 restores inherited timeout values after successful batches and empty completion", async () => {
+test("a batched backfill restores inherited timeout values after successful batches and empty completion", async () => {
   const runner = await fixture("backfill_success");
   try {
     await runner.unsafe(`create table batch_settings(statement_timeout text, lock_timeout text);
@@ -66,7 +93,7 @@ test("0867 restores inherited timeout values after successful batches and empty 
 });
 
 for (const failure of ["error", "cancel"] as const) {
-  test(`0867 restores inherited settings after ${failure} and rolls back its batch`, async () => {
+  test(`a batched backfill restores inherited settings after ${failure} and rolls back its batch`, async () => {
     const runner = await fixture(`backfill_${failure}`);
     const observer = postgres(blank.databaseUrl, { max: 1 });
     let running: Promise<unknown> | undefined;
@@ -108,8 +135,8 @@ for (const failure of ["error", "cancel"] as const) {
   }, 30_000);
 }
 
-for (const file of indexFiles) {
-  test(`${file} after0867 retains the inherited deadline through snapshot cancellation and retry`, async () => {
+for (const [file, source] of Object.entries(indexMigrations)) {
+  test(`${file} after a backfill retains the inherited deadline through snapshot cancellation and retry`, async () => {
     const schema = `after_${file.slice(0, 4)}`;
     const runner = await fixture(schema);
     const reader = postgres(blank.databaseUrl, { max: 1 });
@@ -118,7 +145,6 @@ for (const file of indexFiles) {
     const release = Promise.withResolvers<void>();
     let reading: Promise<unknown> | undefined;
     let building: Promise<unknown> | undefined;
-    const source = readFileSync(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
     const indexName = source.match(/IF NOT EXISTS (\w+)/)![1]!;
     try {
       await runner.unsafe(`create table snapshot_source(id integer);

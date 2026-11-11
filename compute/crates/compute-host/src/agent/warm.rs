@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use compute_core::{DiskSpace, Input};
+use compute_core::{Claims, DiskSpace, Input};
 use compute_engine::Engine;
 use tokio::time::Instant;
 
@@ -16,6 +16,7 @@ use crate::protocol::{Id, ImageId};
 use crate::rootfs::Cache;
 use crate::store::Store;
 
+use super::relief::{self, Kept};
 use super::{Event, HostAgent, HostConfig, SAVE_EXTRA, Warm};
 
 /// How often unused images are looked for.
@@ -57,6 +58,7 @@ impl Warm {
             boot_args: images.boot_args.clone(),
             networked: host.network.is_some(),
             memory: format!("{:?}", engine.memory_profile()),
+            runtime: engine.runtime().to_owned(),
             ready_port,
             hashes: Hashes::load(&templates_dir(root)),
         });
@@ -160,16 +162,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// The template a new sandbox of `shape` starts from, if one is ready.
-    /// Without one, its build starts in the background: the sandbox boots
-    /// cold rather than wait.
-    pub(super) fn template_for(&mut self, shape: Shape) -> Option<Arc<Template>> {
-        let warm = self.warm.as_mut()?;
-        let (template, build) = warm.pool.take(shape, Instant::now());
-        if build {
-            self.build_template(shape);
+    /// The template a new sandbox of `shape` starts from, if one is ready,
+    /// and whether its build is wanted: then the caller starts it with
+    /// [`Self::build_template`] once the create has booked its first wake,
+    /// so the build takes only room the create leaves, and the sandbox
+    /// boots cold rather than wait; or takes the want back with
+    /// [`Self::unwant_template`] if the create went no further.
+    pub(super) fn template_for(&mut self, shape: Shape) -> (Option<Arc<Template>>, bool) {
+        self.warm
+            .as_mut()
+            .map_or((None, false), |warm| warm.pool.take(shape, Instant::now()))
+    }
+
+    /// Takes back the build of `shape`'s template that
+    /// [`Self::template_for`] said is `wanted` and that did not start, so
+    /// the next create asks for it again.
+    pub(super) fn unwant_template(&mut self, shape: Shape, wanted: bool) {
+        if let Some(warm) = self.warm.as_mut().filter(|_| wanted) {
+            warm.pool.unwant(shape);
         }
-        template
     }
 
     /// The image a sandbox's disk starts as: `image`, or the host's base
@@ -182,17 +193,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// unused, unless a template of theirs is kept or being built; looks at
     /// most once a minute.
     pub(super) fn retire_unused_images(&mut self) {
-        if self.rootfs_retired.elapsed() < ROOTFS_RETIRE_EVERY {
+        if !self.relief.retire_images_now(ROOTFS_RETIRE_EVERY) {
             return;
         }
-        self.rootfs_retired = Instant::now();
         let keep = self
             .warm
             .as_ref()
             .map(|warm| warm.pool.images())
             .unwrap_or_default();
         let rootfs = Arc::clone(&self.rootfs);
-        tokio::spawn(async move { rootfs.retire(&keep, SystemTime::now()).await });
+        let (observer, measured) = (self.observer.clone(), self.measured_images());
+        tokio::spawn(async move {
+            let removed = rootfs.retire(&keep, SystemTime::now()).await;
+            relief::retired_images(&observer, &removed, &measured);
+        });
     }
 
     /// Records a create of `shape`, which keeps its template from retiring.
@@ -215,6 +229,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut retired = Vec::new();
         for shape in warm.uses.unused(SystemTime::now()) {
             if let Some(gone) = warm.pool.retire(shape) {
+                tracing::info!(%shape, "template unused for long; retired");
                 retired.push(shape);
                 if let Some(template) = gone.template {
                     tokio::spawn(pool::remove(&template));
@@ -222,6 +237,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         for shape in retired {
+            self.retired_unused(Kept::Template(shape));
             self.discard_stale_ready(shape);
         }
     }
@@ -330,8 +346,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// sandbox. Its memory, and the disk its snapshot may write, are booked
     /// with the core as a spare VM's, within what the core can spare;
     /// without that room it waits as after a failed build, and sandboxes
-    /// boot cold meanwhile.
-    fn build_template(&mut self, shape: Shape) {
+    /// boot cold meanwhile. Creates the host took come first: a build
+    /// started for one waits for that create's booking, and creates still
+    /// waiting for their image or a disk reading hold theirs (see
+    /// [`HostAgent::hold_room`]).
+    pub(super) fn build_template(&mut self, shape: Shape) {
         if !self.may_act() {
             // Asked for again by the next create or refill once the lease
             // is renewed.
@@ -357,20 +376,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.save_copies,
             SAVE_EXTRA,
         );
+        // A build keeps no room for claims of ready sandboxes: a template
+        // serves every create of its shape, and ready ones are the first
+        // ended when a wake needs room.
         if !disk.as_ref().is_ok_and(|disk| {
             self.core
-                .spare_fits(shape.bytes(), *disk, shape.cpu_millis())
+                .spare_fits(shape.bytes(), *disk, shape.cpu_millis(), Claims::default())
         }) {
             if let Some(warm) = &mut self.warm {
-                let problem = match &disk {
-                    Ok(_) => {
-                        "the host has no memory, disk or processor time to spare for a template \
-                         build"
-                            .into()
+                match &disk {
+                    // Nothing failed: creates the host took come first,
+                    // and the build is tried again once one may fit.
+                    Ok(_) => warm.pool.put_off(shape, Instant::now()),
+                    Err(error) => {
+                        let problem = format!("reading the base image or kernel: {error}");
+                        warm.pool.built(shape, Err(problem), Instant::now());
                     }
-                    Err(error) => format!("reading the base image or kernel: {error}"),
-                };
-                warm.pool.built(shape, Err(problem), Instant::now());
+                }
             }
             return;
         }

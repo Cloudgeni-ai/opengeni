@@ -660,7 +660,7 @@ describe("ComputerDriver", () => {
     expect(transport.stoppedCaptures).toBe(1);
   });
 
-  test("pastes text the native keymap refused before typing any key", async () => {
+  test("pastes text the native keymap refused before typing any key, restoring the clipboard", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
       computerSessionId,
@@ -671,12 +671,12 @@ describe("ComputerDriver", () => {
     await expect(driver.dispatch(typing)).resolves.toMatchObject({
       observationId: "observation-2",
     });
+    // The Linux helper's paste carries its text and puts the previous
+    // clipboard back once the target has read it.
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "paste" }],
-      ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["dispatch", { type: "clipboard", operation: "paste" }],
+      ["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
+      ["dispatch", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
     ]);
     expect(transport.dispatched).toMatchObject({
       operationId: typing.operationId,
@@ -684,6 +684,45 @@ describe("ComputerDriver", () => {
       expectedTargetGeneration: typing.expectedTargetGeneration,
       expectedObservationId: typing.expectedObservationId,
     });
+  });
+
+  test("writes then pastes through a helper without the restoring paste, or another backend", async () => {
+    const older = new UntypeableTextTransport();
+    // An older Linux helper accepts text only on a clipboard write.
+    older.refuseRestoringPaste = new ComputerBackendError(
+      "invalid_action",
+      "native clipboard text is required exactly for write",
+      false,
+      false,
+    );
+    const other = new UntypeableTextTransport();
+    Object.defineProperty(other, "identity", {
+      value: { adapterId: "opengeni.cua.linux.v1", platform: "linux" },
+    });
+    for (const [transport, refused] of [
+      [older, true],
+      [other, false],
+    ] as const) {
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      await expect(driver.dispatch(typeCommand("ÆØÅ"))).resolves.toMatchObject({
+        observationId: "observation-2",
+      });
+      const restoring: UntypeableTextTransport["calls"] = refused
+        ? [["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ" }]]
+        : [];
+      expect(transport.calls).toEqual([
+        ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ" }],
+        ...restoring,
+        ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["validate", { type: "clipboard", operation: "paste" }],
+        ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["dispatch", { type: "clipboard", operation: "paste" }],
+      ]);
+    }
   });
 
   test("never pastes after possible input, for keys with their own effect, or without a clipboard", async () => {
@@ -738,114 +777,26 @@ describe("ComputerDriver", () => {
     }
   });
 
-  test("a backend's failure text is redacted in full before it is bounded", async () => {
-    const raw = ["{{", "secret:Desk/token", "}}"].join("");
-    for (const secret of [
-      "line-one\nline-two-secret",
-      `long-${"x".repeat(3_000)}-secret`,
-      "trailing-secret \n",
-    ]) {
-      const transport = new FixtureNativeTransport();
-      transport.dispatchError = new ComputerBackendError(
-        "driver_failed",
-        `CUA type_text refused the operation: could not type ${secret} into the field`,
-        false,
-        false,
-      );
-      const driver = new ComputerDriver({
-        computerSessionId,
-        controllerGeneration,
-        client: transport,
-      });
-      const error = await driver
-        .dispatch({
-          ...typeCommand(raw),
-          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-        })
-        .then(
-          () => null,
-          (caught: unknown) => caught as Error,
-        );
-      expect(error?.message).toBe(
-        "CUA type_text refused the operation: could not type [secret] into the field",
-      );
-    }
-  });
-
-  test("a read failure's backend text is redacted against typed secrets", async () => {
-    const raw = ["{{", "secret:Desk/read token", "}}"].join("");
-    const secret = "read-path-secret-0123456789";
-    const transport = new FixtureNativeTransport();
-    const driver = new ComputerDriver({
-      computerSessionId,
-      controllerGeneration,
-      client: transport,
-    });
-    await driver.dispatch({
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-    });
-    transport.targetsError = new ComputerBackendError(
-      "driver_failed",
-      `CUA list_windows did not return a valid result: window ${secret} is gone`,
-      false,
-      false,
-    );
-    const error = await driver.listTargets().then(
-      () => null,
-      (caught: unknown) => caught as Error,
-    );
-    expect(error?.message).toBe(
-      "CUA list_windows did not return a valid result: window [secret] is gone",
-    );
-  });
-
-  test("never pastes text that carries a resolved secret", async () => {
+  test("pastes a resolved value the layout cannot type, like any other text", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
     });
-    const raw = "{{secret:Desk/password}}";
-    const typing: ComputerActionCommand = {
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: "pÆss密" },
-    };
-    const error = await driver.dispatch(typing).then(
-      () => null,
-      (caught: unknown) => caught as Error,
-    );
-    expect(error).toMatchObject({ code: "unsupported" });
-    expect(error?.message).not.toContain("pÆss密");
+    const raw = ["{{", "secret:Desk/password", "}}"].join("");
+    const value = "pÆss密";
+    await expect(
+      driver.dispatch({
+        ...typeCommand(raw),
+        secretValues: { [referenceKey(parseSecretReference(raw))]: value },
+      }),
+    ).resolves.toMatchObject({ observationId: "observation-2" });
     expect(transport.calls).toEqual([
-      ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
+      ["dispatch", { type: "keyboard", action: "type", value }],
+      ["validate", { type: "clipboard", operation: "paste", text: value }],
+      ["dispatch", { type: "clipboard", operation: "paste", text: value }],
     ]);
-  });
-  test("redacts a typed secret from later observations of the field that holds it", async () => {
-    const transport = new EchoingFieldTransport();
-    const driver = new ComputerDriver({
-      computerSessionId,
-      controllerGeneration,
-      client: transport,
-    });
-    const raw = ["{{", "secret:Desk/api key", "}}"].join("");
-    const secret = "sk-live-0123456789abcdef";
-    const typed = await driver.dispatch({
-      ...typeCommand(raw),
-      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
-    });
-    expect(JSON.stringify(typed)).not.toContain(secret);
-    expect(transport.typed).toBe(secret);
-    // A later observation carries no secret of its own, yet the desktop
-    // still shows the field's value: it stays redacted.
-    const later = await driver.observe("window-1");
-    expect(JSON.stringify(later)).not.toContain(secret);
-    expect(later.semantic?.kind === "snapshot" && later.semantic.roots[0]).toMatchObject({
-      role: "textbox",
-      value: "[secret]",
-    });
-    expect(JSON.stringify(await driver.listTargets())).not.toContain(secret);
   });
 });
 
@@ -1019,8 +970,19 @@ class UntypeableTextTransport extends FixtureNativeTransport {
     false,
   );
 
+  refuseRestoringPaste: ComputerBackendError | null = null;
+
   override async validate(nativeCommand: ComputerBackendActionCommand): Promise<void> {
     this.calls.push(["validate", nativeCommand.action]);
+    const action = nativeCommand.action;
+    if (
+      this.refuseRestoringPaste &&
+      action.type === "clipboard" &&
+      action.operation === "paste" &&
+      action.text !== undefined
+    ) {
+      throw this.refuseRestoringPaste;
+    }
     await super.validate(nativeCommand);
   }
 
@@ -1035,37 +997,6 @@ function typeCommand(value: string): ComputerActionCommand {
   return { ...command(), action: { type: "keyboard", action: "type", value } };
 }
 
-/** A desktop whose text field (and window title) shows what was typed into it. */
-class EchoingFieldTransport extends FixtureNativeTransport {
-  typed = "";
-
-  private field(observationId: string) {
-    return {
-      ...observation(observationId),
-      roots: [
-        { ref: "e1", role: "textbox", name: "API key", value: this.typed, states: [], actions: [] },
-      ],
-    };
-  }
-
-  override async observe() {
-    return { ...this.field("observation-1"), frameId: this.observationFrameId };
-  }
-
-  override async targets() {
-    return (await super.targets()).map((entry) => ({ ...entry, title: `Settings ${this.typed}` }));
-  }
-
-  override async dispatch(nativeCommand: ComputerBackendActionCommand) {
-    if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
-      this.typed = nativeCommand.action.value;
-    return this.field("observation-2");
-  }
-}
-
-/** Numbers frames when a capture lands, like the native helpers, whose newest
- * frame of a target alone keeps its authority. Starts with no frame, as after
- * an action. */
 class NewestFrameTransport extends FixtureNativeTransport {
   frames: string[] = [];
   primers = 0;

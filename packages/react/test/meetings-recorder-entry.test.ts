@@ -49,6 +49,7 @@ describe("@opengeni/react/meetings-recorder", () => {
     expect([...seen].map((file) => file.slice(SOURCE.length + 1)).sort()).toEqual([
       "meetings-recorder.ts",
       "meetings/recorder-context.tsx",
+      "meetings/recorder-state.ts",
     ]);
     // The recorder host and everything it needs arrive in a separate chunk.
     expect(readFileSync(resolve(SOURCE, "meetings/recorder-context.tsx"), "utf8")).toContain(

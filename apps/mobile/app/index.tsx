@@ -33,11 +33,16 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import { useAccount } from "@/account";
+import { useAccount, usePickAccount } from "@/account";
 import { useAgentCall } from "@/call";
-import { cachedLists, rememberLists } from "@/session-list-cache";
+import {
+  cachedLists,
+  rememberLists,
+  rememberSessionRow,
+  subscribeLists,
+} from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
-import { serverLabel } from "@/account-store";
+import { accountMenuTitle } from "@/account-switching";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import {
@@ -46,11 +51,13 @@ import {
   useNewSessionOptions,
 } from "@/new-session-options";
 import { useHomeDraftSync } from "@/new-session-draft-sync";
+import { createSessionFromDraft } from "@/new-session-create";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
+import { rememberPendingPrompt } from "@/pending-prompt";
 
 export default function HomeScreen() {
   return (
@@ -62,13 +69,14 @@ export default function HomeScreen() {
 
 /* Signed out: the web sign-in. Signed in: the home canvas. */
 function Gate() {
-  const { status } = useAccount();
+  const { status, account } = useAccount();
   const theme = useNativeTimelineTheme();
   if (status === "signedOut") {
     return (
       <>
         <Stack.Screen options={{ headerShown: false }} />
-        <SignInScreen />
+        {/* Keyed by account: picking another account from its list starts over for it. */}
+        <SignInScreen key={account?.id ?? "new"} target={account} />
       </>
     );
   }
@@ -102,7 +110,6 @@ function Home() {
   const {
     account,
     accounts,
-    switchAccount,
     adapters,
     client,
     config,
@@ -113,6 +120,7 @@ function Home() {
     error,
     reload,
   } = useAccount();
+  const pickAccount = usePickAccount();
   const [lists, setLists] = useState<SessionLists>(
     () => cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS,
   );
@@ -147,6 +155,12 @@ function Home() {
   // A workspace switch shows that workspace's last list at once.
   useEffect(() => {
     setLists(cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS);
+    if (!workspaceId) return;
+    // A chat open above this screen keeps its row here current, so coming back
+    // shows the list already in order instead of reordering under a tap.
+    return subscribeLists(workspaceId, (next) => {
+      if (next.home) setLists(next.home);
+    });
   }, [workspaceId]);
 
   useFocusEffect(
@@ -245,25 +259,42 @@ function Home() {
     const text = draft.trim();
     if (!workspaceId || !canCreate) return;
     setCreating(true);
+    const sentAt = new Date().toISOString();
     try {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
       const chosen = options.request();
-      const created = await client.createSession(workspaceId, {
-        // A file-only message still says what it carries, as the web composer does.
-        initialMessage: text || "See the attached files.",
-        ...(model ? { model } : {}),
-        ...(effort ? { reasoningEffort: effort } : {}),
-        ...(latencyMode !== "standard" ? { latencyMode } : {}),
-        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
-        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
-        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.excludedMcpServerIds
-          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
-          : {}),
+      // Names the draft this Send was composed in. Once the chat is accepted
+      // the server clears that draft, unless another device saved a newer one.
+      const created = await createSessionFromDraft(
+        client,
+        workspaceId,
+        {
+          // A file-only message still says what it carries, as the web composer does.
+          initialMessage: text || "See the attached files.",
+          ...(model ? { model } : {}),
+          ...(effort ? { reasoningEffort: effort } : {}),
+          ...(latencyMode !== "standard" ? { latencyMode } : {}),
+          ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+          ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+          ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+          ...(chosen.excludedMcpServerIds
+            ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+            : {}),
+          resources: [...chosen.resources, ...attachments.readyResources],
+        },
+        flushed?.revision ?? null,
+      );
+      rememberPendingPrompt(client, workspaceId, created.id, {
+        text: text || "See the attached files.",
+        sentAt,
         resources: [...chosen.resources, ...attachments.readyResources],
       });
-      if (flushed) await draftSync.acknowledgeConsumed(flushed).catch(() => null);
+      // The new chat leads the lists before anyone comes back to them.
+      rememberSessionRow(created, { created: true });
+      // The draft is the server's now. Settling its saved copy starts here, before
+      // the composer empties, but needn't hold the chat back.
+      if (flushed) void draftSync.acknowledgeConsumed(flushed).catch(() => null);
       setDraft("");
       attachments.clear();
       options.reset();
@@ -370,12 +401,9 @@ function Home() {
                           inline: true,
                           items: accounts.map((each) => ({
                             type: "action" as const,
-                            label:
-                              servers > 1
-                                ? `${each.email} · ${serverLabel(each.baseUrl)}`
-                                : each.email,
+                            label: accountMenuTitle(each, servers),
                             state: each.id === account?.id ? ("on" as const) : ("off" as const),
-                            onPress: () => switchAccount(each.id),
+                            onPress: () => pickAccount(each.id),
                           })),
                         },
                         {
@@ -431,7 +459,7 @@ function Home() {
             textAlign: "center",
           }}
         >
-          What should the agent do?
+          What can I help with?
         </Text>
         <View style={{ marginTop: 28 }}>
           <SessionComposer
@@ -440,7 +468,7 @@ function Home() {
             onSend={() => void create()}
             canSend={canCreate}
             sending={creating}
-            placeholder="Describe a task for the agent..."
+            placeholder="Ask anything, or describe what you need..."
             voice={voice}
             call={
               workspaceId
@@ -518,6 +546,7 @@ function Home() {
             <SessionRowList
               sessions={sections.pinned}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
@@ -529,6 +558,7 @@ function Home() {
             <SessionRowList
               sessions={sections.recent}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />

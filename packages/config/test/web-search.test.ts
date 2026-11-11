@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   WEB_SEARCH_PROVIDER_CATALOG,
   WEB_SEARCH_PROVIDER_IDS,
   getSettings,
+  hostedWebSearchCharge,
+  paidHostedToolsChargeCredits,
   resolveWebSearchProvider,
   webSearchCallPricing,
   webSearchCreditMicros,
@@ -316,9 +319,136 @@ describe("web search tool plan", () => {
       ),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
   });
+
+  test("paid hosted tools billing credits swaps hosted search for provider tools", () => {
+    const billed: WebSearchSettings = {
+      ...base,
+      billingMode: "stripe",
+      webSearchProvider: "tinyfish,parallel",
+      webSearchProviderCredentials: keys({ tinyfish: "t", parallel: "p" }),
+    };
+    expect(
+      webSearchToolPlan(billed, { hostedWebSearch: true, hostedToolsBillCredits: true }),
+    ).toEqual({ hostedWebSearch: false, providerTools: ["web_search", "web_fetch"] });
+    expect(
+      webSearchToolPlan(billed, { hostedWebSearch: true, hostedToolsBillCredits: false }),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    // Hosted search stays when the turn cannot get a provider web_search.
+    expect(
+      webSearchToolPlan(
+        { ...billed, webSearchProvider: "parallel" },
+        { hostedWebSearch: true, hostedToolsBillCredits: true, creditsDisabled: true },
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    expect(
+      webSearchToolPlan(
+        { ...base, billingMode: "stripe" },
+        { hostedWebSearch: true, hostedToolsBillCredits: true },
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+  });
+
+  test("the single check point charges only credit-billed models while billing is active", () => {
+    const account = { accountId: "11111111-1111-4111-8111-111111111111" };
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(true);
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "managed" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(true);
+    // Own keys, subscriptions and free-policy models.
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe" },
+        { ...account, chargesOpenGeniCredits: false },
+      ),
+    ).toBe(false);
+    // Billing-off deployments.
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "none" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(false);
+  });
+
+  test("legacy billing accounts (CloudGeni's host account) see no new charges", () => {
+    const legacy = {
+      accountId: "25eacc5d-f383-4f79-910a-b3d11dbf1310",
+      chargesOpenGeniCredits: true,
+    };
+    // The default list exempts CloudGeni's host account.
+    expect(paidHostedToolsChargeCredits({ billingMode: "stripe" }, legacy)).toBe(false);
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "managed" },
+        { ...legacy, accountId: legacy.accountId.toUpperCase() },
+      ),
+    ).toBe(false);
+    // OPENGENI_BILLING_LEGACY_ACCOUNT_IDS overrides the default list.
+    const listed = "22222222-2222-4222-8222-222222222222";
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe", billingLegacyAccountIds: [listed] },
+        { accountId: listed, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(false);
+    expect(
+      paidHostedToolsChargeCredits({ billingMode: "stripe", billingLegacyAccountIds: [] }, legacy),
+    ).toBe(true);
+  });
+
+  test("every internal account on the default legacy list sees no new charges", () => {
+    const billed = getSettings({ OPENGENI_ENV: "test", OPENGENI_USAGE_LIMITS_MODE: "managed" });
+    expect(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS.length).toBeGreaterThan(1);
+    for (const accountId of DEFAULT_BILLING_LEGACY_ACCOUNT_IDS) {
+      const turn = { accountId, chargesOpenGeniCredits: true };
+      // Loaded settings and a caller that passes no list both use the default.
+      expect(paidHostedToolsChargeCredits(billed, turn)).toBe(false);
+      expect(paidHostedToolsChargeCredits({ billingMode: "stripe" }, turn)).toBe(false);
+    }
+    // An ordinary account on the same settings is charged.
+    expect(
+      paidHostedToolsChargeCredits(billed, {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        chargesOpenGeniCredits: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false turns the new charges off", () => {
+    const turn = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      chargesOpenGeniCredits: true,
+    };
+    const billed = { OPENGENI_ENV: "test", OPENGENI_USAGE_LIMITS_MODE: "managed" };
+    // On by default.
+    expect(getSettings(billed).paidHostedToolsCreditBilling).toBe(true);
+    expect(paidHostedToolsChargeCredits(getSettings(billed), turn)).toBe(true);
+    const off = getSettings({ ...billed, OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING: "false" });
+    expect(off.paidHostedToolsCreditBilling).toBe(false);
+    expect(paidHostedToolsChargeCredits(off, turn)).toBe(false);
+  });
 });
 
 describe("web search pricing", () => {
+  test("hosted searches are charged at $10 per 1,000 plus the web-search margin", () => {
+    expect(hostedWebSearchCharge({}, 1)).toEqual({
+      providerMicros: 10_000,
+      creditMicros: 10_500,
+      marginBps: 500,
+    });
+    expect(hostedWebSearchCharge({ creditMarginBpsOverride: 0 }, 3).creditMicros).toBe(30_000);
+    expect(hostedWebSearchCharge({}, 0).creditMicros).toBe(0);
+    expect(() => hostedWebSearchCharge({}, -1)).toThrow();
+  });
+
   test("list prices come from the catalog and keyless calls are free", () => {
     const config = webSearchProviderConfig({
       ...base,

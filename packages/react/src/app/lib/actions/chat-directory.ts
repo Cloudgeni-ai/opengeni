@@ -5,6 +5,7 @@
  * workspace's sidebar order for next and previous chat. It is a cache for speed, never a source of authority: opening a chat
  * still goes through the normal authorized reads.
  */
+import type { SessionAvatar } from "@opengeni/sdk";
 import { useSyncExternalStore } from "react";
 import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
 
@@ -12,9 +13,18 @@ export type ChatRecord = {
   id: string;
   workspaceId: string;
   title: string;
+  /** The chat's avatar, drawn as the sidebar draws it; null when it has none. */
+  avatar: SessionAvatar | null;
   updatedAt: number;
   pinned: boolean;
   archived: boolean;
+  /**
+   * The chat that started this one, for a sub-agent chat; null for a chat of
+   * its own. Kept across reloads, so it is known before the row is read again.
+   */
+  parentId: string | null;
+  /** That chat's title when this record was last written, for when it isn't loaded. */
+  parentTitle: string | null;
   /** Present when the app holds a full or list row, needed for pin and archive. */
   row: SessionListRow | null;
   /** When `row` was last read from the server (ms), so its status is known to be current. */
@@ -42,7 +52,28 @@ function storageKey(subjectId: string): string {
   return `opengeni.recentChats.${subjectId}`;
 }
 
-type StoredRecent = { id: string; workspaceId: string; title: string; at: number };
+type StoredRecent = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  at: number;
+  avatar?: SessionAvatar | undefined;
+  parentId?: string | undefined;
+  parentTitle?: string | undefined;
+};
+
+const AVATAR_KINDS = new Set(["emoji", "icon", "letters", "image"]);
+
+/** A stored avatar, or undefined when it is missing or not one this version draws. */
+function storedAvatar(value: unknown): SessionAvatar | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" && AVATAR_KINDS.has(kind) ? (value as SessionAvatar) : undefined;
+}
+
+function sameAvatar(a: SessionAvatar | null, b: SessionAvatar | null): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
 
 function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
   try {
@@ -60,7 +91,21 @@ function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
       ) {
         return [];
       }
-      return [{ id: entry.id, workspaceId: ws, title: entry.title, at: entry.at }];
+      const avatar = storedAvatar(entry.avatar);
+      const parentId = typeof entry.parentId === "string" ? entry.parentId : undefined;
+      const parentTitle =
+        parentId && typeof entry.parentTitle === "string" ? entry.parentTitle : undefined;
+      return [
+        {
+          id: entry.id,
+          workspaceId: ws,
+          title: entry.title,
+          at: entry.at,
+          ...(avatar ? { avatar } : {}),
+          ...(parentId ? { parentId } : {}),
+          ...(parentTitle ? { parentTitle } : {}),
+        },
+      ];
     });
   } catch {
     return [];
@@ -110,9 +155,12 @@ function directory(subjectId: string): DirectoryState {
             id: item.id,
             workspaceId: item.workspaceId,
             title: item.title,
+            avatar: item.avatar ?? null,
             updatedAt: item.at,
             pinned: false,
             archived: false,
+            parentId: item.parentId ?? null,
+            parentTitle: item.parentTitle ?? null,
             row: null,
             readAt: 0,
           },
@@ -137,9 +185,19 @@ function persistRecent(subjectId: string, state: DirectoryState): void {
   if (typeof window === "undefined") return;
   const stored: StoredRecent[] = state.recent.flatMap((id) => {
     const record = state.rows.get(id);
-    return record
-      ? [{ id, workspaceId: record.workspaceId, title: record.title, at: record.updatedAt }]
-      : [];
+    if (!record) return [];
+    const parentTitle = chatParentTitle(state.rows, record);
+    return [
+      {
+        id,
+        workspaceId: record.workspaceId,
+        title: record.title,
+        at: record.updatedAt,
+        ...(record.avatar ? { avatar: record.avatar } : {}),
+        ...(record.parentId ? { parentId: record.parentId } : {}),
+        ...(record.parentId && parentTitle ? { parentTitle } : {}),
+      },
+    ];
   });
   try {
     window.localStorage.setItem(storageKey(subjectId), JSON.stringify(stored));
@@ -148,17 +206,54 @@ function persistRecent(subjectId: string, state: DirectoryState): void {
   }
 }
 
-export function chatRecordFromRow(row: SessionListRow, readAt: number = Date.now()): ChatRecord {
+export function chatRecordFromRow(
+  row: SessionListRow,
+  readAt: number = Date.now(),
+  parentTitle: string | null = null,
+): ChatRecord {
+  const parentId = row.parentSessionId ?? null;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
     title: sessionDisplayTitle(row),
+    avatar: row.avatar ?? null,
     updatedAt: Date.parse(row.updatedAt) || 0,
     pinned: Boolean(row.pinned),
     archived: Boolean(row.archived),
+    parentId,
+    parentTitle: parentId ? parentTitle : null,
     row,
     readAt,
   };
+}
+
+/**
+ * Whether a chat lists with the person's own chats: every top-level chat, and
+ * a sub-agent chat they pinned. Pinning says "this one is a real agent to me".
+ * Other sub-agent chats show only once opened, or in their own search group.
+ */
+export function listsAsTopLevel(record: Pick<ChatRecord, "parentId" | "pinned">): boolean {
+  return record.parentId === null || record.pinned;
+}
+
+/** The title of the chat a sub-agent chat belongs to, when the app knows it. */
+export function chatParentTitle(
+  rows: ReadonlyMap<string, ChatRecord>,
+  record: Pick<ChatRecord, "parentId" | "parentTitle">,
+): string | null {
+  if (!record.parentId) return null;
+  return rows.get(record.parentId)?.title ?? record.parentTitle;
+}
+
+/** The parent's title to keep on a record: the live one, else what was kept before. */
+function knownParentTitle(state: DirectoryState, row: SessionListRow): string | null {
+  const parentId = row.parentSessionId ?? null;
+  if (!parentId) return null;
+  const previous = state.rows.get(row.id);
+  return (
+    state.rows.get(parentId)?.title ??
+    (previous?.parentId === parentId ? previous.parentTitle : null)
+  );
 }
 
 /**
@@ -190,7 +285,7 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
   const now = Date.now();
   let changed = false;
   for (const row of rows) {
-    const next = chatRecordFromRow(row, now);
+    const next = chatRecordFromRow(row, now, knownParentTitle(state, row));
     const current = state.rows.get(row.id);
     // The newest read always replaces the row (it carries the live status);
     // only a change people can see re-renders the menus.
@@ -200,9 +295,11 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
       (current &&
         current.row &&
         current.title === next.title &&
+        sameAvatar(current.avatar, next.avatar) &&
         current.updatedAt === next.updatedAt &&
         current.pinned === next.pinned &&
         current.archived === next.archived &&
+        current.parentTitle === next.parentTitle &&
         chatStatusKey(current.row) === chatStatusKey(row))
     ) {
       continue;
@@ -215,7 +312,10 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
 /** The chat was opened: move it to the front of the recent list. */
 export function recordChatVisit(subjectId: string, row: SessionListRow): void {
   const state = directory(subjectId);
-  const record = { ...chatRecordFromRow(row), updatedAt: Date.now() };
+  const record = {
+    ...chatRecordFromRow(row, Date.now(), knownParentTitle(state, row)),
+    updatedAt: Date.now(),
+  };
   const previous = state.rows.get(row.id);
   state.rows.set(row.id, previous?.row && !record.row ? { ...previous, ...record } : record);
   if (state.recent[0] !== row.id) {

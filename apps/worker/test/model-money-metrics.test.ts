@@ -186,10 +186,10 @@ describe("model usage wiring", () => {
     const settings = billedSettings();
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => usageSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(
       async (_db, input) => ({
         balance: {} as never,
-        debitedMicros: input.requestedAmountMicros,
+        debitedMicros: input.amountMicros,
         grantDebitedMicros: 1,
       }),
     );

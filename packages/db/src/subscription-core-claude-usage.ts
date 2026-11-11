@@ -41,9 +41,9 @@ import {
 import {
   decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS,
-  SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
+import { claudeSubscriptionUpstreamModelId } from "@opengeni/contracts/claude-subscription-model-ids";
 import { decodeSubscriptionQuota } from "./subscription-core-repository";
 
 /** The Claude usage endpoint (the legacy `requestClaudeUsage` URL). */
@@ -131,10 +131,8 @@ export function subscriptionCoreClaudeUpstreamModelIds(
 ): string[] {
   const upstream = new Set<string>();
   for (const modelId of productModelIds) {
-    for (const prefix of SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES) {
-      if (modelId.startsWith(`${prefix}/`) && modelId.length > prefix.length + 1)
-        upstream.add(modelId.slice(prefix.length + 1));
-    }
+    const id = claudeSubscriptionUpstreamModelId(modelId);
+    if (id !== null) upstream.add(id);
   }
   return [...upstream].sort();
 }
@@ -168,16 +166,27 @@ function reportsBelowLimit(reading: SubscriptionCoreClaudeUsageReading, id: stri
 }
 
 /**
- * The adapter's `usageReadConfirmsAvailability`: an available reading that
- * reports both account windows (five hours, seven days) below the limit. A
- * reading that omits one, or reports it without a percentage, says nothing
- * about the limit that refused the connection, so it ends nothing.
+ * The adapter's `usageReadConfirmsAvailability`: an available reading in
+ * which each account window (five hours, seven days) is either reported with
+ * a percentage below the limit or answered with an explicit `null` (the plan
+ * has no such limit now: a verified Ultra plan has no five-hour window), and
+ * at least one is reported below the limit. A window that is omitted, or
+ * reported without a percentage, says nothing about the limit that refused
+ * the connection, so the reading ends nothing. An explicit `null` only lets
+ * the other window's reading count: it never ends a block that claims the
+ * null window (`subscriptionCoreClaudeUsageEndsClaimedBlock`).
  */
 export function subscriptionCoreClaudeUsageConfirmsAvailability(response: unknown): boolean {
+  if (!isUsageReading(response) || response.status !== "available") return false;
+  const noLimit = new Set<string>(response.observation?.noLimitWindows ?? []);
+  const reported = ACCOUNT_WINDOW_IDS.filter((id) => reportsBelowLimit(response, id));
   return (
-    isUsageReading(response) &&
-    response.status === "available" &&
-    ACCOUNT_WINDOW_IDS.every((id) => reportsBelowLimit(response, id))
+    reported.length > 0 &&
+    ACCOUNT_WINDOW_IDS.every(
+      (id) =>
+        reported.includes(id) ||
+        (noLimit.has(id) && !response.observation?.windows.some((window) => window.id === id)),
+    )
   );
 }
 
@@ -269,6 +278,7 @@ export function subscriptionCoreClaudeUsageVersion(row: { version?: number | str
 const FAMILY_PREFIXES: Partial<Record<ClaudeUsageWindow["id"], string>> = {
   seven_day_opus: "claude-opus-",
   seven_day_sonnet: "claude-sonnet-",
+  seven_day_fable: "claude-fable-",
 };
 
 /**

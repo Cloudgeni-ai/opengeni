@@ -17,6 +17,7 @@ import {
   getApiIntegrationReconciliationSnapshot,
   getConnectionMetadata,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetConfigError,
@@ -1161,7 +1162,7 @@ describe("API Integration persistence", () => {
       facetDefinitions: [
         {
           facetKey: "drive-content",
-          kind: "knowledge_source",
+          kind: "inbound_trigger",
           configSchema: {
             type: "object",
             required: ["sources"],
@@ -1231,7 +1232,7 @@ describe("API Integration persistence", () => {
           binding: null,
         },
         {
-          definition: { facetKey: "drive-content", kind: "knowledge_source" },
+          definition: { facetKey: "drive-content", kind: "inbound_trigger" },
           binding: null,
         },
       ],
@@ -1440,75 +1441,6 @@ describe("API Integration persistence", () => {
       remainingOwners: [],
     });
 
-    const microsoftConnection = await createConnection(client.db, {
-      accountId: first.accountId,
-      workspaceId: first.workspaceId,
-      providerDomain: "onedrive.example.test",
-      kind: "oauth2",
-      credentialEncrypted: "onedrive-facet-encrypted-bundle",
-      grantedScopes: ["files.read"],
-      createdBySubjectId: first.subjectId,
-    });
-    const microsoftBase = integrationInput(microsoftConnection.id, "generic-onedrive");
-    const microsoftInput: InstallApiIntegrationInput = {
-      ...microsoftBase,
-      name: "Generic OneDrive",
-      providerDomain: "onedrive.example.test",
-      baseUrl: "https://onedrive.example.test/v1/",
-      sourceUrl: "https://onedrive.example.test/openapi.json",
-      authScheme: { kind: "oauth2" },
-      requiredScopes: ["files.read"],
-      instanceKey: "legal",
-      facetDefinitions: [
-        {
-          facetKey: "drive-content",
-          kind: "knowledge_source",
-          configSchema: {
-            type: "object",
-            required: ["sourceId", "sourceKind"],
-            properties: {
-              sourceId: { type: "string", minLength: 1, maxLength: 512 },
-              sourceKind: {
-                type: "string",
-                enum: ["my_drive", "shared_library", "folder"],
-              },
-            },
-            additionalProperties: false,
-          },
-          capabilities: {
-            provider: "microsoft-onedrive",
-            connectionRequired: true,
-            cursor: "delta_link",
-          },
-        },
-      ],
-      revision: {
-        ...microsoftBase.revision,
-        bindings: Object.fromEntries(
-          Object.entries(microsoftBase.revision.bindings).map(([key, binding]) => [
-            key,
-            { ...binding, serverUrl: "https://onedrive.example.test/v1/" },
-          ]),
-        ),
-      },
-    };
-    await installApiIntegration(client.db, microsoftInput);
-    const microsoftFeature = await configureIntegrationFacet(client.db, {
-      accountId: first.accountId,
-      workspaceId: first.workspaceId,
-      subjectId: first.subjectId,
-      capabilityId: microsoftInput.capabilityId,
-      instanceKey: "legal",
-      facetKey: "drive-content",
-      displayName: "Legal library",
-      config: { sourceId: "library:legal", sourceKind: "shared_library" },
-      idempotencyKey: crypto.randomUUID(),
-    });
-    expect(microsoftFeature.binding).toMatchObject({
-      kind: "knowledge_source",
-      connectionId: microsoftConnection.id,
-      config: { sourceId: "library:legal", sourceKind: "shared_library" },
-    });
     await expect(
       listIntegrationInstanceFacets(
         client.db,
@@ -1519,5 +1451,93 @@ describe("API Integration persistence", () => {
       ),
     ).rejects.toBeInstanceOf(IntegrationFacetNotFoundError);
     expect(upgraded.installationVersion).toBeGreaterThan(installed.installationVersion);
+  }, 60_000);
+
+  test("a member's add is create only and follows the organization's setup policy", async () => {
+    if (!available || !client || !shared) return;
+    const own = (
+      await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `api-integration-member-account-${crypto.randomUUID()}`,
+        accountName: "Member add account",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `api-integration-member-workspace-${crypto.randomUUID()}`,
+        workspaceName: "Member add workspace",
+        subjectId: "user:api-integration-member",
+      })
+    ).workspaceGrants[0]!;
+    try {
+      const base = {
+        ...integrationInput(undefined, "member-add"),
+        accountId: own.accountId,
+        workspaceId: own.workspaceId,
+        subjectId: own.subjectId,
+        memberCreate: true,
+      };
+      const listed = async () =>
+        (await listInstalledApiIntegrations(client!.db, own.workspaceId)).map((instance) => ({
+          instanceKey: instance.instanceKey,
+          displayName: instance.displayName,
+          revision: instance.revision.contentSha256,
+        }));
+      await installApiIntegration(client.db, base);
+      // Another instance is an add too.
+      await installApiIntegration(client.db, {
+        ...base,
+        instanceKey: "second",
+        displayName: "Second inventory",
+      });
+      const before = await listed();
+      expect(before).toHaveLength(2);
+
+      // Changing an instance that is already set up is not.
+      await expect(
+        installApiIntegration(client.db, { ...base, displayName: "Renamed by a member" }),
+      ).rejects.toBeInstanceOf(IntegrationChangeRequiresAdminError);
+      // Nor is a new revision, which would move the instances already set up.
+      await expect(
+        installApiIntegration(client.db, {
+          ...base,
+          instanceKey: "third",
+          displayName: "Third inventory",
+          revision: {
+            ...base.revision,
+            id: "openapi:222222222222222222222222",
+            contentSha256: "2".repeat(64),
+          },
+        }),
+      ).rejects.toBeInstanceOf(IntegrationChangeRequiresAdminError);
+      expect(await listed()).toEqual(before);
+
+      // An organization that keeps turning integrations on for admins wins,
+      // checked under the policy fence.
+      await shared.admin`insert into organization_integration_policies
+        (account_id, mode, allowed_integration_keys, personal_integration_setup, revision)
+        values (${own.accountId}, 'unrestricted', '[]'::jsonb, 'admins', 1)
+        on conflict (account_id) do update set personal_integration_setup = 'admins'`;
+      await expect(
+        installApiIntegration(client.db, {
+          ...base,
+          instanceKey: "fourth",
+          displayName: "Fourth inventory",
+        }),
+      ).rejects.toBeInstanceOf(IntegrationChangeRequiresAdminError);
+      expect(await listed()).toEqual(before);
+
+      // An admin's install still updates in place.
+      const { memberCreate: _member, ...adminInput } = base;
+      await installApiIntegration(client.db, {
+        ...adminInput,
+        displayName: "Renamed by an admin",
+        expectedInstanceVersion: 1,
+      });
+      expect((await listed()).find((row) => row.instanceKey === "default")?.displayName).toBe(
+        "Renamed by an admin",
+      );
+    } finally {
+      await deleteWorkspace(client.db, own.workspaceId).catch(() => undefined);
+      await shared.admin`delete from organization_integration_policies
+        where account_id = ${own.accountId}`.catch(() => undefined);
+    }
   }, 60_000);
 });

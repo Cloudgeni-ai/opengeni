@@ -1,6 +1,8 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   DEVELOPER_SETUP_API_KEY_PRESET,
+  OWNER_LEVEL_API_KEY_CREATOR_SENTENCE,
   serviceAccountAllowsPermission,
   type Permission,
 } from "@opengeni/contracts";
@@ -37,6 +39,8 @@ import {
 } from "@opengeni/react/ui/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
 import {
+  isMemberLevelApiKey,
+  memberLevelPermission,
   policySummary,
   presetPermissions,
   scopeSummary,
@@ -45,11 +49,13 @@ import {
 import type { ApiKey } from "@opengeni/react/app/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
-  OpenGeniBrowserClient["createOrganizationApiKey"]
+  ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]
 >[1];
-type CreateApiKeyResponse = Awaited<ReturnType<OpenGeniBrowserClient["createOrganizationApiKey"]>>;
+type CreateApiKeyResponse = Awaited<
+  ReturnType<ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]>
+>;
 
-export type OrganizationApiKeysSectionProps = {
+type OrganizationApiKeysSectionProps = {
   organizationId: string;
   canManage: boolean;
   listApiKeys: () => Promise<ApiKey[]>;
@@ -67,6 +73,12 @@ export type OrganizationApiKeysSectionProps = {
   listServiceAccounts?: () => Promise<KeyHolder[]>;
   /** Create API key opened from a service account's page. */
   initialServiceAccountId?: string;
+  /**
+   * An organization admin who isn't the owner: creates, changes and revokes
+   * only keys that can't manage people, keys or billing, held by member
+   * service accounts, as the server allows.
+   */
+  memberLevelOnly?: boolean;
 };
 
 type KeyHolder = { id: string; name: string; role: "admin" | "member" };
@@ -99,6 +111,29 @@ const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
   },
 ];
 
+/** What a choice's key would hold, as the server judges it. */
+function choiceKey(choice: KeyAccessChoice): Parameters<typeof isMemberLevelApiKey>[0] {
+  if (choice === "developer_setup")
+    return { permissions: DEVELOPER_SETUP_API_KEY_PRESET.permissions, permissionMode: "legacy" };
+  if (choice === "full")
+    return { permissions: presetPermissions("full"), permissionMode: "explicit" };
+  if (choice === "read")
+    return { permissions: presetPermissions("read_only"), permissionMode: "explicit" };
+  return { permissions: [], permissionMode: "explicit" };
+}
+
+/**
+ * For an organization admin who isn't the owner: choices whose key would hold
+ * people, key or billing administration stay visible, off, saying who can.
+ */
+function memberLevelAccessChoices(): SelectOption<KeyAccessChoice>[] {
+  return KEY_ACCESS_CHOICES.map((choice) =>
+    isMemberLevelApiKey(choiceKey(choice.value))
+      ? choice
+      : { ...choice, disabled: true, disabledReason: OWNER_LEVEL_API_KEY_CREATOR_SENTENCE },
+  );
+}
+
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
   { id: "created", label: "Created", width: 116 },
@@ -109,7 +144,7 @@ const COLUMNS: RowListColumn[] = [
  * the integration guide, collapsed.
  */
 export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProps) {
-  const { canManage, listApiKeys } = props;
+  const { canManage, listApiKeys, memberLevelOnly = false } = props;
   const mountedRef = useRef(true);
   const readSequenceRef = useRef(0);
   const mutationSequenceRef = useRef(0);
@@ -207,6 +242,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
           onClose={() => setView(undefined)}
           onCreate={createKey}
           workspaces={props.workspaces ?? null}
+          memberLevelOnly={memberLevelOnly}
           {...(props.listServiceAccounts ? { listServiceAccounts: props.listServiceAccounts } : {})}
           {...(props.initialServiceAccountId
             ? { initialServiceAccountId: props.initialServiceAccountId }
@@ -231,7 +267,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
   if (!canManage || (apiKeysError && apiKeys.length === 0 && isPermissionDenied(apiKeysError))) {
     body = (
       <Notice tone="muted" title="You can't manage organization API keys">
-        Ask an organization owner to create or revoke them.
+        Ask an organization owner or admin to create or revoke them.
       </Notice>
     );
   } else if (apiKeysError && apiKeys.length === 0) {
@@ -318,7 +354,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                   created: <RelativeTime date={apiKey.createdAt} format="date" />,
                 }}
                 control={
-                  keyStatus === "revoked" ? undefined : (
+                  keyStatus === "revoked" ||
+                  (memberLevelOnly && !isMemberLevelApiKey(apiKey)) ? undefined : (
                     <RowButton
                       aria-label={`Revoke organization API key ${apiKey.name}`}
                       disabled={busyKeyId !== null}
@@ -385,12 +422,14 @@ function CreateApiKeyPage({
   workspaces,
   listServiceAccounts,
   initialServiceAccountId,
+  memberLevelOnly,
 }: {
   onClose: () => void;
   onCreate: (request: CreateOrganizationApiKeyRequest) => Promise<string | null>;
   workspaces: { id: string; name: string }[] | null;
   listServiceAccounts?: () => Promise<KeyHolder[]>;
   initialServiceAccountId?: string;
+  memberLevelOnly: boolean;
 }) {
   // Who holds the key: a new service account named after it, or an existing one.
   const [holders, setHolders] = useState<KeyHolder[] | null>(null);
@@ -402,7 +441,13 @@ function CreateApiKeyPage({
     listServiceAccounts()
       .then((accounts) => {
         if (!live) return;
-        setHolders(accounts);
+        // An admin who isn't the owner gives keys only to member service accounts.
+        setHolders(memberLevelOnly ? accounts.filter((each) => each.role === "member") : accounts);
+        if (
+          memberLevelOnly &&
+          accounts.find((each) => each.id === initialServiceAccountId)?.role === "admin"
+        )
+          setHolder(NEW_HOLDER);
         // A member can't hold Full access; start it at Read only instead.
         if (accounts.find((each) => each.id === initialServiceAccountId)?.role === "member")
           setAccess((current) => (current === "full" ? "read" : current));
@@ -413,10 +458,12 @@ function CreateApiKeyPage({
     return () => {
       live = false;
     };
-  }, [initialServiceAccountId, listServiceAccounts]);
+  }, [initialServiceAccountId, listServiceAccounts, memberLevelOnly]);
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
-  const [access, setAccess] = useState<KeyAccessChoice>("full");
+  // Full access and Developer setup manage keys or budgets: the owner's to give.
+  const accessChoices = memberLevelOnly ? memberLevelAccessChoices() : KEY_ACCESS_CHOICES;
+  const [access, setAccess] = useState<KeyAccessChoice>(memberLevelOnly ? "read" : "full");
   const [custom, setCustom] = useState<string[]>(() => presetPermissions("read_only"));
   const [scope, setScope] = useState<OrganizationWorkspaceScope>({ kind: "all" });
   const [accessError, setAccessError] = useState<{ permissions?: string; workspaces?: string }>({});
@@ -583,10 +630,10 @@ function CreateApiKeyPage({
           ) : null}
           <Field
             label="Access"
-            hint={KEY_ACCESS_CHOICES.find((choice) => choice.value === access)?.description}
+            hint={accessChoices.find((choice) => choice.value === access)?.description}
           >
             <SelectMenu
-              options={KEY_ACCESS_CHOICES}
+              options={accessChoices}
               value={access}
               onValueChange={(next) => {
                 setAccess(next);
@@ -600,7 +647,8 @@ function CreateApiKeyPage({
             <Field label="Permissions" group error={accessError.permissions}>
               <PermissionChecklist
                 selected={custom}
-                canGrant={() => true}
+                canGrant={memberLevelOnly ? memberLevelPermission : () => true}
+                {...(memberLevelOnly ? { withheldHint: "only the organization owner" } : {})}
                 onChange={(next) => {
                   setCustom(next);
                   setAccessError({});

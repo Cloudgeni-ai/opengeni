@@ -46,6 +46,16 @@ export type ModelPreparationMeasurement = {
   outcome: "completed" | "failed";
   durationSeconds: number;
   count?: number;
+  /** Bounded failure class for a failed phase that classifies its errors
+   * (currently repository skill discovery). `handling` says whether the turn
+   * continued without the phase's result or the error reached turn recovery. */
+  failure?: Readonly<{
+    errorClass: string;
+    handling: "propagated" | "degraded" | "unreachable";
+  }>;
+  /** Bounded classes of entries a completed phase skipped (one unusable
+   * repository skill search path or folder each), for the failure counter. */
+  skipped?: readonly string[];
 };
 
 type ModelPreparationObserver = (measurement: ModelPreparationMeasurement) => void;
@@ -67,6 +77,17 @@ type ModelPreparationObservation = {
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
+
+/** Work that starts after the first model request entered transport is the
+ * turn's own (a tool call), not preparation of that request. */
+function startedAfterFirstModelRequest(
+  observation: ModelPreparationObservation,
+  startedAt: number,
+): boolean {
+  return (
+    observation.firstModelTransportAt !== undefined && observation.firstModelTransportAt < startedAt
+  );
+}
 export type ModelTransportDispatchClock = {
   dispatchedAtUnixMs: number;
   monotonicTimeMs: number;
@@ -163,10 +184,16 @@ export async function recordModelTransportStarted(): Promise<void> {
     await beforeModelRequest();
     await modelTransportStartedObserver.getStore()?.started?.();
   } catch (error) {
-    const admission = modelTransportAdmission.getStore();
-    if (admission) admission.refusal = { error };
-    throw error;
+    refuseModelTransport(error);
   }
+}
+
+/** Refuse a model request before it is sent. Under the SDK fetch wrapper the
+ * refusal is surfaced once, as this exact error, never retried. */
+export function refuseModelTransport(error: unknown): never {
+  const admission = modelTransportAdmission.getStore();
+  if (admission) admission.refusal = { error };
+  throw error;
 }
 
 /** Synchronous diagnostic after admission: plain fetch entry, or the send
@@ -229,6 +256,8 @@ export function markModelPreparationFirstSandboxOperation(durationSeconds: numbe
     if (!observation || observation.firstSandboxOperationEndedAt !== undefined) return;
     const endedAt = performance.now();
     const startedAt = endedAt - Math.max(0, durationSeconds) * 1_000;
+    // A box first used by a tool is not part of preparing the first request.
+    if (startedAfterFirstModelRequest(observation, startedAt)) return;
     observation.firstSandboxOperationStartedAt = startedAt;
     observation.firstSandboxOperationEndedAt = endedAt;
     if (!observation.runnerGapRecorded) {
@@ -251,6 +280,15 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
 
     const endedAt = performance.now();
     const startedAt = endedAt - measurement.durationSeconds * 1_000;
+    // Repository skills read on demand by a tool (a deferred index) would
+    // otherwise report the box create, setup and clone that tool waited on,
+    // and the model's own time before it, as startup.
+    if (
+      measurement.phase === "repository_skill_discovery" &&
+      startedAfterFirstModelRequest(observation, startedAt)
+    ) {
+      return;
+    }
     let reportedMeasurement = measurement;
     if (measurement.phase === "mcp_tools_snapshot") {
       if (!observation.runnerGapRecorded) {

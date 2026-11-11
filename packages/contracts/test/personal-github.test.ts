@@ -3,6 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
+  personalGitHubAccessCovers,
+  personalGitHubAllRepositoriesEffectiveAccess,
+  personalGitHubConnectionNeedsReconnect,
   ReplacePersonalGitHubRepositorySelectionsRequest,
 } from "../src/personal-github";
 import { McpPersonalConnectionDelegation } from "../src";
@@ -156,6 +159,115 @@ describe("personal GitHub repository contracts", () => {
           ],
         },
       }).success,
+    ).toBe(false);
+    // All my repositories may carry no attached repository; without it, one is required.
+    const allMode = {
+      ...delegation,
+      personalGitHubRepositorySelection: {
+        ...delegation.personalGitHubRepositorySelection,
+        allRepositoriesAccess: "read" as const,
+        repositories: [],
+      },
+    };
+    expect(McpPersonalConnectionDelegation.parse(allMode)).toEqual(allMode);
+    expect(
+      McpPersonalConnectionDelegation.safeParse({
+        ...delegation,
+        personalGitHubRepositorySelection: {
+          ...delegation.personalGitHubRepositorySelection,
+          repositories: [],
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("All my repositories", () => {
+  const permissions = { pull: true, push: false, admin: false, maintain: false, triage: false };
+  test("access is the chosen access lowered to GitHub's permission", () => {
+    const read = { permissions, archived: false, disabled: false };
+    const write = { permissions: { ...permissions, push: true }, archived: false, disabled: false };
+    expect(personalGitHubAllRepositoriesEffectiveAccess("write", read)).toBe("read");
+    expect(personalGitHubAllRepositoriesEffectiveAccess("write", write)).toBe("write");
+    expect(personalGitHubAllRepositoriesEffectiveAccess("read", write)).toBe("read");
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("write", { ...write, archived: true }),
+    ).toBe("read");
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("write", { ...write, disabled: true }),
+    ).toBeNull();
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("read", {
+        permissions: { ...permissions, pull: false },
+        archived: false,
+        disabled: false,
+      }),
+    ).toBeNull();
+    expect(personalGitHubAccessCovers("write", "read")).toBe(true);
+    expect(personalGitHubAccessCovers("read", "write")).toBe(false);
+    expect(personalGitHubAccessCovers(null, "read")).toBe(false);
+  });
+
+  test("the mode is optional on save and on older selection states", () => {
+    const base = {
+      expectedConnectionAuthorityGeneration: 1,
+      expectedSelectionGeneration: 1,
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      repositories: [],
+    };
+    expect(ReplacePersonalGitHubRepositorySelectionsRequest.parse(base)).toEqual(base);
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.parse({
+        ...base,
+        allRepositoriesAccess: "write",
+      }).allRepositoriesAccess,
+    ).toBe("write");
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.parse({
+        ...base,
+        allRepositoriesAccess: null,
+      }).allRepositoriesAccess,
+    ).toBeNull();
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.safeParse({
+        ...base,
+        allRepositoriesAccess: "admin",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("personal GitHub reconnect state", () => {
+  const personal = {
+    providerDomain: "github.com",
+    kind: "oauth2" as const,
+    metadata: {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      githubUserId: "59779138",
+      githubLogin: "benyhh",
+      oauthEnvironment: "staging",
+      oauthClientMarker: "a".repeat(32),
+      credentialBindingId: "6acc52e1-2952-4da4-9e0e-f45872f661b2",
+      connectedAt: "2026-11-02T09:19:18.000Z",
+      lastVerifiedAt: "2026-11-02T09:19:18.000Z",
+    },
+  };
+
+  test("only a refused grant on the person's own GitHub needs reconnecting", () => {
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "needs_reauth" })).toBe(
+      true,
+    );
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "error" })).toBe(true);
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "active" })).toBe(false);
+    expect(personalGitHubConnectionNeedsReconnect({ ...personal, status: "revoked" })).toBe(false);
+    expect(
+      personalGitHubConnectionNeedsReconnect({
+        ...personal,
+        status: "needs_reauth",
+        metadata: { credentialRole: "test_oauth" },
+      }),
     ).toBe(false);
   });
 });

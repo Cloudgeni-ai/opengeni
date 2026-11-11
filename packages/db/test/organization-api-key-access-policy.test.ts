@@ -28,7 +28,7 @@ import {
 import { lockConnectionSetupKeyAuthority } from "../src/connection-setup-authority";
 import { organizationApiKeyAllowsWorkspace } from "../src/organization-api-key-access";
 import { rawRows } from "../src/database";
-import { FORCE_RLS_TABLES, RUNTIME_TABLE_PRIVILEGES } from "../src/runtime-posture";
+
 import { nestedPostgresSqlState } from "../src/persistence-errors";
 
 const budget = 180_000;
@@ -67,32 +67,6 @@ async function key(
     ...(accessPolicy ? { policy: accessPolicy } : {}),
   });
 }
-
-test(
-  "0600 is maintenance-only, preserves legacy permission bytes, and provisions the exact FORCE-RLS join",
-  async () => {
-    const migration = await Bun.file(
-      new URL("../drizzle/0600_organization_api_key_access_policy.sql", import.meta.url),
-    ).text();
-    expect(migration.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
-    expect(migration).toContain("opengeni.migration_application_roles");
-    expect(migration).toContain("ERRCODE = '55000'");
-    expect(migration).toContain("permission_mode text NOT NULL DEFAULT 'legacy'");
-    expect(migration).toContain("workspace_scope text NOT NULL DEFAULT 'all'");
-    expect(migration).not.toMatch(/UPDATE\s+api_keys\s+SET\s+permissions/i);
-    expect(migration).toContain("REFERENCES api_keys(id, account_id) ON DELETE CASCADE");
-    expect(migration).toContain("REFERENCES workspaces(id, account_id) ON DELETE CASCADE");
-    expect(migration).not.toContain("revoke_empty_organization_api_key_workspace_scope");
-    expect(FORCE_RLS_TABLES).toContain("organization_api_key_workspaces");
-    expect(RUNTIME_TABLE_PRIVILEGES.organization_api_key_workspaces).toEqual([
-      "SELECT",
-      "INSERT",
-      "UPDATE",
-      "DELETE",
-    ]);
-  },
-  budget,
-);
 
 describe.skipIf(!available)("organization API key policy real PostgreSQL", () => {
   beforeAll(async () => {

@@ -2,10 +2,7 @@
  * Claude's legacy route shapes on the shared subscription core (design
  * docs/design/subscription-core-2026-10-07.md, 5.3 "Claude track", C2b).
  *
- * Dormant: API handlers call into this module only when
- * `readSubscriptionCoreProviderRoute(..., "claude")` is `core`, which needs
- * the Claude cutover receipt (C3); until then the binding is not registered
- * and every shared runtime refuses it. Pools, settings and writers are the
+ * Pools, settings and writers are the
  * provider-neutral ones; this module projects neutral rows into the legacy
  * Claude account shape and encodes an OAuth sign-in or a pasted setup token
  * as the adapter's stored credential. Nothing here reads or writes a legacy
@@ -75,6 +72,7 @@ export function projectSubscriptionCoreClaudeAccount(
   return {
     id: row.id,
     scope,
+    ownerWorkspaceId: row.managed_by_workspace_id ?? null,
     providerAccountId: row.provider_account_id,
     allowedModelIds: row.allowed_model_ids,
     label: row.label,

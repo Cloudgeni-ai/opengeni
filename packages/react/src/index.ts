@@ -183,12 +183,25 @@ export type {
   UseTranscriptionOptions,
   UseTranscriptionResult,
 } from "./hooks/use-transcription";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -235,6 +248,7 @@ export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -440,7 +454,11 @@ export type {
 } from "./hooks/use-machine-chip";
 
 // Pending-approvals projection
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
@@ -471,15 +489,22 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 
 // Timeline projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
+  useTimelinePauses,
 } from "./timeline";
 export type {
   GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
@@ -559,6 +584,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
@@ -657,6 +683,7 @@ export type {
   SessionConversationProps,
   SessionConversationViewProps,
 } from "./components/session-conversation";
+export type { AgentSignalOptions, AgentSignals } from "./session-agents-model";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
@@ -708,6 +735,12 @@ export type {
   PickerModelRow,
 } from "./model-policy";
 export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
+export {
+  REGION_RESTRICTED,
+  inferenceFeatureRestriction,
+  isRegionRestricted,
+  regionRestrictedText,
+} from "./inference-region";
 export {
   humanizeModelSlug,
   isRawModelLabel,
@@ -767,7 +800,12 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
-export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionArchived,
+  sessionDisplayStatus,
+} from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,
@@ -812,7 +850,7 @@ export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
-export { WorkspaceDock } from "./components/workspace-dock";
+export { WorkspaceDock, useWorkspacePanelOwnsExpand } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
 // The embeddable dock "brain" (Workbench v2, M4): the whole session workspace as
@@ -919,3 +957,11 @@ export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+export { InteractiveAnswer, type InteractiveAnswerProps } from "./components/interactive-answer";
+export {
+  browserInteractiveAnswerStore,
+  INTERACTIVE_ANSWER_FENCE,
+  InteractiveAnswerProvider,
+  type InteractiveAnswerHost,
+  type InteractiveAnswerStore,
+} from "./interactive-answer-model";

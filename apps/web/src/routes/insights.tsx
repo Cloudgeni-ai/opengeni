@@ -14,7 +14,7 @@ import { BackLink } from "@opengeni/react/ui/detail-page";
 import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
 import { workspaceSessionPath } from "@opengeni/react/app/lib/routes";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
@@ -61,7 +61,12 @@ export function InsightsRoute({
   const context = useAppContext();
   const navigate = useNavigate();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
-  const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  // Admins, and the owner of a Personal workspace (their own spend).
+  const canRead = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace ?? null,
+    context.managedSelfContext,
+  );
   const selection = useMemo(() => parseInsightsSearch(search ?? {}), [search]);
   const catalog = useWorkspaceModelCatalog(canRead ? workspaceId : null);
 

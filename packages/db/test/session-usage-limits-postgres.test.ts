@@ -1330,3 +1330,122 @@ describe("session usage limit remediation (real PostgreSQL, non-bypass app role)
     expect(deadlocksAfter!.count).toBe(deadlocksBefore!.count);
   });
 });
+
+describe("session usage limit daily window (real PostgreSQL)", () => {
+  async function setWindowed(
+    scope: Scope,
+    sessionId: string,
+    limitMicros: number | null,
+    expectedVersion: number,
+    window: { period: "day"; timeZone: string } | null | undefined,
+    operationId = crypto.randomUUID(),
+  ) {
+    return await withWorkspaceSubjectSessionActivityRls(
+      app.db,
+      scope.workspaceId,
+      scope.subjectId,
+      async (tx) =>
+        await setSessionUsageLimitInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          sessionId,
+          limitMicros,
+          ...(window !== undefined ? { window } : {}),
+          expectedVersion,
+          operationId,
+          actor: { subjectId: scope.subjectId, type: "human" },
+          producerEnabled: true,
+        }),
+    );
+  }
+
+  test("counts the current day, reopens on a new day, replays and clears", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    const child = await newSession(scope, root);
+    await settle(scope, child, "window:before", 400);
+
+    // Setting a window counts what was already recorded today.
+    const operationId = crypto.randomUUID();
+    const set = await setWindowed(
+      scope,
+      root,
+      1_000,
+      0,
+      { period: "day", timeZone: "UTC" },
+      operationId,
+    );
+    expect(set.outcome).toBe("ok");
+    const today = new Date();
+    const dayStart = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+    expect(set.state).toMatchObject({
+      status: "within",
+      limitMicros: 1_000,
+      usedMicros: 400,
+      window: {
+        period: "day",
+        timeZone: "UTC",
+        startedAt: new Date(dayStart).toISOString(),
+        resetsAt: new Date(dayStart + 86_400_000).toISOString(),
+      },
+    });
+    const replay = await setWindowed(
+      scope,
+      root,
+      1_000,
+      0,
+      { period: "day", timeZone: "UTC" },
+      operationId,
+    );
+    expect(replay.outcome).toBe("replayed");
+    expect(replay.state?.window?.timeZone).toBe("UTC");
+    expect(
+      (
+        await setWindowed(
+          scope,
+          root,
+          1_000,
+          0,
+          { period: "day", timeZone: "Europe/Oslo" },
+          operationId,
+        )
+      ).outcome,
+    ).toBe("operation_conflict");
+
+    await settle(scope, child, "window:today", 700);
+    expect(await read(scope, root)).toMatchObject({ status: "reached", usedMicros: 1_100 });
+    expect(
+      (await checkSessionUsageLimitAdmission(app.db, { ...scope, sessionId: child })).allowed,
+    ).toBe(false);
+
+    // The window has passed: nothing counts until the next usage rolls it.
+    await shared.admin`update opengeni_private.session_usage_limit_roots
+      set window_started_at = window_started_at - interval '1 day'
+      where root_session_id = ${root}`;
+    expect(await read(scope, root)).toMatchObject({ status: "within", usedMicros: 0 });
+    expect(
+      (await checkSessionUsageLimitAdmission(app.db, { ...scope, sessionId: child })).allowed,
+    ).toBe(true);
+    await settle(scope, child, "window:next-day", 300);
+    expect(await read(scope, root)).toMatchObject({
+      status: "within",
+      usedMicros: 300,
+      window: { startedAt: new Date(dayStart).toISOString() },
+    });
+
+    // Omitting the window keeps it; null clears it and the lifetime total counts again.
+    const kept = await setWindowed(scope, root, 2_000, 1, undefined);
+    expect(kept.state).toMatchObject({ limitMicros: 2_000, usedMicros: 300 });
+    expect(kept.state?.window?.period).toBe("day");
+    const cleared = await setWindowed(scope, root, 2_000, 2, null);
+    expect(cleared.state).toMatchObject({ limitMicros: 2_000, usedMicros: 1_400 });
+    expect(cleared.state?.window).toBeUndefined();
+
+    // Clearing the limit clears the window too.
+    await setWindowed(scope, root, 2_000, 3, { period: "day", timeZone: "UTC" });
+    const unlimited = await setWindowed(scope, root, null, 4, undefined);
+    expect(unlimited.state).toMatchObject({ status: "unlimited", limitMicros: null });
+    expect(unlimited.state?.window).toBeUndefined();
+  });
+});

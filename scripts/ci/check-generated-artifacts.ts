@@ -20,6 +20,8 @@ export type GeneratedArtifactCheck = {
   check: readonly string[];
   /** The exact command that regenerates the artifacts. */
   regenerate: string;
+  /** Other registered generated files the command reads, which must be current before it runs. */
+  reads?: readonly string[];
   /** The Batch CI script or unit test that fails on the same staleness. */
   batchEnforcedBy: string;
 };
@@ -40,6 +42,7 @@ export const GENERATED_ARTIFACT_CHECKS: readonly GeneratedArtifactCheck[] = [
     ],
     check: ["bun", "scripts/public-api/action-catalog.ts", "--check"],
     regenerate: "bun scripts/public-api/action-catalog.ts --write",
+    reads: ["scripts/public-api/surface.gen.json"],
     batchEnforcedBy: "apps/api/test/organization-mcp.test.ts",
   },
   {
@@ -77,12 +80,71 @@ export const GENERATED_ARTIFACT_CHECKS: readonly GeneratedArtifactCheck[] = [
   },
 ];
 
+export type RegeneratedArtifact = Pick<
+  GeneratedArtifactCheck,
+  "name" | "artifacts" | "regenerate" | "reads"
+>;
+
+/**
+ * Generated files the merge batcher regenerates when they are the only files
+ * a queued PR conflicts with main in, instead of ejecting the PR: the public
+ * API snapshot plus every re-rendered artifact above. Two PRs that both
+ * regenerated one of these conflict in Git although neither did anything
+ * wrong. Entries run in this order, so an entry comes after every entry whose
+ * artifacts it reads. See scripts/ci/regenerate-merge.ts.
+ */
+export const REGENERATED_ON_CONFLICT: readonly RegeneratedArtifact[] = [
+  {
+    name: "Public API snapshot",
+    artifacts: ["scripts/public-api/surface.gen.json"],
+    regenerate: "bun run public-api:refresh",
+  },
+  ...GENERATED_ARTIFACT_CHECKS,
+];
+
+/** Whether the entry keeps this file current: it is an artifact or inside an artifact directory. */
+export function regenerates(entry: RegeneratedArtifact, path: string): boolean {
+  return entry.artifacts.some((artifact) => path === artifact || path.startsWith(`${artifact}/`));
+}
+
+/**
+ * The entries to run, in order, when these files conflict: each entry that
+ * keeps a conflicted file current, and each entry that reads a file an entry
+ * before it regenerates, since that input changes. Throws when an entry reads
+ * a file only a later entry regenerates, which would build it from stale input.
+ */
+export function regenerationPlan(
+  registry: readonly RegeneratedArtifact[],
+  conflicted: readonly string[],
+): RegeneratedArtifact[] {
+  registry.forEach((entry, index) => {
+    for (const input of entry.reads ?? []) {
+      const later = registry.slice(index + 1).find((other) => regenerates(other, input));
+      if (later)
+        throw new Error(
+          `"${entry.name}" reads ${input}, which "${later.name}" regenerates after it`,
+        );
+    }
+  });
+  const plan: RegeneratedArtifact[] = [];
+  for (const entry of registry) {
+    const conflicts = conflicted.some((path) => regenerates(entry, path));
+    const inputChanges = (entry.reads ?? []).some((input) =>
+      plan.some((earlier) => regenerates(earlier, input)),
+    );
+    if (conflicts || inputChanges) plan.push(entry);
+  }
+  return plan;
+}
+
 /**
  * Generated files (`*.gen.*`, `*.generated.*`) this step does not re-render,
  * with the reason. A new generated file must be added here or above.
  */
 export const GENERATED_ARTIFACTS_NOT_RECHECKED: Readonly<Record<string, string>> = {
   "scripts/public-api/surface.gen.json": "the impact plan's public-api guard (PR and Batch)",
+  "scripts/public-api/published-sdk.gen.json":
+    "recorded from the published npm package by `bun run public-api:published-refresh`; the public-api guard (PR and Batch) checks the API still serves it",
   "apps/api/src/routes/github-browser-fonts.gen.ts": "the generated-fonts guard (PR and Batch)",
   "packages/react/src/lib/noto-sans-jp-loader.generated.ts":
     "the generated-fonts guard (PR and Batch)",

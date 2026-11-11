@@ -10,6 +10,8 @@ import {
   FileListResponse,
   FileDownloadUrlResponse,
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -51,6 +53,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  changeFileReach,
   changeFileVisibility,
   fileAccessFor,
   fileOwnerContextForAccess,
@@ -65,10 +68,11 @@ import {
 import { recordWorkspaceUsage, requireLimit, sanitizeWorkspaceFilename } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "../mcp/transport";
 import { buildFilesMcpServer } from "../mcp/files";
 import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
+import { requireCallingWorkspaceContentExchange } from "../mcp/workspace-content-flow";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -137,7 +141,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const server = buildWorkspaceToolGatewayMcpServer(
@@ -163,8 +167,13 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
     const { grant } = access;
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(deps.db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
-      const transport = new WebStandardStreamableHTTPServerTransport({
+      const transport = createApiMcpTransport({
         enableJsonResponse: true,
       });
       const server = buildFilesMcpServer(deps, access);
@@ -192,11 +201,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await requireWorkspace(db, workspaceId);
     // A person's upload is shared unless they choose Only me. An agent's
     // follows its chat (Only me in an Only me chat) unless it chooses, on its
-    // owner's behalf; a personal workspace keeps an agent's uploads private.
-    const personal =
-      payload.scope && !(authority?.agent && workspace.kind === "personal")
-        ? payload.scope === "personal"
-        : Boolean(authority?.agent && privateOwner !== null);
+    // owner's behalf. A personal workspace follows the same rule.
+    const personal = payload.scope
+      ? payload.scope === "personal"
+      : Boolean(authority?.agent && privateOwner !== null);
     if (personal && !privateOwner)
       throw new HTTPException(403, {
         message: authority?.agent
@@ -552,6 +560,23 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // Where an Only me file works besides the workspace that stores it and its
+  // owner's Personal workspace. Only its owner changes it, from here.
+  app.put("/v1/workspaces/:workspaceId/files/:fileId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const request = await parseRequestJson(c, UpdateFileReachRequest);
+    const { file } = await changeFileReach({
+      db,
+      grant,
+      workspace: await requireWorkspace(db, workspaceId),
+      person: fileRequestAuthority.get(c.req.raw)?.person ?? null,
+      fileId: retainedArtifactId(c.req.param("fileId")),
+      reachWorkspaceIds: request.reachWorkspaceIds,
+    });
+    return c.json(UpdateFileReachResponse.parse({ file: await withFileAccess(workspaceId, file) }));
+  });
+
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
@@ -641,23 +666,28 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // These two retained-screenshot routes are registered before the session
   // route module, so its `/sessions/:sessionId/*` authorization middleware
-  // does not cover them: an agent attempt must pass the same core seam here
-  // (private sessions, Slack ownership, and the 0426 agent-access scope) so a
-  // known artifact id cannot read into a tree the attempt may not reach.
-  const requireAgentSessionAccess = async (
+  // does not cover them: every caller must pass the same core seam here
+  // (private sessions, Slack ownership, and for an agent attempt the 0426
+  // agent-access scope) so a known artifact id cannot read into a session the
+  // caller may not read. A person who may not read the session gets the same
+  // answer as for an artifact that does not exist.
+  const sessionReadDenied = async (
     c: Context,
     grant: Awaited<ReturnType<typeof requireAccessGrant>>,
-  ): Promise<void> => {
-    if (!grantHasAgentAttemptAuthority(grant)) return;
+  ): Promise<boolean> => {
     try {
       await requireSessionAuthorization(deps, grant, {
         sessionId: c.req.param("sessionId") ?? "",
         operation: "session.read",
         surface: "http",
       });
+      return false;
     } catch (error) {
       if (error instanceof SessionAuthorizationDeniedError) {
-        throw new HTTPException(404, { message: "session not found", cause: error });
+        if (grantHasAgentAttemptAuthority(grant)) {
+          throw new HTTPException(404, { message: "session not found", cause: error });
+        }
+        return true;
       }
       if (error instanceof SessionAuthorizationUnavailableError) {
         throw new HTTPException(503, {
@@ -672,8 +702,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    await requireAgentSessionAccess(c, grant);
+    const denied = await sessionReadDenied(c, grant);
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    if (denied) return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     const artifact = await getRetainedScreenshotArtifact(
       db,
       workspaceId,
@@ -691,8 +722,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-      await requireAgentSessionAccess(c, grant);
+      const denied = await sessionReadDenied(c, grant);
       const artifactId = retainedArtifactId(c.req.param("artifactId"));
+      if (denied) return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
       const artifact = await getRetainedScreenshotArtifact(
         db,
         workspaceId,

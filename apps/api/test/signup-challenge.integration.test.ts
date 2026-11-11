@@ -4,7 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { createManagedAuth } from "../src/auth/managed-auth";
+import { createManagedAuth, findManagedAuthOAuthState } from "../src/auth/managed-auth";
 let shared: SharedTestDatabase | null;
 let client: DbClient | null;
 beforeAll(async () => {
@@ -36,7 +36,10 @@ test("email and OAuth creation require a single-use challenge, including direct 
     idempotency: { scope: "test:captcha", retentionSeconds: 86400 },
     send: async () => ({ status: "sent" as const, providerMessageId: null }),
   };
-  const auth = createManagedAuth(settings, client.db, transport)!;
+  let signupsOpen = true;
+  const auth = createManagedAuth(settings, client.db, transport, {
+    newSignupsGate: { signupsOpen: async () => signupsOpen },
+  })!;
   const app = createApp({
     settings,
     db: client.db,
@@ -126,8 +129,8 @@ test("email and OAuth creation require a single-use challenge, including direct 
     google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
     const socialEmail = `social-${email}`;
     google.getUserInfo = async () => ({
-      user: { id, name: "Human", email: socialEmail, emailVerified: true },
-      data: {},
+      user: { name: "Human", email: socialEmail, emailVerified: true },
+      data: { sub: id },
     });
     async function oauth(token?: string) {
       const start = await post("/v1/auth/sign-in/social", {
@@ -159,20 +162,45 @@ test("email and OAuth creation require a single-use challenge, including direct 
           { n: number }[]
         >`select count(*)::int n from auth_users where email = ${socialEmail}`
       )[0]!.n;
+    const signedIn = (response: Response) => {
+      expect(response.headers.get("location")).toBe("http://opengeni.test/");
+      expect(
+        response.headers.getSetCookie().some((value) => value.includes("session_token=")),
+      ).toBe(true);
+    };
+    // A new person without a verified challenge is refused after the provider
+    // login, whether no token, a spent token or an unavailable verifier.
     const refused = await oauth();
     expect(await count()).toBe(0);
     expect(new URL(refused.headers.get("location")!).searchParams.get("error")).toBe(
       "signup_challenge_required",
     );
-    await oauth("social");
-    expect(await count()).toBe(1);
-    // An existing human can sign in without another CAPTCHA.
-    const login = await oauth();
-    expect(await count()).toBe(1);
-    expect(login.headers.get("location")).toBe("http://opengeni.test/");
-    expect(login.headers.getSetCookie().some((value) => value.includes("session_token="))).toBe(
-      true,
+    // While sign-ups are paused the client skips the challenge; the refusal
+    // says sign-ups are paused rather than asking for verification again.
+    signupsOpen = false;
+    const paused = await oauth();
+    expect(await count()).toBe(0);
+    expect(new URL(paused.headers.get("location")!).searchParams.get("error")).toBe(
+      "signup_disabled",
     );
+    signupsOpen = true;
+    for (const token of ["first", "provider-unavailable"]) {
+      const failedToken = await oauth(token);
+      expect(await count()).toBe(0);
+      expect(new URL(failedToken.headers.get("location")!).searchParams.get("error")).toBe(
+        "signup_challenge_required",
+      );
+    }
+    // The Sign in tab now sends a token too: a new person is created by it.
+    signedIn(await oauth("social"));
+    expect(await count()).toBe(1);
+    // An existing human signs in without a token, and with a fresh, spent or
+    // unverifiable one: consuming it on a sign-in changes nothing.
+    for (const token of [undefined, "existing-fresh", "existing-fresh", "provider-unavailable"]) {
+      signedIn(await oauth(token));
+      expect(await count()).toBe(1);
+    }
+    expect(consumed.has("existing-fresh")).toBe(true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -320,19 +348,57 @@ test("broker OAuth persists the pass in server state and replays without consumi
     expect(await replay.json()).toEqual(started);
     expect(verifications).toBe(1);
     const state = new URL(started.url).searchParams.get("state")!;
-    const stored = await (await auth.$context).internalAdapter.findVerificationValue(state);
+    const stored = await findManagedAuthOAuthState(auth, state);
     const data = JSON.parse(stored!.value);
     expect(data.opengeniSignupChallenge.provider).toBe("google");
     expect(stored!.value).not.toContain("broker-token");
+    // A token that fails verification doesn't refuse the start (it may be a
+    // sign-in); that login just carries no proof.
+    const unverifiedStart = await app.request("/v1/auth/session-set/transactions/social", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...JSON.parse(body),
+        operationId: crypto.randomUUID(),
+        signupChallengeToken: "spent-token",
+      }),
+    });
+    expect(unverifiedStart.status).toBe(200);
+    expect(verifications).toBe(2);
+    const unverifiedState = new URL(
+      ((await unverifiedStart.json()) as { url: string }).url,
+    ).searchParams.get("state")!;
+    expect(
+      JSON.parse((await findManagedAuthOAuthState(auth, unverifiedState))!.value)
+        .opengeniSignupChallenge,
+    ).toBeUndefined();
     const google = (await auth.$context).socialProviders.find(
       (provider) => provider.id === "google",
     )!;
+    // That login can't create a new person.
+    const refusedId = crypto.randomUUID();
+    const refusedEmail = `${refusedId}@example.test`;
+    google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
+    google.getUserInfo = async () => ({
+      user: { name: "Human", email: refusedEmail, emailVerified: true },
+      data: { sub: refusedId },
+    });
+    await app.request(`/v1/auth/callback/google?state=${unverifiedState}&code=simulated`, {
+      headers: { ...headers, cookie: `${headers.cookie}; ${cookies(unverifiedStart)}` },
+    });
+    expect(
+      (
+        await shared.admin<
+          { n: number }[]
+        >`select count(*)::int n from auth_users where email = ${refusedEmail}`
+      )[0]!.n,
+    ).toBe(0);
     const id = crypto.randomUUID();
     const email = `${id}@example.test`;
     google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
     google.getUserInfo = async () => ({
-      user: { id, name: "Human", email, emailVerified: true },
-      data: {},
+      user: { name: "Human", email, emailVerified: true },
+      data: { sub: id },
     });
     await app.request(`/v1/auth/callback/google?state=${state}&code=simulated`, {
       headers: { ...headers, cookie: `${headers.cookie}; ${cookies(start)}` },

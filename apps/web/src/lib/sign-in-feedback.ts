@@ -1,4 +1,8 @@
-import { SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import {
+  SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUPS_PAUSED_MESSAGE,
+} from "@/lib/signups-paused";
 
 const VERIFICATION_LINK_CALLBACK_ERROR =
   "This email verification link has expired or is no longer valid. Request a new verification email to finish setting up your account.";
@@ -19,9 +23,14 @@ export function signInCallbackError(code: string | null | undefined): string | n
     case "email_verification_required":
       return "Verify your email before using this sign-in method. Use your existing sign-in method to access your account.";
     case "signup_challenge_required":
-      return "To create a new account, choose Sign up or enable Create a new account, then complete verification.";
+      // Only a client that skipped the challenge, or whose token failed, gets here.
+      return "Verification didn't complete, so no account was created. Try again.";
     case "signup_disabled":
       return `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in with the method you used before.`;
+    case "signup_email_not_allowed":
+      return `${SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE} If you already have an account, sign in with the method you used before.`;
+    case "sign_in_email_not_allowed":
+      return SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE;
     case "account_not_linked":
     case "account_linking_disabled":
       return "This sign-in method isn't connected. Sign in with an existing method, then connect it in Personal settings → Security.";
@@ -121,4 +130,17 @@ export function securityReauthenticationPath(search: string): string {
   return outcome === "connected" || outcome === "error"
     ? `/settings/security?signInMethod=${outcome}`
     : "/settings/security";
+}
+
+const ORGANIZATION_PAGE = /^\/workspaces\/([0-9a-f-]{36})\/organization$/i;
+
+/**
+ * Organization settings > Security & data, when sign-in starts there (signing
+ * in again to turn EU-only inference off), so it returns to the same page.
+ * Fixed shape only: the workspace id and `section=security`, nothing else.
+ */
+export function organizationSecurityReturnPath(pathname: string, search: string): string | null {
+  const workspaceId = ORGANIZATION_PAGE.exec(pathname)?.[1];
+  if (!workspaceId || new URLSearchParams(search).get("section") !== "security") return null;
+  return `/workspaces/${workspaceId.toLowerCase()}/organization?section=security`;
 }

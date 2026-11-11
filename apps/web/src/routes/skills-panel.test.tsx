@@ -85,3 +85,108 @@ test("an imported inventory refresh survives opening a skill and ignores an olde
     await view.unmount();
   }
 });
+
+const elsewhere: SkillRecord = {
+  ...skill,
+  id: "elsewhere",
+  stableKey: "elsewhere",
+  title: "Release checklist",
+  scope: "organization",
+  reach: { allowedWorkspaceIds: ["other-workspace"], allowPersonalWorkspaces: false },
+  availableHere: false,
+};
+
+function reachContext(
+  accountPermissions: string[],
+  updateSkillReach: (...args: unknown[]) => Promise<unknown> = async () => ({}),
+) {
+  return {
+    authSession: null,
+    accessContext: {
+      accountGrants: [{ accountId: "account", permissions: accountPermissions }],
+      workspaceGrants: [
+        {
+          accountId: "account",
+          workspaceId: "workspace",
+          subjectId: "user:alice",
+          principalKind: "human_session",
+          permissions: ["workspace:read", "documents:manage"],
+        },
+      ],
+    },
+    client: {
+      listWorkspaceSkills: async () => ({ skills: [skill, elsewhere] }),
+      readWorkspaceSkill: async (_workspaceId: string, id: string) =>
+        id === elsewhere.id ? elsewhere : skill,
+      getPreferenceRegistry: async () => ({ revisions: [] }),
+      getOrganizationAdministrationOverview: async () => ({
+        organization: { name: "Acme" },
+        workspaces: [
+          { id: "workspace", name: "Team" },
+          { id: "other-workspace", name: "Support" },
+        ],
+      }),
+      updateSkillReach,
+    },
+  } as unknown as AppContextValue;
+}
+
+test("an organization Skill this workspace doesn't use is shown only to whoever can change that", async () => {
+  const memberChanges = mock((_skills: SkillSummary[]) => {});
+  const member = await renderComponent(
+    <SkillsPanelContent
+      context={reachContext([])}
+      workspaceId="workspace"
+      onSkillsChange={memberChanges}
+    />,
+  );
+  try {
+    await flush();
+    expect(member.container.textContent).toContain("Existing skill");
+    expect(member.container.textContent).not.toContain("Release checklist");
+    expect(memberChanges.mock.calls.at(-1)?.[0].map((row) => row.id)).toEqual(["existing"]);
+  } finally {
+    await member.unmount();
+  }
+
+  const openSkillRef = { current: null as ((id: string) => void) | null };
+  const updateSkillReach = mock(
+    async (_workspaceId: unknown, _skillId: unknown, reach: unknown) => ({
+      reach,
+    }),
+  );
+  const owner = await renderComponent(
+    <SkillsPanelContent
+      context={reachContext(["account:admin"], updateSkillReach)}
+      workspaceId="workspace"
+      openSkillRef={openSkillRef}
+    />,
+  );
+  try {
+    await flush();
+    expect(owner.container.textContent).toContain("Release checklist");
+    expect(owner.container.textContent).toContain("Not used here");
+    await act(async () => openSkillRef.current!(elsewhere.id));
+    await flush();
+    const page = owner.container.textContent ?? "";
+    expect(page).toContain("Available in");
+    expect(page).toContain("Agents in this workspace don't use it.");
+    const change = [...owner.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Change",
+    );
+    expect(change).toBeDefined();
+    await act(async () => change!.click());
+    await flush();
+    const dialog = document.querySelector("[role=dialog]");
+    expect(dialog?.textContent).toContain("Release checklist");
+    expect(dialog?.textContent).toContain("Support");
+    const save = [...dialog!.querySelectorAll("button")].find(
+      (button) => button.textContent === "Save",
+    );
+    await act(async () => save!.click());
+    await flush();
+    expect(updateSkillReach.mock.calls[0]?.slice(0, 2)).toEqual(["workspace", elsewhere.id]);
+  } finally {
+    await owner.unmount();
+  }
+});

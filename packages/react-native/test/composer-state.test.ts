@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 import { createOpenGeniText } from "@opengeni/react/messages";
 import {
   composerAlternateSend,
   composerTrailingMode,
   nativeLoadingPhrases,
+  textFieldSelectionColors,
 } from "../src/timeline/composer-state";
+import { webColorsDark, webColorsLight } from "../src/ui/web-tokens.gen";
 
 const t = createOpenGeniText();
 
@@ -61,14 +62,30 @@ describe("composer alternate send", () => {
 });
 
 describe("native loading phrases", () => {
-  test("built-in copy per phase by default", () => {
-    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(GENIE_PREPARING_PHRASES(t));
-    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(GENIE_WAITING_PHRASES(t));
+  test("one plain status survives both startup phases", () => {
+    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(["Working"]);
+    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(["Working"]);
   });
 
   test("a host's phrases replace both phases, as on web", () => {
     const own = ["Looking into it…", "One moment…"];
     expect(nativeLoadingPhrases(t, own, "preparing")).toBe(own);
     expect(nativeLoadingPhrases(t, own, "waiting")).toBe(own);
+  });
+});
+
+describe("textFieldSelectionColors", () => {
+  test("Android highlights with the translucent selection token, never the opaque accent", () => {
+    for (const colors of [webColorsDark, webColorsLight]) {
+      const props = textFieldSelectionColors(colors, "android");
+      expect(props.selectionColor).toBe(colors["text-selection"]);
+      expect(props.selectionColor).toMatch(/^rgba\(.*, 0\.\d+\)$/);
+      expect(props.cursorColor).toBe(colors.accent);
+      expect(props.selectionHandleColor).toBe(colors.accent);
+    }
+  });
+
+  test("iOS keeps the system selection tint", () => {
+    expect(textFieldSelectionColors(webColorsDark, "ios")).toEqual({});
   });
 });

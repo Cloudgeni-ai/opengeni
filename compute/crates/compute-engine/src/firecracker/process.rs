@@ -90,15 +90,24 @@ impl Process {
         *self.exit.borrow() == Exit::Running
     }
 
-    /// Makes this process one of the out-of-memory killer's last choices;
-    /// see [`OOM_SCORE_ADJ`]. The file is opened by number, then written
+    /// This process's procfs files, to be read off the async runtime.
+    pub(crate) fn procfs(&self) -> Procfs {
+        Procfs {
+            pid: self.pid,
+            pidfd: Arc::clone(&self.pidfd),
+        }
+    }
+
+    /// Lowers what the out-of-memory killer counts against this process by
+    /// `adj` thousandths of what it counts against (`oom_score_adj`), such
+    /// as [`OOM_SCORE_ADJ`]. The file is opened by number, then written
     /// only if the pinned process has not exited since: a procfs file
     /// names the process that had the number when it was opened, and the
     /// number cannot pass to another before the pinned process exits.
-    pub fn protect_from_oom(&self) -> io::Result<()> {
+    pub fn protect_from_oom(&self, adj: i32) -> io::Result<()> {
         let mut file = open_oom_score_adj(self.pid)?;
         self.still_running()?;
-        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+        file.write_all(adj.clamp(-999, 1000).to_string().as_bytes())
     }
 
     /// Names this process apart from every other the host has run or will
@@ -125,20 +134,7 @@ impl Process {
     /// Fails if the pinned process has exited, so its number may name
     /// another process by now.
     fn still_running(&self) -> io::Result<()> {
-        let mut ready = [rustix::event::PollFd::new(
-            self.pidfd.get_ref(),
-            rustix::event::PollFlags::IN,
-        )];
-        let zero = rustix::event::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
-            return Err(io::Error::from_raw_os_error(
-                rustix::io::Errno::SRCH.raw_os_error(),
-            ));
-        }
-        Ok(())
+        still_running(&self.pidfd)
     }
 
     /// Kills the process. Succeeds if it has already exited.
@@ -154,6 +150,45 @@ impl Process {
         let mut exit = self.exit.clone();
         let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
     }
+}
+
+/// The procfs files of a pinned [`Process`], each opened by number and
+/// handed out only if the process has not exited since, as in
+/// [`Process::protect_from_oom`]: a file names the process that had the
+/// number when it was opened, so one handed out is the pinned process's
+/// for good.
+#[derive(Clone, Debug)]
+pub(crate) struct Procfs {
+    pid: Pid,
+    pidfd: Arc<AsyncFd<OwnedFd>>,
+}
+
+impl Procfs {
+    /// Opens `/proc/<pid>/<name>` for reading.
+    pub(crate) fn open(&self, name: &str) -> io::Result<fs::File> {
+        let file = fs::File::open(format!("/proc/{}/{name}", self.pid.as_raw_pid()))?;
+        still_running(&self.pidfd)?;
+        Ok(file)
+    }
+}
+
+/// Fails if the process `pidfd` pins has exited, so its number may name
+/// another process by now.
+fn still_running(pidfd: &AsyncFd<OwnedFd>) -> io::Result<()> {
+    let mut ready = [rustix::event::PollFd::new(
+        pidfd.get_ref(),
+        rustix::event::PollFlags::IN,
+    )];
+    let zero = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
+        return Err(io::Error::from_raw_os_error(
+            rustix::io::Errno::SRCH.raw_os_error(),
+        ));
+    }
+    Ok(())
 }
 
 /// Makes `command` start its process in a process group of its own, so
@@ -196,9 +231,21 @@ pub(crate) fn parse_pid(text: &str) -> Option<Pid> {
 /// `/proc/<pid>/stat`, `text`. The command name (field 2) is in
 /// parentheses and may hold spaces and parentheses itself, so fields are
 /// counted from the last closing one, after which field 3 comes.
-fn start_time(text: &str) -> Option<u64> {
+pub(crate) fn start_time(text: &str) -> Option<u64> {
     let (_, after_name) = text.rsplit_once(')')?;
     after_name.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
+/// When a process that has not ended started (see [`start_time`]), or
+/// `None` for one that has ended and is not yet reaped: its state (field
+/// 3) is zombie (`Z`) or dead (`X`).
+pub(crate) fn running_since(text: &str) -> Option<u64> {
+    let (_, after_name) = text.rsplit_once(')')?;
+    let state = after_name.split_whitespace().next()?;
+    if matches!(state, "Z" | "X" | "x") {
+        return None;
+    }
+    start_time(text)
 }
 
 #[cfg(test)]
@@ -257,6 +304,20 @@ mod tests {
         assert_eq!(start_time("garbage"), None);
     }
 
+    #[test]
+    fn a_process_that_ended_has_no_start_time_while_it_runs() {
+        let tail = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 19 20";
+        assert_eq!(
+            running_since(&format!("42 (a) Z) S {tail}")),
+            Some(987_654),
+            "the state follows the last parenthesis"
+        );
+        assert_eq!(running_since(&format!("42 (a) D {tail}")), Some(987_654));
+        assert_eq!(running_since(&format!("42 (a) Z {tail}")), None);
+        assert_eq!(running_since(&format!("42 (a) X {tail}")), None);
+        assert_eq!(running_since("garbage"), None);
+    }
+
     #[tokio::test]
     async fn a_process_identity_is_its_own_and_ends_with_it() {
         let spawn = || {
@@ -275,11 +336,19 @@ mod tests {
         assert_ne!(two.identity().unwrap(), identity);
         let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
         assert!(identity.starts_with(&format!("{}/{}/", boot.trim(), first.id())));
+        let files = one.procfs();
+        assert!(files.open("maps").is_ok());
         for (process, child) in [(&one, &mut first), (&two, &mut second)] {
             process.kill().unwrap();
             process.exited().await;
+            // Not yet reaped, so its number still has procfs files.
+            assert!(
+                process.procfs().open("maps").is_err(),
+                "the files of a process that exited are not handed out"
+            );
             let _ = child.wait();
         }
+        assert!(files.open("maps").is_err());
         assert!(
             one.identity().is_err(),
             "a process that exited is named no more"

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useState } from "react";
 import type {
   ModelAccountPreferences,
@@ -51,7 +52,7 @@ export type ModelAccountClientLike = {
   ) => Promise<ModelAccountPreferences>;
 };
 
-export type UseSessionModelAccountOptions = ClientOverride &
+export type UseSessionModelAccountOptions = ClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     sessionId: string;
     /** Scope choices, including Automatic, to this provider. Omit for a whole-session reset. */
@@ -73,8 +74,14 @@ export type UseSessionModelAccountResult = {
   /** The in-flight target (`null` is automatic; `undefined` when idle). */
   choosingTarget: string | null | undefined;
   appliedTo: "waiting_turn" | "next_turn" | null;
-  /** Turn the caller's own personal-fallback opt-in on or off; true on success. */
+  /**
+   * Turn the caller's own personal-fallback opt-in on or off; true on success.
+   * @deprecated The opt-in no longer changes which account pays. A person turns
+   * their own subscription on per workspace with a `subscription_connection`
+   * user-resource grant instead.
+   */
   setFallbackOptIn: (optIn: boolean) => Promise<boolean>;
+  /** @deprecated See `setFallbackOptIn`. */
   canChangeFallback: boolean;
   mutationError: Error | null;
 };

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SendMessageInput } from "@opengeni/sdk";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { projectPendingApprovals } from "../approvals";
@@ -5,17 +6,22 @@ import { conversationTimeline } from "../conversation-timeline";
 import { useSessionStartupTimeline, type PendingPrompt } from "../lib/session-startup-timeline";
 import { admissionRecheckControl } from "../session-admission-model";
 import { useOpenGeni, type ClientOverride } from "../session-context";
+import {
+  promptSendDestination,
+  sessionArchived,
+  sessionTurnKeepsRunControl,
+} from "../session-status-model";
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
 import { useComposer, type UseComposerOptions } from "./use-composer";
-import { useFileAttachments } from "./use-file-attachments";
+import { uploadScopeForSession, useFileAttachments } from "./use-file-attachments";
 import { useHumanInputRequests } from "./use-human-input";
 import { useSession } from "./use-session";
 import { useSessionControl } from "./use-session-control";
 import { useSessionEvents } from "./use-session-events";
 import { useTurnQueue } from "./use-turn-queue";
 
-export type UseSessionConversationOptions = ClientOverride & {
+export type UseSessionConversationOptions = ClientOverride<ChatClient> & {
   /** Uploads remain subject to the client's capabilities. Defaults to true. */
   attachments?: boolean | undefined;
   /** Defaults to the client's model-selection offer. */
@@ -89,7 +95,8 @@ export function useSessionConversation(
   const human = useHumanInputRequests(sessionId, eventOptions);
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
-  const files = useFileAttachments(scope);
+  // As in the web app: a private chat's attachments are its owner's alone.
+  const files = useFileAttachments({ ...scope, scope: uploadScopeForSession(detail.session) });
   const clearFiles = files.clear;
   const attachmentSession = useRef(sessionId);
   useLayoutEffect(() => {
@@ -105,7 +112,9 @@ export function useSessionConversation(
   }, [clearFiles, sessionId]);
   const uploadsEnabled = (options.attachments ?? true) && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
-  const terminal = status === "cancelled";
+  // Cancelled, or archived (read-only even when its last run ended idle).
+  const terminal =
+    status === "cancelled" || (detail.session ? sessionArchived(detail.session) : false);
   const importedArchive = detail.session?.importedArchive?.readOnly === true;
   const host = options.composerOptions;
   const resolveExtras = () =>
@@ -123,13 +132,15 @@ export function useSessionConversation(
     offerQueue: host?.offerQueue,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
     // As in the console and the native screen: a turn that is still current
-    // (running, recovering or waiting for capacity) means a Send waits.
+    // (running or recovering) means a Send waits. A turn parked on provider
+    // capacity does not: the Send replaces it and starts right away.
     sendDestination: () =>
-      queue.queue.length > 0 ||
-      status === "running" ||
-      (detail.session?.activeTurnId ?? null) !== null
-        ? "queue"
-        : "chat",
+      promptSendDestination({
+        status,
+        activeTurnId: detail.session?.activeTurnId,
+        queuedPrompts: queue.queue.length,
+        admissionBlock: detail.session?.admissionBlock,
+      }),
     sendExtras: () => {
       const extras = resolveExtras();
       return {
@@ -213,7 +224,7 @@ export function useSessionConversation(
     status,
     terminal,
     importedArchive,
-    running: status === "running" || status === "recovering" || status === "waiting_capacity",
+    running: sessionTurnKeepsRunControl(status),
     error,
     loadFailed,
     retry,

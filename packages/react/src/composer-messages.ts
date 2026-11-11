@@ -40,6 +40,11 @@ export type ChatComposerMessages = {
   annotationNotesRequired: string;
   /** Quiet notice when Up tried to recall a prompt the agent already took. */
   queuedPromptAlreadySent?: string | undefined;
+  /**
+   * Shown when a Send pressed while the composer was still loading waited as
+   * long as it may and was not sent. Cleared by the next Send or edit.
+   */
+  heldSendGaveUp?: string | undefined;
   workspacePaused: string;
   pausedHere: string;
   parentBlocker: string;
@@ -117,6 +122,7 @@ export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessag
   sendAndResumeTitle: t("composerMessages.addToQueueEnterSteer"),
   annotationNotesRequired: t("composerMessages.addANoteToEach"),
   queuedPromptAlreadySent: t("composerMessages.queuedPromptAlreadySent"),
+  heldSendGaveUp: t("composerMessages.heldSendGaveUp"),
   workspacePaused: t("composerMessages.workspacePaused"),
   pausedHere: t("composerMessages.pausedHere"),
   parentBlocker: "parent",

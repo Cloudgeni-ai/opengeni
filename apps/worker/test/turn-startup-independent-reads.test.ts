@@ -14,13 +14,16 @@ const stage = new Function(
   "ports",
   `
   const { freezeAgentLearningPolicy, getSessionAuthorityProjection } = ports;
+  const getSlackPrivateSessionOwnerSubjectId =
+    ports.getSlackPrivateSessionOwnerSubjectId ?? (async () => null);
   const observability = {}, db = {}, input = {}, learningActor = {}, turnExecutionPolicy = {}, turn = {};
   const measureTurnStartupPhase = (_observability, _phase, run) => run();
-  return (async () => { ${source.slice(start, end)} return { learning, attachmentAuthority }; })();
+  return (async () => { ${source.slice(start, end)} return { learning, attachmentAuthority, slackPrivateOwnerSubjectId }; })();
 `,
 ) as (ports: {
   freezeAgentLearningPolicy: () => Promise<unknown>;
   getSessionAuthorityProjection: () => Promise<unknown>;
+  getSlackPrivateSessionOwnerSubjectId?: () => Promise<string | null>;
 }) => Promise<unknown>;
 const flush = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -67,5 +70,33 @@ test("the old policy-error precedence and successful values are preserved", asyn
       freezeAgentLearningPolicy: async () => learning,
       getSessionAuthorityProjection: async () => attachmentAuthority,
     }),
-  ).toEqual({ learning, attachmentAuthority });
+  ).toEqual({ learning, attachmentAuthority, slackPrivateOwnerSubjectId: null });
+});
+
+test("the private Slack owner is read alongside the session authority", async () => {
+  const learning = { defaultScope: "workspace", subjectId: null };
+  const attachmentAuthority = { authorityEpoch: 3 };
+  expect(
+    await stage({
+      freezeAgentLearningPolicy: async () => learning,
+      getSessionAuthorityProjection: async () => attachmentAuthority,
+      getSlackPrivateSessionOwnerSubjectId: async () => "owner",
+    }),
+  ).toEqual({ learning, attachmentAuthority, slackPrivateOwnerSubjectId: "owner" });
+  const error = new Error("slack ownership failed");
+  await expect(
+    stage({
+      freezeAgentLearningPolicy: async () => learning,
+      getSessionAuthorityProjection: async () => attachmentAuthority,
+      getSlackPrivateSessionOwnerSubjectId: async () => {
+        throw error;
+      },
+    }),
+  ).rejects.toBe(error);
+});
+
+test("the turn's file owner follows a private Slack session before the learning destination", () => {
+  expect(source).toContain(
+    "privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(\n            learning,\n            slackPrivateOwnerSubjectId,\n          ),",
+  );
 });

@@ -8,7 +8,6 @@ import {
   type SessionActivityDatabase,
 } from "../database";
 import * as schema from "../schema";
-import { readSubscriptionProviderCutoverState } from "../subscription-core-repository";
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import { withPoolWakeServiceScopeInTransaction } from "../subscription-session-access";
 
@@ -160,8 +159,8 @@ export type SubscriptionCoreSessionWorkflowWake = (
  * outbox and the generic session workflow wake in the same transaction.
  * Wakes only request re-evaluation; each waiter re-places under its own
  * accepted turn. Runs in the trusted empty-subject worker scope per
- * workspace (the outbox's own policy), never through legacy active pointers,
- * and only while the provider's cutover is enabled for the account. Returns
+ * workspace (the outbox's own policy), never through legacy active pointers.
+ * Returns
  * the workspaces whose outbox the caller should drain after commit.
  */
 export async function wakeSubscriptionCoreCapacityWaiters(
@@ -183,11 +182,6 @@ export async function wakeSubscriptionCoreCapacityWaiters(
   if (sessionIds !== null && sessionIds.length === 0) return [];
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
     withPoolWakeServiceScopeInTransaction(tx, async () => {
-      const cutover = await readSubscriptionProviderCutoverState(tx, {
-        accountId: input.accountId,
-        provider,
-      });
-      if (cutover !== "enabled") return [];
       // Workspaces in ascending id order (lowercase text sorts as the uuid
       // does), as the membership commands walk them, so wakes never cross.
       const workspaceIds =

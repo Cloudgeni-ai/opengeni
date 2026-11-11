@@ -38,7 +38,6 @@ import { createCompanyBrainOkfPackage, serializeCompanyBrainOkf } from "../compa
 import { projectWorkspaceState } from "../workspace-state-projection";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import { parseRequestQuery } from "../http/request-body";
-import { routeRetired } from "../http/deprecation";
 
 const inspectorQuery = z
   .object({
@@ -243,25 +242,6 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
     }
     return context.body(serializeCompanyBrainOkf(result));
   });
-
-  for (const [path, replacement] of [
-    [`${base}/knowledge/search`, "POST /v1/workspaces/:workspaceId/knowledge/entries/search"],
-    [`${base}/knowledge/record`, "POST /v1/workspaces/:workspaceId/knowledge/entries"],
-    [`${base}/knowledge/browse`, "GET /v1/workspaces/:workspaceId/knowledge/entries"],
-  ] as const) {
-    app.all(path, async (context) => {
-      await requireAccessGrant(
-        context,
-        deps,
-        context.req.param("workspaceId")!,
-        "documents:search",
-      );
-      throw routeRetired(
-        replacement,
-        "Knowledge retrieval moved to /knowledge/entries. Use canonical entries, revisions and groups.",
-      );
-    });
-  }
 
   app.get(`${base}/context-receipts`, async (context) => {
     const workspaceId = context.req.param("workspaceId");

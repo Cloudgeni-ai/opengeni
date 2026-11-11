@@ -43,6 +43,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { offerClaudeDefaultModels } from "../claude-default-models";
+import { assertAnthropicApiKey } from "../claude-workspace-connection";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
@@ -200,11 +201,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       throw new HTTPException(422, {
         message: "Only an Azure OpenAI connection signs in with Microsoft Entra ID.",
       });
-    const apiKey = payload.apiKey ?? "";
-    if (kind === "anthropic" && !/^sk-ant-api[0-9]+-\S+$/.test(apiKey))
-      throw new HTTPException(422, {
-        message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
-      });
+    const apiKey =
+      kind === "anthropic" ? assertAnthropicApiKey(payload.apiKey ?? "") : (payload.apiKey ?? "");
     const opperProblem = kind === "opper" ? opperCredentialProblem(apiKey) : null;
     if (opperProblem) throw new HTTPException(422, { message: opperProblem });
     if (kind === "azure_openai" && !payload.endpoint)
@@ -214,6 +212,10 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     if (kind !== "azure_openai" && payload.endpoint !== undefined)
       throw new HTTPException(422, {
         message: "An endpoint is only valid for an Azure OpenAI connection.",
+      });
+    if (payload.models && kind !== "openai" && kind !== "azure_openai")
+      throw new HTTPException(422, {
+        message: "Only an OpenAI or Azure OpenAI connection saves models with its key.",
       });
     if (payload.claudeIdentity)
       throw new HTTPException(422, {
@@ -230,12 +232,24 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       });
     // Sign in once before saving, so a wrong tenant, app or secret is caught
     // here instead of on the first turn. The token itself is not kept.
-    if (authentication)
-      await organizationAzureEntraSetupToken(
-        deps.settings,
-        azureEntraCredential(authentication),
+    const entraToken = authentication
+      ? await organizationAzureEntraSetupToken(
+          deps.settings,
+          azureEntraCredential(authentication),
+          deps.directModelFetch,
+        )
+      : null;
+    // Models saved with the key are checked with it first, with the same
+    // short request as adding one later, so nothing is saved if one fails.
+    for (const model of new Set(payload.models ?? [])) {
+      await verifyOrganizationDirectModel(
+        kind === "openai"
+          ? { provider: "openai", model }
+          : { provider: "azure_openai", model, endpoint: payload.endpoint! },
+        entraToken ?? apiKey,
         deps.directModelFetch,
       );
+    }
     const stored: OrganizationModelProviderCredential =
       authentication?.method === "entra_client_secret"
         ? {
@@ -261,6 +275,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         credentialDigest: organizationModelProviderCredentialDigest(credential),
         ...(kind === "azure_openai" ? { endpoint: payload.endpoint ?? null } : {}),
         ...(authMethod === "api_key" ? {} : { authMethod }),
+        ...(payload.models ? { models: payload.models } : {}),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}

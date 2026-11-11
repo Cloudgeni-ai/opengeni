@@ -37,11 +37,9 @@ const FORWARD_RESPONSE_HEADERS = [
   "content-disposition",
   "content-range",
   "content-type",
-  "deprecation",
   "etag",
   "last-modified",
   "retry-after",
-  "sunset",
   "x-opengeni-api-contract",
   "x-opengeni-correlation-id",
 ] as const;

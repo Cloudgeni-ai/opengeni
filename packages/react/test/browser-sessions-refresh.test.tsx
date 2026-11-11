@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, test } from "bun:test";
 import type { SessionClientLike } from "../src/client";
 import { useBrowserSessions } from "../src/hooks/use-browser-sessions";
@@ -6,7 +7,7 @@ import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
 registerDom();
 
-type Inventory = Awaited<ReturnType<SessionClientLike["listBrowserSessions"]>>;
+type Inventory = Awaited<ReturnType<SessionClientLike<ChatClient>["listBrowserSessions"]>>;
 
 function controlledClient() {
   const requests: Array<{

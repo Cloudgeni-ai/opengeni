@@ -1,11 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { parseSync, type IfStatement } from "oxc-parser";
-import {
-  AutomationSessionTemplate,
-  CreateSessionRequest,
-  type Permission,
-} from "@opengeni/contracts";
+import { CreateSessionRequest, type Permission } from "@opengeni/contracts";
 import { OpenGeniClient } from "../src/index";
 
 // Source-only boundary regression. This runs the exact public admission guard
@@ -138,17 +134,5 @@ test.each(["omitted", "nonempty"] as const)(
     );
     // This nonempty control does not recommend padding a documentation recipe,
     // or assert that any caller holds this permission or passed full admission.
-  },
-);
-
-test.each(["omitted", "explicit"] as const)(
-  "%s automation template arrays remain valid zero authority",
-  (mode) => {
-    const template = AutomationSessionTemplate.parse({
-      prompt: "fixture automation",
-      ...(mode === "explicit" ? { firstPartyMcpTools: [], firstPartyMcpPermissions: [] } : {}),
-    });
-    expect(template.firstPartyMcpTools).toEqual([]);
-    expect(template.firstPartyMcpPermissions).toEqual([]);
   },
 );

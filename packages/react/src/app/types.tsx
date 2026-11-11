@@ -2,6 +2,7 @@
 // SDK's contract-parity tests) — the console does not mirror them. Only the
 // console-local shapes (managed auth session and drafts) live here.
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 
 export type {
   AccessContext,
@@ -55,6 +56,7 @@ export type {
   McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
+  OrganizationInferenceResidency,
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryOverview,
@@ -132,7 +134,7 @@ export type {
   ScheduledTaskRun,
   ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
-  Session,
+  ChatSession as Session,
   SessionEvent,
   SessionGoal,
   SessionStatus,
@@ -160,19 +162,24 @@ export type {
 // shapes. Organization private-session settings are exported directly because
 // their request helpers live in an opt-in SDK subpath.
 export type OrganizationInvitation = Awaited<
-  ReturnType<OpenGeniBrowserClient["listOrganizationInvitations"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["listOrganizationInvitations"]>
 >["invitations"][number];
 export type OrganizationMember = Awaited<
-  ReturnType<OpenGeniBrowserClient["listOrganizationMembers"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["listOrganizationMembers"]>
 >["members"][number];
 export type OrganizationMembershipRole = OrganizationMember["role"];
+/** Who is in the organization by name only, as any member reads it. */
+export type OrganizationMemberNames = Awaited<
+  ReturnType<ChatClient<OpenGeniBrowserClient>["listOrganizationMemberNames"]>
+>;
+export type OrganizationMemberName = OrganizationMemberNames["members"][number];
 export type OrganizationAdministrationOverview = Awaited<
-  ReturnType<OpenGeniBrowserClient["getOrganizationAdministrationOverview"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["getOrganizationAdministrationOverview"]>
 >;
 export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
 export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];
 export type OrganizationRetentionPolicy = Awaited<
-  ReturnType<OpenGeniBrowserClient["getOrganizationRetentionPolicy"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["getOrganizationRetentionPolicy"]>
 >;
 
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";

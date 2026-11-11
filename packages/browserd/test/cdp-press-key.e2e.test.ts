@@ -87,7 +87,8 @@ e2e(
       expect(await evaluate("keys")).toEqual(["Escape"]);
 
       // Function and navigation keys reach the page with their standard
-      // names, including the common short spellings.
+      // names, including the common short spellings. A modifier goes down as
+      // its own key first, as a person presses it.
       await evaluate(
         'globalThis.codes=[];document.addEventListener("keydown",e=>codes.push([e.key,e.code,e.keyCode,e.ctrlKey]))',
       );
@@ -105,6 +106,7 @@ e2e(
         ["PageUp", "PageUp", 33, false],
         ["PageDown", "PageDown", 34, false],
         ["Insert", "Insert", 45, false],
+        ["Control", "ControlLeft", 17, true],
         ["F5", "F5", 116, true],
       ]);
       await evaluate("globalThis.keys=['Escape']");
@@ -208,6 +210,280 @@ e2e(
         )
       ).result.value;
       expect(value).toBe("BIJJL4Q4J");
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "typed keys reach a canvas that reads physical keys, and inserted text is not lost on it",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-canvas-keys-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    // Like a remote-desktop viewer that forwards scancodes: the canvas reads
+    // only which physical key went down and whether a Shift key is held, and
+    // the remote side turns that into a character on a US layout.
+    const script = `
+      const plain = "1234567890-=[]\\\\;',./\`";
+      const shifted = '!@#$%^&*()_+{}|:"<>?~';
+      const codes = ["Digit1","Digit2","Digit3","Digit4","Digit5","Digit6","Digit7","Digit8","Digit9","Digit0","Minus","Equal","BracketLeft","BracketRight","Backslash","Semicolon","Quote","Comma","Period","Slash","Backquote"];
+      const screen = document.querySelector("canvas");
+      globalThis.remote = ""; globalThis.downs = [];
+      let shift = false;
+      screen.addEventListener("keyup", (e) => { if (e.code.startsWith("Shift")) shift = false; e.preventDefault(); });
+      screen.addEventListener("keydown", (e) => {
+        e.preventDefault();
+        downs.push(e.code);
+        if (e.code.startsWith("Shift")) { shift = true; return; }
+        if (e.code.startsWith("Key")) { const letter = e.code.slice(3); remote += shift ? letter : letter.toLowerCase(); return; }
+        if (e.code === "Space") { remote += " "; return; }
+        const index = codes.indexOf(e.code);
+        if (index >= 0) remote += (shift ? shifted : plain)[index];
+      });
+      screen.focus();`;
+    const fixture = `data:text/html,${encodeURIComponent(
+      `<!doctype html><title>Remote screen</title><canvas tabindex="0" width="320" height="200" aria-label="Remote screen"></canvas><input aria-label="Note"><script>${script}</script>`,
+    )}`;
+    try {
+      const initial = await driver.start(fixture);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) =>
+        (
+          await cdp!.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            { sessionId: attached.sessionId },
+          )
+        ).result.value;
+      const run = (action: BrowserActionCommand["action"]) =>
+        controller.run({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: initial.target.id,
+          expectedTargetGeneration: initial.target.targetGeneration,
+          expectedDocumentGeneration: initial.target.documentGeneration!,
+          expectedFrameId: initial.frameId!,
+          actor: { kind: "human", subjectId: "canvas-keys-fixture" },
+          observationMode: "none",
+          action,
+        });
+      expect(await evaluate("document.activeElement?.tagName")).toBe("CANVAS");
+
+      // Uppercase letters and shifted symbols need Shift held on their key.
+      const text = `Hello World 1! aB@#$%^&*()_+{}|:"<>?~ -=[]\\;',./\``;
+      const typed = await run({ type: "type", text, mode: "keys" });
+      expect(typed.state).toBe("completed");
+      expect(await evaluate("remote")).toBe(text);
+
+      // A key combination presses its modifier first.
+      await evaluate("downs.length = 0");
+      expect((await run({ type: "press", key: "Ctrl+A" })).state).toBe("completed");
+      expect(await evaluate("downs")).toEqual(["ControlLeft", "KeyA"]);
+
+      // Inserted text has nowhere to go on a canvas: refuse it rather than
+      // report text that never arrived.
+      await evaluate('remote = ""; downs.length = 0');
+      const inserted = await run({ type: "type", text: "lost" });
+      expect(inserted.state).toBe("failed");
+      expect(inserted.error?.code).toBe("invalid_action");
+      expect(inserted.error?.message).toContain("mode:'keys'");
+      expect(await evaluate("downs.length")).toBe(0);
+
+      // A text field still takes inserted text.
+      const field = await run({
+        type: "type",
+        locator: { kind: "label", text: "Note" },
+        text: "Inserted Text!",
+      });
+      expect(field.state).toBe("completed");
+      expect(await evaluate('document.querySelector("input").value')).toBe("Inserted Text!");
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "typing reaches code editors, refuses a non-text target before focusing it, reports text-only characters a canvas may miss, and never leaves a modifier held",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-canvas-edge-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    // A canvas that reads physical keys and Shift (a remote desktop), an
+    // EditContext editor (how Monaco and VS Code for the web take text), a
+    // button and a text field.
+    const script = `
+      const screen = document.querySelector("canvas");
+      globalThis.remote = ""; globalThis.held = new Set();
+      screen.addEventListener("keyup", (e) => { held.delete(e.code); e.preventDefault(); });
+      screen.addEventListener("keydown", (e) => {
+        e.preventDefault();
+        held.add(e.code);
+        const shift = held.has("ShiftLeft");
+        if (e.code.startsWith("Key")) remote += shift ? e.code.slice(3) : e.code.slice(3).toLowerCase();
+        else if (e.code === "Digit1") remote += shift ? "!" : "1";
+      });
+      const editor = document.querySelector("#editor");
+      globalThis.context = new EditContext();
+      editor.editContext = context;
+      context.addEventListener("textupdate", (e) => context.updateSelection(e.selectionEnd, e.selectionEnd));
+      const box = document.querySelector("#box");
+      box.addEventListener("focus", () => box.querySelector("input").focus());
+      globalThis.chords = [];
+      document.addEventListener("keydown", (e) => { if (e.ctrlKey && e.key.length === 1) chords.push(e.key); });
+      editor.focus();`;
+    const fixture = `data:text/html,${encodeURIComponent(
+      `<!doctype html><title>Edges</title><canvas tabindex="0" width="200" height="100" aria-label="Remote screen"></canvas><div id="editor" tabindex="0" aria-label="Code"></div><button>Save</button><input aria-label="Note"><div id="box" tabindex="0" aria-label="Amount box"><input aria-label="Amount"></div><script>${script}</script>`,
+    )}`;
+    try {
+      const initial = await driver.start(fixture);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) =>
+        (
+          await cdp!.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            { sessionId: attached.sessionId },
+          )
+        ).result.value;
+      const run = (action: BrowserActionCommand["action"]) =>
+        controller.run({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: initial.target.id,
+          expectedTargetGeneration: initial.target.targetGeneration,
+          expectedDocumentGeneration: initial.target.documentGeneration!,
+          expectedFrameId: initial.frameId!,
+          actor: { kind: "human", subjectId: "canvas-edge-fixture" },
+          observationMode: "none",
+          action,
+        });
+
+      // An EditContext editor takes inserted text.
+      expect(await evaluate("document.activeElement.id")).toBe("editor");
+      const edited = await run({ type: "type", text: "const x = 1;" });
+      expect(edited.state).toBe("completed");
+      expect(await evaluate("context.text")).toBe("const x = 1;");
+
+      // A locator that names a button is refused before focus moves, as a
+      // definite failure rather than an unknown outcome.
+      const refused = await run({
+        type: "type",
+        locator: { kind: "role", role: "button", name: "Save", exact: true },
+        text: "lost",
+      });
+      expect(refused.state).toBe("failed");
+      expect(refused.error?.code).toBe("invalid_action");
+      expect(await evaluate("document.activeElement.id")).toBe("editor");
+
+      // A character with no US key reaches a text field as text...
+      const field = await run({
+        type: "type",
+        locator: { kind: "label", text: "Note" },
+        text: "blåbær",
+        mode: "keys",
+      });
+      expect(field.state).toBe("completed");
+      expect(await evaluate('document.querySelector("input").value')).toBe("blåbær");
+      // ...but a canvas reading physical keys gets nothing for it, so the
+      // result names it instead of reporting the text as typed.
+      await evaluate('document.querySelector("canvas").focus()');
+      const canvas = await run({ type: "type", text: "blåbær", mode: "keys" });
+      expect(canvas.state).not.toBe("completed");
+      expect(canvas.error?.code).toBe("outcome_unknown");
+      expect(canvas.error?.message).toContain('"å", "æ"');
+      expect(await evaluate("remote")).toBe("blbr");
+
+      // A pressed symbol is its US key with Shift held.
+      await evaluate('remote = ""');
+      expect((await run({ type: "press", key: "!" })).state).toBe("completed");
+      expect(await evaluate("remote")).toBe("!");
+
+      // A focusable wrapper that moves focus into its own field takes text:
+      // the field that ends up focused decides, not the wrapper.
+      const wrapped = await run({
+        type: "type",
+        locator: { kind: "css", selector: "#box" },
+        text: "Hi",
+      });
+      expect(wrapped.state).toBe("completed");
+      expect(await evaluate('document.querySelector("#box input").value')).toBe("Hi");
+
+      // A letter in a key combination is reported lowercase unless Shift is
+      // held, as a browser reports it.
+      await run({ type: "press", key: "Ctrl+A" });
+      await run({ type: "press", key: "Ctrl+Shift+a" });
+      expect(await evaluate("chords")).toEqual(["a", "A"]);
+
+      // A key that fails to send still releases the modifiers pressed for it.
+      const internals = driver as unknown as {
+        sendActionTarget: (state: unknown, method: string, params?: unknown) => Promise<unknown>;
+      };
+      const send = internals.sendActionTarget.bind(driver);
+      internals.sendActionTarget = async (state, method, params) => {
+        const event = params as { type?: string; code?: string } | undefined;
+        if (
+          method === "Input.dispatchKeyEvent" &&
+          event?.type === "keyDown" &&
+          event.code === "KeyV"
+        )
+          throw new Error("injected key failure");
+        return send(state, method, params);
+      };
+      const failed = await run({ type: "press", key: "Ctrl+Shift+V" });
+      internals.sendActionTarget = send;
+      expect(failed.state).not.toBe("completed");
+      expect(await evaluate("[...held]")).toEqual([]);
     } finally {
       await cdp?.close();
       await driver.close();

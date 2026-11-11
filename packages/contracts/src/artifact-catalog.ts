@@ -20,9 +20,15 @@ export const ArtifactCatalogItem = /* @__PURE__ */ defineSchema(() =>
       status: z.enum(["active", "archived"]),
       /** Shared workspace metadata, not content-access authority. */
       pinned: primitives.optionalBoolean,
-      /** Sites and files: "private" when only its owner (the viewer) can see it. */
+      /**
+       * Sites, files, documents, spreadsheets and presentations: "private"
+       * when only its owner (the viewer) can see it.
+       */
       visibility: z.enum(["private", "workspace"]).optional(),
-      /** Files only: the viewer owns the file, so they can share or limit it. */
+      /**
+       * Files, documents, spreadsheets and presentations: the viewer owns it,
+       * so they can share or limit it.
+       */
       ownedByViewer: primitives.optionalBoolean,
       sourceSessionId: primitives.optionalUuid,
       versionId: z.string().min(1).max(128).optional(),
@@ -77,6 +83,12 @@ export const ArtifactCatalogListResponse = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type ArtifactCatalogListResponse = z.infer<typeof ArtifactCatalogListResponse>;
+
+/** Exact UUID link resolution; content still uses the kind's normal read route. */
+export const ArtifactLinkResolution = /* @__PURE__ */ defineSchema(() =>
+  z.object({ artifactId: primitives.uuid, kind: z.enum(["file", "site"]) }).strict(),
+);
+export type ArtifactLinkResolution = z.infer<typeof ArtifactLinkResolution>;
 
 export const UpdateArtifactPinRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({ pinned: primitives.boolean }).strict(),

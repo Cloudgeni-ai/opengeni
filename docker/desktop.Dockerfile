@@ -32,6 +32,23 @@ FROM scratch AS chrome-assets
 
 ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb
 
+# The pinned rg builds the agent embeds and appends to every command's PATH,
+# with the static musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS shell-tools-fetch
+WORKDIR /src
+COPY scripts/fetch-shell-tools.ts scripts/
+COPY packages/runtime/src/sandbox/shell-tools-manifest.ts packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt packages/runtime/src/sandbox/
+COPY agent/vendor/jq/ agent/vendor/jq/
+COPY --from=shell-tools-linux /cache/ /cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /out
+
 FROM rust:1.82-bookworm AS computer-native-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
@@ -40,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
 WORKDIR /src/agent
 ARG TARGETPLATFORM
 COPY agent .
+COPY --from=shell-tools-fetch /out/ /shell-tools/
 # Cache mounts keep the crates.io registry and the per-target build directory
 # between builds so an edit under agent/ recompiles only the changed crates;
 # the verified binary is installed to /out inside the same step.
@@ -47,7 +65,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
-    cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
+    OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native; \
     install -m 0755 target/release/opengeni-agent /out/opengeni-agent
@@ -195,6 +213,7 @@ RUN set -eux; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    cp -aL packages/contracts/node_modules/entities "$runtime/node_modules/entities"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
     test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
@@ -346,15 +365,24 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
 # ---- Layer 1: headless tool layer (parity with docker/sandbox.Dockerfile) ----
+# Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
+# from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
+# poppler-utils gives PDF text page by page (pdftotext -f N -l N, pdfinfo),
+# which AnyDoc's Markdown does not mark.
+# The small general tools agents reach for without checking first, as in
+# docker/sandbox.Dockerfile: GNU time (`/usr/bin/time -v`), zip, iproute2
+# (ss, ip), binutils (strings, objdump, readelf), bc and patch. The last build
+# step (docker/check-default-commands.sh) proves every default command is present.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     printf '%s\n' \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     base_packages=" \
-        bash ca-certificates coreutils curl gpg git jq openssh-client postgresql-client \
+        bash ca-certificates coreutils curl gpg git jq openssh-client poppler-utils postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
-        apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
+        apt-transport-https net-tools netcat-openbsd sudo util-linux uuid-runtime xxd file \
+        bc binutils iproute2 patch time zip \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -362,7 +390,10 @@ RUN set -eux; \
         if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
     done; \
     rm -rf /var/lib/apt/lists/*; \
-    psql --version
+    psql --version; \
+    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'; \
+    pdftotext -v; \
+    pdfinfo -v
 
 # Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
 # distribution's moving Node release, mirroring the gh keyring+repo layer.
@@ -680,6 +711,9 @@ RUN set -eux; \
                /usr/local/lib/opengeni/opengeni-computer-native \
                /usr/local/bin/opengeni-agent; \
     opengeni-agent --version; \
+    # bunx is Bun started under that name, as in the official Bun images.
+    ln -s bun /usr/local/bin/bunx; \
+    test "$(bunx --version)" = "$(bun --version)"; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \
@@ -700,6 +734,16 @@ RUN set -eux; \
     bash -n /usr/local/bin/opengeni-browserd-down; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS; \
     bash -n /usr/local/bin/opengeni-record
+
+# The same lowest-precedence commit identity as the sandbox image (see
+# docker/sandbox.Dockerfile): anything a deployment, user or repository sets wins.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
+
+# Last build step: every default command an agent may reach for is present
+# and runs (docker/check-default-commands.sh), so a regression fails the build.
+RUN --mount=type=bind,source=docker/check-default-commands.sh,target=/opt/opengeni-check/check-default-commands.sh \
+    sh /opt/opengeni-check/check-default-commands.sh
 
 ENV HOME=/workspace
 ENV DISPLAY=:0

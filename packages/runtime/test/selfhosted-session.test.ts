@@ -17,7 +17,9 @@ import {
   timeoutControlResponse,
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import { prepareSecretExec, runWithSecretCarry } from "../src/sandbox/secret-delivery";
+import { createCredentialEnvironment } from "../src/sandbox/credential-profile-delivery";
 import { isSecretReferenceError, type SecretReferenceError } from "@opengeni/contracts";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 
@@ -520,6 +522,77 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(structured.stdout).toBe("");
     expect(structured.stderr).toBe(stderr);
     expect(structured.exitCode).toBe(2);
+  });
+
+  test("execCommand bounds output to maxOutputTokens with head, tail and the original count", async () => {
+    const lines = Array.from({ length: 3000 }, (_, index) => `${index + 1}`).join("\n") + "\n";
+    const mock = new MockAgentResponder({
+      exec: () => ({
+        exitCode: 3,
+        stdout: new TextEncoder().encode(lines),
+        stderr: new TextEncoder().encode("warning: tail\n"),
+        timedOut: false,
+        durationMs: "4",
+        backgroundChildrenStopped: true,
+      }),
+    });
+    const session = sessionWith(mock);
+
+    const bounded = await session.execCommand({ cmd: "seq 1 3000", maxOutputTokens: 50 });
+    expect(parseExecBannerExitCode(bounded)).toBe(3);
+    expect(bounded).toMatch(/\nOriginal token count: \d+\nOutput:\n/);
+    const body = bounded.slice(bounded.indexOf("\nOutput:\n") + "\nOutput:\n".length);
+    const [output, notice] = body.split("\n\nStopped background child processes");
+    expect(notice).toBeDefined();
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(50 * 4);
+    expect(output).toContain("\n1\n2\n");
+    expect(output).toContain("warning: tail");
+    expect(output).toContain("tokens truncated");
+    expect(output).not.toContain("\n1500\n");
+
+    const full = await session.execCommand({ cmd: "seq 1 3000" });
+    expect(full).not.toContain("Original token count");
+    expect(full).toContain(lines);
+  });
+
+  test("a backgrounded execCommand keeps its handles and bounds the early output", async () => {
+    const early = Array.from({ length: 3000 }, (_, index) => `${index + 1}`).join("\n") + "\n";
+    const session = sessionWith(new MockAgentResponder());
+    session.execWithYield = async () => ({
+      output: early,
+      stdout: early,
+      stderr: "",
+      exitCode: null,
+      backgroundCommandId: "cmd-1",
+      backgroundOpId: "op-1",
+    });
+
+    const bounded = await session.execCommand({
+      cmd: "seq 1 3000; sleep 600",
+      maxOutputTokens: 50,
+    });
+    const [header, output] = bounded.split("\n\nOutput:\n");
+    expect(header).toMatch(
+      /^Command running in background with command ID cmd-1\.\nConnected Machine operation op-1 remains pinned to its launch daemon\.\nOriginal token count: \d+$/,
+    );
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(50 * 4);
+    expect(output).toContain("\n1\n2\n");
+    expect(output).toContain("\n3000\n");
+    expect(output).toContain("tokens truncated");
+    // A backgrounded result never reads as a finished command, bounded or not.
+    expect(parseExecResponseBanner(bounded).kind).toBe("invalid");
+
+    const full = await session.execCommand({ cmd: "seq 1 3000; sleep 600" });
+    expect(parseExecResponseBanner(full).kind).toBe("invalid");
+    expect(full).toBe(
+      [
+        "Command running in background with command ID cmd-1.",
+        "Connected Machine operation op-1 remains pinned to its launch daemon.",
+        "",
+        "Output:",
+        early,
+      ].join("\n"),
+    );
   });
 
   test("native child cleanup appends a notice without changing structured output", async () => {
@@ -1945,5 +2018,66 @@ describe("SelfhostedSession.browserControlHttp", () => {
       },
     }));
     await expect(session.browserControlHttp(call)).rejects.toThrow(/length is invalid/);
+  });
+});
+
+describe("SelfhostedSession — credential profiles (native env path)", () => {
+  const TOKEN = "ghp_fakeNativeProfileToken";
+  const reference = ["{", "{secret:Token}}"].join("");
+  const credentials = () =>
+    createCredentialEnvironment({
+      resolver: createStaticSecretResolver({ Token: TOKEN, Canary: "native-canary" }),
+      load: async () => ({
+        entries: [{ name: "GH_TOKEN", reference, source: { scope: "workspace", sessionId: null } }],
+        gitHelper: false,
+      }),
+    });
+
+  async function execWithProfile(cmd: string, args: { shell?: string; login?: boolean } = {}) {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: "codemode-bearer" }),
+    });
+    const prepared = await prepareSecretExec(cmd, {
+      resolver: createStaticSecretResolver({ Token: TOKEN, Canary: "native-canary" }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+      credentials: credentials(),
+    });
+    await runWithSecretCarry(prepared?.carry ?? null, () =>
+      session.exec({ cmd: prepared?.text ?? cmd, ...args }),
+    );
+    return streamedExecRequest(mock);
+  }
+
+  test("profile variables ride ExecRequest.env; the command and shell are unchanged", async () => {
+    const exec = await execWithProfile("gh pr list", { login: true });
+    const plainMock = new MockAgentResponder();
+    await sessionWith(plainMock, 0, undefined, { workspaceRoot: "/home/user/project" }).exec({
+      cmd: "gh pr list",
+      login: true,
+    });
+    const plain = streamedExecRequest(plainMock);
+    expect(exec.command).toEqual(plain.command);
+    expect(exec.shell).toBe(plain.shell);
+    expect(exec.env).toEqual({
+      GH_TOKEN: TOKEN,
+      OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
+    expect(JSON.stringify(exec.command)).not.toContain(TOKEN);
+  });
+
+  test("with a reference too, both reach the process and only names are in the text", async () => {
+    const canary = ["{", "{secret:Canary}}"].join("");
+    const exec = await execWithProfile(`printf %s "${canary}"`);
+    expect(exec.command).toEqual(["/bin/sh", "-c", 'printf %s "${OPENGENI_SECRET_0}"']);
+    expect(exec.env).toEqual({
+      GH_TOKEN: TOKEN,
+      OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+      OPENGENI_SECRET_0: "native-canary",
+    });
   });
 });

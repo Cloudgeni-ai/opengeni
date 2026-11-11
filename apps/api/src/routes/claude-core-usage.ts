@@ -17,12 +17,9 @@ import {
   projectSubscriptionCoreClaudeUsage,
   readSubscriptionCoreClaudeOrganizationUsageRow,
   readSubscriptionCoreClaudeWorkspaceUsageTarget,
-  readSubscriptionCoreProviderRouteForWorkspace,
   refreshSubscriptionCoreClaudeOrganizationUsage,
   refreshSubscriptionCoreClaudeWorkspaceUsage,
 } from "@opengeni/db";
-import { ApiHttpError } from "../http/api-error";
-import { SUBSCRIPTION_CORE_CUTOVER_DISABLED } from "./codex-core";
 import {
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -38,32 +35,6 @@ export type CoreClaudeUsageCaller = {
   /** The route's account id: a canonical connection id or a cutover alias. */
   accountIdParam: string;
 };
-
-/**
- * Require Claude's core route for an authenticated usage caller. Missing or
- * disabled receipts fail closed with the typed 503 the Codex routes use.
- */
-export async function claudeUsageRoute(
-  deps: ApiRouteDeps,
-  accountId: string,
-  workspaceId: string | null,
-): Promise<"core"> {
-  const route = await readSubscriptionCoreProviderRouteForWorkspace(deps.db, {
-    accountId,
-    workspaceId,
-    provider: "claude",
-  });
-  if (route !== "core") {
-    throw new ApiHttpError(503, {
-      code: "upstream_unavailable",
-      message: "Claude subscriptions are paused for maintenance in this organization",
-      retryable: true,
-      outcomeUnknown: false,
-      details: { reason: SUBSCRIPTION_CORE_CUTOVER_DISABLED },
-    });
-  }
-  return route;
-}
 
 /**
  * Wake the Claude core waiters after a reading that ended a stored

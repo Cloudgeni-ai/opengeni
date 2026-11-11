@@ -161,8 +161,7 @@ test("multiple bot installations keep access changes on the selected workspace",
       await sheet.getByText("Publish important decisions to Slack", { exact: true }).count(),
     ).toBe(0);
     await sheet.getByRole("button", { name: "Edit access", exact: true }).click();
-    await sheet.getByRole("combobox", { name: "Bot workspace access" }).click();
-    await page.getByRole("option", { name: "Selected workspaces", exact: true }).click();
+    await sheet.getByRole("radio", { name: "Selected workspaces", exact: true }).click();
     await sheet.getByRole("checkbox", { name: "Analytics", exact: true }).click();
     await sheet.getByRole("button", { name: "Save", exact: true }).click();
     await sheet.getByRole("button", { name: "Edit access", exact: true }).waitFor();
@@ -274,17 +273,17 @@ test("workspace default machine saves once and schedules show its current name",
     expect(state.defaultExecutionTarget).toEqual({ kind: "machine", targetSandboxId: machineId });
     await page.screenshot({ path: `${evidence}/workspace-default-machine.png` });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/sessions`);
-    await page.getByRole("textbox", { name: "Message the agent" }).waitFor();
+    await page.getByRole("textbox", { name: "Ask anything" }).waitFor();
     const savedDraft = page.waitForResponse(
       (response) =>
         response.url().endsWith("/new-session-draft") && response.request().method() === "PUT",
     );
     await page
-      .getByRole("textbox", { name: "Message the agent" })
+      .getByRole("textbox", { name: "Ask anything" })
       .fill("Check the workspace default machine.");
     await savedDraft;
-    await page.getByRole("button", { name: "More composer actions" }).click();
-    await page.getByRole("menuitem", { name: /Runs on.*Build Mac/ }).waitFor();
+    // Where a new chat runs is the Runs on chip above the message.
+    await page.getByRole("button", { name: "Runs on: Build Mac" }).waitFor();
     expect(state.draft?.options).toMatchObject({ targetSandboxId: machineId });
     await page.screenshot({ path: `${evidence}/new-chat-default-machine.png` });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/automations/new`);

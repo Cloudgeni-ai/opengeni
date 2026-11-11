@@ -571,44 +571,6 @@ test("ordinary Send accepts private attachments after persisting the human messa
   expect(await f.read("user:viewer", target.id)).toHaveLength(1);
 });
 
-test("migration backfills only original uploads proven by accepted human messages", async () => {
-  const f = await fixture();
-  const unrelated = await fixture();
-  expect(await f.read("user:viewer")).toEqual([]);
-  const migration = await Bun.file(
-    new URL("../drizzle/0499_session_attachment_access.sql", import.meta.url),
-  ).text();
-  const start = migration.indexOf("ALTER TABLE files NO FORCE ROW LEVEL SECURITY;");
-  const end = migration.indexOf("-- Copy only already accepted attachment grants", start);
-  if (start < 0 || end < 0) throw new Error("Missing backfill boundary");
-  await shared.admin.begin(async (tx) => {
-    const [owner] =
-      await tx`select r.rolname from pg_class c join pg_roles r on r.oid=c.relowner where c.oid='files'::regclass`;
-    await tx.unsafe(`SET LOCAL ROLE "${String(owner!.rolname).replaceAll('"', '""')}"`);
-    await tx.unsafe(
-      migration.slice(start, end) +
-        migration.slice(migration.indexOf("-- Restore owner isolation")),
-    );
-  });
-  expect(await f.read("user:viewer")).toHaveLength(1);
-  expect(
-    await withSessionRlsActorContext({ subjectId: "user:viewer" }, () =>
-      readSessionFileAttachments(client.db, {
-        ...f.scope,
-        fileIds: [unrelated.file.id],
-        access: {
-          sessionId: f.session.id,
-          authorityEpoch: 1,
-          actor: { kind: "subject", subjectId: "user:viewer" },
-        },
-      }),
-    ),
-  ).toEqual([]);
-  const [policy] =
-    await shared.admin`select relforcerowsecurity from pg_class where oid='files'::regclass`;
-  expect(policy!.relforcerowsecurity).toBe(true);
-});
-
 for (const running of [false, true])
   test(`sharing preserves a ${running ? "running" : "queued"} accepted human turn and its attachment`, async () => {
     const f = await fixture(true, true);

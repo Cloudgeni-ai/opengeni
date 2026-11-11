@@ -172,6 +172,36 @@ describe("CapabilityTile", () => {
       await rendered.unmount();
     }
   });
+
+  test("a connector carried into Personal says which workspace it comes from", async () => {
+    const rendered = await render(
+      <>
+        <CapabilityTile
+          item={item({
+            id: "mcp:notion",
+            name: "Notion",
+            enabled: true,
+            metadata: {
+              personalExtension: { originWorkspaceId: "team", originWorkspaceName: "Team" },
+            },
+          })}
+          logoSrc={null}
+          health={CONNECTED}
+          onOpen={() => {}}
+        />
+        <CapabilityTile item={item()} logoSrc={null} onOpen={() => {}} />
+      </>,
+    );
+    try {
+      const tiles = [...rendered.container.querySelectorAll("[data-capability-catalog-tile]")];
+      expect(tiles[0]!.textContent).toContain("From Team");
+      expect(tiles[0]!.textContent).not.toContain("Issue tracking");
+      expect(tiles[1]!.textContent).toContain("Issue tracking");
+      expect(tiles[1]!.textContent).not.toContain("From ");
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 describe("FeaturedConnectorTile", () => {

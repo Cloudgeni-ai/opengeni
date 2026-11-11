@@ -30,13 +30,26 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { getDesktopBridge, hasDesktopCapability } from "@opengeni/sdk/desktop-bridge";
+import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
+import { canStartRecording, capturing } from "./recorder-state";
+
+export { canStartRecording } from "./recorder-state";
 
 export type MeetingRecorder = UseRecorderResult;
 
-/** A recording someone asked for outside the recorder, such as from a desktop call notification. */
-export type MeetingStartRequest = { title: string };
+/**
+ * A recording someone asked for outside the recorder, such as from a desktop
+ * call notification. An empty title leaves the name to Opengeni; `app` marks
+ * a title the app guessed (the call app's name), which a calendar event or
+ * the conversation replaces. `calendarEvent` is the owner's calendar event
+ * the meeting is of, such as one joined from a reminder; it names the meeting.
+ */
+export type MeetingStartRequest = {
+  title: string;
+  titleSource?: "person" | "app";
+  calendarEvent?: { provider: "google" | "microsoft"; id: string };
+};
 
 export type MeetingRecorderStore = {
   get: () => MeetingRecorder | null;
@@ -87,6 +100,9 @@ export function createMeetingRecorderStore(
     set: (recorder, workspaceId = null) => {
       current = recorder;
       currentWorkspaceId = recorder ? workspaceId : null;
+      // A recording that started some other way (the Start button) uses up a
+      // start still waiting, so it can't begin a second one after Stop.
+      if (pending && capturing(recorder?.state)) pending = null;
       notify();
     },
     workspaceId: () => currentWorkspaceId,
@@ -121,13 +137,6 @@ export const MeetingRecorderStoreProvider = MeetingRecorderContext.Provider;
 const LazyRecorderHost = lazy(() => import("./recorder-host"));
 
 const RECORDING_DATABASE = "opengeni-recordings";
-
-/** States in which the recorder holds a capture that unmounting its host would end. */
-function capturing(state: MeetingRecorder["state"] | null | undefined): boolean {
-  return (
-    state === "starting" || state === "recording" || state === "paused" || state === "stopping"
-  );
-}
 
 /** True when this browser still holds recording chunks from an earlier visit. */
 async function hasLocalRecordings(): Promise<boolean> {
@@ -199,14 +208,6 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(store, {
-    signedOut: scope === null,
-    onOpenMeetings,
-  });
-  // A start someone asked for belongs to who was signed in then.
-  useEffect(() => {
-    store.takeStart();
-  }, [store, scope]);
   // Leaving a workspace must not end a recording made in it: the host, and
   // with it the capture, stays in the recording's workspace until it stops,
   // then follows the host's current workspace. Another person (scope) gets a
@@ -216,6 +217,17 @@ export function MeetingRecorderProvider({
     () => capturing(store.get()?.state),
     () => false,
   );
+  useDesktopMeetingRequests(store, {
+    // The desktop app asks about calls only while a page can record them:
+    // someone signed in, with a workspace to record to, or a recording going.
+    canRecord: scope !== null && (workspaceId !== null || busy),
+    signedOut: scope === null,
+    onOpenMeetings,
+  });
+  // A start someone asked for belongs to who was signed in then.
+  useEffect(() => {
+    store.takeStart();
+  }, [store, scope]);
   const [host, setHost] = useState({ scope, workspaceId });
   if (host.scope !== scope || (!busy && host.workspaceId !== workspaceId)) {
     setHost({ scope, workspaceId });
@@ -241,24 +253,31 @@ export function MeetingRecorderProvider({
 const NO_FINISHED: readonly string[] = [];
 
 /**
- * The desktop app's call notifications: "Record" opens Meetings and starts
- * recording the call; "Stop" (the call ended) stops and opens the meeting.
+ * The desktop app's meeting card: "Record" opens Meetings and starts
+ * recording the call; "Stop recording" (the call ended) stops and opens the
+ * meeting.
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
-  navigation: { signedOut: boolean; onOpenMeetings?: (() => void) | undefined },
+  navigation: {
+    canRecord: boolean;
+    signedOut: boolean;
+    onOpenMeetings?: (() => void) | undefined;
+  },
 ): void {
   const latest = useRef(navigation);
   useEffect(() => {
     latest.current = navigation;
   });
+  const canRecord = navigation.canRecord;
   useEffect(() => {
+    // Taking choices tells the app this page can record; stopping while the
+    // page stays (signed out, no workspace) tells it nobody can.
+    if (!canRecord) return;
     // The bridge itself, not the app layer's helper, which would bring every
-    // contract into this module, mounted above a host's routes.
-    const bridge = getDesktopBridge();
-    const detection = hasDesktopCapability(bridge, "meetingDetection")
-      ? bridge?.meetingDetection
-      : undefined;
+    // contract into this module, mounted above a host's routes. Any Electron
+    // app that embeds these pages can offer it, not only the Opengeni app.
+    const detection = getDesktopMeetingDetection();
     if (!detection) return;
     return detection.onRequest((request) => {
       const recorder = store.get();
@@ -266,13 +285,44 @@ function useDesktopMeetingRequests(
         // Nobody signed in: a start kept for later would record, for whoever
         // signs in next, a call that may be long over.
         if (latest.current.signedOut) return;
-        // Already recording shows that recording rather than start a second one.
-        if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
+        // The call app's name is only a guess at the meeting's; the calendar
+        // event a reminder joined names it.
+        const start: MeetingStartRequest = {
+          title: request.title,
+          titleSource: "app",
+          ...(request.calendarEvent ? { calendarEvent: request.calendarEvent } : {}),
+        };
+        // Already recording shows that recording rather than start a second
+        // one, unless the person chose to switch to recording the next meeting:
+        // this one stops and is kept, then the next starts.
+        if (canStartRecording(recorder?.state)) {
+          store.requestStart(start);
+        } else if (
+          request.replace === true &&
+          recorder &&
+          (recorder.state === "recording" || recorder.state === "paused")
+        ) {
+          // A stop that fails leaves that recording showing its error, and starts nothing.
+          void recorder.stop().then(
+            () => store.requestStart(start),
+            () => undefined,
+          );
+        }
         latest.current.onOpenMeetings?.();
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
       const recordingWorkspaceId = store.workspaceId?.() ?? null;
+      if (request.kind === "open") {
+        // The app's menu: show the meeting this page records, its live transcript.
+        const opened =
+          recordingId && recordingWorkspaceId && capturing(recorder?.state)
+            ? store.openMeeting?.(recordingId, recordingWorkspaceId)
+            : false;
+        if (!opened) latest.current.onOpenMeetings?.();
+        return;
+      }
+      if (request.kind !== "stop") return;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
         if (recordingId && recordingWorkspaceId) {
@@ -280,7 +330,7 @@ function useDesktopMeetingRequests(
         }
       });
     });
-  }, [store]);
+  }, [store, canRecord]);
 }
 
 /** The start a desktop notification asked for, until the recorder panel takes it. */
@@ -337,6 +387,101 @@ export function useMeetingRecorderState(): MeetingRecorder["state"] | null {
     () => store?.get()?.state ?? null,
     () => null,
   );
+}
+
+/** A track whose source went away while recording: which, and whether it comes back by itself. */
+export type MeetingRecorderLostTrack = {
+  source: MeetingRecorder["tracks"][number]["source"];
+  lost: NonNullable<MeetingRecorder["tracks"][number]["lost"]>;
+  systemAudioKind: MeetingRecorder["systemAudioKind"];
+};
+
+/**
+ * The first track that records nothing because its source went away, while
+ * recording or paused; null otherwise, or before the capture code loads. For
+ * a sign outside the recorder, such as the tab's title. Doesn't load the
+ * capture code, and re-renders only when it changes.
+ */
+export function useMeetingRecorderLostTrack(): MeetingRecorderLostTrack | null {
+  const store = useContext(MeetingRecorderContext);
+  const key = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => {
+      const recorder = store?.get();
+      if (recorder?.state !== "recording" && recorder?.state !== "paused") return null;
+      const track = recorder.tracks.find((item) => item.lost);
+      return track?.lost ? `${track.source}|${track.lost}|${recorder.systemAudioKind ?? ""}` : null;
+    },
+    () => null,
+  );
+  return useMemo(() => {
+    if (!key) return null;
+    const [source, lost, kind] = key.split("|");
+    return {
+      source: source as MeetingRecorderLostTrack["source"],
+      lost: lost as MeetingRecorderLostTrack["lost"],
+      systemAudioKind: (kind || null) as MeetingRecorderLostTrack["systemAudioKind"],
+    };
+  }, [key]);
+}
+
+/**
+ * The recorder's Start and Stop, for the app's actions (⌘K, keys, the desktop
+ * menu bar). Null without a recorder provider. Re-renders on state changes,
+ * not on every tick.
+ */
+export type MeetingRecorderControls = {
+  /** The recorder's state; null until its capture code loads. */
+  state: MeetingRecorder["state"] | null;
+  /** Whether this browser can record; null until the capture code loads. */
+  supported: boolean | null;
+  /**
+   * Start recording as the Meetings page's Start recording button does, once
+   * that page's recorder is ready; the caller shows Meetings next. Does
+   * nothing while a recording is going.
+   */
+  requestStart: () => void;
+  /** Stop the recording and open it, as a desktop call notification's Stop does. */
+  stop: () => Promise<StoppedMeeting | null>;
+};
+
+/** The meeting a Stop ended; `opened` is false when the host gave no way to open it. */
+export type StoppedMeeting = { recordingId: string; workspaceId: string; opened: boolean };
+
+export function useMeetingRecorderControls(): MeetingRecorderControls | null {
+  const store = useContext(MeetingRecorderContext);
+  const state = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.state ?? null,
+    () => null,
+  );
+  const supported = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.supported ?? null,
+    () => null,
+  );
+  return useMemo(() => {
+    if (!store) return null;
+    return {
+      state,
+      supported,
+      requestStart: () => {
+        if (canStartRecording(store.get()?.state)) store.requestStart({ title: "" });
+      },
+      stop: async () => {
+        const recorder = store.get();
+        if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) {
+          return null;
+        }
+        const recordingId = recorder.recordingId;
+        const recordingWorkspaceId = store.workspaceId?.() ?? null;
+        await recorder.stop();
+        if (!recordingId || !recordingWorkspaceId) return null;
+        const opened = store.openMeeting?.(recordingId, recordingWorkspaceId) ?? false;
+        return { recordingId, workspaceId: recordingWorkspaceId, opened };
+      },
+    };
+  }, [store, state, supported]);
 }
 
 function noopSubscribe(): () => void {

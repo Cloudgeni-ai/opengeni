@@ -5,6 +5,8 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { projectPickerRows, sortPickerRows } from "@opengeni/react";
 import { scheduledRunErrorText } from "./scheduled-run-error";
 import {
+  isCodexUsageLimitFailure,
+  latestTurnFailedOnUsageLimit,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
@@ -147,7 +149,6 @@ describe("unavailableModelReplacement", () => {
         rows,
         defaultSelection: { model: "gpt-6-sol", reasoningEffort: "high", source: "credits" },
         latencyMode: "standard",
-        codexOnly: false,
       }),
     ).toEqual({
       model: "gpt-6-sol",
@@ -163,20 +164,8 @@ describe("unavailableModelReplacement", () => {
         rows,
         defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
         latencyMode: "priority",
-        codexOnly: false,
       })?.latencyMode,
     ).toBe("standard");
-  });
-
-  test("a remote-compaction session is only offered Codex models", () => {
-    expect(
-      unavailableModelReplacement({
-        rows,
-        defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
-        latencyMode: "standard",
-        codexOnly: true,
-      })?.model,
-    ).toBe("codex/gpt-6-sol");
   });
 
   test("falls back to another selectable row when the preferred one is filtered out", () => {
@@ -193,11 +182,15 @@ describe("unavailableModelReplacement", () => {
     const pool = [astra, unselectableCodex, codexMini];
     const replacement = unavailableModelReplacement({
       rows: sortPickerRows(projectPickerRows(t, pool)),
-      defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
+      defaultSelection: {
+        model: "codex/gpt-6-sol",
+        reasoningEffort: "low",
+        source: "subscription",
+      },
       latencyMode: "standard",
-      codexOnly: true,
     });
-    expect(replacement?.model).toBe("codex/gpt-6-mini");
+    // Every model is offered, Codex chats included: the first selectable row wins.
+    expect(replacement?.model).toBe("gpt-6-astra");
     expect(replacement?.reasoningEffort).toBe("low");
   });
 
@@ -207,9 +200,39 @@ describe("unavailableModelReplacement", () => {
         rows: [],
         defaultSelection: null,
         latencyMode: "standard",
-        codexOnly: false,
       }),
     ).toBeNull();
+  });
+});
+
+describe("Codex usage-limit failures", () => {
+  test("recognize the plan's usage-limit codes only", () => {
+    expect(isCodexUsageLimitFailure("codex_usage_limit_reached")).toBe(true);
+    expect(isCodexUsageLimitFailure("codex_included_usage_exhausted")).toBe(true);
+    expect(isCodexUsageLimitFailure("subscription_capacity_unavailable")).toBe(true);
+    expect(isCodexUsageLimitFailure("model_provider_error")).toBe(false);
+    expect(isCodexUsageLimitFailure(null)).toBe(false);
+    expect(isCodexUsageLimitFailure(undefined)).toBe(false);
+  });
+
+  const event = (type: string, payload: Record<string, unknown> = {}) =>
+    ({ type, payload }) as never;
+
+  test("the latest turn's usage-limit failure stays current until the chat moves on", () => {
+    const limited = [
+      event("user.message"),
+      event("turn.started"),
+      event("turn.failed", { code: "codex_usage_limit_reached" }),
+    ];
+    expect(latestTurnFailedOnUsageLimit(limited)).toBe(true);
+    expect(latestTurnFailedOnUsageLimit([...limited, event("user.message")])).toBe(false);
+    expect(
+      latestTurnFailedOnUsageLimit([...limited, event("turn.started"), event("turn.completed")]),
+    ).toBe(false);
+    expect(
+      latestTurnFailedOnUsageLimit([event("turn.failed", { code: "model_provider_error" })]),
+    ).toBe(false);
+    expect(latestTurnFailedOnUsageLimit([])).toBe(false);
   });
 });
 

@@ -5,18 +5,45 @@ import { createRoot } from "react-dom/client";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 let canRead = true;
+let personalOwner = false;
+const accountId = "33333333-3333-4333-8333-333333333333";
 
 const requestJson = mock(async () => new Promise<never>(() => undefined));
 const getWorkspaceInsights = mock(async () => new Promise<never>(() => undefined));
 const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
 const context = {
-  workspaces: [
-    { id: workspaceId, name: "Product", accountId: "33333333-3333-4333-8333-333333333333" },
-  ],
+  get workspaces() {
+    return [
+      { id: workspaceId, name: "Product", accountId, kind: personalOwner ? "personal" : "shared" },
+    ];
+  },
   get accessContext() {
     return {
-      workspaceGrants: [{ workspaceId, permissions: canRead ? ["workspace:admin"] : [] }],
+      mode: "managed",
+      subjectId: "user:owner",
+      workspaceGrants: [
+        {
+          workspaceId,
+          accountId,
+          permissions: personalOwner ? ["workspace:read"] : canRead ? ["workspace:admin"] : [],
+        },
+      ],
     };
+  },
+  get managedSelfContext() {
+    return personalOwner
+      ? {
+          identity: { credentialGeneration: 1, managedUserId: "owner", subjectId: "user:owner" },
+          memberships: [
+            {
+              id: "membership",
+              organizationId: accountId,
+              status: "active",
+              personalWorkspaceId: workspaceId,
+            },
+          ],
+        }
+      : null;
   },
   client: { requestJson, getWorkspaceInsights, getWorkspaceModelCatalog },
 };
@@ -49,6 +76,7 @@ afterAll(() => {
 
 beforeEach(() => {
   canRead = true;
+  personalOwner = false;
   requestJson.mockClear();
   getWorkspaceInsights.mockClear();
   navigate.mockClear();
@@ -98,6 +126,17 @@ describe("Insights route", () => {
     try {
       expect(rendered.container.textContent).toContain("Only workspace admins can see Insights");
       expect(requestJson).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the owner of a Personal workspace sees its Insights without workspace:admin", async () => {
+    personalOwner = true;
+    const rendered = await renderRoute({ search: {} });
+    try {
+      expect(rendered.container.textContent).not.toContain("Only workspace admins");
+      expect(requestJson).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
     }

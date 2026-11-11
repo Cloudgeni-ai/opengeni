@@ -5,6 +5,7 @@ import {
   condition,
   continueAsNew,
   defineSignal,
+  deprecatePatch,
   isCancellation,
   patched,
   setHandler,
@@ -29,6 +30,7 @@ import {
 import {
   activity,
   goalActivity,
+  sessionPeekActivity,
   turnActivityForTaskQueue,
   workflowFailureMessage,
 } from "./activities";
@@ -72,22 +74,39 @@ const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
  * that lands inside a waiter's timer spread does not shorten it. The Postgres
  * waiter stays authoritative; jitter only delays the same reconciliation
  * activity and never creates queue rows, input, or inference. Interruptions are
- * never delayed.
- *
- * The patch marker is not understood by workers built before it: rolling the
- * worker image back past this change while a session has recorded the marker
- * (it waited on capacity in its current run) fails that workflow's tasks as
- * nondeterministic until a patched worker returns.
+ * never delayed. Its patch is deprecated: every open run takes the jitter.
  */
 export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
 /**
- * A scheduled run's approval timeout sleeps on a durable Temporal timer. A
- * history recorded by a worker that ignored the deadline has no timer command
- * there, so replay only arms it behind this marker.
+ * A scheduled run's approval timeout sleeps on a durable Temporal timer
+ * (deprecated patch: every open run arms it).
  */
 export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
-/** Workflows wait out a recovering turn's durable backoff instead of closing. */
+/** Workflows wait out a recovering turn's durable backoff instead of closing (deprecated patch). */
 export const RECOVERY_BACKOFF_WAIT_PATCH = "session-recovery-backoff-wait-v1";
+/**
+ * An approval or human-input wait compares its wake counters against values
+ * taken before the peek that chose the wait, not after it. A decision can
+ * commit after the peek read PostgreSQL but before the workflow handles the
+ * peek result; its signal is then already counted when the peek returns, and
+ * a baseline taken afterwards would wait forever on a decision the workflow
+ * has already received (the wait has no timer when nothing expires). Replay
+ * of a history recorded without the marker keeps the old baseline. As with
+ * every patch, rolling the worker image back past this change fails the tasks
+ * of a workflow that recorded the marker until a patched worker returns.
+ */
+export const APPROVAL_WAIT_PRE_PEEK_BASELINE_PATCH = "session-approval-wait-pre-peek-baseline-v1";
+/**
+ * The same pre-peek baseline for the two other peek-chosen waits whose
+ * deadline can be far away: a capacity waiter (until the provider's reset)
+ * and a recovering turn's durable backoff. A Pause, Steer, Send or capacity
+ * signal that lands while their peek is in flight then ends the wait at once
+ * instead of at the deadline. Each command keeps its own marker so old
+ * histories replay with their recorded baseline.
+ */
+export const CAPACITY_WAIT_PRE_PEEK_BASELINE_PATCH = "session-capacity-wait-pre-peek-baseline-v1";
+export const RECOVERY_BACKOFF_PRE_PEEK_BASELINE_PATCH =
+  "session-recovery-backoff-pre-peek-baseline-v1";
 const RECOVERY_BACKOFF_MIN_WAIT_MS = 1_000;
 
 /**
@@ -487,20 +506,16 @@ export type SessionWorkflowInput = {
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  // Existing histories recorded the v1 WAIT_CANCELLATION_COMPLETED command
-  // order and workflow-side idempotent fallback. Keep that exact replay path;
-  // every new run records v2 and uses the activity-owned receipt contract.
-  const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
-  const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
-  const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
-  const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
-  const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
-  let durableAdmissionBlocking = false;
-  // PR #2208 changed a typed-cancelled result from a plain re-peek into a
-  // recoverDispatch activity. Version that new command so histories which
-  // already recorded the legacy re-peek remain deterministic on replay.
-  const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
-  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
+  // Deprecated patches: every open run recorded them (or started after they
+  // shipped), so only their new branches remain. Remove these calls once no
+  // open run carries their non-deprecated markers.
+  deprecatePatch("session-attempt-quiescence-v2");
+  deprecatePatch("session-attempt-writer-set-quiescence-v1");
+  deprecatePatch("session-quiescence-reconciliation-wake-v1");
+  deprecatePatch("session-control-stale-wake-v1");
+  deprecatePatch("session-unclaimed-attempt-recovery-v1");
+  deprecatePatch("session-cancelled-attempt-recovery-v1");
+  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
   let wakeups = 0;
@@ -575,7 +590,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
   async function waitForProviderCapacity(
     initial: activities.CodexCapacityWaitRef,
-    entryBaseline?: { wakeups: number; capacityWakeups: number },
+    entryBaseline?: { wakeups: number; capacityWakeups: number; interruptionWakeups?: number },
   ): Promise<void> {
     let current = initial;
     let firstEntryBaseline = entryBaseline;
@@ -585,8 +600,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // baselined away; later iterations use their normal local snapshot.
       const seenWakeups = firstEntryBaseline?.wakeups ?? wakeups;
       const seenCapacityWakeups = firstEntryBaseline?.capacityWakeups ?? capacityWakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
+      // Only a wait chosen by a peek passes an interruption baseline: a
+      // Pause/Steer accepted while that peek was in flight wins at once.
+      const seenInterruptionWakeups =
+        firstEntryBaseline?.interruptionWakeups ?? interruptionWakeups;
       firstEntryBaseline = undefined;
+      if (interruptionWakeups !== seenInterruptionWakeups) return;
       const parsedDeadline = Date.parse(current.nextCheckAt);
       const timerMs = Number.isFinite(parsedDeadline)
         ? Math.max(0, parsedDeadline - Date.now())
@@ -615,9 +634,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           return;
         }
         cause = observedCause();
-        // Histories recorded before the jitter replay without the marker and
-        // reconcile right at the deadline, exactly as they did.
-        if (cause === "timer" && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+        if (cause === "timer") {
+          deprecatePatch(CAPACITY_WAKE_JITTER_PATCH);
           // The shared reset deadline itself fired. The first waiter to
           // reconcile usually refreshes usage and wakes every other waiter; a
           // waiter already inside its own spread keeps it instead of starting a
@@ -637,14 +655,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           cause = observedCause();
         }
       }
-      if (!spread && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+      if (!spread) {
+        deprecatePatch(CAPACITY_WAKE_JITTER_PATCH);
         // One capacity mutation wakes every waiter of the pool at once (the typed
         // capacity signal and the generic durable wake), and a fresh run after
         // continue-as-new, restart, or Resume sees every unobserved wake as an
         // already-due waiter. Spread those reconciliations too. A later wake
         // does not cut the pause short (that would re-synchronize the herd); a
         // queued prompt stays behind the blocked turn either way, so only an
-        // interruption (Pause/Steer/Cancel) wins immediately.
+        // interruption (Pause/Steer/Cancel, including a person's Send, which
+        // admission turns into a Steer of the parked turn) wins immediately.
         const wakeJitterMs = capacityWakeJitterMs(
           "wake",
           Math.random(),
@@ -754,30 +774,29 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // race; every terminal return below must observe that arrival and loop.
     const closeSignalVersion = signalVersion;
     const closeNonControlSignalVersion = nonControlSignalVersion;
+    // Wake counters as they stood before the peek below read durable state.
+    // A signal counted after this point may describe a commit the peek did
+    // not see, so a wait chosen by that peek must not baseline it away.
+    const prePeekWakes = { approvalWakeups, wakeups, interruptionWakeups, capacityWakeups };
     const workflowId = workflowInfo().workflowId;
-    // Re-evaluate at the changed command, not only workflow entry. A replay
-    // without the marker keeps its old shape; the next live admission cycle
-    // can activate this fix without waiting for continueAsNew.
-    durableAdmissionBlocking = patched("session-durable-admission-block-v1");
-    const safeObservation = patched("session-safe-control-observation-v1");
-    // Negotiate the deleted result at this command boundary: replay keeps old
-    // activity inputs/results, while the next live cycle can close an orphan.
-    const closeDeletedSession = patched("session-close-deleted-v1");
-    const peek = await activity.peekSessionWork({
+    deprecatePatch("session-durable-admission-block-v1");
+    deprecatePatch("session-safe-control-observation-v1");
+    deprecatePatch("session-close-deleted-v1");
+    const peek = await sessionPeekActivity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
-      ...(safeObservation ? { observerAccountId: input.accountId } : {}),
-      ...(closeDeletedSession ? { includeDeletion: true } : {}),
+      includeAdmissionFence: true,
+      observerAccountId: input.accountId,
+      includeDeletion: true,
     });
-    if (closeDeletedSession && peek.kind === "deleted") return;
+    if (peek.kind === "deleted") return;
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
       if (
         peek.kind === "attempt-owned" &&
         "ownerActivityState" in peek &&
-        peek.ownerActivityState === "settled" &&
-        patched("session-settled-owner-recovery-v1")
+        peek.ownerActivityState === "settled"
       ) {
+        deprecatePatch("session-settled-owner-recovery-v1");
         const reconciliation = await activity.reconcileSettledSessionAttempt({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -804,14 +823,18 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "admission-blocked") {
       const recoveryRetry =
         peek.reason === "recovery_backoff" && peek.ref && "notBefore" in peek.ref ? peek.ref : null;
-      if (recoveryRetry && patched(RECOVERY_BACKOFF_WAIT_PATCH)) {
+      if (recoveryRetry) {
+        deprecatePatch(RECOVERY_BACKOFF_WAIT_PATCH);
         // The recovering turn's durable backoff deadline is authoritative.
         // Wait for it here; any wake (a new message, Pause/Steer, or the
         // session's own receipts) re-peeks, and the database decides whether
         // the backoff still holds. The floor keeps clock skew between the
         // workflow and the database from turning into a tight peek loop.
-        const seenWakeups = wakeups;
-        const seenInterruptionWakeups = interruptionWakeups;
+        const backoffBaseline = patched(RECOVERY_BACKOFF_PRE_PEEK_BASELINE_PATCH)
+          ? prePeekWakes
+          : { wakeups, interruptionWakeups };
+        const seenWakeups = backoffBaseline.wakeups;
+        const seenInterruptionWakeups = backoffBaseline.interruptionWakeups;
         await condition(
           () =>
             interruptionWakeups !== seenInterruptionWakeups ||
@@ -846,35 +869,35 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "cancellation-wait") {
       // The receipt wake can arrive while reconciliation returns an older pending result.
       const beforeReconciliationSignalVersion = signalVersion;
-      if (writerSetQuiescenceRecovery) {
-        const reconciliation = await activity.reconcileSessionAttemptQuiescence({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          attemptId: peek.attemptId,
-          workflowId,
-        });
-        if (reconciliation.action === "quiesced") continue;
-      }
+      const reconciliation = await activity.reconcileSessionAttemptQuiescence({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: peek.attemptId,
+        workflowId,
+      });
+      if (reconciliation.action === "quiesced") continue;
       // Logical settlement is complete, but the exact predecessor activity has
       // not yet durably proved sandbox/tool quiescence. Wait only briefly for
       // its transactional queueChanged wake. If provider/tool cancellation is
       // genuinely slow, close this workflow run rather than consuming a turn
       // slot or churning control activities; the outbox uses signalWithStart to
       // restart this exact workflow after the receipt commits.
-      const seenSignalVersion = preserveQuiescenceWake
-        ? beforeReconciliationSignalVersion
-        : signalVersion;
-      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      const woke = await condition(() => signalVersion !== beforeReconciliationSignalVersion, "5s");
       if (woke) continue;
       // Close only against the same signal snapshot. A proof signal accepted
       // at the timer/completion boundary must loop through the DB-only receipt
       // activity rather than disappearing with this workflow run.
-      if (signalVersion !== seenSignalVersion || pendingQuiescenceProofs.size > 0) continue;
+      if (signalVersion !== beforeReconciliationSignalVersion || pendingQuiescenceProofs.size > 0)
+        continue;
       return;
     }
     if (peek.kind === "capacity-wait") {
-      await waitForProviderCapacity(peek.ref);
+      if (patched(CAPACITY_WAIT_PRE_PEEK_BASELINE_PATCH)) {
+        await waitForProviderCapacity(peek.ref, prePeekWakes);
+      } else {
+        await waitForProviderCapacity(peek.ref);
+      }
       continue;
     }
     if (peek.kind === "sandbox-lifecycle-wait") {
@@ -886,10 +909,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenSignalVersion = signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+        observerAccountId: input.accountId,
       });
       if (
         finalPeek.kind !== "sandbox-lifecycle-wait" ||
@@ -902,13 +925,19 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return;
     }
     if (peek.kind === "approval-wait") {
-      const seenApprovalWakeups = approvalWakeups;
-      const seenWakeups = wakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
-      const scheduledRunTimeout =
-        peek.scheduledRunTimeout && peek.expiresAt && patched(SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH)
-          ? peek.scheduledRunTimeout
-          : undefined;
+      // A decision accepted while the peek was in flight has already bumped a
+      // counter; baselining after the peek would swallow its only wake.
+      const baseline = patched(APPROVAL_WAIT_PRE_PEEK_BASELINE_PATCH)
+        ? prePeekWakes
+        : { approvalWakeups, wakeups, interruptionWakeups };
+      const seenApprovalWakeups = baseline.approvalWakeups;
+      const seenWakeups = baseline.wakeups;
+      const seenInterruptionWakeups = baseline.interruptionWakeups;
+      let scheduledRunTimeout: typeof peek.scheduledRunTimeout;
+      if (peek.scheduledRunTimeout && peek.expiresAt) {
+        deprecatePatch(SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH);
+        scheduledRunTimeout = peek.scheduledRunTimeout;
+      }
       const timeoutMs =
         (peek.humanInputRequestId || peek.interactionInterventionId || scheduledRunTimeout) &&
         peek.expiresAt
@@ -987,10 +1016,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         "5s",
       );
       if (woke) continue;
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+        observerAccountId: input.accountId,
       });
       if (
         finalPeek.kind !== "input-wait" ||
@@ -1029,28 +1058,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // idle-backoff goal keeps its durable obligation armed; the delayed
       // wake-outbox row at the pacing deadline or any producer signal restarts
       // the workflow. No Temporal timer is used for pacing.
-      // Evaluate at the changed command so old recorded timers still replay,
-      // while the next live idle cycle can close without a grace period.
-      if (!patched("session-normal-idle-no-grace-v1")) {
-        const seenWakeups = wakeups;
-        const seenApprovalWakeups = approvalWakeups;
-        const seenInterruptionWakeups = interruptionWakeups;
-        const woke = await condition(
-          () =>
-            interruptionWakeups !== seenInterruptionWakeups ||
-            wakeups !== seenWakeups ||
-            approvalWakeups !== seenApprovalWakeups,
-          "5s",
-        );
-        if (woke) continue;
-      }
+      deprecatePatch("session-normal-idle-no-grace-v1");
       // Keep both the durable recheck and the transactional idle/parent-outbox
       // fence. A signal accepted during this activity chain makes us loop;
       // later work restarts the same session via durable signalWithStart.
-      const finalPeek = await activity.peekSessionWork({
+      const finalPeek = await sessionPeekActivity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+        observerAccountId: input.accountId,
       });
       if (finalPeek.kind !== "idle") continue;
       await activity.markSessionIdle({
@@ -1074,6 +1089,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         input.sessionId,
         trigger,
         "admissionFence" in peek ? peek.admissionFence : undefined,
+        "admissionWakeRevision" in peek ? peek.admissionWakeRevision : undefined,
       ))
     ) {
       if (signalVersion !== closeSignalVersion) continue;
@@ -1087,6 +1103,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     sessionId: string,
     trigger: activities.RunAgentTurnInput["trigger"],
     admissionFence?: activities.FailSessionAttemptInput["admissionFence"],
+    admissionWakeRevision?: number,
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     // Capture every admission-relevant signal before activity dispatch. A
@@ -1164,37 +1181,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         outcome = observedOutcome;
         break;
       }
-      if (!receiptGatedCancellation) {
-        // Replay-only v1 command order. New histories always take the v2 path
-        // below. The current runAgentTurn still owns and writes the truthful
-        // hard-fence receipt; this call remains an idempotent history command.
-        scope.cancel();
-        const settlement = await activity.settleSessionInterruptions({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          workflowId: workflowInfo().workflowId,
-        });
-        const termination = await turn.then(
-          () => ({ kind: "completed" as const }),
-          (error: unknown) => ({ kind: "failed" as const, error }),
-        );
-        const physicalStopConfirmed =
-          termination.kind === "completed" || isTurnActivityFenceCancellation(termination.error);
-        if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
-          await activity.settleSessionInterruptions({
-            accountId,
-            workspaceId,
-            sessionId,
-            attemptId,
-            workflowId: workflowInfo().workflowId,
-            phase: "attempt_quiesced",
-          });
-        }
-        if (!physicalStopConfirmed) throw termination.error;
-        return settlement.action !== "paused";
-      }
       const observedInterruptionWakeups = interruptionWakeups;
       const settlement = await activity.settleSessionInterruptions({
         accountId,
@@ -1203,7 +1189,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      if (staleControlSignalIsOnlyWakeHint && settlement.action === "stale") {
+      if (settlement.action === "stale") {
         // sessionControl is replaceable transport, not authority. Keep
         // observing the same activity when no durable interruption exists.
         // Preserve signals received while settlement was in flight so a real
@@ -1283,145 +1269,44 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
-      const postDispatchRetryWakeBaseline: SessionWakeCounters = {
-        wakeups,
-        interruptionWakeups,
-        approvalWakeups,
-        capacityWakeups,
-      };
-      if (!unclaimedAttemptRecovery) {
-        // Replay compatibility: histories recorded before v2 scheduled this
-        // exact argument shape and treated the activity as void. Preserve the
-        // completed-history tail during replay, but keep a still-open legacy
-        // history alive after its activity completes. The nested patch marker
-        // is recorded only when an old history reaches this previously absent
-        // tail on a live workflow task; already-completed histories replay the
-        // original close without emitting a new timer command.
-        const legacyFailure: activities.FailSessionAttemptResult | undefined =
-          await activity.failSessionAttempt({
-            accountId,
-            workspaceId,
-            sessionId,
-            attemptId,
-            error: workflowFailureMessage(outcome.error),
-          });
-        if (!patched("session-legacy-unclaimed-attempt-tail-v1")) {
-          return false;
-        }
-        if (legacyFailure?.action === "failed" || legacyFailure?.action === "terminal") {
-          return false;
-        }
-        const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
-        // Histories that already recorded the legacy tail used a post-control
-        // two-signal baseline. Preserve that exact condition on replay; an old
-        // open history reaching this tail for the first time can adopt the
-        // pre-dispatch four-signal contract.
-        const upgradedLegacySignalBaseline = patched("session-legacy-preclaim-signal-baseline-v1");
-        const retryWakeBaseline = upgradedLegacySignalBaseline
-          ? preDispatchRetryWakeBaseline
-          : {
-              wakeups,
-              interruptionWakeups,
-              approvalWakeups,
-              capacityWakeups,
-            };
-        unclaimedAttemptFailures += 1;
-        await condition(() => {
-          const current = {
-            wakeups,
-            interruptionWakeups,
-            approvalWakeups,
-            capacityWakeups,
-          };
-          return upgradedLegacySignalBaseline
-            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                current.wakeups !== retryWakeBaseline.wakeups;
-        }, retryDelayMs);
-        return true;
-      }
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
       const admissionFailure = preClaimFailureDetail(outcome.error);
       const admissionFailureDisposition = admissionFailure?.disposition;
-      const classifiedPostClaimDatabaseRecovery = patched("session-postclaim-database-recovery-v1");
-      const postClaimDatabaseRecovery = classifiedPostClaimDatabaseRecovery
-        ? postClaimDatabaseRecoveryDetail(outcome.error)
-        : null;
-      // Keep this marker immediately adjacent to the changed command. A
-      // history that already recorded the v3 activity replays the old shape;
-      // an open history that has never reached this branch can record v4.
-      const classifiedPreClaimFailure = patched("session-preclaim-failure-classification-v1");
-      const retryWakeBaseline =
-        classifiedPostClaimDatabaseRecovery || classifiedPreClaimFailure
-          ? preDispatchRetryWakeBaseline
-          : postDispatchRetryWakeBaseline;
-      const failure: activities.FailSessionAttemptResult | undefined =
-        await activity.failSessionAttempt(
-          classifiedPostClaimDatabaseRecovery
-            ? {
-                accountId,
-                workspaceId,
-                sessionId,
-                attemptId,
-                workflowId: workflowInfo().workflowId,
-                retryDelayMs,
-                ...(admissionFailureDisposition
-                  ? { preClaimFailureDisposition: admissionFailureDisposition }
-                  : {}),
-                ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
-                ...(durableAdmissionBlocking && admissionFence ? { admissionFence } : {}),
-                ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
-                trigger,
-                error: workflowFailureMessage(outcome.error),
-              }
-            : classifiedPreClaimFailure
-              ? {
-                  accountId,
-                  workspaceId,
-                  sessionId,
-                  attemptId,
-                  workflowId: workflowInfo().workflowId,
-                  retryDelayMs,
-                  ...(admissionFailureDisposition
-                    ? { preClaimFailureDisposition: admissionFailureDisposition }
-                    : {}),
-                  trigger,
-                  error: workflowFailureMessage(outcome.error),
-                }
-              : {
-                  // Replay the exact v2 command shape. Adding optional fields to
-                  // a Temporal activity argument still changes command history.
-                  accountId,
-                  workspaceId,
-                  sessionId,
-                  attemptId,
-                  workflowId: workflowInfo().workflowId,
-                  retryDelayMs,
-                  error: workflowFailureMessage(outcome.error),
-                },
-        );
-      // During a rolling deploy an upgraded workflow worker can schedule this
-      // activity on a legacy control worker whose wire result was void. Treat
-      // that unknown commit outcome like an unclaimed attempt: wait, then
-      // re-read durable state. A legacy worker that settled the failure leaves
-      // an idle turn; one that no-op'd before claim leaves recoverable work.
-      // Neither path replays model or tool side effects speculatively.
-      if (!failure || failure.action === "unclaimed" || failure.action === "recovering") {
+      deprecatePatch("session-postclaim-database-recovery-v1");
+      const postClaimDatabaseRecovery = postClaimDatabaseRecoveryDetail(outcome.error);
+      // Keep this marker immediately adjacent to the changed command.
+      deprecatePatch("session-preclaim-failure-classification-v1");
+      const failure = await activity.failSessionAttempt({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        workflowId: workflowInfo().workflowId,
+        retryDelayMs,
+        ...(admissionFailureDisposition
+          ? { preClaimFailureDisposition: admissionFailureDisposition }
+          : {}),
+        ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
+        ...(admissionFence ? { admissionFence } : {}),
+        ...(admissionFence && admissionWakeRevision !== undefined ? { admissionWakeRevision } : {}),
+        ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
+        trigger,
+        error: workflowFailureMessage(outcome.error),
+      });
+      // An unclaimed or recovering attempt leaves recoverable work: wait, then
+      // re-read durable state. Neither path replays model or tool side effects
+      // speculatively.
+      if (failure.action === "unclaimed" || failure.action === "recovering") {
         unclaimedAttemptFailures += 1;
         await condition(
-          () => {
-            const current = {
+          () =>
+            unclaimedAttemptWakeChanged(preDispatchRetryWakeBaseline, {
               wakeups,
               interruptionWakeups,
               approvalWakeups,
               capacityWakeups,
-            };
-            return classifiedPreClaimFailure
-              ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-              : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                  current.wakeups !== retryWakeBaseline.wakeups;
-          },
-          failure?.action === "recovering"
+            }),
+          failure.action === "recovering"
             ? (failure.continueDelayMs ?? retryDelayMs)
             : retryDelayMs,
         );
@@ -1441,11 +1326,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.result.status === "cancelled") {
-      // Histories created before session-cancelled-attempt-recovery-v1 must
-      // preserve the old command sequence. Their durable state is still safe:
-      // operator recovery or a later fresh workflow run can close a stranded
-      // owner, while new histories use the bounded exact-attempt transaction.
-      if (!cancelledAttemptRecovery) return true;
       // A typed cancellation is normally observed through the control-signal
       // branch above, after Pause/Steer has durably fenced the attempt. A
       // worker can nevertheless return the same shape after a shutdown or a

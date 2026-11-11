@@ -3,6 +3,7 @@ import { SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL } from "@opengeni/core"
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
 import { ScheduleNotFoundError, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   deleteLegacyMaintenanceSchedules,
   INTERNAL_MAINTENANCE_JOBS,
@@ -215,8 +216,10 @@ describe("internal maintenance jobs", () => {
       workflow: { start: async () => undefined, signalWithStart: async () => undefined } as never,
     });
     expect(Object.fromEntries(cadences.map((c) => [c.job, c.periodMs]))).toEqual({
+      "billing-credit-alerts": 60_000,
       "subscription-usage-retention": 60_000,
       "session-workflow-wake-dispatcher": 10_000,
+      "session-workflow-wake-maintenance": 10_000,
       "knowledge-indexing": KNOWLEDGE_INDEXING_PERIOD_MS,
       "site-auth-maintenance": SITE_AUTH_MAINTENANCE_PERIOD_MS,
       // The old reaper Schedule's period, which the boot invariants validate.
@@ -402,6 +405,53 @@ describe("internal maintenance jobs", () => {
         },
       },
     ]);
+  });
+
+  test("blocked recovery discovery cannot block the committed-wake cadence", async () => {
+    const blocked = deferred<never[]>();
+    const queries: string[] = [];
+    const signals: unknown[] = [];
+    const db = {
+      execute: async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+        const text = new PgDialect().sqlToQuery(query).sql;
+        queries.push(text);
+        if (text.includes("list_pending_child_terminal_wake_repairs_v1")) {
+          return await blocked.promise;
+        }
+        if (text.includes("session_workflow_wakes_due_v1")) return [{ due: true }];
+        return [];
+      },
+    } as never;
+    const obs = observability();
+    const cadences = startMaintenanceCadences({
+      autoStart: false,
+      observability: obs,
+      cadences: await internalMaintenanceCadences({
+        settings,
+        db,
+        observability: obs,
+        jobs: ["session-workflow-wake-dispatcher", "session-workflow-wake-maintenance"],
+        workflow: {
+          start: async () => undefined,
+          signalWithStart: async (...args: unknown[]) => {
+            signals.push(args);
+          },
+        } as never,
+      }),
+    });
+    const maintenance = cadences.tick("session-workflow-wake-maintenance");
+    try {
+      expect(await cadences.tick("session-workflow-wake-dispatcher")).toBe("started");
+      expect(signals).toHaveLength(1);
+      expect(queries.some((q) => q.includes("list_pending_child_terminal_wake_repairs_v1"))).toBe(
+        true,
+      );
+      expect(await cadences.tick("session-workflow-wake-maintenance")).toBe("busy");
+    } finally {
+      blocked.resolve([]);
+      await maintenance;
+      await cadences.close();
+    }
   });
 
   test("the workflow's signal is the contract signal name", () => {

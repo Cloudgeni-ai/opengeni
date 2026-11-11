@@ -31,6 +31,10 @@ export type ProviderImmutableImageBuildResult = {
   providerBindingKey: string | null;
   /** Non-secret canonical binding retained only for durable provider artifact ownership. */
   providerBinding: Record<string, unknown> | null;
+  /** False when the build found an image an earlier or concurrent build of
+   * the same name had already made, which this build must not delete.
+   * Omitted means this build made it. */
+  created?: boolean;
 };
 
 export type ProviderImmutableImageBuildInput = {
@@ -38,6 +42,8 @@ export type ProviderImmutableImageBuildInput = {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+  /** Ends a long build when its caller stops. */
+  signal?: AbortSignal;
 };
 
 export type ProviderExpirationRenewalInput = {
@@ -167,6 +173,17 @@ export interface ProviderRegistration {
    * Omission means the provider has no renewable TTL contract. */
   renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;
   descriptor: CapabilityDescriptor;
+  /**
+   * What this provider's live session answers from `supportsPty()`: whether
+   * the agent gets the `write_stdin` tool. A lazily provisioned turn binds its
+   * tools before the box exists and answers with this value, so it must equal
+   * the live session's answer. Otherwise the tool list changes depending on
+   * whether something touched the box before the tools were bound (an attached
+   * file, a resumed box), and every such change costs a full prompt-cache
+   * miss. This is the agent's command-input capability, not the human
+   * terminal's PTY in `descriptor.capabilities.Terminal`.
+   */
+  sessionSupportsPty: boolean;
   /**
    * Validate that the settings carry the credentials/config this provider
    * REQUIRES. Throw SandboxConfigError on any missing/contradictory field.

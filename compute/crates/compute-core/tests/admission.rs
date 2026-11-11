@@ -577,6 +577,7 @@ fn compressing_that_frees_nothing_goes_deeper_for_the_buffer() {
             high_watermark: 0,
             compressed_percent: 100,
             balloon_grace: Duration::ZERO,
+            outgrowth: None,
         }),
         ..policy(GIB, 256 * MIB)
     };

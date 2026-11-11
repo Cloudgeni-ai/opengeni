@@ -325,6 +325,8 @@ start_stack() {
       --ui-ip 127.0.0.1 \
       --ui-port "$OPENGENI_TEMPORAL_UI_HOST_PORT" \
       --db-filename "$TEMPORAL_DATA/temporal.db" \
+      --dynamic-config-value matching.numTaskqueueReadPartitions=1 \
+      --dynamic-config-value matching.numTaskqueueWritePartitions=1 \
       --log-level warn
   if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = minio ]; then
     mkdir -p "$MINIO_DATA" "$MC_CONFIG_DIR"

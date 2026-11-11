@@ -8,16 +8,18 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
   observeDatabaseCredentialEvents,
+  reportRuntimeDatabaseDegraded,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
   type Database,
+  type RuntimeDatabaseDegradedListener,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import {
@@ -54,10 +56,12 @@ import type {
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
   StartRecordingWorkflow,
+  StartRigProviderImageRefresh,
   StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
+import { rigProviderImageRefreshWorkflowId } from "./activities/rig-provider-image-refresh";
 import { createTurnTaskQueueStatsClient } from "./turn-task-queue-reader";
 import { installTemporalRuntimeLogging } from "./temporal-runtime-logger";
 import {
@@ -84,6 +88,7 @@ import {
   type TurnTaskQueueIdentity,
 } from "./observability-metrics";
 import {
+  configureBillingLegacyAccounts,
   resolveCatalogSettings,
   TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
 } from "@opengeni/core";
@@ -221,6 +226,8 @@ export async function createDefaultWorkerActivities(
   if (dependencies.objectStorage == null) {
     prepareObjectStorageProvider(dependencies.settings ?? getSettings());
   }
+  // Accounts on the billing terms from before the app/API split (CloudGeni).
+  configureBillingLegacyAccounts((dependencies.settings ?? getSettings()).billingLegacyAccountIds);
   return role === "control"
     ? (await import("./activities-control")).createControlActivities(dependencies)
     : (await import("./activities-turn")).createTurnActivities(dependencies);
@@ -465,6 +472,7 @@ export async function createWorkerWorkflowSignaler(
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   startSessionTitleWorkflow: StartSessionTitleWorkflow;
   startRecordingWorkflow: StartRecordingWorkflow;
+  startRigProviderImageRefresh: StartRigProviderImageRefresh;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -677,6 +685,23 @@ export async function createWorkerWorkflowSignaler(
         throw error;
       }
     },
+    startRigProviderImageRefresh: async ({ workspaceId, versionId, contentHash }) => {
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: rigProviderImageRefreshWorkflowId({ versionId, contentHash }),
+          // One automatic attempt per version, content and day. A failed
+          // rebuild is not retried by every following turn; the next day or
+          // an explicit verify tries again.
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ workspaceId, versionId }],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
+    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -780,13 +805,21 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
   onDrainStarted?: () => void;
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /** Host-owned final containment after a stalled cleanup has drained peers.
-   * The standalone process exits; embedded hosts own their termination policy. */
+   * The standalone process exits; embedded hosts own their termination policy.
+   * Supplying it also lets `run()` resolve once only contained finalizers
+   * remain in flight, so the host must exit its process after `run()` settles. */
   terminateWorker?: () => void;
   /**
    * Exact catalog posture required by the standalone runtime. Embedded hosts
    * may omit this when they own an equivalent database isolation contract.
    */
   databasePosture?: RuntimeDatabasePostureOptions;
+  /**
+   * Receives the degraded findings (missing required EXECUTE grants) of each
+   * `databasePosture` readiness inspection. Defaults to a reporter that logs
+   * them and sets `opengeni_runtime_database_degraded_findings`.
+   */
+  onDegradedDatabasePosture?: RuntimeDatabaseDegradedListener;
   /**
    * `role-default` registers Opengeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
@@ -901,6 +934,11 @@ export async function createOpenGeniWorkerService(
       options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
     const startRecordingWorkflow =
       options.activityDependencies.startRecordingWorkflow ?? signaler?.startRecordingWorkflow;
+    // Optional: hosts without a Temporal client simply skip automatic rebuilds.
+    const startRigProviderImageRefresh =
+      options.activityDependencies.startRigProviderImageRefresh ??
+      signaler?.startRigProviderImageRefresh ??
+      null;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
@@ -930,9 +968,10 @@ export async function createOpenGeniWorkerService(
         startVideoGenerationWorkflow,
         startSessionTitleWorkflow,
         startRecordingWorkflow,
+        startRigProviderImageRefresh,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
-          cleanupContainment.request();
+          return cleanupContainment.request();
         },
       },
     });
@@ -995,9 +1034,14 @@ export async function createOpenGeniWorkerService(
 
     if (options.http !== false) {
       const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
-      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
-        await resolveCatalogSettings(readinessDb, settings);
-      });
+      const databaseReady = dbReadyCheck(
+        readinessDb,
+        options.databasePosture,
+        async () => {
+          await resolveCatalogSettings(readinessDb, settings);
+        },
+        options.onDegradedDatabasePosture ?? reportRuntimeDatabaseDegraded(observability, "worker"),
+      );
       httpServer = startWorkerHttpServer({
         settings,
         observability,
@@ -1033,6 +1077,9 @@ export async function createOpenGeniWorkerService(
   cleanupContainment = createWorkerCleanupContainment({
     drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
     ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
+    ...(activeWorkerBundle.worker.inFlightActivities
+      ? { inFlightActivities: () => activeWorkerBundle.worker.inFlightActivities?.() }
+      : {}),
     observability,
     // A stalled cleanup drains peers through the ordinary turn sequence:
     // natural grace, WORKER_SHUTDOWN checkpoint, SDK force stop. Terminate
@@ -1045,6 +1092,9 @@ export async function createOpenGeniWorkerService(
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
     cleanupContainmentRequested: activeCleanupContainment.requested,
+    // Only a host that exits the process may stop with a stalled finalizer
+    // still executing; the exit is what ends that JavaScript.
+    ...(options.terminateWorker ? { contained: activeCleanupContainment.contained } : {}),
     ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {
@@ -1249,12 +1299,14 @@ export async function startWorker() {
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
+  // One reporter for startup and readiness, so a degraded posture logs once.
+  const reportDegradedPosture = reportRuntimeDatabaseDegraded(observability, "worker");
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   try {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () => assertRuntimeDatabaseReadiness(dbClient.db, databasePosture, reportDegradedPosture),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     bus = await retryStartupDependency(
@@ -1275,6 +1327,7 @@ export async function startWorker() {
       onDrainStarted: armExitDeadline,
       settings,
       databasePosture,
+      onDegradedDatabasePosture: reportDegradedPosture,
       http: { readinessDb: readinessDbClient.db },
       activityDependencies: {
         observability,

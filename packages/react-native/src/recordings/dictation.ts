@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { RecorderPlatform } from "@opengeni/sdk/recordings";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import {
@@ -12,7 +13,8 @@ import type { NativeVoiceInput, NativeVoiceInputStatus } from "../voice-input";
 export type UseNativeDictationOptions = {
   /** The SDK client; dictations are recorded through its recordings API. */
   client:
-    | (Pick<OpenGeniClient, "transcribeAudio"> & Partial<Pick<OpenGeniClient, "requestJson">>)
+    | (Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+        Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>)
     | null;
   workspaceId: string;
   /** The deployment's voice input, from the client config. */
@@ -85,15 +87,16 @@ export function useNativeDictation(options: UseNativeDictationOptions): NativeVo
     return () => clearInterval(timer);
   }, [readLevel, recording, startedAt]);
 
-  // Another session: end capture the way Cancel does, keeping real speech.
   const cancelVoice = voice.cancel;
+  // Another session: end capture and keep real speech, to insert later.
+  const setAside = voice.setAside;
   const scope = options.scope;
   const lastScope = useRef(scope);
   useEffect(() => {
     if (lastScope.current === scope) return;
     lastScope.current = scope;
-    cancelVoice();
-  }, [cancelVoice, scope]);
+    setAside();
+  }, [setAside, scope]);
 
   const held = voice.hasRecoverableRecording;
   const status = nativeStatus(voice.status, held);
@@ -190,13 +193,16 @@ function nativeError(code: string, held: boolean, t: ReturnType<typeof useOpenGe
       return t("composerTranscriptionControl.usageLimitReachedRecordingSaved");
     case "too_large":
       return t("composerTranscriptionControl.recordingIsTooLargeTry");
+    case "provider_quota_exceeded":
+      return t("composerTranscriptionControl.speechServiceOutOfCredit");
     case "network":
     case "timeout":
-    case "unavailable":
-    case "provider":
       return held
         ? t("native.voiceInput.couldnTReachTranscriptionYour")
         : t("native.voiceInput.couldnTStartTheMicrophone");
+    // The speech service answered and failed: being online again won't help.
+    case "unavailable":
+    case "provider":
     default:
       return held
         ? t("native.voiceInput.couldNotTranscribe")

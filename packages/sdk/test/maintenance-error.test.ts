@@ -38,7 +38,6 @@ function client(fetch: FetchLike, readRetry: false | { maxAttempts: number } = f
     baseUrl: "https://api.example.test",
     apiKey: "key",
     fetch,
-    onDeprecation: false,
     readRetry: readRetry === false ? false : { ...readRetry, initialDelayMs: 1, maxDelayMs: 2 },
   });
 }

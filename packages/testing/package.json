@@ -16,6 +16,7 @@
     "./compose": "./src/compose.ts",
     "./object-storage-fixture": "./src/object-storage-fixture.ts",
     "./shared-pg": "./src/shared-pg.ts",
+    "./pg-wire-proxy": "./src/pg-wire-proxy.ts",
     "./process": "./src/process.ts",
     "./sse": "./src/sse.ts",
     "./assertions": "./src/assertions.ts",
@@ -23,13 +24,14 @@
     "./fakes": "./src/fakes.ts",
     "./mcp": "./src/mcp.ts",
     "./screenshot": "./src/screenshot.ts",
+    "./mcp-elicitation-server": "./src/mcp-elicitation-server.ts",
     "./mcp-events-server": "./src/mcp-events-server.ts"
   },
   "scripts": {
     "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@modelcontextprotocol/server": "2.3.1",
     "@openai/agents": "0.14.3",
     "@opengeni/config": "workspace:*",

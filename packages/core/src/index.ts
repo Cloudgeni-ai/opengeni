@@ -1,5 +1,7 @@
+export * from "./billing-credit-notifications";
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export {
+  discoverCompatibleModelReasoning,
   organizationAzureEntraSetupToken,
   verifyDirectModelAccess,
   verifyOrganizationAzureOpenAIDeployment,
@@ -11,9 +13,12 @@ export * from "./domain/mcp-account-bindings";
 export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
+export * from "./domain/session-secret-redaction";
+export * from "./domain/session-secret-redaction-matchers";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
+export * from "./domain/meeting-summary";
 export * from "./domain/voice-input-billing";
 export * from "./domain/web-search-billing";
 export * from "./domain/realtime-voice-billing";
@@ -86,6 +91,8 @@ export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
+export * from "./side-feature-availability";
+export * from "./side-feature-routes";
 export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
@@ -117,6 +124,7 @@ export * from "./billing/limits";
 export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
+export * from "./billing/byok-platform-fee";
 export * from "./billing/model-call-admission";
 export * from "./model-call";
 
@@ -124,18 +132,26 @@ export * from "./model-call";
 
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/mcp-credential-content-flow";
+export * from "./domain/organization-connectors";
+export * from "./domain/mcp-auto-connect";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
 export * from "./domain/encryption-key";
 export * from "./domain/vaults";
+export * from "./domain/credential-profiles";
 export * from "./rigs";
-export * from "./domain/automations";
-export * from "./domain/pr-review";
 export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
+export * from "./domain/personal-github-repository-access";
+export * from "./domain/connections-needing-reconnect";
+export {
+  listApiIntegrationsWithPersonalExtension,
+  type PersonalWorkspaceExtensionApiIntegration,
+} from "./domain/personal-workspace-connectors";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
@@ -146,9 +162,16 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
+export * from "./domain/agents";
+export * from "./domain/agent-memory";
+export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
+export * from "./domain/project-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
+export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
+export * from "./domain/session-resource-removal";
+export * from "./domain/session-repository-attach";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
@@ -161,6 +184,7 @@ export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
 export * from "./domain/workspace-members";
+export * from "./domain/member-execution-defaults";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
@@ -171,8 +195,10 @@ export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
+export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
+export * from "./application/admission-release";
 export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
@@ -195,9 +221,22 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
+export {
+  billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
+  requestBillingOrigin,
+  resolveTurnBillingOrigin,
+  stampRequestBillingOrigin,
+} from "./billing-origin";
 export { turnAppActionGrant } from "./app-action-turn-grant";
 
-export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
+export {
+  agentPrivateFileOwnerSubjectId,
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./domain/file-owner";
 
 export { prepareKnowledgeFile } from "./domain/knowledge-files";
 export { prepareKnowledgeSave } from "./domain/knowledge-preparation";

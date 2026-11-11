@@ -52,7 +52,6 @@ function fixture(fetchImpl: CodexFetch) {
   restores.push(() => wrapper.mockRestore());
   const deps: NonNullable<Parameters<typeof loadWorkspaceCodexCatalogReadiness>[4]> = {
     recordModels: mock(async () => true),
-    disposition: async () => "core",
     legacyActive: async () => {
       throw new Error("no legacy access");
     },
@@ -233,7 +232,7 @@ describe("core model discovery physical request custody", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
-  test("failed catalogs, maintenance, and personal connections produce no entitlement exclusions", async () => {
+  test("failed catalogs and personal connections produce no entitlement exclusions", async () => {
     const upstream = mock<CodexFetch>(async () => {
       throw new Error("unreachable");
     });
@@ -241,12 +240,6 @@ describe("core model discovery physical request custody", () => {
     await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
     expect(f.deps.recordModels).not.toHaveBeenCalled();
     f.connection.ownership = "personal";
-    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
-    expect(f.deps.recordModels).not.toHaveBeenCalled();
-    f.deps.disposition = async () => "maintenance";
-    f.deps.listServing = async () => {
-      throw new Error("must not read disabled core");
-    };
     await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
     expect(f.deps.recordModels).not.toHaveBeenCalled();
     expect(upstream).toHaveBeenCalledTimes(1);

@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withXaiSubscriptionCatalogProvider } from "@opengeni/config";
 import * as config from "@opengeni/config";
 import {
@@ -20,6 +20,19 @@ import {
 } from "../src/domain/session-tool-policy";
 
 const settings = testSettings({ openaiModel: "gpt-6-astra", lazyToolSearchEnabled: true });
+
+// The workspace's EU-only setting: off unless a test says otherwise.
+let euOnly: ReturnType<typeof spyOn<typeof db, "isWorkspaceEuOnly">>;
+// The sessions with a goal: none unless a test says otherwise.
+let goals: ReturnType<typeof spyOn<typeof db, "sessionsWithGoal">>;
+beforeEach(() => {
+  euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
+  goals = spyOn(db, "sessionsWithGoal").mockResolvedValue(new Set());
+});
+afterEach(() => {
+  euOnly.mockRestore();
+  goals.mockRestore();
+});
 
 function session(capabilities: AgentCapabilities = "all", overrides: Partial<Session> = {}) {
   const agent = resolveAgentConfig({
@@ -452,7 +465,7 @@ describe("server effectiveTools environment projection", () => {
       const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
       const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
       // SuperGrok readiness is the core route's answer (its legacy pool is gone).
-      const xaiPool = spyOn(db, "readSubscriptionCoreRouteReadiness");
+      const xaiPool = spyOn(db, "readSubscriptionCoreReadiness");
       const credentials = spyOn(db, "loadWorkspaceVercelAiGatewayApiKey");
       const policy = spyOn(db, "getWorkspaceVideoGenerationPolicy");
       const authority = spyOn(db, "getLatestStartedSessionTurn");
@@ -530,6 +543,32 @@ describe("server effectiveTools environment projection", () => {
     );
     expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
+  test("EU-only: media tools without an EU route are never projected", () => {
+    const row = session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" });
+    const attached = context({
+      objectStorageAvailable: true,
+      mediaAttachments: new Map([[row.id, { image: "provider_adapter", video: true }]]),
+    });
+    const eu = { ...attached, settings: { ...attached.settings, requiredModelGeography: "eu" } };
+    const names = projected(row, eu as SessionEffectiveToolsContext).effectiveTools!.tools.map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain("generate_image");
+    expect(names).not.toContain("generate_video");
+    expect(names).not.toContain("x_search");
+  });
+
+  test("EU-only: the context reads the workspace setting and narrows its settings", async () => {
+    euOnly.mockResolvedValue(true);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBe("eu");
+    });
+    euOnly.mockResolvedValue(false);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBeUndefined();
+    });
+  });
+
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
     const result = projected(session("none", { bundledSkillIds: ["builtin:documents"] }));
     expect(result.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
@@ -583,6 +622,9 @@ describe("server effectiveTools environment projection", () => {
       expect(result.objectStorageAvailable).toBe(true);
       expect(result.activeSandboxBackends?.get(sandboxId)).toBe("selfhosted");
       expect(result.routerHistorySessionIds?.has(row.id)).toBe(true);
+      expect(result.goalSessionIds).toEqual(new Set());
+      expect(goals).toHaveBeenCalledTimes(1);
+      expect(goals.mock.calls[0]?.slice(1)).toEqual([row.workspaceId, [row.id]]);
       expect(models).toHaveBeenCalledTimes(1);
       expect(skills).toHaveBeenCalledTimes(1);
       expect(skills.mock.calls[0]?.[1]).toEqual({
@@ -609,6 +651,18 @@ describe("server effectiveTools environment projection", () => {
       models.mockRestore();
       workspace.mockRestore();
     }
+  });
+
+  test("goal_resume is projected once the session has a goal, as the worker attaches it", () => {
+    const resume = "opengeni__goal_resume";
+    const names = (env: SessionEffectiveToolsContext) =>
+      projected(session(), env).effectiveTools!.tools.map((tool) => tool.name);
+    const row = session();
+    expect(names(context({ goalSessionIds: new Set() }))).not.toContain(resume);
+    expect(names(context({ goalSessionIds: new Set() }))).toContain("opengeni__goal_set");
+    expect(names(context({ goalSessionIds: new Set([row.id]) }))).toContain(resume);
+    // Without the goal lookup the projection keeps it, as an unknown goal does.
+    expect(names(context())).toContain(resume);
   });
 
   test("configured all reports availability without inventing media or sandbox tools", () => {
@@ -780,7 +834,9 @@ describe("server effectiveTools environment projection", () => {
   test("model-facing names and visibility match progressive disclosure", () => {
     const tools = projected().effectiveTools!.tools;
     const named = (name: string) => tools.find((tool) => tool.name === name);
-    expect(named("opengeni__goal_set")?.visibility).toBe("search");
+    // Harness control tools are in the first request on every path.
+    expect(named("opengeni__goal_set")?.visibility).toBe("upfront");
+    expect(named("opengeni__knowledge_search")?.visibility).toBe("search");
     expect(named("request_human_input")?.visibility).toBe("upfront");
     expect(named("skill_read")?.visibility).toBe("upfront");
     expect(named("skill_save")?.visibility).toBe("search");
@@ -829,6 +885,20 @@ describe("server effectiveTools environment projection", () => {
     ).toEqual([]);
   });
 
+  test("media on predicts the router before any media provider is attached, as the worker does", () => {
+    const row = session(
+      { from: "none", humanInput: false, skills: false, media: true },
+      { firstPartyMcpTools: [] },
+    );
+    const input = sessionEffectiveToolProjectionInput(
+      row,
+      [{ kind: "mcp", id: "opengeni", eager: true }],
+      context(),
+    );
+    expect(input.environment.hasDeferredTools).toBe(true);
+    expect(input.routerToolNames.length).toBeGreaterThan(0);
+  });
+
   test("configured recovery tools exist even with no first-party selection", () => {
     const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);
@@ -842,7 +912,8 @@ describe("server effectiveTools environment projection", () => {
     for (const capabilities of ["none", "all"] as const) {
       const detached = projected(session(capabilities, { sandboxBackend: "none" }));
       const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
-      expect(detachedNames).toContain("opengeni__wait_for_input");
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detachedNames.includes("opengeni__wait_for_input")).toBe(capabilities === "all");
       expect(detachedNames).not.toContain("opengeni__command_read");
       expect(detachedNames).not.toContain("opengeni__command_wait");
 
@@ -1001,5 +1072,37 @@ describe("provider web search projection", () => {
       model: "acme/no-search",
     });
     expect(names(disabled, context({ settings: providerSettings() }))).toEqual([]);
+  });
+
+  test("a credit-billed model on a billed deployment is shown the billed tools, not hosted search", () => {
+    // The default model is credit-billed and has hosted search.
+    const billed = providerSettings({ billingMode: "stripe" });
+    expect(names(session(), context({ settings: billed }))).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    expect(
+      projected(session(), context({ settings: billed })).effectiveTools!.capabilities,
+    ).toMatchObject({ webSearch: true });
+    const hosted = [["web_search", "hosted", "upfront"]];
+    // CloudGeni's host account (a legacy billing account) keeps hosted search.
+    expect(
+      names(
+        session("all", { accountId: "25eacc5d-f383-4f79-910a-b3d11dbf1310" }),
+        context({ settings: billed }),
+      ),
+    ).toEqual(hosted);
+    // So does every account when the operator turned the charges off.
+    expect(
+      names(
+        session(),
+        context({
+          settings: providerSettings({
+            billingMode: "stripe",
+            paidHostedToolsCreditBilling: false,
+          }),
+        }),
+      ),
+    ).toEqual(hosted);
   });
 });

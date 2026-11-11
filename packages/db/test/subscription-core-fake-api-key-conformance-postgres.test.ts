@@ -326,7 +326,7 @@ describe("fake API-key connector: cross-provider failover in the shared policy",
       personalConnectionsAllowed: true,
       personalFallbackAllowed: true,
     },
-    people: [{ membershipId: "member", active: true, personalFallbackOptIn: false }],
+    people: [{ membershipId: "member", active: true }],
     models: [
       { id: "codex/a", provider: "codex", reasoningLevels: ["medium"] },
       {
@@ -426,7 +426,6 @@ describe.skipIf(!realDb)("fake API-key connector: production schema is unchanged
         select has_table_privilege('opengeni_app',
           'opengeni_private.subscription_core_providers', 'SELECT') as allowed`;
       expect(registryRead!.allowed).toBe(false);
-      // The shared tables refuse an unregistered provider id.
       // (postgres.js queries run when awaited, so each is wrapped.)
       const refused = async (run: () => Promise<unknown>) => {
         try {
@@ -436,14 +435,6 @@ describe.skipIf(!realDb)("fake API-key connector: production schema is unchanged
         }
         return null;
       };
-      expect(
-        await refused(
-          async () =>
-            await shared.admin`
-              insert into subscription_provider_cutovers (account_id, provider, enabled)
-              values (gen_random_uuid(), ${FAKE_API_KEY_PROVIDER}, true)`,
-        ),
-      ).toBe("23514");
       // A registered provider's kind cannot be changed after the fact.
       expect(
         await refused(

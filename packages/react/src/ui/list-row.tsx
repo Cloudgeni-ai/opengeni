@@ -494,6 +494,11 @@ export interface ListRowProps {
   expanded?: boolean | undefined;
   /** The content shown under the row while `expanded`. List layouts only. */
   panel?: ReactNode | undefined;
+  /**
+   * One of the rows a group row opened: indented under it, with its panel
+   * indented to match. Resource lists only.
+   */
+  nested?: boolean | undefined;
   /** Not actionable right now. Say why with `disabledReason`. */
   disabled?: boolean | undefined;
   /** Why the row can't be used, and who can fix it. Replaces the description. */
@@ -528,6 +533,7 @@ export function ListRow({
   selected = false,
   expanded,
   panel,
+  nested = false,
   disabled = false,
   disabledReason,
   className,
@@ -667,7 +673,8 @@ export function ListRow({
     "aria-describedby": secondary ? secondaryId : undefined,
     "aria-current": selected ? ("true" as const) : undefined,
     "aria-expanded": expandable ? expanded : undefined,
-    "aria-controls": expandable && expanded ? panelId : undefined,
+    // Only a rendered panel is controlled; a row that reveals sibling rows has none.
+    "aria-controls": expandable && expanded && panel ? panelId : undefined,
     // The row draws the focus ring; the global focus outline is unlayered, so
     // only an inline style keeps it off the title.
     style: { outline: "none" },
@@ -960,6 +967,7 @@ export function ListRow({
     // One fixed height per list type: 64px resource rows (title plus one
     // secondary line; a title-only row centers in the same height).
     variant === "resource" && cn(SUBGRID, "min-h-16 px-3 py-3"),
+    variant === "resource" && nested && "pl-9",
     table && cn(SUBGRID, "min-h-11 px-3 py-2"),
     actionable && "hover:bg-hover",
     selected &&
@@ -1025,7 +1033,10 @@ export function ListRow({
           id={panelId}
           role="region"
           aria-labelledby={titleId}
-          className={cn("col-span-full min-w-0 pr-3 pb-4", catalog ? "pl-16" : "pl-14")}
+          className={cn(
+            "col-span-full min-w-0 pr-3 pb-4",
+            catalog ? "pl-16" : nested && variant === "resource" ? "pl-20" : "pl-14",
+          )}
         >
           {panel}
         </div>

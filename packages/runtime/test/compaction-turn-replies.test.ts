@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { skillCatalogContextItem, workspaceGovernanceContextItem } from "@opengeni/contracts";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
-  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
   RETAINED_REPLY_MAX_TOKENS,
   USER_MESSAGE_TRUNCATION_MARKER,
   buildCompactionReplacement,
@@ -234,10 +233,7 @@ describe("compaction pairs a retained request only with its own turn's reply", (
     });
 
     test(`${mode}: retained replies overshoot the retained budget by at most one bounded reply (layout D)`, () => {
-      const budget =
-        mode === "portable"
-          ? COMPACT_USER_MESSAGE_MAX_TOKENS
-          : REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
+      const budget = COMPACT_USER_MESSAGE_MAX_TOKENS;
       const entries: Array<[string | null, CompactionItem]> = [];
       const turns: string[] = [];
       for (let index = 0; index < 60; index += 1) {

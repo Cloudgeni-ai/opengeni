@@ -4,5 +4,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["./*.ts", "../../test/sdk-compat/*.ts"]
+  "include": ["./*.ts"]
 }

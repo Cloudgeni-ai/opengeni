@@ -95,6 +95,9 @@ export async function lockTurnAttemptWriteFenceTx(
     input.sessionId,
     {
       workspaceControl: locks.control ?? undefined,
+      ...((input.sessionLock ?? "no_key_update") === "no_key_update"
+        ? { lockedSession: session }
+        : {}),
     },
   );
   if (effectiveControl.state === "paused") {

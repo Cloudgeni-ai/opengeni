@@ -17,7 +17,8 @@
 // Per-machine changes (command policy, screen control, privacy panes, agent
 // update) follow the machine's scope (../sandbox/machine-authority.ts): the
 // owner changes their own Only me machine; workspace machines need
-// enrollments:manage and organization machines also account:admin.
+// enrollments:manage and organization machines also the organization's owner
+// or an admin.
 
 import {
   ChangeMachineAudienceRequest,
@@ -31,30 +32,35 @@ import {
   SwapActiveSandboxResponse,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
+import type { AccessGrant, ListOrganizationMachinesResponse } from "@opengeni/contracts";
 import {
   changeMachineAudience,
   continueSessionWaitingWork,
   nestedPostgresSqlState,
   getLiveEnrollmentConnection,
   listEnrollments,
+  listOrganizationCompute,
   previewMachineAudienceChange,
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
+  updateOrganizationMachineReach,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
-  mayStartOnlyMe,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  workspaceSettingsAuthorized,
 } from "@opengeni/core";
-import type { ApiRouteDeps } from "@opengeni/core";
+import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import {
   isAgentAttemptOnOwnSession,
@@ -79,10 +85,17 @@ import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../san
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
 import {
+  canConnectOwnMachine,
   requireMachineAccessGrant,
   requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
 } from "../sandbox/machine-authority";
+import {
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+  requireOrganizationComputeLister,
+} from "../http/organization-compute-reach";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -133,10 +146,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionGrant = sessionId
       ? await requireAccessGrant(c, deps, workspaceId, "sessions:read")
       : null;
-    const grant =
-      sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)
-        ? sessionGrant
-        : await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    // A person (or a credential acting for one) also learns whether their
+    // organization lets them connect a machine of their own; an agent's
+    // listing of its own chat doesn't.
+    let grant: AccessGrant;
+    let personAuthorization: AccessGrantAuthorization | null = null;
+    if (sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)) {
+      grant = sessionGrant;
+    } else {
+      personAuthorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "enrollments:read",
+      );
+      grant = personAuthorization.grant;
+    }
     assertSelfhostedEnabled();
     if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "sessionId must be a UUID" });
@@ -174,7 +199,16 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         sessionId,
       },
     );
-    return c.json(MachinesResponse.parse(response));
+    return c.json(
+      MachinesResponse.parse(
+        personAuthorization
+          ? {
+              ...response,
+              canConnectOwnMachine: await canConnectOwnMachine(deps, personAuthorization),
+            }
+          : response,
+      ),
+    );
   });
 
   // ── GET /workspaces/:ws/machines/:enrollmentId/metrics/series ───────────────
@@ -265,24 +299,23 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     requireFullAccessIfAgent(c, "Changing who can use a machine");
-    return grant;
-  }
-
-  // The new owner's Workspace schedules on the machine become Only me when
-  // they may have Only me schedules; otherwise they pause.
-  async function schedulesMayBeOnlyMe(workspaceId: string, ownerSubjectId: string | null) {
-    return ownerSubjectId === null
-      ? false
-      : await mayStartOnlyMe(db, settings, workspaceId, ownerSubjectId);
+    // Sharing with the whole workspace is a workspace admin's call, or, in a
+    // Personal workspace (still only them), its verified owner's.
+    const mayShareWithWorkspace = await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    );
+    return { grant, caller: { ...grant, mayShareWithWorkspace } };
   }
 
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, MachineAudiencePreviewRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const preview = await previewMachineAudienceChange(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -290,7 +323,6 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       enrollmentId,
       target: body.audience,
       ownerSubjectId,
-      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
     });
     if (typeof preview === "string") throw machineAudienceRefusalError(preview);
     return c.json(machineAudiencePreview(preview));
@@ -298,11 +330,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAudienceCaller(c, workspaceId);
+    const { grant, caller } = await requireAudienceCaller(c, workspaceId);
     const enrollmentId = c.req.param("enrollmentId");
     const body = await parseRequestJson(c, ChangeMachineAudienceRequest);
     const machine = await requireScopedEnrollment(grant, enrollmentId);
-    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const { ownerSubjectId } = machineAudienceRequestFor(caller, workspaceId, machine, body);
     const changed = await changeMachineAudience(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -310,10 +342,52 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       enrollmentId,
       target: body.audience,
       ownerSubjectId,
-      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
       expectedGeneration: body.expectedGeneration,
     });
     return c.json(machineAudienceChangeResponse(changed));
+  });
+
+  // ── Where an organization machine works ──────────────────────────────────────
+  // PUT .../reach: every shared workspace of the organization or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // connected from always has it. The organization's owner or an admin decides this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attach or attempt.
+  app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const machine = await requireScopedEnrollment(grant, enrollmentId);
+    requireMachineScopeAuthority(authorization, machine.scope, "change");
+    requireOrganizationCompute(machine.scope, "machine");
+    requireComputeReachCaller(c, grant, "machine");
+    const result = await updateOrganizationMachineReach(db, enrollmentId, {
+      accountId: grant.accountId,
+      homeWorkspaceId: machine.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "machine"));
+  });
+
+  // ── Every organization machine, wherever it works ──────────────────────────
+  // GET .../organization-machines: names and where each works, for the
+  // organization owners and admins who decide that (Organization settings >
+  // Shared). A workspace's machine list holds only the ones that work there.
+  app.get("/v1/workspaces/:workspaceId/organization-machines", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    requireOrganizationComputeLister(authorization, "machine");
+    return c.json({
+      machines: await listOrganizationCompute(db, grant, "machine"),
+      complete: true,
+    } satisfies ListOrganizationMachinesResponse);
   });
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────
@@ -468,6 +542,8 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         db,
         settings,
         bus,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
         ensureSessionGroupReady: async (fleetCtx) => {
           const session = await requireSession(db, fleetCtx.workspaceId, fleetCtx.sessionId);
           return await ensureViewerSessionGroupReady(

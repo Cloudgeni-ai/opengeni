@@ -16,20 +16,24 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  StatusPill,
 } from "../../../components/session-status";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../session-status-model";
 import { ModelMark } from "../../../components/model-mark";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
+import { sessionAgentRef, sessionAgentSourceLine, useSessionAgent } from "../../lib/session-agent";
+import { SessionAgentChip } from "../agents/session-agent-chip";
 import {
   ArchiveIcon,
-  ArchiveRestoreIcon,
   BellIcon,
   BellOffIcon,
+  BotIcon,
   CalendarClockIcon,
+  CopyIcon,
   GaugeIcon,
   LinkIcon,
   LockIcon,
@@ -40,9 +44,11 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  Share2Icon,
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
+  UserRoundPenIcon,
   ZapIcon,
   ZapOffIcon,
 } from "lucide-react";
@@ -57,6 +63,8 @@ import {
   type SessionAdminAccessControl,
 } from "../session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "../session/subagents";
+import { ShareChatDialog } from "../session/share-chat-dialog";
+import { useSessionUiFeature } from "../../lib/session-ui-features";
 import {
   SESSION_HEADER_PARTS,
   useSessionHeaderOverflow,
@@ -64,10 +72,16 @@ import {
 } from "./session-header-overflow";
 import { Button } from "../../../ui/button";
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../../../ui/context-menu";
+import { copyTitle } from "../../lib/copy-link";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuTrigger,
@@ -97,6 +111,11 @@ import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
+import { SessionAvatar } from "../session/session-avatar";
+import {
+  SessionProfileEditorDialog,
+  type UpdateSessionProfileFn,
+} from "../session/session-profile-editor";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
@@ -119,6 +138,8 @@ export function SessionHeader({
   onToggleInspector,
   onRename,
   onPin,
+  onUpdateProfile,
+  onMakeAgent,
   onArchive,
   repliesMute,
   adminAccess,
@@ -155,6 +176,10 @@ export function SessionHeader({
   onToggleInspector?: (() => void) | undefined;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
+  /** Saves the chat's name, description and avatar. Absent hides Edit profile. */
+  onUpdateProfile?: UpdateSessionProfileFn | null | undefined;
+  /** Opens New agent prefilled from this chat. Absent hides Make this an agent. */
+  onMakeAgent?: (() => void) | null | undefined;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: ((session: Session, archived: boolean) => Promise<void>) | undefined;
   /**
@@ -205,15 +230,23 @@ export function SessionHeader({
 }) {
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
-  const waiting = sessionInputWait({ ...session, status });
-  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  // A session the runtime could not start reads as stuck, not "Waiting on you",
+  // and an archived chat reads as archived, never as its last run state.
   const displayStatus = sessionDisplayStatus({
     status,
     admissionBlock: session.admissionBlock,
+    archived: session.archived,
+    retention: session.retention,
   });
+  const archived = displayStatus === "archived";
+  // Archiving stops the chat's work, which also pauses it and settles its waits:
+  // the header names the archive, not a pause or a wait.
+  const waiting = archived ? null : sessionInputWait({ ...session, status });
+  const paused = !archived && sessionControlPaused(session);
   const startup = useSessionStartup({ ...session, status });
-  const startupLabel =
-    startup === "starting"
+  const startupLabel = archived
+    ? undefined
+    : startup === "starting"
       ? "Starting"
       : startup === "delayed" || startup === "retrying"
         ? "Waiting to start"
@@ -242,8 +275,28 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  // An archived chat is restored from its own notice, so it offers no
+  // archive action, and only people who can control the chat archive it.
+  const canArchive =
+    Boolean(onArchive) &&
+    session.parentSessionId === null &&
+    !session.archived &&
+    (context ? archiveActionLabel(context, session) !== null : true);
+  // An archived chat cannot be pinned.
+  const canPin = !session.archived;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
+  const shareLinksFeature = useSessionUiFeature("shareLinks");
+  // Only the person who started a top-level chat can share it; the server
+  // decides whether links are on at all and says so in the dialog.
+  const canShare =
+    shareLinksFeature &&
+    context !== null &&
+    session.parentSessionId === null &&
+    session.createdBy?.kind === "subject" &&
+    session.createdBy.subjectId === context.accessContext.subjectId;
+  const [shareOpen, setShareOpen] = useState(false);
+  const canEditProfile = Boolean(onUpdateProfile);
+  const [profileOpen, setProfileOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -255,6 +308,11 @@ export function SessionHeader({
   const panelKeys = useActionShortcut("view.workspacePanel");
   const hasCrumb =
     Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
+  // A chat with an agent names it beside the title; the agent's icon is on the chip.
+  const agent = useSessionAgent(session.workspaceId, sessionAgentRef(session));
+  // Where it started, when not here: "Started in Slack by Kari".
+  const sourceLine = sessionAgentSourceLine(session);
+  const hasSubline = !hasCrumb && sourceLine !== null;
   const overflow = useSessionHeaderOverflow({
     present: SESSION_HEADER_PARTS.filter((part) => {
       switch (part) {
@@ -270,6 +328,8 @@ export function SessionHeader({
           return Boolean(sandboxSlot);
         case "site":
           return sessionSiteOrigin(session) !== null;
+        case "agent":
+          return agent !== null;
         case "accessKey":
           return keyAuthRequired;
         default:
@@ -332,18 +392,41 @@ export function SessionHeader({
         <div
           ref={overflow.rowRef}
           data-session-title-row=""
-          className={cn("flex min-w-0 items-center gap-1", hasCrumb && "h-7")}
+          className={cn("flex min-w-0 items-center gap-1", (hasCrumb || hasSubline) && "h-7")}
         >
           <div
             ref={overflow.titleRef}
-            className={cn("flex min-w-0 items-center", rename.editing && "flex-1")}
+            className={cn("flex min-w-0 items-center gap-1.5", rename.editing && "flex-1")}
           >
-            <SessionTitleEditor session={session} rename={rename} />
+            {/* A chat's own avatar travels with its title; an agent's is on its chip. */}
+            {session.avatar && !agent ? (
+              <button
+                type="button"
+                aria-label="Edit profile"
+                title="Edit profile"
+                disabled={!canEditProfile}
+                onClick={() => setProfileOpen(true)}
+                className="-mr-0.5 flex shrink-0 items-center justify-center rounded-[6px] outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 enabled:hover:opacity-85 pointer-coarse:size-11"
+              >
+                <SessionAvatar
+                  avatar={session.avatar}
+                  name={sessionDisplayTitle(session)}
+                  workspaceId={session.workspaceId}
+                  seed={session.id}
+                  size="sm"
+                />
+              </button>
+            ) : null}
+            <SessionTitleEditor
+              session={session}
+              rename={rename}
+              onCopyLink={() => void chatOps.copyLink(session)}
+            />
           </div>
           {/* Below lg (or when the full badge has no room) the lifecycle is a
               dot beside the title. */}
           <CompactSessionStatus
-            paused={sessionControlPaused(session)}
+            paused={paused}
             waiting={Boolean(waiting)}
             status={displayStatus}
             label={startupLabel}
@@ -367,6 +450,11 @@ export function SessionHeader({
               <SiteOriginLink session={session} />
             </span>
           ) : null}
+          {agent && !inMenu("agent") ? (
+            <span ref={part("agent")} className="flex min-w-0 shrink-0 items-center">
+              <SessionAgentChip agent={agent} workspaceId={session.workspaceId} />
+            </span>
+          ) : null}
           {onOpenAutomations && !inMenu("automations") ? (
             // The first to give way: its words shorten to its icon before
             // anything moves into the menu. The weight is high enough that
@@ -380,6 +468,15 @@ export function SessionHeader({
             </span>
           ) : null}
         </div>
+        {hasSubline ? (
+          <p
+            data-session-source=""
+            className="min-w-0 truncate text-2xs leading-4 text-fg-muted"
+            title={sourceLine ?? undefined}
+          >
+            {sourceLine}
+          </p>
+        ) : null}
       </div>
       <div ref={overflow.clusterRef} className="flex shrink-0 items-center gap-0.5 lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -433,7 +530,7 @@ export function SessionHeader({
             <SearchIcon className="size-4" />
           </Button>
         )}
-        {inMenu("pin") ? null : (
+        {inMenu("pin") || !canPin ? null : (
           <Button
             ref={part("pin")}
             type="button"
@@ -459,15 +556,14 @@ export function SessionHeader({
                 control is Active (Running + Active) is redundant noise. When
                 paused, admission is the headline — hide lifecycle so we don't
                 imply the session is still "Running"/"Idle" under a pause gate. */}
-            {!sessionControlPaused(session) ? (
+            {!paused ? (
               waiting ? (
-                <span
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
+                <StatusPill
+                  className="border-border bg-surface text-fg-muted"
                   data-session-wait-badge=""
                 >
-                  <span aria-hidden className="size-1.5 rounded-full bg-current" />
                   Waiting
-                </span>
+                </StatusPill>
               ) : (
                 <SessionStatusBadge status={displayStatus} label={startupLabel} />
               )
@@ -569,6 +665,26 @@ export function SessionHeader({
               <PencilIcon />
               Rename
             </DropdownMenuItem>
+            {canEditProfile ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setProfileOpen(true);
+                }}
+              >
+                <UserRoundPenIcon />
+                Edit profile…
+              </DropdownMenuItem>
+            ) : null}
+            {onMakeAgent && !agent ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = onMakeAgent;
+                }}
+              >
+                <BotIcon />
+                Make this an agent
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               aria-keyshortcuts={copyLinkKeys?.ariaKeys}
               onSelect={() => void chatOps.copyLink(session)}
@@ -579,16 +695,32 @@ export function SessionHeader({
                 <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
               ) : null}
             </DropdownMenuItem>
-            <DropdownMenuItem
-              className={inMenu("pin") ? undefined : "lg:hidden"}
-              aria-keyshortcuts={pinKeys?.ariaKeys}
-              disabled={pin.busy}
-              onSelect={() => pin.toggle()}
-            >
-              <PinIcon className={session.pinned ? "fill-current" : undefined} />
-              {session.pinned ? "Unpin" : "Pin"}
-              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
+            <DropdownMenuItem onSelect={() => void copyTitle(sessionDisplayTitle(session))}>
+              <CopyIcon />
+              Copy title
             </DropdownMenuItem>
+            {canShare ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setShareOpen(true);
+                }}
+              >
+                <Share2Icon />
+                Share…
+              </DropdownMenuItem>
+            ) : null}
+            {canPin ? (
+              <DropdownMenuItem
+                className={inMenu("pin") ? undefined : "lg:hidden"}
+                aria-keyshortcuts={pinKeys?.ariaKeys}
+                disabled={pin.busy}
+                onSelect={() => pin.toggle()}
+              >
+                <PinIcon className={session.pinned ? "fill-current" : undefined} />
+                {session.pinned ? "Unpin" : "Pin"}
+                {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
+              </DropdownMenuItem>
+            ) : null}
             {currentPhoneAppPlatform() ? (
               <DropdownMenuItem
                 onSelect={() => {
@@ -625,6 +757,11 @@ export function SessionHeader({
               />
             ) : null}
             {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
+            {agent && inMenu("agent") ? (
+              <div className="flex min-h-9 min-w-0 items-center px-1.5">
+                <SessionAgentChip agent={agent} workspaceId={session.workspaceId} />
+              </div>
+            ) : null}
             {keyAuthRequired && inMenu("accessKey") ? (
               <DropdownMenuItem onSelect={onForgetAccessKey}>
                 <LockIcon />
@@ -679,17 +816,11 @@ export function SessionHeader({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   aria-keyshortcuts={archiveKeys?.ariaKeys}
-                  onSelect={() => void onArchive?.(session, !session.archived)}
+                  onSelect={() => void onArchive?.(session, true)}
                 >
-                  {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {context
-                    ? archiveActionLabel(context, session)
-                    : session.archived
-                      ? "Restore"
-                      : "Archive"}
-                  {session.archived ? (
-                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
-                  ) : archiveKeys ? (
+                  <ArchiveIcon />
+                  Archive
+                  {archiveKeys ? (
                     <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
                   ) : null}
                 </DropdownMenuItem>
@@ -697,6 +828,23 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {canShare && context ? (
+          <ShareChatDialog
+            client={context.client}
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+        ) : null}
+        {onUpdateProfile && profileOpen ? (
+          <SessionProfileEditorDialog
+            session={session}
+            update={onUpdateProfile}
+            open={profileOpen}
+            onOpenChange={setProfileOpen}
+          />
+        ) : null}
         {adminAccess ? (
           <GrantSessionAdminAccessDialog
             control={adminAccess}
@@ -915,9 +1063,14 @@ function useSessionPinToggle(
  * reload. The shared `useInlineRename` hook keeps this behaviour identical to
  * the rail row's rename.
  */
-function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
+function SessionTitleEditor(props: {
+  session: Session;
+  rename: InlineRename;
+  onCopyLink: () => void;
+}) {
   const display = sessionDisplayTitle(props.session);
   const rename = props.rename;
+  const afterMenuClose = useRef<(() => void) | null>(null);
 
   if (rename.editing) {
     return (
@@ -951,16 +1104,51 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
 
   return (
     <div className="group/title flex min-w-0 items-center gap-0.5">
-      <button
-        type="button"
-        onClick={rename.startEditing}
-        title={`${display} · click to rename`}
-        dir="auto"
-        data-session-title-text=""
-        className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
-      >
-        {display}
-      </button>
+      {/* Right-click (or long-press) the title to copy it or the chat's link. */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onClick={rename.startEditing}
+            title={`${display} · click to rename`}
+            dir="auto"
+            data-session-title-text=""
+            className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
+          >
+            {display}
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent
+          className="min-w-40"
+          data-session-title-menu=""
+          onCloseAutoFocus={(event) => {
+            // Rename starts once the menu has handed focus back, so the
+            // field keeps it.
+            const action = afterMenuClose.current;
+            if (!action) return;
+            afterMenuClose.current = null;
+            event.preventDefault();
+            action();
+          }}
+        >
+          <ContextMenuItem onSelect={() => void copyTitle(display)}>
+            <CopyIcon className="size-4" />
+            Copy title
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={props.onCopyLink}>
+            <LinkIcon className="size-4" />
+            Copy link
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => {
+              afterMenuClose.current = rename.startEditing;
+            }}
+          >
+            <PencilIcon className="size-4" />
+            Rename
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {/* The pencil earns its pixels only when relevant: hidden at rest and
           revealed on hover/focus. Touch screens rename by tapping the title
           (or "…" > Rename), so the title keeps the row's width. */}

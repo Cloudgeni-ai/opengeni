@@ -1,16 +1,22 @@
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
+  modelCallProcessingResidency,
+  parseModelCallProcessingResidency,
   parsePromptCacheObservation,
+  type ModelCallProcessingResidencyV1,
+  type ModelResidencyV1,
   type PromptCacheObservation,
   type PromptCacheRequestFingerprint,
 } from "@opengeni/contracts";
 import {
   isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
+  setSessionLastInputTokensInTransaction,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
   type ModelCallTiming,
   type SessionEventMutation,
+  type SessionEventProjection,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -21,6 +27,7 @@ import {
   type ModelCallUsageNormalization,
 } from "@opengeni/runtime";
 import {
+  builtinModelResidency,
   configuredModels,
   responseSatisfiesLatencyMode,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -53,6 +60,7 @@ import {
   sanitizedModelUsageInput,
   sessionUsageMeterAmountMicros,
   settleModelUsage,
+  settleHostedWebSearchUsage,
   type ModelUsageBillingRecord,
 } from "@opengeni/core";
 
@@ -129,11 +137,35 @@ export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
   mutate?: SessionEventMutation<"event">,
+  project?: SessionEventProjection,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
   canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }>;
+
+/** Issues progress receipts in order without waiting for them (turn-event-lane.ts). */
+export type TurnBackgroundEventPublisher = (
+  events: Parameters<TurnEventPublisher>[0],
+  options?: { measureDelivery?: <T>(work: () => Promise<T>) => Promise<T> },
+) => void;
+
+/** A startup progress receipt nothing reads back before the first model
+ * request. Uses the background lane when the attempt wired one; otherwise it
+ * is an ordinary awaited append. */
+export async function publishStartupProgress(
+  eventing: {
+    publish: TurnEventPublisher | null;
+    publishInBackground: TurnBackgroundEventPublisher | null;
+  },
+  events: Parameters<TurnEventPublisher>[0],
+): Promise<void> {
+  if (eventing.publishInBackground) {
+    eventing.publishInBackground(events);
+    return;
+  }
+  await eventing.publish!(events);
+}
 
 export type ModelResponseEventState = {
   responseCount: number;
@@ -154,6 +186,33 @@ export type CompactionModelUsageEventState = {
  * source key, billing, credit, idempotency or metric label.
  */
 export type ModelCallPurpose = "main" | "compaction" | "session-title";
+
+/**
+ * Where the route that served a call processes data: the resolved configured
+ * model's residency record, or the built-in provider's record for the legacy
+ * unlisted-model fallback (no resolved model). It is never inferred from a
+ * model or provider name. A route whose record cannot be read is unknown.
+ */
+export function servedRouteProcessingResidency(
+  settings: Settings,
+  route: { configured: { residency?: ModelResidencyV1 | undefined } } | null | undefined,
+  builtinModelId: string,
+): ModelCallProcessingResidencyV1 {
+  try {
+    return modelCallProcessingResidency(
+      route ? route.configured.residency : builtinModelResidency(settings, builtinModelId),
+    );
+  } catch {
+    return modelCallProcessingResidency(null);
+  }
+}
+
+/** Only the claim fields are recorded, whatever the caller passed. */
+function modelCallProcessingResidencyClaim(
+  residency: ModelCallProcessingResidencyV1,
+): ModelCallProcessingResidencyV1 {
+  return parseModelCallProcessingResidency(residency) ?? modelCallProcessingResidency(null);
+}
 
 export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
@@ -252,6 +311,8 @@ export async function processModelResponseTerminalEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  /** Served by the person's own API key (the turn's funding): pays the platform fee. */
+  byok?: boolean;
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
@@ -262,11 +323,19 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLost: () => boolean;
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
+  completionEvents?: () => Parameters<TurnEventPublisher>[0];
+  onCompletionCommitted?: () => void;
+  /** Prepare stable history, then commit it with canonical usage and token signals. */
+  checkpoint?: (
+    persist: (history: SessionEventMutation<"event">) => Promise<boolean>,
+  ) => Promise<unknown>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   /** Timing of the call this terminal response completes; read once per claimed response. */
   responseTiming?: () => ModelCallTiming | null;
   /** Wire fingerprint of the request this response completes; read once per claimed response. */
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
+  /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -316,12 +385,27 @@ export async function processModelResponseTerminalEvent(input: {
   // A terminal response without usage still authoritatively replaces the
   // attempt-owned context signal. There is simply no billing event to claim.
   let authoritative = responseUsage === null;
+  const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
+  const finalInputTokens = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
+  const lastInputTokens =
+    finalInputTokens !== null && finalInputTokens > 0 ? finalInputTokens : null;
+  let signalsCommitted = false;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      if (!responseUsage) return;
+      if (!responseUsage) {
+        // No usage means no token debit here, but the provider still ran
+        // these searches. Each response settles its own under its own source
+        // key, so a stream that mixes responses with and without usage
+        // charges every search once, whatever the aggregate fallback does.
+        await settleHostedWebSearchUsageWithoutTokens(input, {
+          sourceKey,
+          requests: terminal.webSearchRequests ?? 0,
+        });
+        return;
+      }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -331,6 +415,7 @@ export async function processModelResponseTerminalEvent(input: {
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
           : {}),
@@ -340,54 +425,89 @@ export async function processModelResponseTerminalEvent(input: {
         usage: responseUsage.usage,
         normalizedUsage,
         gatewayBilling: responseUsage.gatewayBilling,
+        webSearchRequests: responseUsage.webSearchRequests,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
         metricProvider: input.provider,
       });
-      authoritative = await emitModelCallUsage({
-        observability: input.observability,
-        publish: input.publish,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        provider: input.provider,
-        providerApi: input.providerApi,
-        model: input.model,
-        purpose: "main",
-        sourceKey,
-        usage: responseUsage,
-        normalizedUsage,
-        ...(billing ? { billingPath: billing.billingPath } : {}),
-        ...(billing ? { billingSnapshot: billing } : {}),
-        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
-        servingAccountHash: accountContext.servingAccountHash,
-        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
-        emittedSourceKeys: input.emittedSourceKeys,
-        timing,
-      });
-      if (authoritative && billing) {
-        await recordAuthoritativeModelCallFact({
-          timing,
-          db: input.db,
+      const recordFact = (factDb: ActivityServices["db"]) =>
+        billing
+          ? recordAuthoritativeModelCallFact({
+              timing,
+              db: factDb,
+              observability: input.observability,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              turnAttemptId: input.turnAttemptId,
+              sourceKey,
+              provider: input.provider,
+              providerApi: input.providerApi,
+              model: input.model,
+              billing,
+              subscriptionConnectionId: input.subscriptionConnectionId ?? null,
+              ...(input.contextContributions !== undefined
+                ? { contextContributions: input.contextContributions }
+                : {}),
+              promptCache: cacheObservation,
+              processingResidency: input.processingResidency,
+            })
+          : Promise.resolve();
+      const cacheObservation = await promptCacheObservation(responseUsage, promptCacheRequest);
+      const commitUsage = async (history?: SessionEventMutation<"event">) => {
+        const completionEvents = input.completionEvents?.() ?? [];
+        authoritative = await emitModelCallUsage({
           observability: input.observability,
+          publish: input.publish,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
-          turnAttemptId: input.turnAttemptId,
-          sourceKey,
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
-          billing,
-          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
-          ...(input.contextContributions !== undefined
-            ? { contextContributions: input.contextContributions }
+          purpose: "main",
+          sourceKey,
+          usage: responseUsage,
+          normalizedUsage,
+          ...(billing ? { billingPath: billing.billingPath } : {}),
+          ...(billing ? { billingSnapshot: billing } : {}),
+          ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
+          servingAccountHash: accountContext.servingAccountHash,
+          accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+          emittedSourceKeys: input.emittedSourceKeys,
+          timing,
+          processingResidency: input.processingResidency,
+          additionalEvents: completionEvents,
+          ...(input.checkpoint
+            ? {
+                project: async (tx, fence, events) => {
+                  signalsCommitted = false;
+                  // A replayed provider response cannot replace context signals.
+                  if (!fence.allowed || !isCanonicalModelUsage(events, sourceKey)) return;
+                  // The fact remains best-effort in its own savepoint, but completes
+                  // before the same lost-lease checkpoint as the standalone path.
+                  await recordFact(tx);
+                  if (input.leaseLost()) return;
+                  await setSessionLastInputTokensInTransaction(tx, fence, lastInputTokens);
+                  if (history) await history(tx, fence);
+                  signalsCommitted = true;
+                },
+              }
             : {}),
-          promptCache: await promptCacheObservation(responseUsage, promptCacheRequest),
         });
+        if (completionEvents.length > 0) input.onCompletionCommitted?.();
+        // Already-incurred usage commits even when the credential was lost.
+        // Do not acknowledge a prepared history checkpoint in that case.
+        if (input.checkpoint && input.leaseLost()) throw new Error(input.leaseLostMessage);
+        return authoritative && signalsCommitted;
+      };
+      if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
+      else await commitUsage();
+      if (authoritative && billing) {
+        if (!input.checkpoint) await recordFact(input.db);
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
           settings: input.settings,
@@ -407,16 +527,12 @@ export async function processModelResponseTerminalEvent(input: {
       if (!authoritative) return;
       // Context is what the last request sent, not the sum of a response that
       // took several requests (each re-sends the whole prefix).
-      const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
       const observedTotal = finalRequest?.totalTokens ?? normalizedUsage.totalTokens;
       input.state.contextSignal =
         observedTotal !== null && observedTotal > 0
           ? { revision: responseOrdinal, totalTokens: observedTotal }
           : null;
-      const observedInput = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
-      await input.setLastInputTokens(
-        observedInput !== null && observedInput > 0 ? observedInput : null,
-      );
+      if (!signalsCommitted) await input.setLastInputTokens(lastInputTokens);
     },
   });
   return {
@@ -425,6 +541,42 @@ export async function processModelResponseTerminalEvent(input: {
     authoritative,
     usageReported: responseUsage !== null,
   };
+}
+
+/**
+ * Hosted searches of a model response that reported no usage. The same gates
+ * as the token path: only a credit-billed turn on a billed deployment pays
+ * (settleHostedWebSearchUsage checks billing, the operator switch and legacy
+ * accounts). There is no Gateway-reported cost without usage, so nothing
+ * already includes these searches.
+ */
+async function settleHostedWebSearchUsageWithoutTokens(
+  input: {
+    settings: Settings;
+    db: ActivityServices["db"];
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    model: string;
+    externallyBilled: boolean;
+    chargesOpenGeniCredits?: boolean | undefined;
+  },
+  response: { sourceKey: string; requests: number },
+): Promise<void> {
+  const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
+  if (response.requests <= 0 || !chargesOpenGeniCredits) return;
+  await settleHostedWebSearchUsage(input.db, input.settings, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+    sourceId: `${input.turnId}:${response.sourceKey}`,
+    model: input.model,
+    requests: response.requests,
+  });
 }
 
 /**
@@ -454,6 +606,8 @@ export async function processCompactionModelUsageEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  /** Served by the person's own API key (the turn's funding): pays the platform fee. */
+  byok?: boolean;
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
@@ -466,6 +620,8 @@ export async function processCompactionModelUsageEvent(input: {
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   /** Wire fingerprint of the compaction request this usage belongs to. */
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
+  /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
@@ -505,6 +661,7 @@ export async function processCompactionModelUsageEvent(input: {
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
           : {}),
@@ -514,6 +671,7 @@ export async function processCompactionModelUsageEvent(input: {
         usage: input.usage.usage,
         normalizedUsage,
         gatewayBilling: input.usage.gatewayBilling,
+        webSearchRequests: input.usage.webSearchRequests,
         sourceKey,
         observability: input.observability,
         metricProvider: input.provider,
@@ -538,6 +696,7 @@ export async function processCompactionModelUsageEvent(input: {
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
+        processingResidency: input.processingResidency,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
@@ -558,6 +717,7 @@ export async function processCompactionModelUsageEvent(input: {
             ? { contextContributions: input.contextContributions }
             : {}),
           promptCache: await promptCacheObservation(input.usage, promptCacheRequest),
+          processingResidency: input.processingResidency,
         });
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
@@ -597,6 +757,8 @@ export async function processSessionTitleModelUsageEvent(
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
+  project?: SessionEventProjection;
+  additionalEvents?: Parameters<TurnEventPublisher>[0];
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -631,6 +793,11 @@ export async function emitModelCallUsage(input: {
   emittedSourceKeys?: Set<string>;
   /** Worker-measured call timing, stored with the event for Insights repair. */
   timing?: ModelCallTiming | null;
+  /**
+   * Processing residency of the route that served the call, stored with the
+   * event so a fact rebuilt from it keeps the route's recorded region.
+   */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -670,21 +837,18 @@ export async function emitModelCallUsage(input: {
               }
             : {}),
           ...(input.timing ? { timing: input.timing } : {}),
+          processingResidency: modelCallProcessingResidencyClaim(input.processingResidency),
           ...telemetry,
         },
       },
+      ...(input.additionalEvents ?? []),
     ],
     true,
+    undefined,
+    input.project,
   );
   input.emittedSourceKeys?.add(input.sourceKey);
-  const authoritative = appended?.events.some(
-    (event) =>
-      event.type === "agent.model.usage" &&
-      event.turnAssociation === "current" &&
-      event.payload !== null &&
-      typeof event.payload === "object" &&
-      (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
-  );
+  const authoritative = isCanonicalModelUsage(appended?.events ?? [], input.sourceKey);
   if (!authoritative) return false;
   releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
@@ -722,6 +886,17 @@ export async function emitModelCallUsage(input: {
     // Durable event + billing already committed; metrics are best-effort only.
   }
   return true;
+}
+
+function isCanonicalModelUsage(events: SessionEvent[], sourceKey: string): boolean {
+  return events.some(
+    (event) =>
+      event.type === "agent.model.usage" &&
+      event.turnAssociation === "current" &&
+      event.payload !== null &&
+      typeof event.payload === "object" &&
+      (event.payload as Record<string, unknown>).sourceKey === sourceKey,
+  );
 }
 
 const METERED_PRICING_SOURCES = new Set(["configured_list_price", "gateway_reported"]);
@@ -791,10 +966,20 @@ export function applyCodexCacheTelemetry(
   provider: string,
   normalizedUsage: ModelCallUsageNormalization,
 ): void {
+  const { telemetry } = normalizedUsage;
   recordModelCacheTokens(observability, provider, {
-    cachedTokens: normalizedUsage.telemetry.cachedTokens,
-    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
-    promptTokens: normalizedUsage.telemetry.inputTokens,
+    cachedTokens: telemetry.cachedTokens,
+    cacheWriteTokens: telemetry.cacheWriteTokens,
+    promptTokens: telemetry.inputTokens,
+    // A Responses terminal event without a usage object reaches here as the
+    // SDK's all-zero usage with empty details; it reported nothing. Malformed
+    // counts were reported, so they stay a missing cache field.
+    usageReported: !(
+      normalizedUsage.rejectedFields.length === 0 &&
+      telemetry.cachedTokens === null &&
+      !telemetry.inputTokens &&
+      !telemetry.outputTokens
+    ),
   });
 }
 
@@ -815,8 +1000,12 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
+    /** Served by the person's own API key; omitted resolves from the model. */
+    byok?: boolean;
     creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+    /** Hosted provider searches the response reported; charged on credit-billed turns. */
+    webSearchRequests?: number | undefined;
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
@@ -837,8 +1026,10 @@ export async function recordModelUsageAndDebitCredits(
     model: input.model,
     chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
     countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
     creditPolicyRevision: input.creditPolicyRevision,
     ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
+    ...(input.webSearchRequests ? { hostedWebSearchRequests: input.webSearchRequests } : {}),
     normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
     sourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,
@@ -965,6 +1156,8 @@ export async function recordAuthoritativeModelCallFact(input: {
   timing?: ModelCallTiming | null;
   /** Prompt-cache observation; the fact write classifies a warm miss from it. */
   promptCache?: PromptCacheObservation | null;
+  /** Processing residency of the route that served the call. */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -997,6 +1190,7 @@ export async function recordAuthoritativeModelCallFact(input: {
         ? { contextContributions: input.contextContributions }
         : {}),
       promptCache: input.promptCache ?? null,
+      processingResidency: input.processingResidency,
     });
     let recorded: Awaited<ReturnType<typeof recordModelCallFact>> | undefined;
     try {

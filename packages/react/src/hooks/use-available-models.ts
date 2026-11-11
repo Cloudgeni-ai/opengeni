@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
@@ -6,7 +7,7 @@ import { joinClientConfigRead } from "../lib/client-config-read";
 import { useSharedQuery } from "./shared-query";
 import { useOpenGeniText } from "../messages/runtime";
 
-export type UseAvailableModelsOptions = Pick<ClientOverride, "client"> & {
+export type UseAvailableModelsOptions = Pick<ClientOverride<ChatClient>, "client"> & {
   /** Refresh interval (ms). Off by default — the host model list rarely moves. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -20,7 +21,7 @@ export type UseAvailableModelsResult = {
   refresh: () => Promise<void>;
 };
 
-export type UseWorkspaceModelCatalogOptions = Pick<ClientOverride, "client"> & {
+export type UseWorkspaceModelCatalogOptions = Pick<ClientOverride<ChatClient>, "client"> & {
   workspaceId: string | null;
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;

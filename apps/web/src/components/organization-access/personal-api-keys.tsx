@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -50,9 +51,11 @@ import {
    -------------------------------------------------------------------------- */
 
 export type PersonalApiKey = Awaited<
-  ReturnType<OpenGeniBrowserClient["listPersonalApiKeys"]>
+  ReturnType<ChatClient<OpenGeniBrowserClient>["listPersonalApiKeys"]>
 >["apiKeys"][number];
-type CreatePersonalApiKeyRequest = Parameters<OpenGeniBrowserClient["createPersonalApiKey"]>[1];
+type CreatePersonalApiKeyRequest = Parameters<
+  ChatClient<OpenGeniBrowserClient>["createPersonalApiKey"]
+>[1];
 
 export type PersonalApiKeysApi = {
   list: () => Promise<{ apiKeys: PersonalApiKey[]; canManageAll: boolean }>;
@@ -229,7 +232,7 @@ export function PersonalApiKeys(props: PersonalApiKeysProps) {
                 ),
               }}
               menu={
-                mine || canManageAll ? (
+                (key.canRevoke ?? (mine || canManageAll)) ? (
                   <DropdownMenuItem variant="destructive" onSelect={() => setRevoking(key)}>
                     <XIcon />
                     Revoke key…
@@ -441,7 +444,7 @@ export function OrganizationPersonalApiKeys({
   location,
   onNavigate,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   organizationName: string;
   location: PersonalApiKeysLocation;

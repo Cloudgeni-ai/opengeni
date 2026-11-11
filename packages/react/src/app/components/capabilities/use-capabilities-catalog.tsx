@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { NativeConnectCatalog } from "./native-connect-readiness";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "../../lib/toast";
@@ -48,6 +49,8 @@ export type CapabilitiesCatalog = {
   apiIntegrationInstances: ApiIntegrationInstallationSummary[];
   socialConnections: SocialConnection[];
   slackInstallationBindings: SlackInstallationBinding[];
+  /** Who the organization lets turn integrations on (undefined: members, or not loaded). */
+  memberIntegrationSetup: "members" | "admins" | undefined;
   loading: boolean;
   loadError: Error | null;
   /** Bumped after every accepted load, so per-instance surfaces can reload themselves. */
@@ -56,7 +59,7 @@ export type CapabilitiesCatalog = {
 };
 
 type CatalogState = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   epoch: number;
   items: CapabilityCatalogItem[];
@@ -68,6 +71,7 @@ type CatalogState = {
   apiIntegrationInstances: ApiIntegrationInstallationSummary[];
   socialConnections: SocialConnection[];
   slackInstallationBindings: SlackInstallationBinding[];
+  memberIntegrationSetup: "members" | "admins" | undefined;
   loading: boolean;
   loadError: Error | null;
   revision: number;
@@ -76,7 +80,7 @@ type CatalogState = {
 type ConnectionReadAccess = boolean | null;
 
 function emptyCatalogState(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   epoch: number,
   readAccess: ConnectionReadAccess,
@@ -94,6 +98,7 @@ function emptyCatalogState(
     apiIntegrationInstances: [],
     socialConnections: [],
     slackInstallationBindings: [],
+    memberIntegrationSetup: undefined,
     loading: true,
     loadError: null,
     revision: 0,
@@ -266,6 +271,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       update((current) => ({
         ...current,
         items: catalog.items,
+        memberIntegrationSetup: catalog.memberIntegrationSetup,
         socialConnections: socials ?? current.socialConnections,
         slackInstallationBindings: slackBindings ?? current.slackInstallationBindings,
         apiIntegrationDefinitions: apiDefinitions?.definitions ?? current.apiIntegrationDefinitions,
@@ -316,6 +322,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     apiIntegrationInstances: visible.apiIntegrationInstances,
     socialConnections: visible.socialConnections,
     slackInstallationBindings: visible.slackInstallationBindings,
+    memberIntegrationSetup: visible.memberIntegrationSetup,
     loading: visible.loading,
     loadError: visible.loadError,
     revision: visible.revision,

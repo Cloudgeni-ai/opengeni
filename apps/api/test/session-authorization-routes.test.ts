@@ -29,7 +29,6 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -124,6 +123,85 @@ function fullAppWith(port: SessionAuthorizationPort): Hono {
     sessionAuthorization: port,
   });
 }
+
+test("configuration reads honor host denial under tool-policy authority", async () => {
+  if (!available) return;
+  const value = await fixture();
+  const decisions: string[] = [];
+  const app = fullAppWith({
+    authorizeSession: async ({ operation }) => {
+      decisions.push(operation);
+      return { allowed: false, reason: "not_found" };
+    },
+  });
+  const response = await app.request(
+    `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/configuration`,
+    {
+      headers: { authorization: value.authorization },
+    },
+  );
+  expect(response.status).toBe(404);
+  expect(decisions).toEqual(["session.tool_policy.write"]);
+});
+
+test("configuration reads pass live agent identity to the host's session scope", async () => {
+  if (!available) return;
+  const value = await fixture();
+  await initializeSessionStartAtomically(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.child.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+    goal: null,
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.child.id,
+    workflowId: `session-${value.child.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("test attempt was not claimed");
+  const token = await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: "worker:session-authorization-test",
+    permissions: ["sessions:read", "sessions:control"],
+    sessionId: value.child.id,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+    principalKind: "agent_attempt",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const app = appWith({
+    authorizeSession: async ({ actor, target }) => {
+      expect(actor).toMatchObject({
+        kind: "agent_attempt",
+        callerSessionId: value.child.id,
+        attemptId,
+      });
+      return target.sessionId === value.child.id
+        ? { allowed: true, relatedSessionAccess: "root" }
+        : { allowed: false, reason: "not_found" };
+    },
+  });
+  for (const [sessionId, status] of [
+    [value.child.id, 200],
+    [value.hidden.id, 404],
+  ] as const) {
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${sessionId}/configuration`,
+      {
+        headers: { authorization: `Bearer ${token}` },
+      },
+    );
+    expect(response.status).toBe(status);
+  }
+});
 
 test("workspace commands use the live host list scope and reject malformed cursors", async () => {
   if (!available || !shared) return;
@@ -590,123 +668,6 @@ describe("embedding host session authorization routes", () => {
       serverId: "external_tools",
       effectiveFrom: "next_attempt",
     });
-  });
-
-  test("answers 410 variable_sets_removed for the retired session Variable Set route", async () => {
-    if (!available) return;
-    const value = await fixture();
-    const app = appWith({
-      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
-      resolveListScope: async () => ({ kind: "all" }),
-    });
-    const response = await app.request(
-      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`,
-      {
-        method: "PUT",
-        headers: { authorization: value.authorization, "content-type": "application/json" },
-        body: JSON.stringify({ variableSetIds: [crypto.randomUUID()] }),
-      },
-    );
-    expect(response.status).toBe(410);
-    expect(await response.json()).toMatchObject({
-      error: "variable_sets_removed",
-      details: { vaultsPath: "/vaults" },
-    });
-    const [session] = await shared!.admin<Array<{ variableSetIds: string[] }>>`
-      select variable_set_ids as "variableSetIds" from sessions
-      where workspace_id = ${value.grant.workspaceId} and id = ${value.child.id}
-    `;
-    expect(session).toEqual({ variableSetIds: [] });
-  });
-
-  test("rejects non-empty legacy Variable Set create fields with 422 and accepts empty ones", async () => {
-    if (!available) return;
-    const value = await fixture();
-    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      subjectId: value.grant.subjectId,
-      permissions: ["sessions:create", "sessions:read"],
-      principalKind: "human_session",
-      exp: Math.floor(Date.now() / 1000) + 3_600,
-    })}`;
-    const app = appWith(undefined);
-    const create = (legacy: Record<string, unknown>) =>
-      app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions`, {
-        method: "POST",
-        headers: { authorization, "content-type": "application/json" },
-        body: JSON.stringify({ initialMessage: "legacy field probe", ...legacy }),
-      });
-    const legacyId = crypto.randomUUID();
-    for (const [legacy, fields] of [
-      [{ variableSetIds: [legacyId] }, ["variableSetIds"]],
-      [{ variableSetId: legacyId }, ["variableSetId"]],
-      [{ environmentId: legacyId }, ["environmentId"]],
-    ] as const) {
-      const response = await create(legacy);
-      expect(response.status).toBe(422);
-      expect(await response.json()).toMatchObject({
-        error: "variable_sets_removed",
-        details: { fields },
-      });
-    }
-    const accepted = await create({ variableSetIds: [], variableSetId: null, environmentId: null });
-    expect(accepted.status).toBe(202);
-    expect(await accepted.json()).toMatchObject({ variableSetIds: [] });
-  });
-
-  test("preserves unrelated create-time foreign key failures", async () => {
-    if (!available || !shared) return;
-    const value = await fixture();
-    const variableSet = await createLegacyVariableSet(client.db, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      name: `session-create-unrelated-fk-${crypto.randomUUID()}`,
-    });
-    let failure: unknown;
-    try {
-      await createSession(client.db, {
-        accountId: value.grant.accountId,
-        workspaceId: value.grant.workspaceId,
-        initialMessage: "unrelated create FK",
-        resources: [],
-        metadata: {},
-        model: "test-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "modal",
-        variableSetIds: [variableSet.id],
-        variableSetId: variableSet.id,
-        createdBy: { kind: "subject", subjectId: value.grant.subjectId, label: "Test owner" },
-        createdByContext: {},
-        subjectId: value.grant.subjectId,
-        beforeCreateCommit: async () => {
-          await shared.admin`
-            insert into session_variable_set_attachments (
-              account_id,
-              workspace_id,
-              session_id,
-              variable_set_id,
-              position,
-              session_status
-            ) values (
-              ${value.grant.accountId},
-              ${value.grant.workspaceId},
-              ${crypto.randomUUID()},
-              ${variableSet.id},
-              0,
-              'queued'
-            )
-          `;
-        },
-      });
-    } catch (error) {
-      failure = error;
-    }
-    expect((failure as { code?: string } | undefined)?.code).toBe("23503");
-    expect((failure as { constraint_name?: string } | undefined)?.constraint_name).toBe(
-      "session_variable_set_attachments_session_fk",
-    );
   });
 
   test("updates the durable session tool policy and returns a version conflict", async () => {

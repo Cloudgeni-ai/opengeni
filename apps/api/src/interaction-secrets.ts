@@ -253,12 +253,15 @@ type PasskeySessionState = {
 /** Per-process lease cache: renew at most once a minute per browser session
  * (leases last ten minutes and renew on use, Q-32). */
 const passkeySessions = new Map<string, PasskeySessionState>();
+/** Controller capability is independent of the acting principal and attempt. */
+const passkeyBackupFlagCapabilities = new Map<string, boolean>();
 
 /** The latest pending sync per BrowserSession; later syncs chain after it. */
 const passkeySyncTails = new Map<string, Promise<void>>();
 
 export function resetPasskeySessionCacheForTests(): void {
   passkeySessions.clear();
+  passkeyBackupFlagCapabilities.clear();
   passkeySyncTails.clear();
 }
 
@@ -275,6 +278,11 @@ function isUnsupportedSync(error: unknown): boolean {
   const status = (error as { status?: unknown } | null)?.status;
   const name = (error as { name?: unknown } | null)?.name;
   return status === 404 || status === 405 || name === "BrowserControlUnsupportedError";
+}
+
+/** The relying parties the browser holds passkeys for (no key material). */
+function loadedRpIds(credentials: readonly BrowserPasskeyCredential[]): string[] {
+  return [...new Set(credentials.map((credential) => credential.rpId))].sort();
 }
 
 /**
@@ -321,17 +329,38 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
   const store = input.port?.passkeys;
   if (!store) return null;
   const principal = attemptSecretPrincipal(input.grant);
-  if (!principal) return null;
+  if (!principal) {
+    // Passkeys are usable only while the attempt that loaded them acts: a
+    // caller acting for no attempt (a person or an API key) drives a browser
+    // whose authenticators hold nothing. Its pending events stay for the
+    // attempt that owns them.
+    if (input.refresh === true) await clearBrowserPasskeys(input);
+    return null;
+  }
   const now = input.now ?? Date.now;
   const holder = passkeyLeaseHolder(input.browserSessionId);
   // Per attempt: a later turn may act for another person, so it leases (and
   // replaces browserd's credential set with) its own passkeys first.
-  const cacheKey = `${input.browserSessionId}:${input.controllerGeneration}:${principal.attemptId}`;
+  const bindingKey = `${input.browserSessionId}:${input.controllerGeneration}`;
+  const cacheKey = `${bindingKey}:${principal.attemptId}`;
+  let supportsBackupFlags = passkeyBackupFlagCapabilities.get(bindingKey);
+  const rememberBackupFlags = (response: BrowserPasskeySyncResponse): void => {
+    supportsBackupFlags = response.supportsBackupFlags === true;
+    passkeyBackupFlagCapabilities.delete(bindingKey);
+    passkeyBackupFlagCapabilities.set(bindingKey, supportsBackupFlags);
+    while (passkeyBackupFlagCapabilities.size > PASSKEY_SESSION_CACHE_LIMIT) {
+      passkeyBackupFlagCapabilities.delete(passkeyBackupFlagCapabilities.keys().next().value!);
+    }
+  };
   let state = passkeySessions.get(cacheKey);
   if (state?.unsupported) return null;
   const lease = async (): Promise<BrowserPasskeyCredential[]> => {
     const credentials = await store.lease(principal, holder, PASSKEY_LEASE_TTL_SECONDS);
-    state = { leasedAtMs: now(), credentials, unsupported: false };
+    state = {
+      leasedAtMs: now(),
+      credentials,
+      unsupported: false,
+    };
     passkeySessions.delete(cacheKey);
     passkeySessions.set(cacheKey, state);
     while (passkeySessions.size > PASSKEY_SESSION_CACHE_LIMIT) {
@@ -346,8 +375,16 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     protocolVersion: INTERACTION_PROTOCOL_VERSION,
     browserSessionId: input.browserSessionId,
     controllerGeneration: input.controllerGeneration,
-    credentials,
+    // Absent already means false to both legacy and current controllers.
+    // Never send new keys to a strict legacy schema, even when they are false.
+    credentials:
+      credentials?.map(({ backupEligibility, backupState, ...credential }) => ({
+        ...credential,
+        ...(supportsBackupFlags && backupEligibility === true ? { backupEligibility: true } : {}),
+        ...(supportsBackupFlags && backupState === true ? { backupState: true } : {}),
+      })) ?? null,
     acknowledgeEventIds,
+    owner: principal.attemptId,
   });
   try {
     const due =
@@ -355,7 +392,18 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     const credentials = due ? await lease() : null;
     let response: BrowserPasskeySyncResponse;
     try {
+      if (
+        supportsBackupFlags === undefined &&
+        credentials?.some((credential) => credential.backupEligibility || credential.backupState)
+      ) {
+        // Read-only discovery preserves pending events and the browser's higher
+        // counters until normal replacement and write-back reconcile the vault.
+        // Older controllers ignore the opt-in query and return their old shape.
+        const probe = await input.client.passkeySync(request(null, []));
+        rememberBackupFlags(probe);
+      }
       response = await input.client.passkeySync(request(credentials, []));
+      rememberBackupFlags(response);
     } catch (error) {
       if (isUnsupportedSync(error)) {
         passkeySessions.set(cacheKey, {
@@ -368,16 +416,39 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       }
       throw error;
     }
-    if (response.events.length === 0) return { saved: 0, asserted: 0 };
+    // The write-back after an action reports what it found even when the
+    // browser held passkeys and none was used, so a sign-in that never reached
+    // the authenticator is told apart from one that never had the passkey.
+    const reportUnused = input.refresh !== true && (state?.credentials.length ?? 0) > 0;
+    if (response.events.length === 0) {
+      if (reportUnused) {
+        input.log?.("browser.passkey.synced", {
+          saved: 0,
+          asserted: 0,
+          loadedRpIds: loadedRpIds(state!.credentials),
+        });
+      }
+      return { saved: 0, asserted: 0 };
+    }
     const processed: string[] = [];
     const itemByCredential = new Map(
       (state?.credentials ?? []).map((credential) => [credential.credentialId, credential.itemId]),
     );
     let saved = 0;
     let asserted = 0;
+    let discarded = 0;
     for (const event of response.events as BrowserPasskeyEvent[]) {
       try {
         if (event.type === "registered") {
+          // Saved only for the attempt whose passkeys were loaded when the
+          // page registered it. A registration made under another attempt,
+          // under nobody's, or by a controller that cannot say, is dropped:
+          // it never lands in another person's vault.
+          if (response.supportsOwners !== true || event.owner !== principal.attemptId) {
+            processed.push(event.eventId);
+            discarded += 1;
+            continue;
+          }
           const existing = itemByCredential.get(event.credential.credentialId);
           if (existing === undefined) {
             const result = await store.saveRegistered(principal, {
@@ -407,8 +478,13 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     // New items are loaded with their item IDs so later assertions write back.
     const refreshed = saved > 0 ? await lease() : null;
     await input.client.passkeySync(request(refreshed, processed));
-    if (saved > 0 || asserted > 0) {
-      input.log?.("browser.passkey.synced", { saved, asserted });
+    if (discarded > 0) input.log?.("browser.passkey.registrations_discarded", { discarded });
+    if (saved > 0 || asserted > 0 || reportUnused) {
+      input.log?.("browser.passkey.synced", {
+        saved,
+        asserted,
+        loadedRpIds: loadedRpIds(state?.credentials ?? []),
+      });
     }
     return { saved, asserted };
   } catch (error) {
@@ -419,6 +495,24 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
   }
 }
 
+/** Empty the BrowserSession's authenticators before an action no attempt
+ * owns. Best effort, like every sync: a controller without passkeys has
+ * nothing to clear. */
+async function clearBrowserPasskeys(input: PasskeySyncInput): Promise<void> {
+  try {
+    await input.client.passkeySync({
+      protocolVersion: INTERACTION_PROTOCOL_VERSION,
+      browserSessionId: input.browserSessionId,
+      controllerGeneration: input.controllerGeneration,
+      credentials: [],
+      acknowledgeEventIds: [],
+    });
+  } catch (error) {
+    if (isUnsupportedSync(error)) return;
+    input.log?.("browser.passkey.sync_failed", { message: errorMessage(error) });
+  }
+}
+
 /** Release the BrowserSession's passkey leases (session end). Best effort. */
 export async function releaseBrowserPasskeys(
   port: InteractionSecretsPort | null | undefined,
@@ -426,6 +520,9 @@ export async function releaseBrowserPasskeys(
 ): Promise<void> {
   for (const key of [...passkeySessions.keys()]) {
     if (key.startsWith(`${browserSessionId}:`)) passkeySessions.delete(key);
+  }
+  for (const key of [...passkeyBackupFlagCapabilities.keys()]) {
+    if (key.startsWith(`${browserSessionId}:`)) passkeyBackupFlagCapabilities.delete(key);
   }
   await port?.passkeys?.release(passkeyLeaseHolder(browserSessionId)).catch(() => undefined);
 }

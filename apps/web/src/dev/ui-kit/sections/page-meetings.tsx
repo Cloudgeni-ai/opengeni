@@ -15,14 +15,21 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 import {
   createMeetingsFixture,
+  ELSEWHERE_RECORDING_ID,
   FAILED_RECORDING_ID,
   LIVE_LINES,
   LIVE_RECORDING_ID,
 } from "@opengeni/react/testing/meetings";
 
 type View = "list" | "meeting" | "settings";
+/** The fixture's 31-minute meeting still being transcribed. */
+const TRANSCRIBING_RECORDING_ID = "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
+/** A track whose device went away mid-recording: the microphone waiting for one, or shared audio that ended. */
+type LostTrack = "none" | "microphone" | "system" | "microphone-stopped" | "both";
+/** An earlier meeting this device still holds audio of, while the recorder is idle. */
+type BackgroundUpload = "none" | "uploading" | "failed";
 
 /**
  * The live preview as the recorder holds it: four lines heard, one still
@@ -68,6 +75,8 @@ function fakeRecorder(
   startedAt: number,
   audio: "desktop" | "display",
   preview: LivePreview = "off",
+  background: BackgroundUpload = "none",
+  lost: LostTrack = "none",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
   // Just stopped: the last few seconds of audio are on their way, so it reads Transcribing.
@@ -93,11 +102,17 @@ function fakeRecorder(
             trackNumber: 0,
             source: "microphone",
             label: "MacBook Pro Microphone",
+            ...(lost === "microphone" || lost === "both"
+              ? { lost: "reconnecting" as const }
+              : lost === "microphone-stopped"
+                ? { lost: "stopped" as const }
+                : {}),
           },
           {
             trackNumber: 1,
             source: "system",
             label: audio === "desktop" ? "Computer audio" : "Meet tab",
+            ...(lost === "system" || lost === "both" ? { lost: "stopped" as const } : {}),
           },
         ]
       : [],
@@ -121,12 +136,34 @@ function fakeRecorder(
     systemAudioSupported: true,
     systemAudioKind: audio,
     recovered: [],
+    uploads:
+      background === "none" || held
+        ? {}
+        : {
+            [LIVE_RECORDING_ID]: {
+              recordingId: LIVE_RECORDING_ID,
+              created: true,
+              pendingChunks: 3,
+              pendingBytes: 360_000,
+              uploading: background === "uploading",
+              retryingAfterError: null,
+              failed:
+                background === "failed"
+                  ? { code: "conflict", message: "The recording changed on the server" }
+                  : null,
+              finalized: false,
+              discarded: false,
+            },
+          },
+    retryUpload: () => false,
     start: async () => {},
     pause: () => {},
     resume: () => {},
     stop: async () => {},
     discard: async () => {},
     rename: async () => {},
+    reconnectTrack: async () => {},
+    importAudio: async () => LIVE_RECORDING_ID,
     levels: () => {
       const t = Date.now() / 180;
       return {
@@ -163,42 +200,118 @@ export default function PageMeetingsSection() {
   );
   // ?models=pinned previews a deployment that pins one speech-to-text model.
   const pinned = initial.get("models") === "pinned";
+  // ?models=credits: every model is charged in credits, so a refusal's fix is adding them.
+  const creditsOnly = initial.get("models") === "credits";
+  // ?models=subscription adds the organization's ChatGPT subscription.
+  const subscription = initial.get("models") === "subscription";
   // ?failure=missing_provider_key makes the failed meeting's transcript fail
   // for a provider that isn't connected, instead of a used-up provider account.
   const failure = initial.get("failure");
+  // ?elsewhere=off hides the viewer's Only me meetings from another workspace.
+  const otherWorkspaces = initial.get("elsewhere") !== "off";
+  // ?upload=elsewhere: the meeting in progress has no live preview, so its
+  // audio is only on the device that recorded it.
+  const elsewhereAudio = initial.get("upload") === "elsewhere";
+  // ?gaps=on: the ready meeting's microphone was unplugged for a while, and
+  // tab sharing ended before the meeting did. ?gaps=all: both tracks went
+  // silent together. ?gaps=long: the microphone dropped an hour in.
+  const gapsParam = initial.get("gaps");
+  const gaps = gapsParam === "on" || gapsParam === "all" || gapsParam === "long";
   const fixture = useMemo(() => {
-    const base = createMeetingsFixture({ state: data, pinned });
-    if (!failure) return base;
+    const base = createMeetingsFixture({
+      state: data,
+      pinned,
+      otherWorkspaces,
+      creditsOnly,
+      subscription,
+    });
+    if (!failure && !elsewhereAudio && !gaps) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
-      return recording.transcript && id === FAILED_RECORDING_ID
+      if (elsewhereAudio && id === LIVE_RECORDING_ID) {
+        // No live preview: nothing here shows it is still being recorded.
+        return {
+          ...recording,
+          tracks: recording.tracks.map((track) => ({ ...track, live: null })),
+        };
+      }
+      if (gaps && id === base.readyId) {
+        if (gapsParam === "long") {
+          return {
+            ...recording,
+            durationMilliseconds: 3_910_000,
+            tracks: recording.tracks.map((track) => ({
+              ...track,
+              unrecorded:
+                track.source === "microphone"
+                  ? [{ startMilliseconds: 3_759_000, endMilliseconds: null }]
+                  : [],
+            })),
+          };
+        }
+        return {
+          ...recording,
+          tracks: recording.tracks.map((track) => ({
+            ...track,
+            unrecorded:
+              gapsParam === "all"
+                ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                : track.source === "microphone"
+                  ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                  : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+          })),
+        };
+      }
+      return failure && recording.transcript && id === FAILED_RECORDING_ID
         ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure]);
+  }, [
+    data,
+    pinned,
+    failure,
+    otherWorkspaces,
+    creditsOnly,
+    subscription,
+    elsewhereAudio,
+    gaps,
+    gapsParam,
+  ]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
   const audio = initial.get("audio") === "desktop" ? "desktop" : "display";
+  // ?upload=uploading|failed: this device still holds the meeting in
+  // progress's audio, uploading it in the background or refused for good.
+  const uploadParam = initial.get("upload");
+  const background: BackgroundUpload =
+    uploadParam === "uploading" || uploadParam === "failed" ? uploadParam : "none";
+  // ?lost=microphone|microphone-stopped|system|both: a track's device went away while recording.
+  const lost = (initial.get("lost") as LostTrack | null) ?? "none";
   useEffect(() => {
-    store.set(fakeRecorder(mode, startedAt, audio, preview));
+    store.set(fakeRecorder(mode, startedAt, audio, preview, background, lost));
     if (mode !== "recording") return;
     const timer = window.setInterval(
-      () => store.set(fakeRecorder(mode, startedAt, audio, preview)),
+      () => store.set(fakeRecorder(mode, startedAt, audio, preview, background, lost)),
       250,
     );
     return () => window.clearInterval(timer);
-  }, [mode, startedAt, store, audio, preview]);
+  }, [mode, startedAt, store, audio, preview, background, lost]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
   // records, or elsewhere while it is idle. ?open=failed opens the one whose
-  // transcript failed.
+  // transcript failed, ?open=transcribing the long one still transcribing,
+  // ?open=elsewhere the viewer's own Only me meeting stored in Sales.
   const [openId, setOpenId] = useState(
     initial.get("open") === "live"
       ? LIVE_RECORDING_ID
       : initial.get("open") === "failed"
         ? FAILED_RECORDING_ID
-        : fixture.readyId,
+        : initial.get("open") === "transcribing"
+          ? TRANSCRIBING_RECORDING_ID
+          : initial.get("open") === "elsewhere"
+            ? ELSEWHERE_RECORDING_ID
+            : fixture.readyId,
   );
 
   return (
@@ -297,6 +410,8 @@ export default function PageMeetingsSection() {
                 viewerName="Ingrid Solberg"
                 voiceRecognition={settings.voiceprints === true}
                 onOpenSettings={() => setView("settings")}
+                onOpenBilling={() => toast("Opens the organization's billing")}
+                onConnectModels={() => toast("Opens the workspace's models")}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
                 onOpenChat={() => toast("Opens the chat that wrote the notes")}

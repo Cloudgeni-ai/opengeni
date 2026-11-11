@@ -161,7 +161,7 @@ export function createSkillPublishAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_publish"],
     title: "Publish Skill directory",
     description:
-      "Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. Set scope as in skill_save only to publish a new Skill somewhere other than this chat's default. The result reports whether the change is live or pending approval.",
+      "Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. Set scope as in skill_save only to publish a new Skill somewhere other than this chat's default. The result reports whether the change is live or pending approval. A Skill or change pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown; an edited Skill keeps its current version until then. Say so in your reply.",
     inputSchema: {
       type: "object",
       properties: {

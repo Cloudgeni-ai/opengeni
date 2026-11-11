@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /**
  * Platform-neutral session realtime: the controller hook, admission rules and
  * the workspace voice-model catalog. Free of DOM components, so web and native
@@ -31,6 +32,7 @@ function abortError(message: string): Error {
 }
 
 export type RealtimeModelOption = {
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider: WorkspaceRealtimeModelCatalogItem["provider"];
@@ -82,7 +84,7 @@ const REALTIME_LANGUAGE_STORAGE_KEY = "opengeni:realtime-language";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 
-export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike &
+export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike<ChatClient> &
   SessionRealtimeClientLike;
 
 const realtimeLanguageListeners = new Set<() => void>();
@@ -361,9 +363,6 @@ export function prestartSessionRealtime(input: {
         client: input.client,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        // The adopting view's audio element does not exist yet; a detached
-        // element plays the same way.
-        ...(typeof Audio === "undefined" ? {} : { remoteAudio: new Audio() }),
         model: input.model,
         getModelContext: () => modelContext.current?.(),
         getLanguage: () => language.current(),
@@ -466,6 +465,10 @@ export function useSessionRealtime(options: {
     workspaceId: options.workspaceId,
   });
   const model = options.model ?? CODEX_LIVE_MODEL(t).id;
+  /**
+   * Kept for compatibility. Replies play through the controller's own audio
+   * element, so a mounted element is no longer used.
+   */
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
@@ -531,7 +534,6 @@ export function useSessionRealtime(options: {
             client,
             workspaceId,
             sessionId: options.sessionId,
-            ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
             model,
             getModelContext: () => modelContextProviderRef.current?.(),
             getLanguage: () => languageRef.current,
@@ -620,6 +622,12 @@ export function useSessionRealtime(options: {
     }
     await controller.start();
   }, [model, t]);
+  const prepare = useCallback(async () => {
+    await controllerRef.current?.prepare?.();
+  }, []);
+  const prepareIncoming = useCallback(async (input: { callId: string; device: string }) => {
+    await controllerRef.current?.prepareIncoming?.(input);
+  }, []);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -650,7 +658,7 @@ export function useSessionRealtime(options: {
   const canStart =
     controllerRef.current !== null &&
     controllerModelRef.current === model &&
-    ["idle", "error"].includes(snapshot.status) &&
+    (["idle", "error"].includes(snapshot.status) || snapshot.mode?.state === "preparing") &&
     admissionBlocker === null;
 
   return {
@@ -661,7 +669,10 @@ export function useSessionRealtime(options: {
     canStart,
     admissionBlocker,
     codexConnected: options.codexConnected,
+    /** @deprecated Replies play without a mounted element; rendering this ref has no effect. */
     audioRef,
+    prepare,
+    prepareIncoming,
     start,
     stop,
     retry,

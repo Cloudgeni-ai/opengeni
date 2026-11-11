@@ -9,7 +9,7 @@ import {
   isWorkspaceAgentActivityPaused,
   listOutstandingSessionSystemUpdates,
   mutateWorkspaceControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -105,12 +105,13 @@ test.each([
   ["queued", "added"],
   ["running", "session_not_idle"],
   ["requires_action", "session_not_idle"],
-  ["waiting_capacity", "session_not_idle"],
+  // A chat parked on a model account is told apart, so the schedule can say so.
+  ["waiting_capacity", "session_waiting_capacity"],
 ])("a reusable session that is %s admits the next occurrence: %s", async (status, expected) => {
   const target = await reusableSession(status);
   const occurrence = await nextOccurrence(target);
   expect(occurrence.reason as string).toBe(expected);
-  expect(occurrence.rejections).toEqual([expected === "added" ? null : "session_not_idle"]);
+  expect(occurrence.rejections).toEqual([expected === "added" ? null : expected]);
 });
 
 test("an uninitialized session has no executable queue projection", async () => {
@@ -183,9 +184,9 @@ test("Pause refuses a buffered or concurrent occurrence too, so none waits unset
     const [current] = await shared.admin`select revision from workspace_inference_controls
       where workspace_id = ${target.workspaceId!}`;
     const expectedRevision = Number(current?.revision ?? 0);
-    return withWorkspaceRls(client.db, target.workspaceId!, (db) =>
+    return withWorkspaceSessionActivityRls(client.db, target.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: target.accountId,
           workspaceId: target.workspaceId!,
           actor: { type: "human", subjectId: target.subjectId },

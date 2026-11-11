@@ -193,14 +193,6 @@ describe.skipIf(!realDb)(
             ),
           ).toBeNull();
         }
-        // Redaction follows current visibility without rewriting past events.
-        await shared.admin`update subscription_provider_cutovers set enabled=false
-          where account_id=${org.accountId}::uuid and provider='claude'`;
-        const hidden = (await readChoice())?.serving;
-        expect(hidden).toMatchObject({ modelId: target.id, connectionId: null });
-        expect(JSON.stringify(hidden)).not.toContain(targetId);
-        await shared.admin`update subscription_provider_cutovers set enabled=true
-          where account_id=${org.accountId}::uuid and provider='claude'`;
         const retried = await recordSubscriptionCoreServingSelectionForTurnAttempt(
           fixture.client.db,
           selection,

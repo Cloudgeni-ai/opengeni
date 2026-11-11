@@ -8,9 +8,12 @@ import { ErrorCode, Permission } from "@opengeni/contracts";
  *
  * - `code` is the public `ErrorEnvelope.code` (a closed enum).
  * - `reason` is `permission:<name>` when the refusal names a missing permission
- *   from the closed permission catalog, else the envelope's typed
+ *   from the closed permission catalog (as `details.permission`, or in a
+ *   legacy "missing permission: <name>" message), else the envelope's typed
  *   `details.code` when it is a short identifier, else `control:<code>` for a
- *   Connected Machine control failure, else `unclassified`.
+ *   Connected Machine control failure, else (for a route's own top-level
+ *   `{ code, message, details }` body, such as session create) its
+ *   UPPER_SNAKE route code, else `unclassified`.
  * - `fingerprint` is a one-way hash of the message with identifiers and
  *   numbers normalized away. It groups identical refusals in logs; resolve it
  *   back to source text with `bun run scripts/resolve-rejection-fingerprint.ts`.
@@ -27,6 +30,8 @@ const PERMISSIONS: ReadonlySet<string> = new Set(Permission.options);
 const DETAIL_CODE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const MISSING_PERMISSION = /^missing (?:literal )?permission: ([a-z][a-z0-9-]*:[a-z][a-z0-9-]*)/;
 const CONTROL_CODE = /^[a-z][a-z0-9_]{0,31}$/;
+/** A route's own authored top-level code, such as `SESSION_CREATE_REJECTED`. */
+const ROUTE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 const MAX_ENVELOPE_BYTES = 32 * 1024;
 
 export const UNCLASSIFIED_REJECTION_REASON = "unclassified";
@@ -48,19 +53,36 @@ export function normalizeRejectionMessage(message: string): string {
 
 export function rejectionReasonFromMessage(message: string | undefined): string | null {
   if (!message) return null;
-  const permission = MISSING_PERMISSION.exec(message)?.[1];
-  return permission && PERMISSIONS.has(permission) ? `permission:${permission}` : null;
+  return permissionReason(MISSING_PERMISSION.exec(message)?.[1]);
 }
 
-/** Classify a parsed `ErrorEnvelope`-shaped body. Unknown shapes still get a code. */
+/** `permission:<name>` for a permission from the closed catalog, else null. */
+function permissionReason(permission: unknown): string | null {
+  return typeof permission === "string" && PERMISSIONS.has(permission)
+    ? `permission:${permission}`
+    : null;
+}
+
+/**
+ * Classify a parsed `ErrorEnvelope`-shaped body. Unknown shapes still get a code.
+ * A route that answers with its own top-level `{ code, message, details }`
+ * (session create) is read the same way, so its refusals are not all
+ * "unclassified": the reason is its typed `details.code`, else its own route
+ * code, and the message is fingerprinted. Only a body whose top-level code is
+ * one of our authored UPPER_SNAKE route codes counts, so a passed-through
+ * upstream body can never add reason values.
+ */
 export function httpRejectionFactsFromEnvelope(
   envelope: unknown,
   fallbackCode: string,
 ): HttpRejectionFacts {
-  const error =
-    envelope && typeof envelope === "object" && "error" in envelope
-      ? (envelope as { error?: unknown }).error
-      : undefined;
+  const body = envelope && typeof envelope === "object" ? envelope : undefined;
+  const routeShaped =
+    body !== undefined &&
+    !("error" in body) &&
+    typeof (body as { code?: unknown }).code === "string" &&
+    ROUTE_CODE.test((body as { code: string }).code);
+  const error = routeShaped ? body : (body as { error?: unknown } | undefined)?.error;
   const record = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
   const code =
     typeof record.code === "string" && ERROR_CODES.has(record.code) ? record.code : fallbackCode;
@@ -75,12 +97,18 @@ export function httpRejectionFactsFromEnvelope(
     typeof details?.controlFailureCode === "string" && CONTROL_CODE.test(details.controlFailureCode)
       ? `control:${details.controlFailureCode}`
       : null;
+  const routeCode =
+    routeShaped && typeof record.code === "string" && !ERROR_CODES.has(record.code)
+      ? record.code
+      : null;
   return {
     code,
     reason:
+      permissionReason(details?.permission) ??
       rejectionReasonFromMessage(message) ??
       detailCode ??
       controlCode ??
+      routeCode ??
       UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
   };
@@ -92,9 +120,21 @@ export function httpRejectionFactsFromError(
   fallbackCode: string,
 ): HttpRejectionFacts {
   const message = error instanceof Error ? error.message : undefined;
+  const permission =
+    error && typeof error === "object" ? (error as { permission?: unknown }).permission : undefined;
+  // A typed refusal (an API error, a missing sign-in) carries the same
+  // `details.code` its envelope would.
+  const details =
+    error && typeof error === "object" ? (error as { details?: unknown }).details : undefined;
+  const detailCode =
+    details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
   return {
     code: fallbackCode,
-    reason: rejectionReasonFromMessage(message) ?? UNCLASSIFIED_REJECTION_REASON,
+    reason:
+      permissionReason(permission) ??
+      rejectionReasonFromMessage(message) ??
+      (typeof detailCode === "string" && DETAIL_CODE.test(detailCode) ? detailCode : null) ??
+      UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
   };
 }

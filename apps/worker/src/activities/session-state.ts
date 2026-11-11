@@ -42,6 +42,7 @@ import {
   validProviderOverloadRecoveryDelay,
 } from "./agent-turn/provider-recovery-policy";
 import { writeSessionUsageReceipts } from "./agent-turn/session-usage-custody";
+import { resolveWorkerShutdownTiming } from "../worker-shutdown";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -216,6 +217,9 @@ export function createSessionStateActivities(
           workflowId,
           attemptId: input.attemptId,
           fence: input.admissionFence,
+          ...(input.admissionWakeRevision !== undefined
+            ? { wakeRevision: input.admissionWakeRevision }
+            : {}),
           reason: input.preClaimFailure.reason,
           sqlState: input.preClaimFailure.sqlState ?? null,
         });
@@ -458,19 +462,6 @@ export function createSessionStateActivities(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
-    if (input.phase === "attempt_quiesced") {
-      // Replay compatibility only: v1 histories scheduled this idempotent
-      // fallback after WAIT_CANCELLATION_COMPLETED. Receipt-gated v2 workflows
-      // never call it; runAgentTurn writes immediately after its hard fence.
-      const events = await markSessionAttemptQuiescedFn(db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        attemptId: input.attemptId,
-        temporalWorkflowId: input.workflowId,
-      });
-      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
-      return { action: "stale" };
-    }
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
@@ -519,7 +510,7 @@ export function createSessionStateActivities(
   async function reconcileSessionAttemptQuiescenceActivity(
     input: ReconcileSessionAttemptQuiescenceInput,
   ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const { db, bus, inspectSessionAttemptActivity, settings } = await services();
     const activityRef = await getSessionAttemptActivityRefFn(db, {
       ...input,
       temporalWorkflowId: input.workflowId,
@@ -539,6 +530,9 @@ export function createSessionStateActivities(
       temporalWorkflowRunId: activityRef.workflowRunId,
       temporalActivityId: activityRef.activityId,
       activitySettled: true,
+      // A worker-shutdown closure's process has exited once this has passed.
+      workerProcessExitDeadlineMs: resolveWorkerShutdownTiming("turn", settings)
+        .processExitDeadlineMs,
     });
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(

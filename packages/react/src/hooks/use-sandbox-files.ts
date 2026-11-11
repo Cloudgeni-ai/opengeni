@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   FileSystemRouteIdentity,
   FsChangedPayload,
@@ -84,7 +85,7 @@ export type FileTreeNode = {
   truncated?: boolean | undefined;
 };
 
-export type UseSandboxFilesOptions = ClientOverride & {
+export type UseSandboxFilesOptions = ClientOverride<ChatClient> & {
   /** Live event log (usually `useSessionEvents().events`) — drives auto-refresh
    *  on `fs.changed` / `git.changed`. */
   events?: SessionEvent[] | undefined;

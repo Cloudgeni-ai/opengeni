@@ -4,7 +4,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId};
+use crate::ids::{BalloonRequest, CacheId, HoldId, LoanId, OpId, SandboxId, ShrinkRequest};
 use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
@@ -12,14 +12,20 @@ use crate::time::At;
 
 mod admission;
 mod disk;
+pub(crate) mod outgrowth;
+mod restart;
 mod spare;
 mod squeeze;
+mod view;
 
 use admission::FirstWake;
 pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
+pub use outgrowth::{MemoryLevels, ShrinkCause};
+pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
+pub use view::SandboxView;
 
 /// Something that happened, fed to [`Host::handle`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +64,9 @@ pub enum Input {
         sandbox: SandboxId,
         /// What it may take of host memory.
         size: Size,
+        /// How it will sleep: its first wake books its next save only if
+        /// the host may save it unasked ([`SleepPolicy::saves`]).
+        policy: SleepPolicy,
         /// Whether its first wake fetches it from object storage, as an
         /// adopted sandbox's does, and so books its fetch too.
         remote: bool,
@@ -96,6 +105,54 @@ pub enum Input {
         /// Names the work; any id no other work uses.
         key: SandboxId,
         /// What it may still write.
+        disk: DiskSpace,
+    },
+    /// Work named `key` that has written nothing yet, such as a create,
+    /// waits for `disk` of local disk that is free only once disk relief
+    /// is in (see [`CreateRoom::AwaitsReading`]): it is booked from now
+    /// on, so nothing else takes the room relief frees for it, and is
+    /// given back to the same key's own checks ([`Host::create_room`],
+    /// [`Host::disk_room_for`]). Reported again with nothing once the
+    /// work goes on, together with what it books then, or is refused:
+    /// since it wrote nothing, that ends the booking at once.
+    Wants {
+        /// Names the work, as its other bookings do.
+        key: SandboxId,
+        /// What it waits for.
+        disk: DiskSpace,
+    },
+    /// Something the host keeps on local disk only to go faster, such as
+    /// a template or a cached image, that nothing uses now: removing it
+    /// loses nothing, and frees at least `disk`. It counts as disk relief
+    /// ([`Host::reclaimable_disk`]), and the core may ask for its removal
+    /// with [`Action::RemoveCache`], least recently used first among it
+    /// and idle sandboxes' local copies. Reported again when it changes;
+    /// with nothing, it is forgotten, as when it went or is in use again.
+    Cache {
+        /// Names it.
+        cache: CacheId,
+        /// What removing it frees at least.
+        disk: DiskSpace,
+        /// When it was last used.
+        last_used: At,
+    },
+    /// [`Action::RemoveCache`] removed `cache`: what it held counts as
+    /// freed until the next [`Input::Disk`] reading, which shows it. One
+    /// that could not be removed, as when it was in use after all, is
+    /// reported with [`Input::Cache`] and nothing instead.
+    CacheRemoved {
+        /// The cache.
+        cache: CacheId,
+    },
+    /// What giving up the sandbox's local copy frees at least, measured
+    /// while it sleeps with no VM: counted as disk relief while its copy
+    /// is archived in object storage and it is idle (see
+    /// [`Host::reclaimable_disk`]). Forgotten when it wakes or its copy
+    /// goes, until measured again.
+    LocalCopy {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// What its local copy holds alone.
         disk: DiskSpace,
     },
     /// The sandbox is needed: wake it if it sleeps, and count it as activity.
@@ -268,8 +325,8 @@ pub enum Input {
         millis: u64,
     },
     /// Bytes the sandbox's disk may still grow by, measured: what its
-    /// awake VM books for its disk from now on instead of its size's
-    /// `disk`. Send it before the [`Input::Disk`] reading taken after it,
+    /// awake VM or next local wake books for its disk instead of its
+    /// size's `disk`. Send it before the [`Input::Disk`] reading taken after it,
     /// in the same batch, since that reading shows what the disk grew by.
     DiskGrowth {
         /// The sandbox.
@@ -307,6 +364,56 @@ pub enum Input {
         /// Resident bytes.
         bytes: u64,
     },
+    /// How one running sandbox's VM uses memory beyond what
+    /// [`Input::Resident`] says, read with it; see [`crate::Outgrowth`].
+    /// Ignored for a sandbox not running.
+    MemoryUse {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Bytes its compressed pages take in host memory, which its
+        /// resident size includes (`memory.zswap.current`).
+        compressed: u64,
+        /// Bytes of its memory out of RAM, at their original size,
+        /// compressed or on swap (`memory.swap.current`).
+        swapped: u64,
+        /// Thousandths of the last ten seconds all its threads were
+        /// stalled on memory (`full avg10` of its `memory.pressure`).
+        stall: u16,
+        /// Its `memory.high` as the kernel holds it: where the host's last
+        /// [`Action::Bound`] left it, which is above that bound when the
+        /// kernel could not bring the VM down to it; `None` for none or
+        /// unknown.
+        high: Option<u64>,
+        /// Whether the engine is still bringing the VM down toward that
+        /// bound: the kernel is at work on it and has not shown that it
+        /// can take no more. Before it compresses a VM that has just
+        /// written gigabytes, the kernel may age its pages for many
+        /// seconds of a busy host's time.
+        bringing_down: bool,
+    },
+    /// The guest of the sandbox answered the [`Action::Shrink`] of
+    /// `request`: it freed `freed` bytes, and `spent` says whether it has
+    /// nothing more it may end.
+    Shrunk {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// The request.
+        request: ShrinkRequest,
+        /// Bytes its guest freed.
+        freed: u64,
+        /// Whether it has nothing left it may end above what it keeps.
+        spent: bool,
+    },
+    /// The guest of the sandbox could not be asked, did not answer, or
+    /// cannot be shrunk (a guest of a release before shrinking), for the
+    /// [`Action::Shrink`] of `request`: if it is chosen again while the
+    /// host is short, its VM is ended instead.
+    ShrinkFailed {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// The request.
+        request: ShrinkRequest,
+    },
     /// Put the sandbox at least as deep as `level` now, whatever its sleep
     /// rules say, for example to drain the host or to benchmark a level.
     /// It waits while something holds the sandbox awake; a later
@@ -318,6 +425,19 @@ pub enum Input {
         sandbox: SandboxId,
         /// The least depth to reach.
         level: Level,
+    },
+    /// Boot the sandbox afresh from its disk where it is: any step under
+    /// way that would keep or bring back its running programs is
+    /// cancelled, its VM, if it has one, ends without being saved
+    /// ([`Action::EndForRestart`]), and its saved memory image, here and in
+    /// object storage, is forgotten ([`Step::Forget`]) before anything
+    /// wakes it, so its next wake boots from its files. Its files, and the
+    /// copy of them in object storage, stay as they are. A wake asked
+    /// meanwhile waits for that, then boots it. Done once
+    /// [`Host::restarting`] is false. Ignored for a broken sandbox.
+    Restart {
+        /// The sandbox.
+        sandbox: SandboxId,
     },
     /// Time passed. Call at [`Host::next_deadline`].
     Tick,
@@ -412,6 +532,14 @@ pub enum Action {
         /// Names the VM.
         sandbox: SandboxId,
     },
+    /// Remove `cache` (see [`Input::Cache`]) to free local disk; report
+    /// it with [`Input::CacheRemoved`] once removed, or with
+    /// [`Input::Cache`] and nothing if it is in use and stays. Comes once
+    /// per report of it.
+    RemoveCache {
+        /// The cache.
+        cache: CacheId,
+    },
     /// Report a change to the control plane.
     Notify {
         /// The sandbox.
@@ -432,6 +560,58 @@ pub enum Action {
         bytes: u64,
         /// Which request this is.
         request: BalloonRequest,
+    },
+    /// Ask the guest of the sandbox's running VM to free `free` bytes of
+    /// its memory for the host, dropping its page cache and then ending its
+    /// largest processes, never below `keep` bytes in use (its request).
+    /// Answer with [`Input::Shrunk`] or [`Input::ShrinkFailed`], naming
+    /// `request`. Comes for one sandbox at a time (ADR 24).
+    Shrink {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Bytes to free.
+        free: u64,
+        /// Bytes its guest keeps in use whatever it frees.
+        keep: u64,
+        /// Which request this is.
+        request: ShrinkRequest,
+        /// Why the host asks it.
+        cause: ShrinkCause,
+    },
+    /// End the sandbox's running VM: its guest could not be shrunk, and
+    /// the host is still short with every running sandbox held to its
+    /// request, or the kernel still cannot hold it to its bound. Report it
+    /// with [`Input::Lost`] once it has ended; it is then restored from its
+    /// last copy as any lost VM is.
+    EndForMemory {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Why the host ends it.
+        cause: ShrinkCause,
+    },
+    /// End the sandbox's running VM without saving it, for an
+    /// [`Input::Restart`]. Report it with [`Input::Lost`] once it has
+    /// ended. Comes again after each [`Input::Restart`] while it runs.
+    EndForRestart {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
+    /// Set the sandbox's running VM's `memory.low` to `low` and its
+    /// `memory.high` to `high` (`None` for none). A VM starts, resumes and
+    /// is adopted with its request as `memory.low` and no `memory.high`;
+    /// this comes only when that or the last setting changes, or when the
+    /// kernel holds the VM above it and the VM has since come down
+    /// (ADR 24). The engine never sets a high below what the VM holds: it
+    /// brings the VM down toward `high` as far as the kernel can compress
+    /// it, and leaves the high there (see [`Input::MemoryUse`]).
+    Bound {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Bytes the kernel keeps it from losing to others.
+        low: u64,
+        /// Bytes past which it waits on its own allocations while the
+        /// kernel compresses its coldest pages.
+        high: Option<u64>,
     },
 }
 
@@ -476,46 +656,6 @@ pub enum Notice {
     /// with [`Input::PausedForMemory`], so the sandbox still wakes by
     /// itself.
     PausedForMemory(Option<u64>),
-}
-
-/// A read-only snapshot of one sandbox's state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SandboxView {
-    /// Where its state is.
-    pub state: State,
-    /// The step in flight, if any.
-    pub step: Option<Step>,
-    /// Whether something currently needs it awake.
-    pub wants_awake: bool,
-    /// Number of active holds.
-    pub holds: usize,
-    /// Its last activity.
-    pub last_activity: At,
-    /// The depth memory pressure demands; [`Level::Running`] means none.
-    pub floor: Level,
-    /// The depth asked for by [`Input::Sleep`]; [`Level::Running`] means
-    /// none.
-    pub requested: Level,
-    /// Whether no copy of its VM process can be trusted; see
-    /// [`Failure::Unsavable`].
-    pub unsavable: bool,
-    /// Whether it is beyond recovery on this host.
-    pub broken: bool,
-    /// Bytes of host memory its VM held when the host paused it, or began
-    /// pausing and saving it, for memory while it was in use above its
-    /// request; it wakes again by itself once there is room.
-    pub paused_for_memory: Option<u64>,
-    /// Bytes its VM's balloon takes back from its guest for the host.
-    pub balloon: u64,
-}
-
-impl SandboxView {
-    /// Whether its VM runs with nothing stopping it: no step in flight, or
-    /// a checkpoint, which pauses it only while its state is captured.
-    #[must_use]
-    pub fn runs(&self) -> bool {
-        self.state.level == Level::Running && self.step.is_none_or(|step| step == Step::Checkpoint)
-    }
 }
 
 /// The decision core for one host.
@@ -573,6 +713,13 @@ pub struct Host {
     /// Bookings that steps finished since that reading gave up: what they
     /// wrote shows only in the next one.
     disk_spent: DiskSpace,
+    /// What disk relief freed since that reading: local copies given up
+    /// and caches removed, which only the next one shows.
+    disk_freed: DiskSpace,
+    /// Things kept on local disk only to go faster; see [`Input::Cache`].
+    caches: HashMap<CacheId, disk::Cache>,
+    /// Local disk that work waits for; see [`Input::Wants`].
+    wants: HashMap<SandboxId, DiskSpace>,
     /// Whether it decides nothing of its own; see [`Host::suspend`].
     suspended: bool,
     /// Local disk that work outside any step may still write; see
@@ -586,6 +733,8 @@ pub struct Host {
     /// First wakes booked for sandboxes being created or adopted and not
     /// added yet; see [`Input::Creating`].
     creating: HashMap<SandboxId, FirstWake>,
+    /// Bounding sandboxes in use that outgrow the host (ADR 24).
+    outgrown: outgrowth::Outgrown,
 }
 
 impl Host {
@@ -616,10 +765,14 @@ impl Host {
             disk: None,
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
+            disk_freed: DiskSpace::default(),
+            caches: HashMap::new(),
+            wants: HashMap::new(),
             suspended: false,
             writes: HashMap::new(),
             removed_disk: HashMap::new(),
             creating: HashMap::new(),
+            outgrown: outgrowth::Outgrown::default(),
         })
     }
 
@@ -689,6 +842,9 @@ impl Host {
             self.reconcile_dirty(now, out);
         }
         self.discard_spares(out);
+        self.remove_caches(out);
+        self.bound_memory(now, out);
+        self.bound_outgrowth(now, out);
     }
 
     /// When to call [`Host::handle`] with [`Input::Tick`] next.
@@ -700,28 +856,8 @@ impl Host {
             .map(|(at, _)| *at)
             .into_iter()
             .chain(lapses)
+            .chain(self.outgrowth_deadline())
             .min()
-    }
-
-    /// The state of one sandbox.
-    #[must_use]
-    pub fn sandbox(&self, id: SandboxId) -> Option<SandboxView> {
-        self.sandboxes.get(&id).map(|sandbox| SandboxView {
-            state: sandbox.state,
-            step: sandbox.in_flight.map(|flight| flight.step),
-            wants_awake: sandbox.wants_awake(),
-            holds: sandbox.holds.len(),
-            last_activity: sandbox.last_activity,
-            floor: sandbox.floor,
-            requested: sandbox.requested,
-            unsavable: sandbox.health == Health::Unsavable,
-            broken: sandbox.is_broken(),
-            paused_for_memory: match sandbox.squeeze {
-                Squeeze::None | Squeeze::Returning { .. } => None,
-                Squeeze::Leaving { bytes, .. } | Squeeze::Waiting { bytes } => Some(bytes),
-            },
-            balloon: sandbox.balloon_sent.unwrap_or(0),
-        })
     }
 
     /// Whether sandbox `id` holds its request of the host's memory and
@@ -771,17 +907,10 @@ impl Host {
             Input::Creating {
                 sandbox,
                 size,
+                policy,
                 remote,
                 until,
-            } => self.creating(
-                now,
-                sandbox,
-                FirstWake {
-                    size,
-                    remote,
-                    until,
-                },
-            ),
+            } => self.creating(now, sandbox, FirstWake::new(size, policy, remote, until)),
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Spare {
                 sandbox,
@@ -796,6 +925,10 @@ impl Host {
                 cpu,
             } => self.unmanaged(sandbox, bytes, cpu),
             Input::Writes { key, disk } => self.writes(key, disk),
+            input @ (Input::Wants { .. }
+            | Input::Cache { .. }
+            | Input::CacheRemoved { .. }
+            | Input::LocalCopy { .. }) => self.relief_input(input),
             Input::Touch { sandbox, priority } => self.touch(now, sandbox, priority, out),
             Input::Hold {
                 sandbox,
@@ -829,7 +962,7 @@ impl Host {
                     self.unsavable(sandbox, out);
                 }
             }
-            Input::Memory { available } => self.memory_read(available),
+            Input::Memory { available } => self.memory_read(now, available),
             Input::Disk { available } => self.disk_read(available),
             Input::CpuBudget { millis } => self.set_cpu_budget(millis),
             Input::DiskGrowth { sandbox, bytes } => self.disk_growth(sandbox, bytes),
@@ -844,12 +977,18 @@ impl Host {
                     slot.resident = Some(bytes);
                 }
             }
+            input @ (Input::MemoryUse { .. }
+            | Input::Shrunk { .. }
+            | Input::ShrinkFailed { .. }) => {
+                self.outgrowth_input(now, input);
+            }
             Input::Sleep { sandbox, level } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     slot.request_sleep(level);
                     self.mark(sandbox);
                 }
             }
+            Input::Restart { sandbox } => self.restart(sandbox),
             Input::Tick => {}
         }
     }
@@ -972,13 +1111,17 @@ impl Host {
             let (state, lost) = slot.state.without_process();
             slot.state = state;
             slot.renew();
-            if lost {
+            // A restart ends its programs on purpose.
+            if lost && slot.restart.is_none() {
                 out.push(Action::Notify {
                     sandbox,
                     notice: Notice::MemoryLost,
                 });
             }
             out.push(state_notice(sandbox, slot));
+        }
+        if let Some(restart) = &mut slot.restart {
+            restart.ending = false;
         }
         self.mark(sandbox);
     }
@@ -1001,15 +1144,6 @@ impl Host {
             }
         }
         if slot.cannot_save() {
-            if let Squeeze::Leaving { claim, .. } = slot.squeeze {
-                // It stays awake, and its guest may still take back what
-                // its balloon held.
-                slot.squeeze = if claim > 0 {
-                    Squeeze::Returning { bytes: claim }
-                } else {
-                    Squeeze::None
-                };
-            }
             if slot.floor >= Level::Saved {
                 self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
                 slot.floor = Level::Running;
@@ -1061,7 +1195,9 @@ impl Host {
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
             (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
-            (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
+            (Step::Fetch, Outcome::Failed(_)) => {
+                DiskSpace::save(slot.size.fetch.saturating_add(slot.size.disk))
+            }
             _ => DiskSpace::default(),
         };
         self.disk_spent = self.disk_spent.add(written);
@@ -1075,9 +1211,9 @@ impl Host {
                 .local_disk
                 .booked
                 .saturating_sub(slot.checkpoint_need());
-        } else if flight.step == Step::Pause {
-            // Its guest trimmed its disk: until a reading measures the disk
-            // again, it may grow by its whole bound, also once it wakes.
+        } else if matches!(flight.step, Step::Pause | Step::Fetch) {
+            // A pause trimmed the disk; a fetch replaced it. Until measured
+            // again, either may grow by its whole bound, also once it wakes.
             slot.local_disk.growth = slot.size.disk;
         }
         let before = slot.state;
@@ -1108,12 +1244,32 @@ impl Host {
         if !slot.state.level.has_process() {
             slot.renew();
         }
+        // What its local copy held is freed once the copy is gone, which
+        // only the next reading shows, and is unknown once it wakes, until
+        // measured again.
+        if !matches!(slot.state.level, Level::Saved | Level::Archived) {
+            let copy = core::mem::take(&mut slot.local_disk.copy);
+            if slot.state.level == Level::Remote && before.level != Level::Remote {
+                self.disk_freed = self.disk_freed.add(copy);
+            }
+        }
+        // A restart whose memory image cannot be forgotten, as while the
+        // store is out of reach, ends: the sandbox wakes from its last
+        // save rather than not at all.
+        if flight.step == Step::Forget
+            && matches!(outcome, Outcome::Failed(_))
+            && slot.state.memory_saved
+        {
+            slot.restart = None;
+        }
         if lost {
             slot.retry = None;
-            out.push(Action::Notify {
-                sandbox: id,
-                notice: Notice::MemoryLost,
-            });
+            if slot.restart.is_none() {
+                out.push(Action::Notify {
+                    sandbox: id,
+                    notice: Notice::MemoryLost,
+                });
+            }
         }
         if slot.floor != Level::Running && slot.state.level >= slot.floor {
             self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
@@ -1224,7 +1380,8 @@ impl Host {
         };
         slot.dirty = false;
         slot.expire_holds(now);
-        self.settle_squeeze(id, now, out);
+        self.settle_squeeze(id, out);
+        self.settle_restart(id, out);
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
@@ -1244,7 +1401,7 @@ impl Host {
                 since: now,
             });
         }
-        if slot.wants_awake() && !slot.leaving() {
+        if slot.wants_awake() {
             if slot.floor != Level::Running {
                 self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
                 slot.floor = Level::Running;
@@ -1255,6 +1412,8 @@ impl Host {
             if let Some(flight) = &mut slot.in_flight
                 && !flight.step.wakes()
                 && flight.step != Step::Checkpoint
+                // A restart forgets its memory image before it wakes.
+                && !(slot.restart.is_some() && flight.step == Step::Forget)
                 && !flight.cancel_sent
             {
                 flight.cancel_sent = true;
@@ -1383,6 +1542,11 @@ impl Host {
             slot.balloon_sent = None;
             slot.balloon_taken = None;
         }
+        // Every pause and resume sets the VM's memory bounds back to its
+        // request and no high, a checkpoint's too, however quickly they
+        // come and go: they are asked again once it runs with no step on
+        // it (ADR 24).
+        slot.bound = None;
         if admission::needs_memory(step) {
             slot.room = WakeRoom::Admitted;
             // A wake from object storage writes its local copy from now

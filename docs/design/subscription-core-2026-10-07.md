@@ -4455,7 +4455,7 @@ code):
 | `CodexSubscriptionCoreTurn` | `SubscriptionCoreTurn` (alias kept); `subscriptionCoreTurnOf(providerTurn)` for checkpoints and `model_call_facts.connection_id` attribution |
 | `codexCredentialLeaseHolderId` | `subscriptionTurnLeaseHolderId(provider, displayName, input, turnId)` |
 | failure copy builders in `codex-core-errors.ts` | the same builders with an optional display name (default `Codex`, so texts are unchanged) |
-| `subscriptionCoreAcceptedCodexTurnIsFunded` behind `isCodexBilledTurn` | `readSubscriptionCoreRouteFunding` (`subscription-core/route-readiness.ts`) and `coreRoutedSubscriptionFunding` in the `@opengeni/core` limits; `isCodexBilledTurn` is unchanged |
+| `subscriptionCoreAcceptedCodexTurnIsFunded` behind `isCodexBilledTurn` | `readSubscriptionCoreFunding` (`subscription-core/funding-readiness.ts`) and `coreRoutedSubscriptionFunding` in the `@opengeni/core` limits; `isCodexBilledTurn` is unchanged |
 | the Codex turn bearer resolver | `buildSubscriptionCoreTurnTokenResolver` (`subscription-core/turn-token-resolver.ts`); Codex keeps its own binding |
 
 The package index now exports, for the worker and `@opengeni/core`,
@@ -4464,7 +4464,7 @@ The package index now exports, for the worker and `@opengeni/core`,
 `buildSubscriptionCoreTurnTokenResolver`, the route helpers
 (`readSubscriptionCoreProviderRoute`,
 `readSubscriptionCoreProviderRouteForWorkspace`) and route answers
-(`readSubscriptionCoreRouteFunding`, `readSubscriptionCoreRouteReadiness`),
+(`readSubscriptionCoreFunding`, `readSubscriptionCoreReadiness`),
 and the SuperGrok adapter and resolver. This supersedes §5.1.3's "the
 package index exports none of the provider-parameterized entry points".
 
@@ -6811,11 +6811,15 @@ Fail-closed choices (contract ambiguous; strictest option taken):
   source routes.
 - Rotation can be set only for providers registered on the shared core; any
   other provider is refused (422) because a value would have no effect.
-- The settings API writes no overrides for Personal workspaces (409
-  `personal_workspace`, `canEdit: false`); they follow the organization. A
+- In a Personal workspace, the settings API writes overrides only for its
+  verified owner acting as themselves (migration 1233,
+  docs/organization-tenancy.md), who may change what the organization has not
+  locked as a shared workspace's admins can; anyone else, including a delegated
+  token without `workspace:admin` in its verified ceiling, sees
+  `canEdit: false`, and Personal workspaces without an owner
+  row (local and external-user ones) keep the 409 `personal_workspace`. A
   person's own primary may still set a rotation entry there (the existing
-  personal-account route), and the workspace view then reports that entry's
-  source as `workspace` with `canEdit: false`. A rotation lock binds Personal
+  personal-account route). A rotation lock binds Personal
   workspaces like any other: locking clears that entry, and choosing a
   personal primary is refused with 409 `setting_locked` while the lock holds.
   The overview lists shared workspaces only.

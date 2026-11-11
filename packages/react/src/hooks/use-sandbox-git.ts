@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   GitFileDiff,
   SessionCapabilities,
@@ -9,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
-export type UseSandboxGitOptions = ClientOverride & {
+export type UseSandboxGitOptions = ClientOverride<ChatClient> & {
   /** Live event log (usually `useSessionEvents().events`) — drives auto-refresh
    *  on `git.changed`. */
   events?: SessionEvent[] | undefined;

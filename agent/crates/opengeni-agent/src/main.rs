@@ -54,12 +54,17 @@ mod handover;
 mod instance_lock;
 mod inventory;
 mod job;
+#[cfg(target_os = "linux")]
+mod keeper;
 mod log_file;
 mod metrics;
 mod ops;
 mod overrides;
 mod rpc_replay;
 mod service;
+mod shell_tools;
+#[cfg(target_os = "linux")]
+mod stop_signal;
 mod stream_digest;
 mod supervisor;
 mod uninstall;
@@ -114,10 +119,25 @@ fn main() -> std::process::ExitCode {
     #[cfg(unix)]
     let inherited = handover::inherit_from_env();
     let cli = Cli::parse();
+    // A foreground Linux agent that nothing would start again becomes a small
+    // keeper that runs the real agent as its child and starts it again when
+    // the kernel kills it (see `keeper`). Decided before any thread exists.
+    // An image continuing handed-over commands keeps serving them itself.
+    #[cfg(target_os = "linux")]
+    if !keeper::kept_by_parent()
+        && matches!(inherited, Ok(false))
+        && keeper::wanted(&cli, hosted_by_desktop_app())
+    {
+        if let Some(code) = update::installed_executable().ok().and_then(keeper::keep) {
+            return code;
+        }
+    }
     // Only the long-running agent persists its log; one-shot CLI commands
     // print to the terminal and must not interleave with the service's file.
     let persistent = matches!(cli.command, None | Some(Command::Run(_)));
     init_tracing(persistent);
+    #[cfg(target_os = "linux")]
+    keeper::report_restart();
     #[cfg(unix)]
     if let Err(error) = caught {
         error!(%error, "could not catch SIGUSR1 while this image starts: it stays blocked, in the commands this agent runs too");
@@ -305,8 +325,8 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         Command::Connect(args) | Command::Enroll(args) => {
             enroll_command(args, &api_url).await.map(|_| ())
         }
-        Command::Connections => list_connections(&api_url),
-        Command::Disconnect(args) => disconnect(&args, &api_url),
+        Command::Connections => list_connections(),
+        Command::Disconnect(args) => disconnect(&args),
         Command::Start(args) => service::ensure_running(&args).map_err(string_err),
         Command::Stop(args) => service::stop(&args).map_err(string_err),
         Command::Status(args) => service::show_status(&args).map_err(string_err),
@@ -347,10 +367,7 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 ///     promptly, rather than dropping into an invisible device-flow enroll that
 ///     needs a workspace id + a visible TTY and would otherwise appear to hang.
 async fn run_default(api_url: &str) -> anyhow_lite::Result {
-    if config::load_connections(api_url)
-        .map_err(to_boxed)?
-        .is_empty()
-    {
+    if config::load_connections().map_err(to_boxed)?.is_empty() {
         // Not enrolled (or creds unreadable): show how to get started and exit
         // cleanly. Help goes to stderr so a `opengeni-agent | …` pipe is unchanged.
         eprintln!("{}", Cli::command().render_help());
@@ -370,24 +387,18 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 }
 
 /// Prints the non-secret local connection inventory.
-fn list_connections(api_url: &str) -> anyhow_lite::Result {
-    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+fn list_connections() -> anyhow_lite::Result {
+    let connections = config::load_connections().map_err(to_boxed)?;
     if connections.is_empty() {
         println!("No Opengeni connections configured. Run `opengeni-agent connect`.");
         return Ok(());
     }
     println!("Configured Opengeni connections ({}):", connections.len());
     for connection in connections {
-        let origin_note = if connection.legacy_origin {
-            " (legacy origin unverified; reconnect once to confirm)"
-        } else {
-            ""
-        };
         println!(
-            "  {}  {}{}  workspace={}  agent={}",
+            "  {}  {}  workspace={}  agent={}",
             connection.connection_id,
             connection.api_url,
-            origin_note,
             connection.credentials.workspace_id,
             connection.credentials.agent_id
         );
@@ -398,7 +409,7 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
             Some(config::AuthenticationState::ReconnectRequired) => println!(
                 "    Reconnect required; automatic retries stopped. Run `{}` or disconnect this saved connection.",
                 supervisor::rejected_bearer_reconnect_command(
-                    if connection.legacy_origin { None } else { Some(&connection.api_url) },
+                    Some(&connection.api_url),
                     &connection.credentials.workspace_id,
                 )
             ),
@@ -410,8 +421,8 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
 
 /// Removes one local connection. The running process watches the connection
 /// directory and cleanly takes only this link offline; all others keep serving.
-fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
-    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+fn disconnect(args: &DisconnectArgs) -> anyhow_lite::Result {
+    let connections = config::load_connections().map_err(to_boxed)?;
     let matches: Vec<_> = connections
         .iter()
         .filter(|connection| connection.connection_id.starts_with(&args.connection))
@@ -424,7 +435,7 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
         [connection] => {
             let id = connection.connection_id.clone();
             let api_url = connection.api_url.clone();
-            config::remove_connection(&id, api_url.as_str()).map_err(to_boxed)?;
+            config::remove_connection(&id).map_err(to_boxed)?;
             println!("Disconnected {id} from {api_url}.");
             println!(
                 "The local link stops automatically; remove the offline machine in that workspace if you also want to revoke its enrollment."
@@ -448,15 +459,14 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Capture before any managed update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
     // A verified self-update may have exec'd this new binary from the exact old
-    // generated systemd unit. Refresh that narrowly-proven definition before
-    // admission, then let the manager restart us directly in `supervisor`.
-    match service::refresh_managed_service_definition() {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(error) => warn!(
+    // generated systemd unit. Refresh that narrowly-proven definition (its
+    // restart policy; systemd applies it on reload without restarting us)
+    // before admission.
+    if let Err(error) = service::inspect_managed_service_definition() {
+        warn!(
             %error,
-            "could not refresh the managed service definition; continuing without assuming operation-cgroup capability"
-        ),
+            "could not inspect the managed service definition; continuing without assuming operation-cgroup capability"
+        );
     }
 
     // A service manager may start us at the filesystem root (launchd does for a
@@ -528,7 +538,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     }
 
     // Connect if we have no persisted connection yet ("connect-if-needed").
-    let existing_connections = config::load_connections(api_url).map_err(to_boxed)?;
+    let existing_connections = config::load_connections().map_err(to_boxed)?;
     let connections = if existing_connections.is_empty() {
         info!("no connection found; starting device-flow connection");
         let enroll_args = EnrollArgs {
@@ -586,6 +596,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         )));
     }
     let config_dir = config::config_dir().ok();
+    install_shell_tools(config_dir.as_deref(), instance_lock_guard.is_some());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) = attach_browser_controller(
         platform,
@@ -670,7 +681,6 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Enrollment commands intentionally do not contend on the process-wide run
     // lock. Reconcile their independent credential files live so adding/removing
     // a workspace never requires restarting this agent or interrupts other links.
-    let watcher_api_url = api_url.to_string();
     let watcher_platform = platform.clone();
     let watcher_connection_instance_id = connection_instance_id.clone();
     let watcher = tokio::spawn(async move {
@@ -680,7 +690,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
                 () = updates_tx.closed() => return,
                 () = tokio::time::sleep(CONNECTION_RELOAD_INTERVAL) => {}
             }
-            match config::load_connections(&watcher_api_url) {
+            match config::load_connections() {
                 Ok(next) if next != current => {
                     let next_links =
                         supervisor_links(&next, &watcher_platform, &watcher_connection_instance_id);
@@ -699,7 +709,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     });
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
-    let renewal = tokio::spawn(credential_renewal::run(api_url.to_string()));
+    let renewal = tokio::spawn(credential_renewal::run());
     let supervisor_result = supervisor.run_with_updates(updates_rx).await;
     renewal.abort();
     watcher.abort();
@@ -751,6 +761,34 @@ fn operation_cgroups(
     Ok(cgroups)
 }
 
+/// Puts this release's ripgrep and jq at the end of every command's `PATH`.
+/// A failure only costs the fallback tools, so it never stops the agent. The
+/// agent holding the instance lock (`prune`) then removes generations no
+/// agent has used for a while, off the startup path, and every agent renews
+/// its own generation's in-use marker while it runs.
+fn install_shell_tools(config_dir: Option<&Path>, prune: bool) {
+    match shell_tools::install(config_dir) {
+        Ok(Some(directory)) => info!(directory = %directory.display(), "shell tools ready"),
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, "shell tools unavailable; commands use the machine's own");
+            return;
+        }
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(shell_tools::IN_USE_RENEWAL_INTERVAL);
+        shell_tools::mark_current_generation_in_use();
+    });
+    if prune {
+        std::thread::spawn(|| {
+            let removed = shell_tools::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier shell tools generations");
+            }
+        });
+    }
+}
+
 /// `run --compute`: the agent in an Opengeni compute sandbox, started by the
 /// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
 /// one link, dialed through the sandbox's host with no credential, and keeps
@@ -800,6 +838,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    install_shell_tools(config_dir.as_deref(), instance_lock_guard.is_some());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone(), true);
@@ -1085,6 +1124,12 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
             entry.extend(value.as_bytes());
             envp.push(c_string(entry)?);
         }
+        // The successor replaces this process, so it is still the child of
+        // this agent's keeper, which `main` removed from the environment.
+        #[cfg(target_os = "linux")]
+        if let Some((name, value)) = keeper::successor_env() {
+            envp.push(c_string(format!("{name}={value}").into_bytes())?);
+        }
         if let Some(handover) = handover {
             // Last step before exec: nothing else spawns from here, so only
             // the successor image inherits the carried descriptors.
@@ -1306,26 +1351,24 @@ fn supervisor_links(
         .iter()
         .map(|connection| {
             let credentials = connection.credentials.clone();
+            let relay_credential = RelayCredential::fixed(
+                credentials.relay_url.clone(),
+                credentials.relay_token.clone(),
+            );
             let hub = RelayHub::new(RelayHubConfig {
                 workspace_id: credentials.workspace_id.clone(),
                 agent_id: credentials.agent_id.clone(),
-                credential: RelayCredential::fixed(
-                    credentials.relay_url.clone(),
-                    credentials.relay_token.clone(),
-                ),
+                credential: relay_credential.clone(),
                 allow_screen_control: credentials.consented_screen_control
                     && !screen_control_turned_off(),
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
-            let link =
+            let mut link =
                 SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
                     .with_authentication_state(connection.authentication_state)
                     .with_connection_instance_id(connection_instance_id);
-            if connection.legacy_origin {
-                link
-            } else {
-                link.with_api_url(connection.api_url.clone())
-            }
+            link.relay_credential = Some(relay_credential);
+            link.with_api_url(connection.api_url.clone())
         })
         .collect()
 }
@@ -1641,7 +1684,16 @@ fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
 
 /// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix;
 /// on Windows also a closing console and `opengeni-agent stop`'s pipe request).
+/// On Linux a stop signal one of the agent's own commands sent (`kill -1` in a
+/// command) does not count (see `stop_signal`).
 async fn wait_for_shutdown_signal() {
+    #[cfg(target_os = "linux")]
+    match stop_signal::wait().await {
+        Ok(()) => return,
+        Err(e) => {
+            warn!(error = %e, "could not tell a command's stop signal from others; any stop signal stops the agent");
+        }
+    }
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -1829,5 +1881,238 @@ mod log_persistence_tests {
             !stdout.contains("persistent log child started"),
             "a service that captures stderr itself must not store each line twice"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod stop_signal_tests {
+    use std::io::{BufRead as _, BufReader, Lines};
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::time::Duration;
+
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    /// The command the re-executed agent runs.
+    const SCRIPT: &str = "OPENGENI_TEST_STOP_SIGNAL_SCRIPT";
+    /// Set when the re-executed agent should exit once it survived.
+    const EXIT_AFTER: &str = "OPENGENI_TEST_STOP_SIGNAL_EXIT";
+    const CHILD_TEST: &str = "stop_signal_tests::agent_running_one_command";
+
+    /// Only re-executed by the tests below. Waits for a stop signal as the
+    /// agent does, runs `$OPENGENI_TEST_STOP_SIGNAL_SCRIPT` as one of its
+    /// contained commands (with `$AGENT` naming this process), and prints the
+    /// verdict `survived` when the command ended without stopping it, then
+    /// `stopped` when a stop signal from elsewhere arrives.
+    #[test]
+    #[ignore = "re-executed by the stop signal tests"]
+    fn agent_running_one_command() {
+        let Some(script) = std::env::var_os(SCRIPT) else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let mut stop = tokio::spawn(super::wait_for_shutdown_signal());
+            // Wait until it handles both stop signals, as the agent does once
+            // it started.
+            wait_until_handled(&[Signal::SIGTERM, Signal::SIGINT]).await;
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(script)
+                .env("AGENT", std::process::id().to_string());
+            let mut exec =
+                opengeni_agent_platform::spawn_contained(command, None).expect("start the command");
+            drop(exec.stdin.take());
+            tokio::time::timeout(Duration::from_secs(20), exec.wait())
+                .await
+                .expect("the command ends")
+                .expect("the command's status");
+            if tokio::time::timeout(Duration::from_millis(700), &mut stop)
+                .await
+                .is_ok()
+            {
+                println!("\nverdict: stopped by its own command");
+                std::process::exit(3);
+            }
+            println!("\nverdict: survived");
+            if std::env::var_os(EXIT_AFTER).is_some() {
+                std::process::exit(0);
+            }
+            stop.await.expect("the stop wait");
+            println!("\nverdict: stopped");
+        });
+    }
+
+    /// Waits until this process handles every one of `signals`.
+    async fn wait_until_handled(signals: &[Signal]) {
+        let wanted = signals
+            .iter()
+            .fold(0_u64, |mask, signal| mask | 1 << (*signal as i32 - 1));
+        for _ in 0..400 {
+            let caught = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("SigCgt:"))
+                        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+                })
+                .unwrap_or(0);
+            if caught & wanted == wanted {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the stop signal handlers were never installed");
+    }
+
+    /// Sends the agent `TERM` and `INT` in the ways a command does, many
+    /// times over, so a sender that exits before the agent can look it up is
+    /// covered: the shell's own `kill`, `/bin/kill` where it exists, a nested
+    /// shell, and a `kill` that ends the script.
+    const SIGNAL_THE_AGENT: &str = "i=0; while [ $i -lt 10 ]; do \
+         kill -TERM \"$AGENT\"; \
+         if [ -x /bin/kill ]; then /bin/kill -INT \"$AGENT\"; fi; \
+         sh -c 'kill -TERM \"$AGENT\"'; \
+         sh -c 'kill -INT \"$AGENT\"'; \
+         i=$((i + 1)); done; \
+         kill -TERM \"$AGENT\"";
+
+    /// `kill -1` as commands send it. The first keeps its own shell alive and
+    /// ends with a nested shell's `kill -1`, a sender often gone before the
+    /// agent can look it up. In the second, `/bin/kill -1` (where it exists)
+    /// also ends the command's shell, so the sender is often an orphaned
+    /// zombie by then.
+    const KILL_MINUS_ONE: [&str; 2] = [
+        "trap '' TERM INT; kill -TERM -1; kill -INT -1; sh -c 'kill -TERM -1; kill -INT -1'",
+        "if [ -x /bin/kill ]; then /bin/kill -TERM -- -1; else kill -TERM -1; fi; sleep 1",
+    ];
+
+    fn agent_command(script: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                CHILD_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SCRIPT, script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        command
+    }
+
+    fn next_line(lines: &mut Lines<BufReader<ChildStdout>>) -> String {
+        for line in lines.by_ref() {
+            // libtest may print the test's name on the same line.
+            if let Some(verdict) = line.expect("agent output").split("verdict: ").nth(1) {
+                return verdict.to_string();
+            }
+        }
+        "(no verdict: the agent ended)".to_string()
+    }
+
+    fn start(mut command: Command) -> (Child, Lines<BufReader<ChildStdout>>) {
+        let mut child = command.spawn().expect("start the agent");
+        let lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+        (child, lines)
+    }
+
+    /// A command that signals the agent itself, as `pkill -f opengeni` or a
+    /// group signal aimed at the wrong group does, no longer stops it; a stop
+    /// signal from anywhere else still does.
+    #[test]
+    fn a_stop_signal_from_the_agents_own_command_does_not_stop_it() {
+        let (mut agent, mut lines) = start(agent_command(SIGNAL_THE_AGENT));
+        let verdict = next_line(&mut lines);
+        if verdict != "survived" {
+            let _ = agent.kill();
+            let _ = agent.wait();
+        }
+        assert_eq!(verdict, "survived");
+        let pid = Pid::from_raw(i32::try_from(agent.id()).expect("pid"));
+        kill(pid, Signal::SIGTERM).expect("stop the agent from outside");
+        assert_eq!(next_line(&mut lines), "stopped");
+        let status = agent.wait().expect("agent status");
+        assert!(status.success(), "agent exit {status:?}");
+    }
+
+    /// The `unshare` arguments for a private PID namespace (with its own
+    /// `/proc`): as real root, or in a rootless user namespace. `None` where
+    /// neither is permitted.
+    fn private_pid_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOT: &[&str] = &["--pid", "--fork", "--mount-proc"];
+        const ROOTLESS: &[&str] = &[
+            "--user",
+            "--map-root-user",
+            "--pid",
+            "--fork",
+            "--mount-proc",
+        ];
+        let works = |args: &[&str]| {
+            Command::new("unshare")
+                .args(args)
+                .arg("true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
+            Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
+        } else {
+            None
+        }
+    }
+
+    /// Regression: `kill -1` in a command signals every process of the user,
+    /// the agent among them, and the agent went offline. Runs the real
+    /// `kill -1` in a private PID namespace, so it reaches nothing outside this
+    /// test. Skips where no such namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[test]
+    fn kill_minus_one_in_a_command_leaves_the_agent_running() {
+        let Some(namespace) = private_pid_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private PID namespace"
+            );
+            eprintln!("skipping: this machine permits no private PID namespace");
+            return;
+        };
+        for script in KILL_MINUS_ONE {
+            // The namespace's first process is immune to `kill -1`, so a shell
+            // takes that place and the agent runs as its child.
+            let inner = agent_command(script);
+            let mut command = Command::new("unshare");
+            command
+                .args(namespace)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg("\"$0\" \"$@\" & wait $!")
+                .arg(inner.get_program())
+                .args(inner.get_args())
+                .env(EXIT_AFTER, "1")
+                .env(SCRIPT, script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            let (mut agent, mut lines) = start(command);
+            let verdict = next_line(&mut lines);
+            let status = agent.wait().expect("namespace status");
+            assert_eq!(verdict, "survived", "{script}: namespace exit {status:?}");
+            assert!(status.success(), "{script}: namespace exit {status:?}");
+        }
     }
 }

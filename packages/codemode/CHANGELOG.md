@@ -1,5 +1,400 @@
 # @opengeni/codemode
 
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [7c926f8]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+  - @opengeni/tool-gateway@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/sdk@6.12.0
+  - @opengeni/tool-gateway@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- c69598a: The agent's own texts no longer name the product, so an agent that a host gives its own identity presents only that identity. The `privacy_facts` result says "this deployment" and "Request settings" instead of naming Opengeni, and the provider table describes requests in the passive voice ("Chat turns ask Azure not to store …"); every privacy, model and provider fact is unchanged. Three system-prompt clauses (secret references, GitHub app repositories, the GitHub app in integration setup) say "built-in workspace tools" and "the workspace's GitHub app". The `wait_for_input` and `goal_complete` descriptions say "the runtime", the GitHub, secret-profile, scheduled-trigger and Slack-suggestion descriptions drop the name, the Connected Machine descriptions and the setup-card description name the deployment's configured browser extension, and tool results such as workspace-machine faults, owned-box repairs, cross-workspace refusals and the secret-approval reply use the passive voice. The default identity, tool names, provenance markers such as `[Opengeni setup notice]`, and names of software a person installs are unchanged.
+- 2495d3e: A connector with too many tools, oversized tools or a clashing tool name no longer stops a turn. When the turn's tools go over the 4,096-tool or 16 MB limit, or one connector's list goes over its own limit, Opengeni keeps the tools that fit and leaves the rest out. Built-in tools, harness control tools and eager tools are kept first, and this now applies to required connectors too. When more than 64 connectors are selected for a turn, required ones are kept first and the rest are skipped for that turn. Repeated listings are removed before the size checks, so repeats no longer count against the limits. When two connectors produce the same model name, the first to list it keeps it and the other connector's tool is left out; calls to that tool are refused, never sent to the other connector. Built-in tools claim their names before any connector. Each case logs a structured `tool_catalog_degraded` warning, and tool search tells the model which tools are unavailable and why.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [06606ef]
+- Updated dependencies [888aaf5]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [2495d3e]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/sdk@6.11.0
+  - @opengeni/tool-gateway@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- 7fb4b0d: `ogtool` and the Codemode client now say why they cannot reach Opengeni instead of printing only "fetch failed". A broken DNS setup reads "Can't reach Opengeni: DNS lookup for <host> failed (ENOTFOUND). Check /etc/resolv.conf." (other systems are pointed at their DNS settings), and a wrong clock reads "Can't reach Opengeni: TLS certificate not yet valid. This machine's clock says <time>, so it is probably wrong." An expired certificate names both possibilities, the clock or the server. Refused, timed-out, unanswered and closed connections, unreachable networks and certificates that cannot be verified get their own sentence, including a connection lost while reading the answer. When a call was already submitted, the message adds that it may have run and how to check it with `ogtool read <operationId>`. The error is a new `CodemodeConnectionError` that keeps the original error as its `cause`; a failure with an unknown reason, or a caller's own abort, keeps its original error.
+- 3b162f4: A turn paused or cancelled while a platform setup command runs no longer stalls its finalization. The setup command's registered shell kept the turn's cancellation signal on the reads the writer drain uses to prove the command exited, so after the cancel every proof read was refused, and a command that had already exited on its own could never be proven settled; the drain now reads without that signal, as it does for ordinary shells. A worker contained by a stalled finalizer now stops cleanly once every other in-flight turn has settled or checkpointed, instead of running into the Temporal SDK force stop, whose native worker finalization fails with "Worker still in use" while the stalled activity keeps its poll open, and exiting non-zero. Each containment request is a hold the finalizer releases if its stage recovers, so a worker never stops under a live turn. `CodemodeClient` treats `agent_attempt_caller_stale` as permanent for that bearer: later requests with the same bearer, from any client in the process, fail locally with the same non-retryable refusal instead of reaching the API again, while a renewed bearer is tried normally (`isCodemodeCallerStaleError`).
+- f0d27b2: One connector's bad tool no longer stops a turn. When a connector lists the same tool more than once (as the ElevenLabs hosted MCP did while its tool list changed), Opengeni keeps one copy. Two different tools that would share a Codemode path now get distinct paths, and a tool that still cannot be added, or whose definition is invalid, is left out for that turn. Each case is logged as a structured warning. A call always runs the tool the model was shown: when two different tools claim one model name, the catalog keeps one, and a call meant for the other is refused rather than sent to the wrong tool. OpenAPI connectors whose operation names differ only by a number suffix keep a separate tool for each operation.
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [f619179]
+- Updated dependencies [15763a2]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [f0d27b2]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/sdk@6.10.0
+  - @opengeni/tool-gateway@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/contracts@6.9.0
+  - @opengeni/tool-gateway@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/sdk@6.8.0
+  - @opengeni/tool-gateway@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/sdk@6.7.0
+  - @opengeni/tool-gateway@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/sdk@6.6.0
+  - @opengeni/contracts@6.6.0
+  - @opengeni/tool-gateway@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/sdk@6.5.0
+  - @opengeni/tool-gateway@6.5.0
+
+## 6.4.0
+
+### Patch Changes
+
+- Updated dependencies [1f918a4]
+- Updated dependencies [92f419c]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [b4e780e]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [d55f740]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [0d409a7]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/sdk@6.4.0
+  - @opengeni/tool-gateway@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [c0b945b]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+  - @opengeni/contracts@6.3.0
+  - @opengeni/tool-gateway@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/sdk@6.2.0
+  - @opengeni/tool-gateway@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+
+## 6.0.2
+
+### Patch Changes
+
+- d4fd76d: A managed browser that was stopped (for example after going unused for 10 minutes) and relaunched now tells the agent so on the tabs it reopened. Chrome reopens those tabs at the same URLs and they keep their IDs, but each page loaded again, so text typed into it, a dialog it had open and anything else it held only in memory are gone. Before, nothing said this: an agent that came back to the tab saw an emptied page with no explanation.
+
+  The first observation of a reopened tab that the agent's own tools receive (browser_observe, the page after a browser_act, or a tab selected with browser_tabs) now carries a new optional `notice` field on `BrowserObservation`, shown to the model right after the tab line, for example: "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone." It is given once. Nothing is refused because of it: an element reference from before the reload already fails as stale, and anything else the agent does runs on the page as it now is, with the notice in the result. A caller receives notices only when it asks with the new `notices=1` query parameter (`BROWSER_OBSERVATION_NOTICES_PARAMETER`), which the API sends only for an agent's own requests, so a person watching the browser, an auth check or an API client neither sees the notice nor uses it up. Browser controllers that predate it ignore the parameter, and callers that do not send it never receive the field.
+
+  Every tab a relaunched browser reopened now answers. Chrome loads the pages of only the first few tabs it restores and leaves the rest without a renderer until they are used, which browserd reported as "This browser tab crashed", so with five or more tabs the later ones could not be used after a relaunch. browserd now starts such a tab's page the first time it is used, in the background and without switching to it, and waits briefly for it to load.
+
+  A tab showing the browser's error page (its last load failed) now also keeps its ID across a relaunch. Chrome reopens such a tab at the address it failed to load, not at its error page, so browserd now records and matches it under that address, read from the tab's history when the browser stops. Before, the tab was reported as replaced and reappeared under a new ID. Tab lists still show the error page's URL while the tab shows it.
+
+- 067d06b: Reduce redundant tool-catalog hashing and persistence reads during turn startup while preserving catalog bytes, exact-attempt checks and replay verification.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [f2e1953]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [1271da5]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [bdac9fc]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/sdk@6.0.0
+  - @opengeni/tool-gateway@6.0.0
+
+## 5.5.1
+
+### Patch Changes
+
+- fa7516a: A full-page browser screenshot no longer changes the page's layout. Chromium hides classic scrollbars for a capture beyond the viewport, so content used to widen by the scrollbar's width while it was captured, right-aligned elements moved, and the change stayed after the capture; the image was also narrower than the tab's viewport. The capture now keeps each scrollbar's space with a temporary inspector stylesheet that page scripts cannot see, re-evaluates scrollbars afterwards, and is as wide as the tab's viewport. Screenshot scale now comes from the emulated device scale factor instead of the image width, which excluded the scrollbar. When some scrollbars cannot be kept (horizontal ones, ones inside shadow trees), the browser_screenshot result and Code Mode screenshot metadata carry a short `note` saying so, and the SDK frame has `inexactScrollbars: true`.
+- f980186: Check serialized tool catalog sizes without allocating an extra UTF-8 byte buffer. Preserve the existing byte limits, validation and digests.
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [cc59c02]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [f980186]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/tool-gateway@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

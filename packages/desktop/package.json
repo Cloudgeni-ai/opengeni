@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/desktop",
-  "version": "5.4.2",
+  "version": "6.14.0",
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",
   "repository": {
@@ -29,9 +29,17 @@
       "types": "./src/main/mac-login-agent.ts",
       "default": "./src/main/mac-login-agent.ts"
     },
+    "./meeting-detection": {
+      "types": "./src/main/meeting-detection/public.ts",
+      "default": "./src/main/meeting-detection/public.ts"
+    },
     "./system-audio": {
       "types": "./src/main/system-audio.ts",
       "default": "./src/main/system-audio.ts"
+    },
+    "./dictation": {
+      "types": "./src/main/dictation/public.ts",
+      "default": "./src/main/dictation/public.ts"
     },
     "./preload": {
       "types": "./src/preload/content.ts",
@@ -41,9 +49,17 @@
       "types": "./src/preload/welcome.ts",
       "default": "./src/preload/welcome.ts"
     },
+    "./preload/meeting-detection": {
+      "types": "./src/preload/meeting-detection.ts",
+      "default": "./src/preload/meeting-detection.ts"
+    },
     "./preload/system-audio": {
       "types": "./src/preload/system-audio.ts",
       "default": "./src/preload/system-audio.ts"
+    },
+    "./preload/dictation": {
+      "types": "./src/preload/dictation.ts",
+      "default": "./src/preload/dictation.ts"
     }
   },
   "publishConfig": {
@@ -61,7 +77,7 @@
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
-    "electron": "44.7.2",
+    "electron": "44.10.1",
     "electron-updater": "6.8.9",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"

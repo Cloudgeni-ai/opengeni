@@ -1,3 +1,4 @@
+import type { ChatClient, OpenGeniClient } from "@opengeni/sdk";
 import { ToolDetailsProvider } from "./timeline/tool-details";
 import type { ToolDetails } from "./timeline/tool-presentation";
 import {
@@ -6,6 +7,7 @@ import {
   type StreamConnectionState,
   type WorkspaceControlEvent,
   type WorkspaceInteractionRevisionEvent,
+  type WorkspaceDraftsChangedEvent,
   type WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -27,8 +29,8 @@ export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 const CONTRACT_RELOAD_STORAGE_PREFIX = "opengeni.reloadForApiContract:";
 
-export type OpenGeniProviderProps = {
-  client: SessionClientLike;
+export type OpenGeniProviderProps<Client extends ChatClient = OpenGeniClient> = {
+  client: SessionClientLike<Client>;
   workspaceId: string;
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
   onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
@@ -82,6 +84,8 @@ export type OpenGeniProviderProps = {
 /**
  * Supplies the Opengeni client + workspace to all hooks below it. Hooks also
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
+ * Preserves the supplied client's response projection; pass an explicitly
+ * compact client for a chat-only surface.
  */
 export function OpenGeniProvider({
   client,
@@ -96,7 +100,7 @@ export function OpenGeniProvider({
   productName,
   toolDetails = "full",
   children,
-}: OpenGeniProviderProps) {
+}: OpenGeniProviderProps<ChatClient>) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
     null,
   );
@@ -107,6 +111,14 @@ export function OpenGeniProvider({
     useState<WorkspaceInteractionRevisionEvent | null>(null);
   const [workspaceSessionListEvent, setWorkspaceSessionListEvent] =
     useState<WorkspaceSessionListEvent | null>(null);
+  const [workspaceDraftsEvent, setWorkspaceDraftsEvent] =
+    useState<WorkspaceDraftsChangedEvent | null>(null);
+  // A hint not yet rendered absorbs the next one, so a burst handled in one
+  // batch still names every changed draft.
+  const pendingDraftsEventRef = useRef<WorkspaceDraftsChangedEvent | null>(null);
+  useEffect(() => {
+    pendingDraftsEventRef.current = null;
+  }, [workspaceDraftsEvent]);
   const [workspaceInteractionConnectionState, setWorkspaceInteractionConnectionState] = useState<
     StreamConnectionState | "idle" | "error"
   >("idle");
@@ -200,6 +212,7 @@ export function OpenGeniProvider({
     setWorkspaceControlEvent(null);
     setWorkspaceInteractionEvent(null);
     setWorkspaceSessionListEvent(null);
+    setWorkspaceDraftsEvent(null);
     if (!pageLive) {
       setWorkspaceControlConnectionState("idle");
       setWorkspaceInteractionConnectionState("idle");
@@ -251,6 +264,20 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             interactionCallbackRef.current?.(event);
+          } else if (event.type === "workspace.drafts.changed") {
+            if (event.workspaceId === workspaceId) {
+              const pending = pendingDraftsEventRef.current;
+              const next =
+                pending && pending.workspaceId === event.workspaceId
+                  ? {
+                      ...event,
+                      sessionIds: [...new Set([...pending.sessionIds, ...event.sessionIds])],
+                      newSession: pending.newSession || event.newSession,
+                    }
+                  : event;
+              pendingDraftsEventRef.current = next;
+              setWorkspaceDraftsEvent(next);
+            }
           } else if (event.workspaceId === workspaceId) {
             setWorkspaceSessionListEvent(event);
           }
@@ -387,6 +414,7 @@ export function OpenGeniProvider({
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
       workspaceSessionListEvent,
+      workspaceDraftsEvent,
       registerSessionReconciler,
       reconcileSession,
     }),
@@ -398,6 +426,7 @@ export function OpenGeniProvider({
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
       workspaceSessionListEvent,
+      workspaceDraftsEvent,
       registerSessionReconciler,
       reconcileSession,
     ],
@@ -440,12 +469,12 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
       aria-live="assertive"
       data-opengeni-api-contract-mismatch
     >
-      <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface p-6 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface-1 p-6 shadow-2xl">
         <p className="text-og-menu font-semibold text-og-fg">{t("provider.opengeniUpdated")}</p>
-        <p className="mt-2 text-og-menu leading-6 text-og-muted">
+        <p className="mt-2 text-og-menu leading-6 text-og-fg-muted">
           {t("provider.thisTabCannotSafelyContinue")}
         </p>
-        <p className="mt-3 font-mono text-og-control text-og-subtle">
+        <p className="mt-3 font-mono text-og-control text-og-fg-subtle">
           {t("provider.clientExpectedApiActual", {
             expected: mismatch.expected,
             actual: mismatch.actual,

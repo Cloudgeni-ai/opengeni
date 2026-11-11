@@ -105,7 +105,7 @@ describe("session browse projections", () => {
       }).map((item) => item.id),
     ).toEqual(["scheduler"]);
     expect(sessionCreatorLabel(opaqueSubject)).toBe("tenant:ada");
-    expect(sessionCreatorLabel(scheduler)).toBe("Service · service:scheduler");
+    expect(sessionCreatorLabel(scheduler)).toBe("Service");
   });
 
   test("groups root browse results by creator or created-date buckets", () => {
@@ -238,6 +238,83 @@ describe("session browse projections", () => {
         key: "creator:subject:tenant-b:alex",
         label: "Alex · Subject · tenant-b:alex",
       },
+    ]);
+  });
+
+  test("groups an API key once by its name, whichever kind its sessions were frozen as", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    const label = "Codex operator 2026-09-11";
+    const legacy = session({ id: "legacy", createdBy: { kind: "subject", subjectId, label } });
+    const current = session({ id: "current", createdBy: { kind: "service", subjectId, label } });
+    const davlet = session({
+      id: "davlet",
+      createdBy: { kind: "subject", subjectId: "user:davlet", label: "davlet@cloudgeni.ai" },
+    });
+    const all = [legacy, current, davlet];
+
+    const grouped = groupSessionsForBrowse(all, "creator", {
+      now: NOW,
+      creatorLabels: sessionCreatorLabelMap(all),
+    }).grouped.map((group) => ({
+      key: group.group,
+      label: group.label,
+      sessions: group.sessions.map((node) => node.session.id).sort(),
+    }));
+    expect(grouped).toEqual([
+      {
+        key: `creator:${subjectId}`,
+        label: "Codex operator 2026-09-11 · API key",
+        sessions: ["current", "legacy"],
+      },
+      // People keep the label frozen with the chat.
+      { key: "creator:subject:user:davlet", label: "davlet@cloudgeni.ai", sessions: ["davlet"] },
+    ]);
+    expect(grouped[0]?.label).not.toMatch(/api_key:|service|subject/i);
+  });
+
+  test("a service never joins a person's group, even with the same subject id", () => {
+    const person = session({
+      id: "person",
+      createdBy: { kind: "subject", subjectId: "user:ada", label: "Ada" },
+    });
+    const impostor = session({
+      id: "impostor",
+      createdBy: { kind: "service", subjectId: "user:ada", label: "Ada" },
+    });
+    const all = [person, impostor];
+    expect(
+      groupSessionsForBrowse(all, "creator", {
+        now: NOW,
+        creatorLabels: sessionCreatorLabelMap(all),
+      }).grouped.map((group) => ({
+        key: group.group,
+        sessions: group.sessions.map((node) => node.session.id),
+      })),
+    ).toEqual([
+      { key: "creator:subject:user:ada", sessions: ["person"] },
+      { key: "creator:service:user:ada", sessions: ["impostor"] },
+    ]);
+  });
+
+  test("tells same-named API keys apart without showing their ids", () => {
+    const first = session({
+      id: "first",
+      createdBy: { kind: "service", subjectId: "api_key:aaaa", label: "Codex operator" },
+    });
+    const second = session({
+      id: "second",
+      createdBy: { kind: "service", subjectId: "api_key:bbbb", label: "Codex operator" },
+    });
+    expect(sessionCreatorOptions([first, second])).toEqual([
+      { value: "api_key:aaaa", label: "Codex operator · API key (1)" },
+      { value: "api_key:bbbb", label: "Codex operator · API key (2)" },
+    ]);
+    const unnamed = session({
+      id: "unnamed",
+      createdBy: { kind: "service", subjectId: "api_key:7dbccefa-3591-437a-81d2-6319352f124d" },
+    });
+    expect(sessionCreatorOptions([unnamed])).toEqual([
+      { value: "api_key:7dbccefa-3591-437a-81d2-6319352f124d", label: "API key" },
     ]);
   });
 

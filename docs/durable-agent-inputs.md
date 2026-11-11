@@ -112,7 +112,7 @@ wakes the agent once more; the deadline bounds that cost.
 `sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
 predicate for this rule. Worker peek and settlement, wake and claim admission,
 public `inputWait`, and waiting-descendant counts all read it.
-The operational instructions still tell the agent to answer and then call
+The `wait_for_input` tool description still tells the agent to answer and then call
 `wait_for_input` again while the awaited work is still in flight, reusing the
 earlier reason and only the time left before the earlier deadline, because
 each turn's wait sets a fresh deadline from its timeout.
@@ -130,8 +130,11 @@ update pulls it to now and its producer still signals after commit; without
 that signal the input would wait for the periodic dispatcher tick. The extra
 signal is a hint only: one claim consumes the whole pending batch, and the
 acknowledgement rules above keep the revision open until it does. Terminal
-background-command settlement registers the same wake but does not signal from
-its settlement callers, so the dispatcher delivers it. Claim, supersession, and
+background-command settlement registers the same wake and returns it, and each
+settlement caller (pushed Connected Machine completion, in-turn, API and reaper
+retained-process settlement, the selfhosted reaper, lost or contained boxes)
+signals it after commit, bounded to 5 seconds; the dispatcher delivers any wake
+a caller could not signal. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 for completed/paused goals without a held wait do not create new work.
 "Eligible" includes the compaction-failure hold: when the newest finished turn
@@ -198,7 +201,7 @@ rows:
 | `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews and compact answerable questions (ids, kinds, prompts, option ids and labels; no secret specs) plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
-| `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
+| `child_waiting_capacity` | immediate | a long subscription capacity wait armed on the child (reset at least 15 minutes away, unknown, or needing a person); carries `resetsAt` and tells the parent that `session_set_model` moves the waiting turn to a model with capacity | `child-waiting-capacity:<child>:<waiter>` |
 | `child_progress` | deferred | the child's agent `goal_progress`; a newer note supersedes an older still-pending one | `child-progress:<child>:<receipt>` |
 
 Delivery into the parent happens through `addSessionSystemUpdateWithSourceMutation`:
@@ -213,11 +216,21 @@ backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
 the claim returns its rows sorted instead of in heap order (migration 0528). Like
 child results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Like `child_terminal_result`, a
-`child_requires_action` also wakes an idle parent that has no goal at all, so
-the parent can answer the child's question while the person sees the same card;
-a parent whose goal is paused or completed is not woken by it. Without such an
-obligation, other child lifecycle notices remain pending until new intent
-arrives.
+`child_requires_action` also wakes an idle parent that has no goal at all or a
+completed goal (without reopening it), so the parent can answer the child's
+question while the person sees the same card; a parent whose goal is paused is
+not woken by it. Without such an obligation, other child lifecycle notices
+remain pending until new intent arrives.
+
+A `child_requires_action` goes to the child's parent unless the parent cannot
+act on it: it is failed or cancelled, or its frozen agent configuration has
+`subagents` off, so it has no `session_human_input_respond`. Then the notice
+goes to the nearest ancestor that can act, and only to that one
+(`childRequiresActionRouteTx`). Its authority is that ancestor's own turn that
+started the branch, its lineage names `escalatedFromSessionId`, and its summary
+says the parent can't act. The question's `child_requires_action_resolved`
+follows it to the same session, so it supersedes the notice there. With no
+such ancestor, the notice stays with the parent.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal
@@ -254,10 +267,10 @@ terminal state changes commit; the already-checkpointed provider proof remains
 eligible for a settlement-only retry and provider execution is never replayed.
 
 The five new kinds are produced only while
-`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from
-before these kinds existed throws on an unknown kind, so enable the flag only
-once the whole fleet runs an image that understands them. Delivery and
-consumption of an already committed notice never read the flag.
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default on): a worker from
+before these kinds existed (before August 2026) throws on an unknown kind, so
+a fleet still running such an image sets the flag to false until it is gone.
+Delivery and consumption of an already committed notice never read the flag.
 
 Rollout and rollback rule: once the flag has produced rows, a pre-notice image
 must never restart while any new-kind row is still pending in
@@ -432,6 +445,29 @@ does not color every ancestor forever. The fence is monotone: a human who has
 already read further, or a racing claim that observed a later sequence, is
 never regressed.
 
+A failure the parent agent took is that agent's to follow up, so it never asks
+a person through an ancestor. A failed session is `failureHandled` when it is
+bound to the failure episode the parent saw: the newest `child_terminal_result`
+outbox row the child wrote for its parent (committed with the failure) is a
+failure, the parent's copy of that same notice (same dedupe key) is
+`delivered`, meaning claimed into a parent turn (if that turn later fails, the
+parent's own failure surfaces instead), and the child has finished no other
+turn since. Such a session is left out of every ancestor's
+`unreadFailedDescendants` and `unreadDescendants`, project and Site totals, and
+the flat child list in Needs you, even when it logs a late event such as a
+workspace capture after the acknowledgment. Its own row, when expanded, shows
+as unread rather than failed. The rule is viewer-independent: it holds for
+members whose personal state the claim never acknowledged. The one exception
+fails safe: a viewer who can see the child but not its parent cannot read the
+notices between them, so the failure stays unhandled for that viewer.
+
+Everything else stays unhandled and keeps its red marker: a root session; a
+failure whose notice has not been delivered yet, is still pending (its parent
+paused or not yet run), was dropped because the parent was cancelled or
+archived, or was settled without the parent seeing it (`superseded`,
+`cancelled` or `failed`); and a child that ran another turn afterwards, such as
+a retried child that fails again, until its parent takes that failure too.
+
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then
 letting that child work and report again, leaves it acknowledged after the
@@ -540,6 +576,30 @@ timeline, including when they arrive alongside other updates. A delivered input
 does not necessarily start a new turn. Command-result summaries include the
 bounded command preview; an unavailable exit result is described as unavailable
 rather than asserting that execution failed.
+
+An automation occurrence (`scheduled_occurrence`) keeps its instructions as
+the update's summary, which only the agent reads. Its pending and delivered
+session events instead carry the automation's current name as their summary,
+and the delivered member carries `automation: {name, eventSummaries,
+eventCount}` (at most three event summaries of 200 bytes each). The chat draws
+the run as one line: the name and what the first event says. Events written
+before Opengeni recorded the name carry no `automation` and read "Automation
+run". Each new occurrence also tells the agent to answer
+exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
+omits the run's line, work and answer, unless the run asked the person
+something or holds another item that waits on them.
+
+Since migration 1289 an agent message whose text is the no-reply token, and a
+`turn.completed` whose `output` is (without a recorded `reply`), is not
+attention: the event cursor trigger leaves `last_meaningful_sequence` where it
+was, so a quiet turn sets no unread mark. Its turn opens no inbox reply item
+and sends no `reply_ready` push. The `reply_ready` push of any other finished
+turn carries the turn's answer (its newest non-commentary agent message, up to
+1000 characters) instead of "The agent replied."; a turn with no answer sends
+none. `opengeni_private.no_reply_text_v1` and `noReplyTextSql`
+(`packages/db/src/session-meaningful-events.ts`) apply the same normalization
+as `isNoReplyText`. The partial attention index keeps its 0774 predicate;
+attention queries add the exclusion as a filter on top of it.
 
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation

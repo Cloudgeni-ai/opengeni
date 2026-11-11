@@ -21,9 +21,9 @@ import { sql } from "drizzle-orm";
 import { auditEvents } from "../schema";
 import { withLosslessContentWriteVersion } from "../lossless-json";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import {
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
   subscriptionConnectionEffectiveLastError,
   subscriptionConnectionEffectiveStatus,
@@ -41,36 +41,11 @@ import {
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
-
-/**
- * `core`: the provider's cutover is enabled. `maintenance`: a missing or
- * disabled row; callers fail closed.
- */
-export type SubscriptionCoreCutoverDisposition = "core" | "maintenance";
-
-export async function readSubscriptionCoreCutoverDisposition(
-  db: Database,
-  provider: SubscriptionCoreProvider,
-  accountId: string,
-  /**
-   * The caller's workspace, when it has one. The cutover row needs only the
-   * account scope, but a caller inside a shared request transaction (whose
-   * sibling queries run concurrently) must not have its workspace setting
-   * changed underneath them, so the nested scope keeps the same workspace.
-   */
-  workspaceId: string | null = null,
-): Promise<SubscriptionCoreCutoverDisposition> {
-  const state = await withRlsContext(
-    db,
-    { accountId, workspaceId },
-    async (tx) =>
-      await readSubscriptionProviderCutoverState(tx, {
-        accountId,
-        provider: subscriptionCoreProviderId(provider),
-      }),
-  );
-  return state === "enabled" ? "core" : "maintenance";
-}
+import {
+  declarePersonalWorkspaceOwnerSettings,
+  personalWorkspaceOwnerMayChangeSettings,
+  type PersonalWorkspaceOwnerSettingsInput,
+} from "../personal-workspace-owner-settings";
 
 /** A wake the caller delivers after its mutation committed. */
 export type SubscriptionCoreWake = {
@@ -361,8 +336,8 @@ export async function readSubscriptionCoreWorkspacePool(
 /**
  * The viewing person's own personal connections of this provider (no
  * credential material), through the owner-only reader. Requires the
- * workspace RLS context on `tx`; sets the subject. Empty for anyone else, for
- * a workspace the person may not use, or without an enabled cutover.
+ * workspace RLS context on `tx`; sets the subject. Empty for anyone else or
+ * for a workspace the person may not use.
  */
 export async function listSubscriptionCorePersonalConnectionRowsInTransaction(
   tx: Database,
@@ -446,7 +421,10 @@ export async function readSubscriptionCoreOrganizationPool(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, {
+        accountId: input.organizationId,
+        subjectId: input.subjectId,
+      });
       const [admin] = await rawRows<{ admin: boolean }>(
         tx,
         sql`select opengeni_private.subscription_organization_admin(${input.organizationId}::uuid) as admin`,
@@ -650,7 +628,7 @@ export type SubscriptionCoreAdministration = {
   /** null: the organization route. */
   workspaceId: string | null;
   subjectId: string;
-};
+} & PersonalWorkspaceOwnerSettingsInput;
 
 export type SubscriptionCoreAllocatorResult =
   | {
@@ -706,7 +684,9 @@ async function withAdministration<T>(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
+        // A Personal workspace's own settings row admits its verified owner (1233).
+        if (input.workspaceId !== null) await declarePersonalWorkspaceOwnerSettings(tx, input);
         // A workspace route that writes the workspace's settings row takes the
         // settings lock before any row lock (see lockSubscriptionSettings);
         // routes that never write settings do not queue behind a lock change.
@@ -1372,7 +1352,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     workspaceId: string;
     subjectId: string;
     mode: SubscriptionCoreWorkspaceSourceMode;
-  },
+  } & PersonalWorkspaceOwnerSettingsInput,
 ): Promise<{ pool: SubscriptionCoreWorkspacePool; wake: SubscriptionCoreWake }> {
   return await withSettingsAdministration(db, input, async (tx) => {
     const [workspace] = await rawRows<{ workspace_kind: string }>(
@@ -1380,7 +1360,12 @@ export async function setSubscriptionCoreWorkspaceSource(
       sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)
         as workspace_kind`,
     );
-    if (workspace?.workspace_kind === "personal" && input.mode !== "automatic") {
+    // Only its verified owner turns a provider off in a Personal workspace (1233).
+    if (
+      workspace?.workspace_kind === "personal" &&
+      input.mode !== "automatic" &&
+      !(await personalWorkspaceOwnerMayChangeSettings(tx, input))
+    ) {
       throw provider.errors.sourceRefused(
         "personal_workspace",
         `${provider.adapter.displayName} source modes are not available for personal workspaces`,
@@ -1392,7 +1377,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     if (!written) {
       throw provider.errors.sourceRefused(
         "forbidden",
-        `missing permission to change this workspace's ${provider.adapter.displayName} source`,
+        `You don't have permission to change this workspace's ${provider.adapter.displayName} source.`,
       );
     }
     return {

@@ -17,13 +17,16 @@ import {
   NativeSessionScreen,
   SessionActionsButton,
   SessionHeaderTitle,
+  useNativeSessionIdentity,
   useNativeTimelineTheme,
   type NativeInChatConnectOptions,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
-import type { OpenGeniLinkTarget } from "@opengeni/sdk";
+import { resolveOpenGeniLinkTarget, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
 import * as Haptics from "expo-haptics";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
@@ -44,18 +47,22 @@ import { copyText } from "@/clipboard";
 import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
 import { AppThemeProvider } from "@/theme";
+import { rememberSessionRow } from "@/session-list-cache";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
-import { openOnWeb, webPaths } from "@/web-links";
+import { openOnWeb, webPaths, webUrl } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that copies this conversation's web link. */
+const COPY_LINK_ACTION = "opengeni.copy-link";
 /** The session menu item that mutes or unmutes this session's replies for the person. */
 const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 /** Session menu items for full access: a time limit to give it for, or turning it off. */
@@ -110,6 +117,12 @@ function fullAccessMenuAction(access: SessionFullAccess | null): MenuAction[] {
     : [];
 }
 
+/** Interactive answers remember picks and what was sent across app launches. */
+const answerStore: InteractiveAnswerStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+};
+
 export default function SessionScreen() {
   const { id, at, workspace } = useLocalSearchParams<{
     id: string;
@@ -132,6 +145,7 @@ export default function SessionScreen() {
   return (
     <AppThemeProvider>
       <LiveSession
+        key={`${account?.id ?? "signed-out"}:${workspaceId}:${id}`}
         client={client}
         models={models}
         baseUrl={account?.baseUrl ?? null}
@@ -238,6 +252,11 @@ function LiveSession(props: {
     workspaceId: props.workspaceId,
   });
   const session = controller.session.session;
+  // The lists underneath follow this chat's row while it is open, so going back
+  // shows them already in order rather than reordering under the next tap.
+  useEffect(() => {
+    if (session && session.workspaceId === props.workspaceId) rememberSessionRow(session);
+  }, [session, props.workspaceId]);
   const feedback = useMemo(
     () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
     [props.client, props.workspaceId, props.sessionId],
@@ -246,7 +265,7 @@ function LiveSession(props: {
   const webBaseUrl = account?.baseUrl ?? null;
   // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
   const renderMarkdown = useMemo(() => {
-    const openLink = (target: OpenGeniLinkTarget) => {
+    const openResolvedLink = (target: OpenGeniLinkTarget) => {
       // Another chat opens here in the app, in the workspace the link names (or this one).
       if (target.kind === "session") {
         router.push(
@@ -272,6 +291,18 @@ function LiveSession(props: {
           `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
         );
     };
+    const openLink = (target: OpenGeniLinkTarget) => {
+      void resolveOpenGeniLinkTarget(props.client, target, props.workspaceId, {
+        sessionId: props.sessionId,
+      })
+        .then(openResolvedLink)
+        .catch((error: unknown) =>
+          Alert.alert(
+            t("markdown.openArtifact"),
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
+    };
     return createWebMarkdownRenderer({
       // Opengeni conversations open in the app; anything else in the browser.
       onLinkPress: (url) => {
@@ -286,7 +317,7 @@ function LiveSession(props: {
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, webBaseUrl, t]);
+  }, [props.client, props.workspaceId, props.sessionId, webBaseUrl, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -303,12 +334,22 @@ function LiveSession(props: {
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
   const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  const [pendingPrompt] = useState(() =>
+    readPendingPrompt(props.client, props.workspaceId, props.sessionId),
+  );
+  useEffect(() => {
+    if (controller.initialHistoryReady)
+      forgetPendingPrompt(props.client, props.workspaceId, props.sessionId);
+  }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
-  const paused = controller.queue.effectiveControl?.state === "paused";
+  // Archiving stops (and so pauses) a chat's work: it reads as archived, not paused.
+  const paused = !controller.archived && controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
   const title = session ? sessionDisplayTitle(session) : "";
+  // The agent's (or the chat's own) avatar beside the title, as on the web header.
+  const identity = useNativeSessionIdentity(session, props.client);
   const agentCall = useAgentCall();
   const onCall = agentCall.sessionId === props.sessionId;
   // In the call's own conversation the green phone button returns to the call,
@@ -379,10 +420,12 @@ function LiveSession(props: {
           status={paused ? "queued" : status}
           statusLabel={paused ? "Paused" : undefined}
           fullAccess={fullAccessOn}
+          avatar={identity.avatar}
+          agentName={identity.agentName}
         />
       </AppThemeProvider>
     ),
-    [fullAccessOn, paused, status, title],
+    [fullAccessOn, identity, paused, status, title],
   );
   const headerRight = useCallback(
     () =>
@@ -424,6 +467,11 @@ function LiveSession(props: {
                             title: "Open in web",
                             image: "safari" as MenuAction["image"],
                           },
+                          {
+                            id: COPY_LINK_ACTION,
+                            title: "Copy link",
+                            image: "link" as MenuAction["image"],
+                          },
                         ]
                       : []),
                     {
@@ -458,6 +506,15 @@ function LiveSession(props: {
                     if (nativeEvent.event === OPEN_ON_WEB_ACTION) {
                       if (webBaseUrl)
                         openOnWeb(webBaseUrl, webPaths.session(workspaceId, props.sessionId));
+                      return;
+                    }
+                    if (nativeEvent.event === COPY_LINK_ACTION) {
+                      if (!webBaseUrl) return;
+                      void copyText(
+                        webUrl(webBaseUrl, webPaths.session(workspaceId, props.sessionId)),
+                      ).then(() =>
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+                      );
                       return;
                     }
                     if (nativeEvent.event === CALL_PIN_ACTION) {
@@ -534,10 +591,12 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        pendingPrompt={pendingPrompt}
         focusSequence={props.focusSequence}
         client={props.client}
         models={props.models}
         renderMarkdown={renderMarkdown}
+        answerStore={answerStore}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
@@ -588,7 +647,6 @@ function LiveSession(props: {
           hasImageAttachments={controller.attachments.attachments.some(
             (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
           )}
-          codexOnly={session?.codexCompactionMode === "remote_v2"}
           groupPresentation={{
             opengeni_credits: {
               label: "Opengeni",

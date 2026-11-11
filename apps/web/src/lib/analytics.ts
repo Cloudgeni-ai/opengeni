@@ -65,6 +65,12 @@ let ga4Active = false;
 let reoActive = false;
 let latestPathname: string | null = null;
 let latestSearch = "";
+/**
+ * Pages whose address is itself private: a chat share link's address is the
+ * key to the conversation, so it must never reach a provider that records
+ * the ambient URL.
+ */
+const PRIVATE_ADDRESS_PATH = /^\/share(?:\/|$)/u;
 let lastPageViewKey: string | null = null;
 let identityGeneration = 0;
 let activeIdentity: AnalyticsIdentity | null = null;
@@ -84,14 +90,24 @@ declare global {
   }
 }
 
+/**
+ * Whether the current address must stay away from GA4 and Reo: a route with
+ * a query, or a page whose address is private (a chat share link). PostHog
+ * still runs there, with every URL property removed before it is sent.
+ */
+function ambientAddressPrivate(): boolean {
+  return Boolean(latestSearch) || PRIVATE_ADDRESS_PATH.test(latestPathname ?? "");
+}
+
 export function syncAnalytics(config: AnalyticsConfig, pathname: string, search = ""): void {
   suspended = false;
   activeConfig = config;
   latestPathname = pathname;
   latestSearch = search;
-  // Reo observes the ambient URL itself. Keep it off query-bearing routes;
-  // PostHog and GA4 below receive only our explicit content-free projection.
-  if (search) {
+  // Reo observes the ambient URL itself. Keep it off query-bearing routes and
+  // private addresses; PostHog and GA4 below receive only our explicit
+  // content-free projection.
+  if (ambientAddressPrivate()) {
     try {
       window.Reo?.unload?.();
     } catch {
@@ -106,7 +122,7 @@ export function syncAnalytics(config: AnalyticsConfig, pathname: string, search 
   }
   if (initialization) {
     if (providersReady) {
-      if (!search) {
+      if (!ambientAddressPrivate()) {
         if (config.providers.reo && !reoActive)
           void initializeReo(config.providers.reo.clientId).catch(() => {});
         if (config.providers.ga4 && !ga4Active)
@@ -170,7 +186,7 @@ export function captureAnalyticsEvent(
       return;
     const facts = { ...context, ...properties };
     posthogClient?.capture(name, facts);
-    if (ga4Active && !latestSearch)
+    if (ga4Active && !ambientAddressPrivate())
       window.gtag?.("event", name, {
         ...facts,
         page_location: window.location.origin,
@@ -246,7 +262,7 @@ function dispatchPageView(pathname: string): void {
     $current_url: `${window.location.origin}${pathname}`,
     ...facts,
   });
-  if (ga4MeasurementId && ga4Active && !latestSearch) {
+  if (ga4MeasurementId && ga4Active && !ambientAddressPrivate()) {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
       page_referrer: "",
@@ -257,7 +273,7 @@ function dispatchPageView(pathname: string): void {
 }
 
 async function initializeReo(clientId: string): Promise<void> {
-  if (!analyticsCollectionAllowed() || latestSearch) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate()) {
     return;
   }
   if (!window.Reo) {
@@ -268,7 +284,7 @@ async function initializeReo(clientId: string): Promise<void> {
     script.src = `https://static.reo.dev/${encodeURIComponent(clientId)}/reo.js`;
     await appendExternalScript(script);
   }
-  if (!analyticsCollectionAllowed() || latestSearch || !window.Reo) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate() || !window.Reo) {
     return;
   }
   reoActive = true;
@@ -525,7 +541,7 @@ function resetProviderIdentity(force = false): void {
 }
 
 async function initializeGa4(measurementId: string): Promise<void> {
-  if (!analyticsCollectionAllowed() || latestSearch) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate()) {
     return;
   }
   window.dataLayer ??= [];

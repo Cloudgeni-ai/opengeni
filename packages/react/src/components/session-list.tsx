@@ -1,4 +1,9 @@
-import { deriveSessionDisplayTitle, type OpenGeniClient, type Session } from "@opengeni/sdk";
+import {
+  deriveSessionDisplayTitle,
+  type OpenGeniClient,
+  type ChatSession as Session,
+} from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { ArchiveIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
@@ -17,6 +22,9 @@ export type SessionListLabels = {
   loadMore: string;
   rename: string;
   archive: string;
+  /** Shown for a few seconds after archiving, before the chat's name. */
+  archived: string;
+  undo: string;
   save: string;
   cancel: string;
 };
@@ -29,11 +37,16 @@ const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
   loadMore: t("sessionList.showMore"),
   rename: t("sessionList.rename"),
   archive: t("sessionList.archive"),
+  archived: t("sessionList.archived"),
+  undo: t("sessionList.undo"),
   save: t("sessionList.save"),
   cancel: t("sessionList.cancel"),
 });
 
-export type SessionListProps = ClientOverride & {
+/** How long the list offers Undo after archiving; the server accepts it a little longer. */
+const ARCHIVE_UNDO_MS = 10_000;
+
+export type SessionListProps = ClientOverride<ChatClient> & {
   selectedSessionId?: string | null | undefined;
   onSelect: (sessionId: string) => void;
   /** Shown as a "New chat" button when provided. */
@@ -41,8 +54,11 @@ export type SessionListProps = ClientOverride & {
   /** Allow inline rename (`updateSession`). Defaults to true. */
   rename?: boolean | undefined;
   /**
-   * Offer "Hide for me" (`updateSessionArchive` with `hide_for_me`). Defaults
-   * to true. An older session proxy that reports `archive: false` also hides it.
+   * Offer "Archive" (`updateSessionArchive` with `archived: true`). Archiving
+   * is for everyone and needs control of the chat: the chat leaves the list,
+   * Undo is offered for a few seconds, and then its content moves to
+   * long-term storage for good (it stays readable). Defaults to true. An
+   * older session proxy that reports `archive: false` also hides it.
    */
   archive?: boolean | undefined;
   /**
@@ -59,7 +75,7 @@ export type SessionListProps = ClientOverride & {
   className?: string | undefined;
 };
 
-type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
+type ArchiveClient = Partial<Pick<ChatClient<OpenGeniClient>, "updateSessionArchive">>;
 
 /**
  * The workspace's root chats the current user may read, newest activity
@@ -104,6 +120,12 @@ export function SessionList({
   const [editing, setEditing] = useState<{ id: string; title: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<{ cause: unknown } | null>(null);
+  const [undoable, setUndoable] = useState<{ id: string; title: string } | null>(null);
+  useEffect(() => {
+    if (!undoable) return;
+    const timer = setTimeout(() => setUndoable(null), ARCHIVE_UNDO_MS);
+    return () => clearTimeout(timer);
+  }, [undoable]);
   const formatError = useErrorMessage();
   const archiveClient = context.client as unknown as ArchiveClient;
   // An older session proxy with `archive: false` reports it; hide what would fail.
@@ -136,14 +158,21 @@ export function SessionList({
     );
   };
 
-  const archiveSession = (session: Session) =>
+  const archiveSession = (session: Session, title: string) =>
     void run(session.id, async () => {
       await archiveClient.updateSessionArchive!(context.workspaceId, session.id, {
         archived: true,
-        mode: "hide_for_me",
       });
+      setUndoable({ id: session.id, title });
       onArchived?.(session.id);
     });
+
+  const undoArchive = (target: { id: string; title: string }) => {
+    setUndoable(null);
+    void run(target.id, () =>
+      archiveClient.updateSessionArchive!(context.workspaceId, target.id, { archived: false }),
+    );
+  };
 
   const sessions = list.sessions;
   return (
@@ -169,6 +198,24 @@ export function SessionList({
       {error || list.error ? (
         <p role="alert" className="px-2 text-og-xs text-og-status-failed">
           {formatError(error ? error.cause : list.error)}
+        </p>
+      ) : null}
+      {undoable ? (
+        <p
+          role="status"
+          className="flex min-w-0 items-center gap-2 px-2 text-og-xs text-og-fg-muted"
+          data-og-archive-undo=""
+        >
+          <span className="min-w-0 truncate">
+            {labels.archived} “{undoable.title}”
+          </span>
+          <button
+            type="button"
+            onClick={() => undoArchive(undoable)}
+            className="shrink-0 rounded px-1.5 py-0.5 font-medium text-og-fg hover:bg-og-surface-2"
+          >
+            {labels.undo}
+          </button>
         </p>
       ) : null}
       <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-1 pb-2">
@@ -239,7 +286,7 @@ export function SessionList({
                   <button
                     type="button"
                     aria-label={`${labels.archive}: ${title}`}
-                    onClick={() => archiveSession(session)}
+                    onClick={() => archiveSession(session, title)}
                     className="rounded p-1 text-og-fg-subtle hover:bg-og-surface-3 hover:text-og-fg"
                   >
                     <ArchiveIcon className="size-3.5" aria-hidden />

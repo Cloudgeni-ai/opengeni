@@ -20,7 +20,9 @@ A session with full access (see [MCP surfaces](mcp-surfaces.md)) also reaches
 chats in the granting person's other workspaces through the same session tools
 with `workspaceId`. Those calls are not agent-scope calls: they run in that
 workspace as the person, under their live permissions, exactly as
-`admin_action_call` does.
+`admin_action_call` does. Only turns that person caused carry it; in a turn
+another member caused in the same shared chat, the session tools behave as if
+the session had no full access.
 
 A private parent can create a same-owner private child from a live internal-update
 attempt as well as a human-message attempt. Internal updates keep their service
@@ -124,7 +126,11 @@ whose answer arrives after another one gets `outcome: "unchanged"` with
 used. A pending tool approval
 (`session.approval.write`) is denied to every agent attempt on every surface,
 including a child the caller spawned, and an embedding-host port cannot widen
-that. The parent learns that a child is blocked through the
+that. A person may approve only calls that run on a workspace login or on
+their own login: approving a call on someone else's personal (Only me) login
+is refused for everyone but its owner (see
+[`remote-mcp-credentials.md`](remote-mcp-credentials.md#where-your-own-logins-work)).
+The parent learns that a child is blocked through the
 `child_requires_action` notice (see
 [`durable-agent-inputs.md`](durable-agent-inputs.md)). Production sessions stay `workspace_shared` until visibility
 lifecycle is wired; that separate tenancy activation must keep intersecting

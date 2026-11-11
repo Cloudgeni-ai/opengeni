@@ -8,7 +8,13 @@
  * is the authority; these helpers only label what a person picks.
  */
 
-import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
+import {
+  normalizePermission,
+  ORGANIZATION_ADMIN_ONLY_PERMISSIONS,
+  organizationAccessPresetPermissions,
+  serviceAccountAllowsPermission,
+  type Permission,
+} from "@opengeni/contracts";
 import type {
   OrganizationAccessPolicy,
   OrganizationAccessPreset,
@@ -48,9 +54,37 @@ export function presetPermissions(
   return organizationAccessPresetPermissions(preset);
 }
 
+/**
+ * What an organization admin who isn't the owner may give a key: anything a
+ * member service account's keys may hold, never people, key or billing
+ * administration.
+ */
+export function memberLevelPermission(permission: string): boolean {
+  return serviceAccountAllowsPermission("member", normalizePermission(permission) as Permission);
+}
+
+/**
+ * Whether an organization admin who isn't the owner may change or revoke this
+ * key, as the server decides: not held by an admin service account, and holding
+ * no administration. A legacy key's workspace:admin implies key management.
+ */
+export function isMemberLevelApiKey(key: {
+  permissions: readonly string[];
+  permissionMode?: "legacy" | "explicit" | undefined;
+  serviceAccount?: { role: "admin" | "member" } | null | undefined;
+}): boolean {
+  if (key.serviceAccount?.role === "admin") return false;
+  if (key.permissionMode !== "explicit" && key.permissions.includes("workspace:admin"))
+    return false;
+  return !key.permissions.some((permission) =>
+    ORGANIZATION_ADMIN_ONLY_PERMISSIONS.includes(permission as Permission),
+  );
+}
+
 /** The preset these permissions match exactly, or custom. */
 export function presetFor(permissions: readonly string[]): OrganizationAccessPreset {
-  const wanted = new Set(permissions);
+  // Legacy variable-set names on older keys count as their canonical secrets permission.
+  const wanted = new Set(permissions.map(normalizePermission));
   // Connecting accounts includes connecting one's own (saved before it was separate).
   if (wanted.has("connections:write")) wanted.add("connections:personal");
   for (const preset of ["full", "read_only"] as const) {

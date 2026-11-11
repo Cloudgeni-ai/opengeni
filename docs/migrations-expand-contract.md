@@ -6,28 +6,12 @@ release keeps working against the new schema. Use
 `-- deployment-mode: maintenance` only when no expand/contract sequence works,
 and say why in the file.
 
-## Historical server compatibility
+## Immutable migration files
 
-Published migration files remain byte-for-byte immutable. PostgreSQL 18 added
-column NOT NULL entries to `pg_constraint`, so the migration runner adapts only
-the exact deployed 0345/0598 sources through
-`packages/db/src/migration-postgres-compatibility.ts` on PostgreSQL 18 or newer.
-The adapter verifies the source SHA-256 before excluding `contype = 'n'` from
-three registry/capability comparisons and the pool constraint-copy loop.
-0345 still checks `pg_attribute.attnotnull`; 0598's `CREATE TABLE ... LIKE`
-already copies NOT NULL. Ownership, ACL, RLS and all other constraints remain
-unchanged. Older servers use the original SQL, and already-applied migrations
-are not rerun. Release-schema contracts hash the original files, not adapted
-execution text. A new forward migration cannot repair an earlier fresh-install
-failure, and changing the historical files would invalidate deployed hashes.
-
-The same closed adapter stabilizes 0807's policy deparsing on all supported
-servers. Dedicated-schema deployments put `opengeni_private` on `search_path`,
-which causes `pg_get_expr` to omit the schema that 0807's exact helper matcher
-requires. Only that hash-pinned source temporarily uses the quoted data schema
-and `pg_catalog` while deparsing and rewriting policies, then restores the
-caller's path. The strict matcher, row-account fence, administrator check and
-transaction boundaries remain unchanged; failure rolls back the local setting.
+Published migration files remain byte-for-byte immutable: the
+`migration-immutability` guard (`scripts/check-migration-immutability.ts`)
+fails any change to an existing file under `packages/db/drizzle/` other than
+adding a new one. Fix a shipped migration with a new forward migration.
 
 ## Why rolling is the default
 
@@ -247,13 +231,28 @@ inventory, not a provisioning grant list. Never regenerate it from a live
 database to silence findings. New named private capabilities need explicit
 registration and their own authority tests.
 
+**A missing required EXECUTE grant degrades; it doesn't take pods out.**
+The strict posture check (`db:assert-runtime-posture` in the Helm migration
+job, the runtime-posture compatibility workflow and the previous-binary
+tests) still rejects every finding, including a required runtime EXECUTE
+grant that is missing. Running API and worker processes classify findings
+first (`classifyRuntimeDatabasePosture`). A finding that goes away once the
+contract-required EXECUTE grants are present (and raises nothing else) is
+degraded. It is logged as `Runtime database posture is degraded`, counted
+in `opengeni_runtime_database_degraded_findings`, and alerted as
+`OpenGeniRuntimeDatabaseGrantMissing`. Startup and readiness still pass,
+and only the calls to those routines fail. Every other finding stays fatal
+for startup and readiness. So a migration that revokes a grant the previous
+binary still requires no longer takes the fleet out, but the release gates
+still catch it. Withhold and defer grants as described below.
+
 **A new definer the runtime must call takes two releases.** Create it without
 runtime EXECUTE, and register it in `RUNTIME_DEFINER_ROUTINES` and
 `DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness accepts it with or without
 the grant. Code that calls it treats `insufficient_privilege` as "not yet".
 Once a binary that knows it is the previous release (the pinned baseline
 below), grant it in a rolling migration, drop it from
-`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness requires it, and remove the
+`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so the posture contract requires it, and remove the
 "not yet" handling. A new non-RLS table the runtime writes needs the same two
 steps, with readiness accepting no runtime DML or all four. 0929, 0930, 0932
 and 0935 granted on creation instead; 0937 withheld those grants and the
@@ -262,12 +261,46 @@ recording retention inventory withheld, and 0950 granted it. 0978 created the
 personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
-withheld the same way, with the same caller check.
+withheld the same way, with the same caller check, and 1101 granted it and
+removed that check. 0988 created the queued-turn hold summary withheld, with
+the same caller check, and 1274 granted it and removed the check. 1002 created the
+held-browser inventory withheld, with the same caller check, and 1093 granted
+it and removed the check. 1060 created the EU-only
+inference change function withheld the same way, and 1210 granted it. 1091
+created the secret history scrub's reader and cell
+writer withheld; the scrub checks the grant once per run and reports the
+cells only they reach as pending until then. 1103 created the subscription
+account-administrator grant withheld, with the same caller check, and 1149
+granted it and removed the check. 1107 created the agent-call and native push
+v2 functions withheld; 1239 grants all six to every configured application
+role and removes the privilege probes and v1 caller fallbacks. The v1 SQL
+functions and grants stay intact for rolling binaries. 1239 follows the
+production baseline pin that contains 1107 (`d91058a8b8` or later). 1218
+created the organization vault list and 1224 the organization machine and rig
+list withheld, with the same caller check, and 1272 granted both and removed
+the check. 1211 created the names-only organization member list
+withheld, with the same caller check; until it is granted the API reports the
+list as unavailable. 1240 created the inventory of meeting tracks not yet
+kept compact withheld, with the same caller check. 1282 granted it and removed
+the check, citing a baseline pin (`2a02889ffe`) that production never ran:
+production still ran `6327db2c`, which predates 1240 and rejects the grant.
+1283 withholds it again and the caller check is back; 1283 takes the free
+ordinal after 1282 so a database that has not applied 1282 runs the two back
+to back. A later migration grants it once a release containing 1283 is the
+pinned previous production binary. Pin only the binary production really runs
+(its healthz `deploymentRevision`), never one that merely reached staging.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
 those grants, so the old fleet stays unready. The gap is normally only the
 seconds the migrations before rollout (`--phase=maintenance`) take.
+
+**The same holds between 1282 and 1283.** On a database that has not applied
+1282 yet, the two run back to back. If `migrate` stops after 1282 commits and
+before 1283 does (a lock timeout, for example), a previous release that
+predates 1240, such as `6327db2c`, rejects the grant and its fleet stays
+unready until `migrate` is rerun. Hosted production applied both in the 6.14.0
+release (`1396c6d3`).
 
 Every existing check for **known** objects remains exact: missing objects and
 privileges, excess grants, owner relationships, RLS, capability predicates,
@@ -307,9 +340,8 @@ migration owner; see [force-rls-migration-backfills.md](force-rls-migration-back
 `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` holds an `ACCESS EXCLUSIVE` lock
 until commit, so use that window only for small tables. For large or hot tables,
 add a GUC-gated owner policy arm in the expand migration, run the backfill with
-`-- opengeni:batched-backfill` and register its GUC in
-`packages/db/src/migration-runner-settings.ts`, then validate in a separate
-migration (0409-0412 are the reference sequence).
+`-- opengeni:batched-backfill` and give it a closed, per-file transaction-local setting in the batched-backfill
+path of `packages/db/src/migrate.ts`, then validate in a separate migration.
 
 ## When maintenance is justified
 
@@ -340,6 +372,38 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 
 ## The CI guard
 
+### Retiring removed-feature schema
+
+`RETIRING_FEATURE_TABLES` in `packages/db/src/runtime-posture.ts` is the explicit
+release-N inventory for the removed Variable Sets, subscription pools, first
+automation API, PR Review and resumable-transcription features. Readiness permits
+those tables to be absent but retains their exact ownership, grants and RLS
+checks while present. No prefix rule makes other tables optional. Modern
+subscription-core tables, vaults, automation templates, event sources and meeting
+recordings are not retired.
+
+The inspector checks the data schema in `pg_catalog`, not tenant-filtered rows.
+Cutover receipts remain required while any table of the corresponding legacy
+feature exists. Their absence is accepted only after its entire table group is
+gone, including in scoped/embedded mode. Surviving routines keep their existing
+execution, ownership and search-path contracts.
+
+This is not a drop migration or permission-snapshot rewrite. Before release N+1:
+
+- Deploy this compatibility binary everywhere; record exact source ancestry and
+  advance the previous-production readiness pin in a separate change.
+- Replace every surviving SQL lifecycle/retention caller, remove unused ORM
+  fields from live projections, and preserve outstanding blob-deletion work.
+- Migrate mutable legacy permission grants without rewriting model history or
+  invalidating frozen execution identities; reconcile old tokens and workflows.
+- Use an explicit `contract-step` migration with reviewed dependency removals,
+  not blanket `DROP ... CASCADE`, and test it as the non-superuser migration owner.
+
+`retiring-feature-posture-postgres.test.ts` physically removes the named objects
+in a disposable database to prove readiness compatibility. Its test-only cascade
+is deliberately not a production migration or proof that remaining SQL callers
+can already run without those objects.
+
 ### Pinned previous-binary readiness
 
 `scripts/runtime-posture-baseline.json` pins a full immutable source commit,
@@ -356,9 +420,8 @@ The test also adds safe unknown objects and deliberately weakens RLS, adds
 unsafe grants/definers and revokes known EXECUTE privileges. Both the current
 and pinned binary must reject the negative controls. Missing PostgreSQL, pin
 objects or extraction dependencies fail the dedicated job; there is no green
-fallback to current code. Existing per-feature old-reader harnesses (for
-example `fixtures/site-limits-2fef1581b.ts`) remain necessary for non-readiness
-compatibility. The release-schema hash tests and historical maintenance notes
+fallback to current code. Per-feature old-reader harnesses remain necessary
+for non-readiness compatibility. The release-schema hash tests and historical maintenance notes
 are complementary, not evidence that an old readiness probe passes.
 
 The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`
@@ -414,7 +477,102 @@ changes that break old binaries, such as dropping a unique constraint an
 without a default, `ADD CHECK ... NOT VALID`, `DROP VIEW`, `DROP TYPE` or
 `RENAME VALUE`. Passing the guard does not make a change backward compatible;
 the review still has to. Shipped migrations are frozen and exempt; never raise
-the threshold to exempt a new file.
+the threshold to exempt a new file. Revokes, routine, view and type removals,
+`SET SCHEMA` and dynamic DDL are the previous-release guard's, below.
+
+### Previous-release dependencies
+
+`bun run check:migration-previous-release`
+(`scripts/check-migration-previous-release.ts`) runs in CI on every migration
+change. A rolling migration runs before the rollout, while earlier releases
+still serve, so it must not remove anything their readiness requires. The guard
+reads the runtime posture of **every release that may still be serving** from
+that release's own source: `packages/db/src/runtime-posture.ts` (with
+`runtime-posture-legacy-routines.json` and `role-relationships.ts`) at the
+pinned production baseline, at the merge base with `origin/main`, and at every
+main commit between them that changed those files, because staging and canaries
+can run any main commit. Today's posture is not the judge: a change that defers
+a routine and revokes it in the same PR, or in the next PR, still breaks the
+releases before it. Every migration the head adds is checked; this rule has no
+ordinal floor and no annotation. The guard needs the git history from the pin to
+the merge base and fails in a shallow clone (`git fetch --unshallow origin`).
+
+A rolling migration fails with `previous-release-dependency` when, after it
+commits, any of those releases would lose:
+
+- the runtime's EXECUTE on a routine its readiness requires:
+  `RUNTIME_DEFINER_ROUTINES` not in `DEFERRED_RUNTIME_PRIVATE_ROUTINES`,
+  `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and the other
+  `*_RUNTIME_ROUTINES` and `*_CAPABILITY_ROUTINES` lists, exported or read
+  from the release's source, less its `OWNER_INTERNAL_PRIVATE_ROUTINES`
+  (revoked, dropped, renamed or moved, including `ALL FUNCTIONS IN SCHEMA` for
+  that schema);
+- the runtime's EXECUTE on a routine in its frozen legacy private inventory
+  (`DECLARED_PRIVATE_ROUTINES`, less owner-internal, retired and deferred
+  routines). Readiness checks these only while they exist, so revoking fails
+  and dropping is left to the annotation rule below;
+- PUBLIC's EXECUTE on a `RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES`
+  routine;
+- a table-level privilege its `RUNTIME_TABLE_PRIVILEGES` requires, or the table
+  itself (dropped, renamed or moved), unless its `RETIRING_FEATURE_TABLES` lets
+  the table be absent;
+- USAGE on `public` or `opengeni_private`.
+
+SQL in DO blocks, `EXECUTE` strings (including `'...' || '...'` and
+`format('%I.name ...')`) and helper routines the migration creates and calls
+counts. A removal the guard cannot parse counts as dynamic (below). A revoke
+the same file undoes counts as undone only when it grants the privilege back to
+the same role or to PUBLIC (a `%I` role only with the same `format()`
+arguments); a dropped and recreated object counts as kept only with every
+required privilege granted after the create to PUBLIC or the runtime role
+(`opengeni_app` or a placeholder). Revoking only from
+PUBLIC is allowed except for the shared-policy predicates and schema USAGE (the
+runtime holds explicit grants on everything else). An object the file itself
+creates with an unconditional top-level `CREATE` (not `CREATE OR REPLACE`), and
+`pg_temp` relations and routines, are new. A routine in one of the release's
+`RETIRING_*_ROUTINES` sets may be dropped (not revoked) when every table of its
+`RETIRING_FEATURE_TABLES` feature is gone once the migration commits, counting
+tables that earlier migrations of the same change drop: readiness skips it then.
+Maintenance migrations run with the fleet stopped and are exempt. The guard
+fails closed when a release's posture module no longer has the exports it
+reads, or when it cannot read `OWNER_INTERNAL_PRIVATE_ROUTINES` in full.
+
+The fix is the contract phase. Release N stops needing the object: for a
+definer, add it to `DEFERRED_RUNTIME_PRIVATE_ROUTINES` and make its callers
+treat `insufficient_privilege` as "not yet"; for a table, stop using it and
+list it in `RETIRING_FEATURE_TABLES`. A later migration removes it once no
+release from the pinned production baseline to main still needs it, which in
+practice means after the production pin has advanced past release N. If no
+such sequence works, use maintenance with a justification.
+
+This would have caught 1283. 1282 had granted
+`opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)` and
+removed it from `DEFERRED_RUNTIME_PRIVATE_ROUTINES`, so the 6.13.0 binary
+serving staging required its EXECUTE. 1283 put it back on the deferred list and
+revoked the grant in the same change; the guard judges the revoke against the
+merge base (and the posture revisions since 1282), which still required it.
+Applied before the rollout, the revoke took every 6.13.0 API and worker pod
+unready on staging on 10 November 2026, from 15:32 to 16:05 UTC.
+
+From 1359, the same guard also asks for `-- contract-step:` (as for dropped
+columns) on other removals static analysis cannot judge: revoking privileges
+from a role other than PUBLIC on a routine the previous release's posture names
+in any other contract, dropping or renaming a routine, view, materialized view,
+type, domain, sequence or schema the file did not create (`RENAME VALUE`,
+`RENAME ATTRIBUTE` and `DROP ATTRIBUTE` on types too), and revokes, drops or
+renames the guard cannot read or whose target is built at run time. Table drops
+and renames stay with the deployment-mode guard's contract-step rule.
+
+What the guard does not model: column-level privileges, grants the previous
+release rejects (its readiness also fails on excess runtime privileges and
+unknown callable definers), CONNECT on the database, `DROP OWNED BY`, routines
+readiness checks only through an inline list or a single constant (for example
+the Site cancellation predicate PUBLIC must execute), and grants inside a
+branch that never runs or inside a string that is not executed, which it still
+counts as grants back. Words inside string literals (a `COMMENT` or `RAISE`
+mentioning a revoke) can trigger the annotation rule. The runtime posture compatibility workflow, which runs the
+pinned release's own inspector against a migrated database, remains the
+end-to-end check; review is still required.
 
 ## Online-safety guard
 

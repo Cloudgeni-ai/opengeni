@@ -7,6 +7,10 @@ import { loadRuntimePostureBaseline } from "../runtime-posture-baseline";
 import { createConnection, createServer } from "node:net";
 import { postgresWireBudget } from "./postgres-wire-budget";
 
+const jit = process.env.OPENGENI_BENCH_POSTURE_JIT;
+if (jit !== undefined && jit !== "on" && jit !== "off") {
+  throw new Error("OPENGENI_BENCH_POSTURE_JIT must be on or off");
+}
 const fixture = await acquireRestrictedRuntimeTestDatabase("posture-budget", "og_data");
 if (!fixture) throw new Error("Real PostgreSQL required");
 const upstream = new URL(fixture.appUrl);
@@ -43,6 +47,11 @@ databaseUrl.hostname = "127.0.0.1";
 databaseUrl.port = String(address.port);
 const client = createDb(databaseUrl.href, { searchPath: fixture.schema, max: 1 });
 const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+if (jit !== undefined) {
+  // Opt-in, benchmark connection only: small fixtures can cross a JIT cost
+  // threshold that the deployed catalog plan does not cross.
+  driver.options.connection.jit = jit;
+}
 let baseline: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 const samples: {
   operation: string;
@@ -60,17 +69,26 @@ driver.options.debug = (_connection, text, parameters) => {
     queries.set(text, [...parameters]);
 };
 try {
+  console.log(
+    JSON.stringify({
+      environment: await driver.unsafe("select version(), current_setting('jit') as jit"),
+    }),
+  );
   if (process.env.OPENGENI_BENCH_POSTURE_BASELINE)
     baseline = await loadRuntimePostureBaseline(
       process.cwd(),
       process.env.OPENGENI_BENCH_POSTURE_BASELINE,
     );
   for (let i = 0; i < 12; i++) {
-    let reference: Awaited<ReturnType<typeof inspectRuntimeDatabasePosture>> | undefined;
-    for (const [operation, inspect] of [
+    const results = new Map<string, Awaited<ReturnType<typeof inspectRuntimeDatabasePosture>>>();
+    const operations = [
       ...(baseline ? [["baseline", baseline.module.inspectRuntimeDatabasePosture] as const] : []),
       ["current", inspectRuntimeDatabasePosture] as const,
-    ]) {
+    ];
+    // Balance connection/cache warm-up rather than always measuring the old
+    // inspector first. Both versions still read the same disposable database.
+    if (i % 2) operations.reverse();
+    for (const [operation, inspect] of operations) {
       statements = 0;
       cycles = 0;
       responseBytes = 0;
@@ -91,15 +109,18 @@ try {
           cpuMs: (elapsedCpu.user + elapsedCpu.system) / 1000,
           statements,
         });
-      if (operation === "baseline") reference = result;
-      else if (reference) {
+      results.set(operation, result);
+      if (results.has("baseline") && results.has("current")) {
         // The old private-table query had no ORDER BY. Compare all its row
         // fields without treating an incidental array order as a posture fact.
         const canonical = (posture: typeof result) => ({
           ...posture,
           privateTables: [...posture.privateTables].sort((a, b) => a.name.localeCompare(b.name)),
+          subscriptionOwnerRoutines: posture.subscriptionOwnerRoutines
+            ? [...posture.subscriptionOwnerRoutines].sort((a, b) => a.name.localeCompare(b.name))
+            : undefined,
         });
-        deepStrictEqual(canonical(result), canonical(reference));
+        deepStrictEqual(canonical(results.get("current")!), canonical(results.get("baseline")!));
       }
       if (i === 0 && operation === "current")
         console.log(

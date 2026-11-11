@@ -581,6 +581,49 @@ describe("ordinary session Codex realtime control", () => {
     expect(calls).toEqual(["start", "input:true", "output:true", "stop"]);
   });
 
+  test("a live call that is silent on one side says so next to the control", async () => {
+    const render = async (kind: "no_input_audio" | "output_silent" | null, inputMuted = false) =>
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            snapshot={{
+              ...idle,
+              status: "active",
+              realtimeId: "redacted-realtime-id",
+              mode: activeMode,
+              inputMuted,
+              diagnostic: kind
+                ? { kind, message: kind, recoverable: true, connectionGeneration: 1, attempt: 0 }
+                : null,
+            }}
+            canStart={false}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+    const note = () => container.querySelector('[data-testid="realtime-audio-flow-issue"]');
+    await render(null);
+    expect(note()).toBeNull();
+    await render("no_input_audio");
+    expect(note()?.textContent).toBe("No sound from your microphone");
+    expect(
+      container
+        .querySelector('[data-testid="realtime-primary-action"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("End voice conversation");
+    await render("no_input_audio", true);
+    expect(note()).toBeNull();
+    await render("output_silent");
+    expect(note()?.textContent).toBe("Reply not played");
+  });
+
   test("notifies the host when voice becomes active so dictate can soft-hide", async () => {
     const activeUpdates: boolean[] = [];
     let current = {
@@ -747,6 +790,44 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(container.textContent).toContain("Connected Codex");
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+  });
+
+  test("the voice model picker marks a model EU-only switched off and won't pick it", async () => {
+    const models: RealtimeModelOption[] = [
+      {
+        id: "opengeni-gateway/openai/gpt-realtime-2.1",
+        label: "GPT Realtime 2.1",
+        provider: "OpenGeni",
+        description: "Best overall voice intelligence",
+        available: false,
+        unavailableReason: "Off here",
+        unavailableCode: "region_restricted",
+        recommended: true,
+      },
+    ];
+    const picked: string[] = [];
+    await act(async () =>
+      root.render(
+        <RealtimeModelPickerMenu
+          models={models}
+          selectedModel={models[0]!}
+          provider="OpenGeni"
+          direction={1}
+          disabled={false}
+          onProviderChange={() => undefined}
+          onSelect={(id) => void picked.push(id)}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("GPT Realtime 2.1");
+    expect(container.textContent).toContain("Not supported in EU");
+    expect(container.textContent).not.toContain("Off here");
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.includes("GPT Realtime 2.1"),
+    );
+    expect(row?.disabled).toBe(true);
+    await act(async () => row?.click());
+    expect(picked).toEqual([]);
   });
 
   test("sets the conversation language for models that need one, defaulting to the app language", async () => {
@@ -1700,7 +1781,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(reason()).toBeNull();
   });
 
-  test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
+  test("shows no voice control while no voice model can run", async () => {
     await act(async () => {
       root.render(
         <RealtimeVoiceControl
@@ -1719,21 +1800,112 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
 
-    const start = container.querySelector<HTMLButtonElement>(
-      '[data-testid="realtime-primary-action"]',
-    );
-    expect(start?.dataset.phase).toBe("unavailable");
-    expect(start?.disabled).toBe(true);
-    // The disabled control names its blocker instead of offering to start.
-    expect(start?.getAttribute("aria-label")).toBe(
-      "Voice model unavailable: Connect Codex to use this voice model.",
-    );
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "Voice model unavailable",
-    );
+    // A disabled button that explains a setup step greets people who never
+    // asked for voice; the control appears once a voice model is available.
+    expect(container.querySelector('[data-testid="realtime-primary-action"]')).toBeNull();
+    expect(container.textContent).not.toContain("Voice model unavailable");
   });
 
-  test("says it is checking voice, not Connect Codex, until the catalog arrives", async () => {
+  test("EU-only voice models switched off: shown, off, saying Not supported in EU once", async () => {
+    const restricted = {
+      id: "gpt-realtime-3",
+      label: "GPT Realtime",
+      provider: "openai",
+      description: "",
+      available: false,
+      unavailableReason: "Not supported in EU",
+      unavailableCode: "region_restricted",
+      recommended: false,
+    } as const;
+    const allowed = {
+      id: "eu-voice",
+      label: "EU voice",
+      provider: "openai",
+      description: "",
+      available: true,
+      recommended: false,
+    } as const;
+    const alsoRestricted = { ...restricted, id: "gpt-realtime-mini", label: "Mini" } as const;
+    // Every voice model restricted, and the saved one restricted beside an EU one.
+    for (const models of [
+      [restricted, alsoRestricted],
+      [restricted, allowed],
+    ]) {
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            key={models.map((model) => model.id).join()}
+            snapshot={idle}
+            canStart={false}
+            admissionBlocker="Not supported in EU"
+            modelAvailable={false}
+            selectedModel={restricted as never}
+            models={models as never}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+
+      const start = container.querySelector<HTMLButtonElement>(
+        '[data-testid="realtime-primary-action"]',
+      );
+      expect(start?.disabled).toBe(true);
+      expect(start?.getAttribute("aria-label")).toBe("Not supported in EU");
+      const status = container.querySelector('[role="status"]')?.textContent ?? "";
+      expect(status).toBe("Not supported in EU");
+    }
+  });
+
+  test("no voice model configured and none restricted: still no control", async () => {
+    const unconnected = {
+      id: "gpt-realtime-3",
+      label: "GPT Realtime",
+      provider: "openai",
+      description: "",
+      available: false,
+      unavailableReason: "Connect a workspace AI Gateway key",
+      recommended: false,
+    } as const;
+    const restricted = {
+      ...unconnected,
+      id: "gpt-realtime-mini",
+      unavailableReason: "Not supported in EU",
+      unavailableCode: "region_restricted",
+    } as const;
+    // One restricted beside one that only needs connecting: not every model is off for the EU.
+    for (const models of [[unconnected], [unconnected, restricted]]) {
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            key={models.length}
+            snapshot={idle}
+            canStart={false}
+            admissionBlocker="Connect a workspace AI Gateway key"
+            modelAvailable={false}
+            selectedModel={unconnected as never}
+            models={models as never}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+      expect(container.querySelector('[data-testid="realtime-primary-action"]')).toBeNull();
+      expect(container.textContent).not.toContain("Not supported in EU");
+    }
+  });
+
+  test("shows no voice control, and never Connect Codex, until the catalog arrives", async () => {
     let resolveCatalog!: (value: { models: unknown[] }) => void;
     const response = new Promise<{ models: unknown[] }>((resolve) => {
       resolveCatalog = resolve;
@@ -1753,13 +1925,10 @@ describe("ordinary session Codex realtime control", () => {
       ),
     );
     const start = () =>
-      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]')!;
-    expect(start().disabled).toBe(true);
-    // A neutral wait, not the alert treatment of a real blocker.
-    expect(start().dataset.phase).toBe("checking");
-    expect(start().getAttribute("aria-label")).toBe(
-      "Checking voice: Finding the voice models you can use.",
-    );
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]');
+    // Until a voice model is known to be usable there is nothing to offer, so
+    // no control greets someone who never asked for voice.
+    expect(start()).toBeNull();
     expect(container.textContent).not.toContain("Connect Codex");
 
     await act(async () => {
@@ -1778,8 +1947,8 @@ describe("ordinary session Codex realtime control", () => {
       });
       await response;
     });
-    expect(start().disabled).toBe(false);
-    expect(start().getAttribute("aria-label")).toBe("Start voice");
+    expect(start()?.disabled).toBe(false);
+    expect(start()?.getAttribute("aria-label")).toBe("Start voice");
   });
 
   test("says voice couldn't load when the catalog fails, not Connect Codex", async () => {
@@ -1928,6 +2097,263 @@ describe("ordinary session Codex realtime control", () => {
       if (top) Object.defineProperty(window, "top", top);
       else delete (window as { top?: unknown }).top;
       query.mockRestore();
+    }
+  });
+});
+
+describe("voice replies in an open chat", () => {
+  const workspaceId = "88888888-8888-4888-8888-888888888881";
+  const sessionId = "88888888-8888-4888-8888-888888888882";
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  /** A provider connection that answers, sends its reply track and opens its event channel. */
+  function fakeVoiceProvider() {
+    let channel: RTCDataChannel | null = null;
+    const replyTrack = { kind: "audio" };
+    const replyStream = new MediaStream();
+    const createPeerConnection = (): RTCPeerConnection => {
+      const peer = new EventTarget() as RTCPeerConnection;
+      const events = new EventTarget() as RTCDataChannel;
+      Object.defineProperties(events, {
+        label: { value: "oai-events" },
+        readyState: { value: "open" },
+        send: { value: () => undefined },
+        close: { value: () => undefined },
+      });
+      channel = events;
+      let local: RTCSessionDescriptionInit | null = null;
+      Object.defineProperties(peer, {
+        localDescription: { get: () => local },
+        connectionState: { value: "connected" },
+        iceConnectionState: { value: "connected" },
+        createDataChannel: { value: () => events },
+        addTrack: { value: () => ({}) },
+        createOffer: { value: async () => ({ type: "offer", sdp: "v=0\r\nm=audio 9 x 111\r\n" }) },
+        setLocalDescription: {
+          value: async (description: RTCSessionDescriptionInit) => {
+            local = description;
+          },
+        },
+        setRemoteDescription: {
+          // Browsers fire the remote track while applying the answer.
+          value: async () => {
+            const event = new Event("track") as RTCTrackEvent;
+            Object.defineProperties(event, {
+              track: { value: replyTrack },
+              streams: { value: [replyStream] },
+            });
+            peer.dispatchEvent(event);
+          },
+        },
+        close: { value: () => undefined },
+      });
+      return peer;
+    };
+    const microphoneTrack = Object.assign(new EventTarget(), {
+      kind: "audio",
+      enabled: true,
+      readyState: "live",
+      stop: () => undefined,
+    });
+    const microphone = {
+      getAudioTracks: () => [microphoneTrack],
+      getTracks: () => [microphoneTrack],
+    } as unknown as MediaStream;
+    const say = (payload: unknown) =>
+      channel?.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+    return {
+      replyStream,
+      createPeerConnection,
+      getUserMedia: async () => microphone,
+      reply(text: string) {
+        say({ type: "session.started", session: { id: "provider-session" } });
+        say({ type: "output_audio.delta", audio: "" });
+        say({ type: "turn.done", turn: { id: "reply", role: "assistant", transcript: text } });
+      },
+    };
+  }
+
+  function voiceClient(resolveCatalog: Promise<{ models: unknown[] }>) {
+    let current: SessionRealtimeControllerSnapshot["mode"] = null;
+    const transcripts: string[] = [];
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => await resolveCatalog,
+      beginSessionRealtime: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { operationId: string; browserInstanceId: string },
+      ) => {
+        current = {
+          ...activeMode,
+          sessionId,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        };
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { expectedConnectionEpoch: number },
+      ) => ({
+        sdp: "v=0\r\nm=audio 9 x 111\r\n",
+        version: "v3",
+        model: "gpt-live-1-boulder-alpha",
+        connectionId: "88888888-8888-4888-8888-888888888883",
+        connectionEpoch: request.expectedConnectionEpoch,
+        startupFenceSequence: 0,
+        modeVersion: current!.version,
+        replay: false,
+      }),
+      activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        request: { entries?: Array<{ kind: string; text?: string | null }> },
+      ) => {
+        for (const entry of request.entries ?? []) {
+          if (entry.kind === "assistant_transcript" && entry.text) transcripts.push(entry.text);
+        }
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: { ...current!, state: "ended" },
+        replay: false,
+      }),
+    };
+    return { client: client as unknown as OpenGeniClient, transcripts };
+  }
+
+  const codexLive = {
+    id: "gpt-live-1-boulder-alpha",
+    label: "Codex Live",
+    provider: "Connected Codex",
+    description: "Deep session integration",
+    available: true,
+    unavailableReason: null,
+    recommended: true,
+  };
+
+  async function settle() {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    }
+  }
+
+  /**
+   * The open chat's voice control stays hidden until the catalog says a voice
+   * model can run, and the call then starts with the same model it was
+   * prepared for. Its replies must still be heard.
+   */
+  async function startVoiceAfterCatalog(options: { blockFirstPlay?: boolean } = {}) {
+    const provider = fakeVoiceProvider();
+    let releaseCatalog!: (value: { models: unknown[] }) => void;
+    const catalog = new Promise<{ models: unknown[] }>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    const { client, transcripts } = voiceClient(catalog);
+    const playing: unknown[] = [];
+    let blockPlay = options.blockFirstPlay === true;
+    const play = spyOn(HTMLMediaElement.prototype, "play").mockImplementation(
+      async function (this: HTMLMediaElement) {
+        if (blockPlay) {
+          blockPlay = false;
+          throw new DOMException("play() needs a user gesture", "NotAllowedError");
+        }
+        playing.push(this.srcObject);
+      },
+    );
+    const { createSessionRealtimeController } = await import("@opengeni/sdk/realtime");
+    const controllerFactory: SessionRealtimeControllerFactory = (controllerOptions) =>
+      createSessionRealtimeController({
+        ...controllerOptions,
+        createPeerConnection: provider.createPeerConnection,
+        getUserMedia: provider.getUserMedia,
+      });
+
+    await act(async () =>
+      root.render(
+        <OpenGeniMessagesProvider>
+          <SessionRealtimeControl
+            client={client as never}
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            sessionStatus="idle"
+            effectiveControl={effectiveControl}
+            events={[]}
+            eventsReady={true}
+            codexConnected={false}
+            controllerFactory={controllerFactory}
+          />
+        </OpenGeniMessagesProvider>,
+      ),
+    );
+    await settle();
+    const primary = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]');
+    expect(primary()).toBeNull();
+
+    await act(async () => {
+      releaseCatalog({ models: [codexLive] });
+      await catalog;
+    });
+    await settle();
+    expect(primary()?.getAttribute("aria-label")).toBe("Start voice");
+    await act(async () => primary()?.click());
+    await settle();
+    expect(primary()?.getAttribute("aria-label")).not.toBe("Start voice");
+
+    await act(async () => provider.reply("Loud and clear."));
+    await settle();
+    return { provider, transcripts, playing, play, primary };
+  }
+
+  test("a reply that shows up as a transcript is also played", async () => {
+    const { provider, transcripts, playing, play, primary } = await startVoiceAfterCatalog();
+    try {
+      expect(transcripts).toContain("Loud and clear.");
+      expect(playing).toContain(provider.replyStream);
+      expect(container.querySelector('[data-testid="realtime-audio-blocked"]')).toBeNull();
+      expect(primary()?.getAttribute("aria-label")).toBe("End voice conversation");
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("a reply the browser won't play asks the person to tap, and that tap plays it", async () => {
+    const { provider, transcripts, playing, play, primary } = await startVoiceAfterCatalog({
+      blockFirstPlay: true,
+    });
+    try {
+      expect(transcripts).toContain("Loud and clear.");
+      expect(playing).toEqual([]);
+      const prompt = container.querySelector<HTMLButtonElement>(
+        '[data-testid="realtime-audio-blocked"]',
+      );
+      expect(prompt?.textContent).toBe("Tap to hear replies");
+      expect(primary()?.getAttribute("aria-label")).toBe("Resume voice audio");
+
+      await act(async () => prompt?.click());
+      await settle();
+      expect(playing).toContain(provider.replyStream);
+      expect(container.querySelector('[data-testid="realtime-audio-blocked"]')).toBeNull();
+    } finally {
+      play.mockRestore();
     }
   });
 });

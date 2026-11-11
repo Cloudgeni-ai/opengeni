@@ -33,6 +33,7 @@ export { useSession, isTitleEvent } from "./hooks/use-session";
 export { useRetainedReads } from "./hooks/shared-query";
 export { readClientConfig } from "./lib/client-config-read";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useSessionStartupTimeline } from "./lib/session-startup-timeline";
 export {
   useSessionReadAcknowledgement,
   type SessionAttentionClientLike,
@@ -75,12 +76,25 @@ export type {
   ComposerState,
   UseComposerOptions,
 } from "./hooks/use-composer";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -106,6 +120,7 @@ export type {
 } from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -118,7 +133,11 @@ export type {
   UseSessionMcpApprovalPolicyResult,
 } from "./hooks/use-session-mcp-approval-policy";
 
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -130,14 +149,23 @@ export type {
 } from "./hooks/use-human-input";
 
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
 } from "./timeline/projection";
-export type { GroupTimelineOptions } from "./timeline/projection";
+export type {
+  GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
+} from "./timeline/projection";
+export { useTimelinePauses } from "./timeline/use-timeline-pauses";
 export type {
   ActivityItem,
   AgentMessageItem,
@@ -173,19 +201,29 @@ export type {
 export { useSessionStart } from "./hooks/use-session-start";
 export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
 export {
+  allowMachineForChat,
   admissionControlNeedsRefresh,
   admissionRecheckControl,
   currentSessionMachineAccess,
   isMachineComputeSelectable,
   personalMachineCopy,
   recheckSessionAdmission,
+  runSavedMessageOnMachine,
+  savedMessageApprovedMachines,
   savedMessageMachineChoices,
+  sessionAdmissionApprovedElsewhere,
+  sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
   sessionAdmissionMachineChangedCopy,
   sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionNeedsMachineAccess,
   sessionAdmissionReason,
 } from "./session-admission-model";
 export type {
+  AllowMachineClient,
+  ApprovedElsewhereCopy,
+  ApprovedMachineChoice,
   PersonalMachineCopy,
   SessionAdmissionCopy,
   SessionAdmissionReason,

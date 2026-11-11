@@ -11,7 +11,10 @@ import type {
 } from "@opengeni/contracts";
 import { AgentBrowserDriver, ManagedBrowserRunner, BrowserPasskeyManager } from "../src";
 import type { BrowserCdpConnection } from "../src/cdp-driver";
+import { CdpConnection } from "../src/cdp";
 import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
+import { encryptString, generateSymmetricKey } from "../../vaults-bitwarden/src/crypto";
+import { cipherPasskeys } from "../../vaults-bitwarden/src/mapping";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
 // (register, sync-only reload, every tab), a cross-origin CAPTCHA iframe and a
@@ -56,16 +59,17 @@ afterAll(async () => {
   }
 });
 
-e2e(
-  "registers a passkey, signs in with it, and signs in again in a fresh browser that only got it through sync, in every tab",
-  async () => {
+e2e.each(["device-bound", "backed-up", "bitwarden", "legacy-missing-flags"] as const)(
+  "vault passkey registration and fresh-browser import: %s",
+  async (source) => {
+    const backedUp = source !== "device-bound";
     const username = `pk-${randomUUID().slice(0, 8)}`;
     const password = "Passkey-User-Password-1!";
     const itemId = randomUUID();
     let stored: BrowserPasskeyCredential;
     const signCounts: number[] = [];
     // ---- browser 1: sign up, register, sign in ----------------------------------
-    const first = await launch("pk1");
+    const first = await launch("pk1", backedUp);
     try {
       let page = await first.driver.start(`${site.url}/signup`);
       page = await act(page, fillByRef(page, "textbox", "Username", username));
@@ -87,6 +91,10 @@ e2e(
       expect(event.origin).toBe(site.url);
       expect(event.credential.rpId).toBe("localhost");
       expect(event.credential.privateKey.length).toBeGreaterThan(100);
+      expect(event.credential).toMatchObject({
+        backupEligibility: backedUp,
+        backupState: backedUp,
+      });
       // The API saves the vault item, acknowledges the event and supplies the item.
       stored = { ...event.credential, itemId };
       expect((await first.sync([stored], [event.eventId])).events).toEqual([]);
@@ -98,11 +106,37 @@ e2e(
       page = await until(first.driver, page.target.id, (o) =>
         hasName(o, `Logged in as ${username}`),
       );
+      if (source === "backed-up") {
+        // A new API attempt can discover capabilities before it has written
+        // the previous assertion's higher counter back to the vault. A read-only
+        // probe must preserve that counter while the stale lease is replaced.
+        const pending = await first.sync(null);
+        const asserted = only(pending.events, "asserted");
+        expect(asserted.signCount).toBeGreaterThan(stored.signCount);
+        await first.sync(null); // capability probe: no credential replacement or ack
+        const reconciled = await first.sync([stored]);
+        expect(only(reconciled.events, "asserted").signCount).toBe(asserted.signCount);
+        await first.sync(null, [asserted.eventId]);
+        page = await act(page, { type: "navigate", url: `${site.url}/logout` });
+        page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
+        page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+        page = await until(first.driver, page.target.id, (o) =>
+          hasName(o, `Logged in as ${username}`),
+        );
+        expect(await serverSignCount(username)).toBeGreaterThan(asserted.signCount);
+      }
       signCounts.push(await assertedSignCount(first, itemId));
     } finally {
       await first.close();
     }
     stored = { ...stored, signCount: signCounts[0]! };
+    if (source === "bitwarden") stored = throughBitwarden(stored);
+    if (source === "legacy-missing-flags") {
+      // Reproduce the old import without changing the key, RP id, handle or
+      // counter. The verifier checks the signature before rejecting BE.
+      const { backupEligibility: _be, backupState: _bs, ...legacy } = stored;
+      stored = legacy;
+    }
     expect(await serverSignCount(username)).toBe(signCounts[0]!);
 
     // ---- browser 2: fresh profile, credential only from sync ----------------------
@@ -113,6 +147,21 @@ e2e(
       let page = await second.driver.start(`${site.url}/passkey/login`);
       expect(hasName(page, "Not signed in")).toBe(true);
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+      if (source === "legacy-missing-flags") {
+        page = await until(second.driver, page.target.id, (o) =>
+          names(o).some((name) =>
+            name.includes("backup_eligibility_mismatch: BE changed since registration"),
+          ),
+        );
+        expect(hasName(page, "Not signed in")).toBe(true);
+        expect(await assertedSignCount(second, itemId)).toBeGreaterThan(signCounts[0]!);
+        expect(site.state().attempts.at(-1)).toMatchObject({
+          username,
+          ok: false,
+          reason: "backup_eligibility_mismatch",
+        });
+        return;
+      }
       page = await until(second.driver, page.target.id, (o) =>
         hasName(o, `Logged in as ${username}`),
       );
@@ -144,9 +193,11 @@ e2e(
     expect(await serverSignCount(username)).toBe(signCounts.at(-1)!);
     const rejected = site
       .state()
-      .attempts.filter((attempt) => attempt.flow === "passkey" && !attempt.ok);
+      .attempts.filter(
+        (attempt) => attempt.flow === "passkey" && attempt.username === username && !attempt.ok,
+      );
     expect(rejected).toEqual([]);
-    evidence.passkey = { username, signCounts };
+    evidence[`passkey-${source}`] = { username, signCounts };
   },
   180_000,
 );
@@ -374,6 +425,37 @@ e2e(
 
 // ---- harness --------------------------------------------------------------------
 
+/** Only freshly generated fixture material; no account or remote vault access. */
+function throughBitwarden(credential: BrowserPasskeyCredential): BrowserPasskeyCredential {
+  const key = generateSymmetricKey();
+  const enc = (value: string) => encryptString(value, key);
+  const [imported] = cipherPasskeys(
+    {
+      type: 1,
+      login: {
+        fido2Credentials: [
+          {
+            credentialId: enc(
+              `b64.${Buffer.from(credential.credentialId, "base64").toString("base64url")}`,
+            ),
+            rpId: enc(credential.rpId),
+            userHandle: enc(credential.userHandle ?? ""),
+            userName: enc(credential.userName ?? ""),
+            userDisplayName: enc(credential.userDisplayName ?? ""),
+            keyValue: enc(credential.privateKey),
+            keyAlgorithm: enc("ECDSA"),
+            keyCurve: enc("P-256"),
+            counter: enc(String(credential.signCount)),
+          },
+        ],
+      },
+    },
+    key,
+  );
+  expect(imported).toBeDefined();
+  return { ...imported!, itemId: credential.itemId };
+}
+
 type Browser = {
   driver: AgentBrowserDriver;
   sync(
@@ -383,7 +465,7 @@ type Browser = {
   close(): Promise<void>;
 };
 
-async function launch(label: string): Promise<Browser> {
+async function launch(label: string, backedUp = false): Promise<Browser> {
   const directory = await mkdtemp(`/tmp/w4cdp-${label}-`);
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
@@ -401,6 +483,32 @@ async function launch(label: string): Promise<Browser> {
     runner,
     focusEmulation: true,
     passkeys,
+    // Simulate a password manager at registration only. The fresh browser's
+    // imports use the production defaults, never these registrar defaults.
+    ...(backedUp
+      ? {
+          connect: async (endpoint: string) => {
+            const connection = await CdpConnection.connect(endpoint);
+            const send = connection.send.bind(connection);
+            connection.send = (method, params, options) =>
+              send(
+                method,
+                method === "WebAuthn.addVirtualAuthenticator"
+                  ? {
+                      ...params,
+                      options: {
+                        ...(params?.options as Record<string, unknown>),
+                        defaultBackupEligibility: true,
+                        defaultBackupState: true,
+                      },
+                    }
+                  : params,
+                options,
+              );
+            return connection;
+          },
+        }
+      : {}),
   });
   drivers.set(browserSessionId, driver);
   return {

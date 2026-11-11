@@ -1,4 +1,5 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
+import type { AppActionApprovalCard } from "./app-action-confirmation";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type {
@@ -8,13 +9,16 @@ import type {
   SessionEventMutation,
 } from "@opengeni/db";
 import type {
+  BillingOrigin,
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
+  InputWaitGuardResult,
   InputWaitRequest,
+  InteractionRequestTargetReader,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -27,9 +31,13 @@ import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
-import type { TurnOutcome } from "../../observability-metrics";
+import type {
+  ModelRequestPreDispatchStage,
+  TurnOutcome,
+  TurnRecoveryCause,
+} from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
-import type { TurnEventPublisher } from "./model-usage";
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
 import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
@@ -56,6 +64,8 @@ export type TurnSettleInput = {
   suppressGoalContinuation?: boolean;
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
+  /** Drop a pending `proactive` compaction request with this settlement. */
+  dropProactiveCompactionRequest?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
 };
@@ -76,6 +86,9 @@ export type TurnControlState = {
   cancellationRequestedAt: number | null;
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   turnMetricOutcome: TurnOutcome | null;
+  /** Set with turnMetricOutcome "recovering"; labels opengeni_turn_recoveries_total. */
+  turnRecoveryCause?: TurnRecoveryCause;
+  turnFailureOrigin?: import("@opengeni/observability").FailureOrigin;
   activityError: unknown;
   acknowledgeQuiescence: boolean;
 };
@@ -111,11 +124,22 @@ export type BillingState = {
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  /** The turn's frozen funding origin: API work spends credits only. */
+  billingOrigin?: BillingOrigin;
+  /** Served by the person's own API key: pays the platform fee. */
+  isByokTurn?: boolean;
+  /** Served by the person's own subscription: no fee, needs a paid plan. */
+  isOwnSubscriptionTurn?: boolean;
 };
 
 export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
+  /** The command fence the attempt writer drain cancelled and quiesced. Set
+   * together with `attemptWritersDrained`; a cancelled fence also refuses
+   * every later command, so a workspace mutation that writes only through it
+   * can no longer write once this is set. */
+  drainedCommandFence: TurnToolCancellationFence | null;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
   machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
@@ -172,25 +196,47 @@ export type EventingState = {
   codemodeDispatcher: CodemodeAttemptDispatcher | null;
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   publish: TurnEventPublisher | null;
+  /** Startup progress receipts that nothing awaits; ordered before later appends. */
+  publishInBackground: TurnBackgroundEventPublisher | null;
+  /** Settles once every background receipt issued so far has finished; never rejects. */
+  backgroundEventsSettled: (() => Promise<void>) | null;
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
-  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<InputWaitGuardResult>) | null;
+  /** Reads the target an interaction_request_human pause names, as it is now. */
+  interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  /**
+   * Set by the stream attempt: the model request now in preparation entered
+   * a pre-dispatch stage. Provider transports report their stages here.
+   */
+  enterModelRequestStage: ((stage: ModelRequestPreDispatchStage) => void) | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
+  /**
+   * The question and facts each app-action approval of this attempt shows,
+   * by call id, as its review saved them: the pending approval event says the
+   * same.
+   */
+  appActionApprovalCards: Map<string, AppActionApprovalCard>;
+  /**
+   * Finished-command text appended to tool results for the model and not yet
+   * matched to its result event; the timeline shows each tool's own output.
+   * Absent means nothing was appended.
+   */
+  commandCompletionNotices?: Set<string> | undefined;
 };
 
-/** Rig telemetry (M3): set once the session loads; empty string for a rig-less
- * turn (mirrors variableSetId). Read by the activity span's finally block. */
+/** Rig telemetry: set once the session loads; empty string for a rig-less
+ * turn. Read by the activity span's finally block. */
 export type WorkspaceRefState = {
-  variableSetId: string;
   rigId: string;
   rigVersionId: string;
 };
@@ -323,10 +369,12 @@ export function createTurnContext(input: {
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
+      billingOrigin: "app",
     },
     sandboxState: {
       resolvedSandbox: null,
       attemptWritersDrained: false,
+      drainedCommandFence: null,
       lateSandboxesAwaitingWriterDrain: new Set(),
       machinePrimarySession: null,
       lazyOwnedSandbox: null,
@@ -369,20 +417,25 @@ export function createTurnContext(input: {
       codemodeDispatcher: null,
       toolCancellationFenceRef: { current: null },
       publish: null,
+      publishInBackground: null,
+      backgroundEventsSettled: null,
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
       inputWaitReplyGuard: null,
+      interactionRequestTargetReader: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      enterModelRequestStage: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
+      appActionApprovalCards: new Map(),
+      commandCompletionNotices: new Set(),
     },
     workspaceRefs: {
-      variableSetId: "",
       rigId: "",
       rigVersionId: "",
     },

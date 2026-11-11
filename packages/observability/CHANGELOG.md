@@ -1,5 +1,334 @@
 # @opengeni/observability
 
+## 6.14.0
+
+### Minor Changes
+
+- ec9cfe4: Distinguish proven customer-provider failures from platform failures in operational metrics, including an OpenRouter account restricted to its own provider keys (on turns, compaction requests and model calls), an OpenRouter key refused at the credit or budget limit the customer set on it, model calls on the workspace's direct and organization compatible connections, Vercel AI Gateway credit, budget and payment-verification refusals, and compaction requests refused for exhausted provider quota. Preserve unknown, generic 404 and malformed-request failures in platform reliability signals.
+
+### Patch Changes
+
+- c7ba98b: On Modal sandboxes, `view_image` now reads any file the agent's own shell can read, such as a page `pdftoppm` just rendered to `/tmp`, the same as on Connected Machine and compute sandboxes. Paths resolve the way the shell resolves them (absolute as given, relative from the workspace root) and are read with the box's own file read, which also removes one validation round trip per image. A path the SDK refuses on a caller-addressed file operation is now counted as `outcome="rejected"` in `opengeni_sandbox_operations_total` instead of `failed`, so it no longer trips the sandbox operation failure-ratio alert.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- af5b686: Report requested context checkpoints as normal transitions, preserve their trigger and size diagnostics, and distinguish context/request-size rejection and checkpoint failure from a generic worker failure. Compaction behavior and model inputs are unchanged.
+- 98938f0: Prepare native call data and microphone-free WebRTC offers while ringing, reuse the workspace voice selection, and overlap outgoing setup with admission. Keep provider calls and microphone capture behind Answer, release abandoned preparation, and expose server setup phase timings.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- 486e0bf: Keep supported published SDKs working against the current hosted API with a
+  deterministic integration matrix and prevent silently removing tested versions.
+  SDK requests identify their package version for content-free request diagnostics;
+  the optional header never changes authorization or compatibility admission.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+  - @opengeni/contracts@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- 232e713: Subscription voice no longer refuses to start when the Codex realtime remote configuration advertises a protocol version other than V3. That version is the desktop client's preference, not a requirement of the call endpoint, so the call now uses the pinned V3 model and architecture (as the Codex CLI does). A refused realtime negotiation now writes one server log line with the provider status, the failing stage, identifier-shaped provider error fields, and the call parameters with their source; the client still gets only the safe message.
+- b5a7db4: Insights usage no longer fails for every request after a chat's usage rows are deleted out of order. Deleting model call facts whose hourly rollup row was already gone used to store their amounts as a negative rollup row, which made every Insights usage read covering that hour return 500. A delete now subtracts only amounts the group holds; otherwise the group is rebuilt from its facts at commit. Migration 1252 rebuilds every hour that already holds a negative rollup row.
+
+  An unexpected API 500 now logs its cause's message (scrubbed of credentials and bounded to 1 KiB) as `causeMessage` in the server log, so the log says why it failed. Responses are unchanged.
+
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+
+## 6.4.0
+
+### Minor Changes
+
+- cdb9d27: Agents answer privacy, retention, training and "where does it run" questions from server facts. The new always-visible `privacy_facts` tool reports the chat's model, provider route and how it is paid for, the route's declared region, whether the workspace is EU-only, the provider's training, retention and processing location from one reviewed table with source links and the date checked, Opengeni's own retention facts, where the deployment hosts app data and where this chat's sandbox runs, and the deployment's privacy policy, subprocessor list, terms and support contact. New optional settings `OPENGENI_DATA_HOSTING_LOCATION` and `OPENGENI_LEGAL_SUBPROCESSORS_URL` declare the hosting and subprocessor list; unset, they are reported as unknown and the agent is pointed to the privacy policy. Unknowns are stated as unknown. The operational contract tells agents to call it for these questions and answer only from it.
+
+### Patch Changes
+
+- 21d0e30: Every way an agent reads a page now withholds the same things. An observation showed the text of private and payment elements, the value of a private text area and the options of a card-expiry select, while a page read withheld exactly that text. Observations now find the page's protected elements the way page reads do and show each protected field as present, labelled and fillable, with its value, options, checked state and description withheld; protected text elsewhere is withheld too, and names or descriptions built from it (a button's contents, aria-labelledby, aria-describedby) keep only their public part. A payment-like id or name (card number, CVC, expiry) marks only a form field, so ordinary page text such as a heading with id="credit-card-offers" stays readable; an action on a protected field names it by its label, never its value. A page read no longer returns text the page does not show, such as the inside of a closed details element. A connected machine that does not answer a request in time now says whether the request may have run or was never sent, and a read says it is safe to retry; a missing controller and missing screen access say how to recover, and a controller that stops while a browser or computer is opening says to open it once more. A read the controller gave up retrying keeps the driver's error class and function in the caller's logs.
+- Updated dependencies [1f918a4]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [c35704f]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+
+## 6.0.2
+
+### Patch Changes
+
+- 7f627c9: A page in the Opengeni desktop app's own window that lacks the shell's bridge now reports it once per page load as the `desktop_bridge_missing` client signal, with the platform and the app version from its user agent. The API counts it in `opengeni_client_desktop_bridge_missing_total{platform}` and logs the version. The account menu no longer offers to download the desktop app inside the app when the bridge is missing; it follows the same desktop decision as the layout (`desktopPlatform`). A window the app opens with `openBlankTab` is named so it keeps the web layout, like other windows the page opens. `desktopPlatformIn` exposes that decision for a given window.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+
+## 5.5.1
+
+### Patch Changes
+
+- 1600e2d: A managed browser, or an attached Chrome's debugger connection, is no longer stopped as idle while the agent session that created or is using it is still working (a turn queued, running, recovering, waiting for capacity or waiting on a person) or deliberately waits (`wait_for_input`). Every two minutes the API lists the browsers held this way (`listAgentHeldBrowserSessions`, migration `1002_browser_wait_hold`) and renews a short hold on each running browser's controller (`POST /v1/browser-sessions/:id/wait-hold`, `BrowserControlClient.holdForWait`): keep it at least five more minutes. A hold only ever extends, so overlapping renewals from several API processes are harmless and nothing needs to end one; once the session neither works nor waits the renewals stop, the hold lapses and the normal idle time counts from its end. The idle release keeps the browser, tabs and page state, but never longer than `BROWSER_WAIT_HOLD_MAX_MS` (60 minutes) after the browser's last use, so a long turn or repeated waits cannot keep a browser nobody uses. Renewals reach a Connected Machine or attached Chrome as the person who most recently started a turn of the holding session, through the explicit `browser.hold` operation with no request grant; a browser held only by sessions no person started is renewed only through a sandbox's cached controller endpoint. A browser held at controller shutdown is handed off and kept by the successor, and a renewal after a restart keeps a handed-off browser the new controller has not adopted yet. A sandbox box holding such a browser is not released as idle under the same rule. A renewal never launches, recovers or counts as a use of a browser and never starts a sandbox; a controller that predates it keeps its plain idle release. Browsers that only observed, and browsers no working or waiting session holds, are released as before.
+
+  `list_agent_held_browser_sessions` ships with its runtime `EXECUTE` withheld for one release (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`), because the previous release's readiness rejects a runtime grant on a SECURITY DEFINER routine it does not know. Until a later migration grants it, the API lists nothing and renews no controller holds; the sandbox box release applies the rule from this release on.
+
+- 093b9e2: Rotating the runtime database password no longer fails operations when many connections log in at the moment a pool switches passwords. Each refused login (SQLSTATE `28P01`) is now attributed to the password that login actually used, captured when it asked for its password, instead of to the password the operation saw when it started. A refusal of a password the pool has already replaced (a stale refusal) never moves the pool. An operation is retried whenever the pool then selects another password than the refused login used (a stale refusal, or a fresh one that moved the pool on, including back to a password a rollback made valid again), under a hard cap of five attempts; a single configured password still fails fast. The five-second straggler grace is removed, so a pool switches back at once when the password it switched to is refused (for example during a rollback); `DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS` (now 0) and the `staleFailureGraceMs`/`now` options remain only as ignored, deprecated compatibility shims. `RotatingDatabasePassword.password(login)` records the position per login, `reportAuthenticationFailure` returns whether the refusal was stale, the `candidate_refused` event gains a `stale` flag and `candidates_exhausted` a `reason` (`every_candidate_refused` or `attempt_cap`). The session-list LISTEN connection retries a newly selected password at once at most four times until it listens again or the files change.
+
+  Credential events now reach structured logs with their pool and facts: they are logged under the reviewed public fields `databasePool`, `credentialIndex`, `credentialFromIndex`, `credentialToIndex`, `credentialCandidates`, `credentialStale`, `credentialFile`, `credentialFileErrorCode` and `reason` (previously the public log projection dropped `pool` and the index fields). Refusals are logged too; repeated refusal, switch and exhaustion lines of one pool are rate-limited (once per 10 seconds per kind, with `suppressedCount`). The exhaustion message is now "database credential retries exhausted". New Prometheus counters, labelled by `pool`: `opengeni_database_credential_refusals_total` (`index`, `refusal` = `stale`|`fresh`), `opengeni_database_credential_switches_total` (`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total` (`index`, `reason`) and `opengeni_database_credential_reloads_total` (`candidates`). `observeDatabaseCredentialEvents(pool, observability)` wires both; `databaseCredentialEventAttributes` and `DATABASE_CREDENTIAL_METRICS` are exported.
+
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactCurrentResponse,
@@ -21,6 +22,7 @@ import {
 } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  createChannel,
   createDb,
   createSession,
   createWorkspaceArtifact,
@@ -38,6 +40,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 
 import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifacts";
+import { registerArtifactCatalogRoutes } from "../src/routes/artifact-catalog";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const SIGNING_SECRET = "workspace-artifacts-test-signing-secret";
@@ -170,6 +173,10 @@ beforeAll(async () => {
     },
   } as unknown as ObjectStorageDependency;
   app = new Hono();
+  registerArtifactCatalogRoutes(app, {
+    settings: testSettings({ productAccessMode: "local", delegationSecret: SIGNING_SECRET }),
+    db: client.db,
+  } as ApiRouteDeps);
   registerWorkspaceArtifactRoutes(app, {
     settings: testSettings({
       productAccessMode: "local",
@@ -208,6 +215,39 @@ async function request(
   if (init.body) headers.set("content-type", "application/json");
   return await app.request(`http://x${path}`, { ...init, headers });
 }
+
+test("UUID link lookup uses real visibility and file precedence across artifact domains", async () => {
+  const base = `/v1/workspaces/${grant.workspaceId}`;
+  const created = await request(grant, ["artifacts:publish"], `${base}/published-artifacts`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: "Link resolution",
+      html: "<!doctype html><h1>Site</h1>",
+      idempotencyKey: crypto.randomUUID(),
+    }),
+  });
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { artifact } = WorkspaceArtifactMutationResponse.parse(await created.json());
+  const path = `${base}/artifact-catalog/${artifact.id}/resolve`;
+  const read = () => request(grant, ["artifacts:read", "files:read"], path);
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "site" });
+  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key)
+    VALUES(${artifact.id},${grant.accountId},${grant.workspaceId},'ready','link.txt','link.txt','text/plain',10,${"a".repeat(64)},'fixture',${artifact.id})`;
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "file" });
+  // Another workspace cannot discover either half of the collision.
+  const foreign = await request(
+    otherGrant,
+    ["artifacts:read", "files:read"],
+    `/v1/workspaces/${otherGrant.workspaceId}/artifact-catalog/${artifact.id}/resolve`,
+  );
+  expect(foreign.status).toBe(404);
+  const missing = await request(
+    grant,
+    ["artifacts:read", "files:read"],
+    `${base}/artifact-catalog/${crypto.randomUUID()}/resolve`,
+  );
+  expect(missing.status).toBe(404);
+});
 
 test("direct uploads publish large HTML with optional downloadable source and immutable retries", async () => {
   const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
@@ -969,6 +1009,73 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     ).toBe(404);
   }, 60_000);
 
+  test("moves a Site row to another project like a chat, without changing the Site", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Project board",
+            html: "<!doctype html><h1>Project</h1>",
+            idempotencyKey: "project-board",
+          }),
+        })
+      ).json(),
+    );
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `Research ${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const path = `${base}/${site.artifact.id}/channel`;
+    const put = (body: unknown) =>
+      requestAsCanonicalLocalHuman(path, { method: "PUT", body: JSON.stringify(body) });
+    // Made outside a chat, the Site sits in Default; its row is the Site itself.
+    const moved = await put({ fromChannelId: null, channelId: project.id });
+    expect(moved.status).toBe(200);
+    expect(SiteProjectResponse.parse(await moved.json())).toEqual({
+      siteId: site.artifact.id,
+      channelId: project.id,
+      siteMoved: true,
+      movedSessionIds: [],
+    });
+    // Back to Default: removed from the project, still published.
+    expect(
+      SiteProjectResponse.parse(
+        await (await put({ fromChannelId: project.id, channelId: null })).json(),
+      ),
+    ).toMatchObject({ channelId: null, siteMoved: true });
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}`)).json(),
+    );
+    expect(detail.artifact.status).toBe("active");
+
+    expect((await put({ channelId: project.id })).status).toBe(422);
+    expect((await put({ fromChannelId: null, channelId: crypto.randomUUID() })).status).toBe(422);
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Project board" },
+      () => put({ fromChannelId: null, channelId: project.id }),
+    );
+    expect(fromSite.status).toBe(403);
+    // Projects are shared: moving needs sessions:control, as for a chat.
+    const body = JSON.stringify({ fromChannelId: null, channelId: project.id });
+    expect(
+      (await request(grant, ["artifacts:read", "sessions:read"], path, { method: "PUT", body }))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["sessions:control"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/channel`,
+          { method: "PUT", body },
+        )
+      ).status,
+    ).toBe(404);
+  }, 60_000);
+
   test("reads a Site's current version alone, for an open Site view's checks", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const site = WorkspaceArtifactMutationResponse.parse(
@@ -1093,7 +1200,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!preparedText || preparedText.type !== "text") throw new Error("Missing upload result");
       const upload = JSON.parse(preparedText.text);
       objects.set(new URL(upload.html.putUrl).pathname.slice(1), {
-        bytes: new TextEncoder().encode("<!doctype html><main>Created through MCP</main>"),
+        // A heavy page (media embedded in the HTML): published, with a warning.
+        bytes: new TextEncoder().encode(
+          `<!doctype html><main>Created through MCP</main><!--${"x".repeat(6 * 1024 * 1024)}-->`,
+        ),
         contentType: "text/html",
       });
       const createdResult = await mcp.callTool({
@@ -1108,6 +1218,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
       if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
+      expect(
+        JSON.parse(createdText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(created.version.sourceSessionId).toBe(attempt.sessionId);
       expect(created.version.sourceTurnId).toBe(attempt.turnId);
       expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
@@ -1156,6 +1269,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!replayText || replayText.type !== "text") throw new Error("missing MCP replay result");
       const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(replayText.text));
       expect(replayed.replayed).toBe(true);
+      expect(
+        JSON.parse(replayText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(replayed.artifact.id).toBe(created.artifact.id);
       expect(objectPutCount).toBe(putsAfterCreate);
 
@@ -1184,6 +1300,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!publishedText || publishedText.type !== "text")
         throw new Error("missing MCP publish result");
       const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
+      expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 

@@ -56,6 +56,21 @@ describe("session-only entry", () => {
     // Refusal copy and the controller's model labels/order are explicit pure
     // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // Source links shown without hosted-search tracking: a dependency-free leaf.
+      "@opengeni/contracts/citation-urls",
+      // Claude citation tags shown as their text: a dependency-free contracts leaf.
+      "@opengeni/contracts/claude-cite-tags",
+      "@opengeni/contracts/claude-subscription-model-ids",
+      // The shared "Machine access needed" sentence for a refused machine move:
+      // a dependency-free contracts leaf shared with the worker and server.
+      "@opengeni/contracts/machine-access",
+      // The MCP server question on a pending approval: a zod-free model leaf.
+      "@opengeni/contracts/mcp-elicitation-model",
+      // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/no-reply",
+      // The archive's stop reason, so an archive never reads as cancelled: a
+      // dependency-free contracts leaf shared with the server.
+      "@opengeni/contracts/session-history",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
       "@opengeni/contracts/values",
       "@opengeni/sdk",
@@ -69,6 +84,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
+      // Timeline ordering shared with server-side conversation snapshots.
+      "@opengeni/sdk/timeline-order",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -100,6 +117,7 @@ describe("session-only entry", () => {
             "@opengeni/sdk",
             "@opengeni/sdk/allowance-refusal",
             "@opengeni/sdk/learning-refusal",
+            "@opengeni/sdk/timeline-order",
           ],
         },
       },
@@ -196,7 +214,22 @@ describe("session-only entry", () => {
     expect(
       reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
     ).toBe(true);
-    expect(reactSources.length).toBe(60);
+    // Pure region-restriction reason helper the model policy reads; types only.
+    expect(reactSources.some((id) => id.endsWith("/src/inference-region.ts"))).toBe(true);
+    // Pure parser for a question the person handed to the agent to decide.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-delegation.ts"))).toBe(true);
+    // Pure send-destination and run-control rules shared with the console and
+    // native screens (a turn parked on a usage limit does not hold a Send).
+    expect(reactSources.some((id) => id.endsWith("/src/session-status-model.ts"))).toBe(true);
+    // Pause spans for a custom timeline, from its events and live control:
+    // paused time is not work and a paused turn reads "Paused".
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
+      true,
+    );
+    // The one way every surface shows an attached image from its stored file
+    // (a restored draft, a queued message, another device).
+    expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
+    expect(reactSources.length).toBe(65);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

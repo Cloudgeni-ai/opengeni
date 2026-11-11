@@ -56,7 +56,7 @@ If your app authenticates with a bearer token instead of cookies, pass it on eve
 
 The function runs per request, so it can return a refreshed token. Pass `fetch` instead when the token must be awaited. A `client` you pass with `baseUrl` is used instead of the one the component would create.
 
-The list shows every chat the user can read; pass `listProps={{ mineOnly: true }}` for only their own, `listProps={{ archive: false }}` to hide "Hide for me", and `newChat={false}` to hide "New chat". Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
+The list shows every chat the user can read; pass `listProps={{ mineOnly: true }}` for only their own, `listProps={{ archive: false }}` to hide "Archive" (it archives the chat for everyone after a short Undo window and needs control of the chat), and `newChat={false}` to hide "New chat". Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
 
 For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
 
@@ -71,6 +71,8 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 
 ## Props
 
+{/* doc-snippets: keys SessionConversationProps from "@opengeni/react/session-ui" */}
+
 | Prop                                                   | Purpose                                                                                  |
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `sessionId`                                            | Required. The session to show                                                            |
@@ -78,6 +80,7 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | `headers`, `fetch`                                     | With `baseUrl`: headers for every request (static or a function), or a custom fetch      |
 | `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
 | `modelPicker`                                          | Show the model picker. Hidden unless the proxy sets `modelSelection: true`               |
+| `agentSignals`                                         | Show the goal pill and agent activity, or only some of it. Defaults to `true`; see below |
 | `toolRegistry`                                         | Your own renderers for your tools                                                        |
 | `renderMessageText`                                    | Custom rendering for message text, such as links into your product                       |
 | `renderAllowanceExhausted`, `allowanceExhaustedLabels` | Replace the row or its words when a [usage allowance](/guides/usage-allowances) runs out |
@@ -86,6 +89,110 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | `composerProps`                                        | Composer options, such as placeholder text                                               |
 
 Remount the component when the signed-in user or tenant changes.
+
+## Hide agent signals from end users
+
+Above the composer, the conversation shows how the agent works: the goal pill
+(for example "Goal · Paused · agent") and, when you pass them in `chromeProps`,
+counts of helper agents and running commands. People who just want an answer
+often don't need these. Turn them off with `agentSignals={false}`:
+
+```tsx
+<SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} agentSignals={false} />
+
+// The full chat takes it through conversationProps:
+<OpenGeniChat baseUrl="/api/opengeni" conversationProps={{ agentSignals: false }} />
+```
+
+Queued messages, approvals and the agent's questions still show. Each turn's
+work row reads only as its status ("Working · 8s", "Worked for 36s"), without
+step previews or your `turnSummary` facets. An automation run shows as its
+one line and its answer, with no work row; a run that is still working, or
+ends with a failure only an operator can fix, shows nothing. React Native's
+`NativeSessionScreen` takes the same `agentSignals={false}` for all of this,
+and to hide its goal, agents and commands chips.
+
+To hide only some of it, pass an object instead. Each switch defaults to
+`true`, so name only what you hide:
+
+| Switch       | Hides                                                                         |
+| ------------ | ----------------------------------------------------------------------------- |
+| `goal`       | The goal pill (and the conversation no longer reads the goal)                 |
+| `agents`     | The helper agents segment                                                     |
+| `commands`   | The running commands segment                                                  |
+| `turnDetail` | Turn-row detail: step previews and your `turnSummary` facets, automation work |
+
+For example, an assistant whose users should see queued messages and helper
+agents, but not a "Goal · Paused" chip:
+
+```tsx
+<SessionConversation
+  baseUrl="/api/opengeni"
+  sessionId={sessionId}
+  agentSignals={{ goal: false }}
+  chromeProps={{ agentsSignal, agentsPanel }}
+/>
+```
+
+Turn rows keep their live step and your facets, because `turnDetail` stays on.
+`true` and `false` keep their meaning: everything shown, or everything hidden.
+`NativeSessionScreen` takes the same object for its chips and turn rows.
+
+The row above the composer (queue, wait, goal and agents) sits in the same
+readable column as the composer, so it lines up with the composer in a wide
+panel. A `className` in `chromeProps` is added to that row; you no longer need
+one to center it.
+
+## Automation runs in the chat
+
+When an automation (a schedule or an event trigger) acts in a chat, the chat
+shows one centered line saying what happened, then the agent's answer. The line
+is the automation's name and what the event that started it says, for example
+"Ticket assigned to you: T-4907 Refund request from Contoso", or just the name
+for a scheduled run. Name automations for the person reading the chat. The
+automation's instructions are never shown; runs recorded before Opengeni kept
+the name read "Automation run".
+
+A run with nothing for the person stays out of the chat. The agent is told to
+answer exactly `NO_REPLY` when a run leaves nothing to see or do, and the chat
+then draws neither the run's line, its work nor its answer. A run that asks the
+person something or needs them to connect an account always shows.
+
+Such a run leaves no other trace for the person either: it does not mark the
+chat unread, open an inbox reply item or send a phone notification. It stays
+in the session's history. When a run (or any turn) does answer, its phone
+notification carries that answer, the same text the chat shows; events that
+arrive close together start one run, so they give one answer and one
+notification.
+
+## Lead the live turn row with your mark
+
+While the agent works, the turn shows one live row, such as "Working · 8s".
+`turnSummary.renderLiveMark` puts your own small mark, for example an animated
+mascot, at the start of that row. It is called with the row's state:
+`{ kind: "working" }`, `{ kind: "waiting", waitingOn: "you" }` when the wait
+needs the reader (an approval or a question), `{ kind: "waiting" }` for other
+waits, or `{ kind: "paused" }`. The mark goes away when the turn settles. Draw
+it about 20 px tall so it fits the row; it is hidden from screen readers
+because the row's words already say what is happening. By default there is no
+mark.
+
+```tsx
+<SessionConversation
+  baseUrl="/api/opengeni"
+  sessionId={sessionId}
+  timelineProps={{
+    turnSummary: { rolling: true, renderLiveMark: (state) => <Mascot state={state.kind} /> },
+  }}
+/>
+
+// The full chat takes it through conversationProps.timelineProps.
+```
+
+Keep `rolling: true` when you pass `turnSummary`: it selects the per-turn
+presentation that has the live row. On React Native, pass
+`renderLiveMark={(state) => <Mascot state={state.kind} />}` to
+`NativeSessionScreen` or `MessageTimeline`.
 
 ## Keep a conversation across layouts
 

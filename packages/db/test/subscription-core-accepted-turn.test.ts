@@ -60,14 +60,14 @@ describe("subscription-core accepted-turn guard", () => {
     expect(statements[1]).toContain("from sessions");
   });
 
-  test("stops before reading session identity when the database capability denies access", async () => {
+  test("SUB-ACCESS-02: stops before reading session identity when the database capability denies access", async () => {
     const { db, statements } = transaction([[{ authorized: false }]]);
 
     await expect(assertSubscriptionCoreAcceptedTurn(db, identity)).resolves.toBe(false);
     expect(statements).toHaveLength(1);
   });
 
-  test("rejects a caller tuple that differs from the accepted turn", async () => {
+  test("SUB-ACCESS-04: rejects a caller tuple that differs from the accepted turn", async () => {
     const { db } = transaction([
       [{ authorized: true }],
       [

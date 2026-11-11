@@ -29,8 +29,6 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     },
     targetSessionId: null,
     reusableSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: "2026-07-20T00:00:00.000Z",

@@ -5,6 +5,7 @@ import {
   SessionConversationView,
 } from "../src/components/session-conversation";
 import { useSessionConversation } from "../src/hooks/use-session-conversation";
+import { useSessionStartupTimeline } from "../src/lib/session-startup-timeline";
 import type { TimelineItem } from "../src/timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent, renderHook } from "./render-hook";
@@ -13,6 +14,29 @@ registerDom();
 
 const TURN = "33333333-3333-4333-8333-333333333333";
 const SENT_AT = new Date(Date.now() - 2_000).toISOString();
+
+test("the shared pending prompt retains attachments without sending or persisting them", async () => {
+  const resources = [{ kind: "file" as const, fileId: "attachment", filename: "garden.jpg" }];
+  const view = await renderHook(
+    () =>
+      useSessionStartupTimeline([], {
+        session: null,
+        events: [],
+        optimisticMessages: [],
+        hasNewer: false,
+        historyReady: false,
+        pendingPrompt: { text: "Plan this garden", sentAt: SENT_AT, resources: resources as never },
+      }),
+    undefined,
+  );
+  try {
+    const prompt = view.result.current.find((item) => item.kind === "user-message");
+    expect(prompt?.kind === "user-message" && prompt.resources).toBe(resources);
+    expect(view.result.current.filter((item) => item.kind === "startup-phase")).toHaveLength(1);
+  } finally {
+    await view.unmount();
+  }
+});
 
 type Control = { state: "active" | "paused"; controlVersion: number } | undefined;
 function session(

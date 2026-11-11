@@ -1,7 +1,11 @@
 # 14. Requests, limits and admission
 
 Status: Accepted, 2026-10-16. Built. Amended 2026-10-20: processor time is
-booked and guaranteed like memory.
+booked and guaranteed like memory. Amended 2026-10-29 by
+[24](0024-busy-sandboxes-are-slowed-never-frozen.md): a sandbox in use is
+never paused for memory (step 3 of the relief is gone), running VMs are
+compressed where the host allows it, and the VMMs' out-of-memory score
+follows their request.
 
 ## Context
 
@@ -145,14 +149,73 @@ pick a VM.
   ceiling would waste idle processors and slow a
   burst that harms nobody, and the request is a floor, as in Kubernetes
   and Modal.
-- A running VM is never compressed or swapped: `memory.swap.max` and
-  `memory.zswap.max` are 0 from launch, after adoption and before every
-  resume, and open only while the agent compresses a paused VM, with
-  `memory.zswap.writeback` at 0 so nothing reaches the swap device. A host
-  that compresses must have zswap on, or the agent refuses to start.
-  Status shows each VM's zswap traffic and memory pressure; a running VM
-  with zswap stores is a bug.
-- VMMs and pagers run with `oom_score_adj` -900, so the host's
+- On a host without the memory rule of 24 (huge pages, compression off or
+  no swap device), a running VM is never compressed or swapped:
+  `memory.swap.max` and `memory.zswap.max` are 0 from launch, after
+  adoption and before every resume, and open only while the agent
+  compresses a paused VM. `memory.zswap.writeback` is always 0, so nothing
+  reaches the swap device. A host that compresses must have zswap on, or
+  the agent refuses to start. Status shows each VM's zswap traffic and
+  memory pressure; there, a running VM with zswap stores is a bug. With
+  the rule, running VMs are compressed as 24 describes.
+- On 4 KiB pages with relief, the VMs together may hold the host's memory
+  less the high watermark before the kernel slows them down: their parent
+  group's `memory.high`, set as the agent starts (and lifted where it
+  does not apply, so no earlier setting lingers). By default that is the
+  memory capacity, so the host keeps the headroom it was promised. The
+  agent does not wait for the kernel to reclaim down to it: kernels
+  without `O_NONBLOCK` for the file reclaim in the write itself, dirty
+  disk pages included, for as long as that makes progress, and a
+  starting agent waiting on that could run out its lease before renewing
+  it. The write runs on a thread of its own, and the agent waits only
+  until the group shows the new limit (or the write fails), which the
+  kernel records before it starts reclaiming. The agent reads the limit back each time it
+  samples, so `max` written by hand lifts its accounting along with the
+  kernel's slowing. Their
+  VMMs, pagers and the page cache of their disks and images count, as in
+  each VM's own group; the kernel drops that page cache first. Running
+  guests are never swapped, so when sandboxes in use go
+  above their request together faster than relief can save them, the
+  kernel otherwise takes what they reach for from everything else: the
+  agent's memory and code, its guard's, the rest of the host's. The agent
+  then grows too slow to renew its lease or to pause anyone. Measured on a
+  32 GiB host: eight guests growing together took it from 12 GiB
+  available to none in 17 s; balloons had nothing to give, two sandboxes
+  were paused, the lease ran out and the guard ended every VM, and in
+  another run the machine reset. A limit a low watermark short of the
+  host's memory was not enough: beside the VMs the kernel's own memory,
+  page tables and compressed pages took most of a gigabyte, so under
+  350 MiB stayed available, the agent reclaimed its own pages and the
+  lease ran out again. Past the limit a guest waits on its own
+  allocations while the kernel reclaims from the VMs' groups first, and
+  nothing ends. Available memory is never more than the limit leaves (the
+  limit less what the VMs' group holds, droppable page cache left out, as
+  for each VM), so at the limit available memory is below the low
+  watermark and relief is already pausing and saving the sandboxes above
+  their request, until it is back at the high watermark. Not
+  `memory.max`: at it the kernel ends a VM, and slowing VMs down is the
+  better failure, as for `memory.low`. The kernel slows every thread of
+  the VMs that takes more memory at the limit, not only guests: the VMM
+  threads that answer the agent and write snapshots too, and their
+  answers come late. So time a VMM's group waits for memory does not
+  count toward a request's deadline, up to two minutes of it a request,
+  as time it spends frozen does not: counted, a pause past the 10 s a
+  control request may take failed as if the VMM were stuck, and the
+  sandboxes relief was saving lost their running programs instead (three
+  in a run on a 32 GiB host). A VMM stuck while its group waits for good,
+  under a limit of its own its guest keeps pushing against, still fails
+  once those two minutes are spent. A capacity given above the limit
+  is kept but warned about: requests within it could then be slowed at
+  the limit. The VMMs' and pagers' own memory is not booked, so a host
+  booked to its last byte with every guest at its request can reach the
+  limit too, and its guests are then slowed slightly; nothing above
+  request is left for relief to save. On huge pages nothing limits them
+  together: guests take their memory from the pool, which their groups do
+  not count, and every awake sandbox is booked whole. An agent of a
+  release before this leaves a limit an earlier one set in place without
+  counting it; `max` in the group's `memory.high` lifts it.
+- VMMs and pagers run with an `oom_score_adj` that follows their request
+  (24; -900 where nothing limits the VMs together), so the host's
   out-of-memory killer ends nearly anything else first, and the agent with
   -999, so it outlasts the VMs it can bring back. It runs in a service unit
   of its own with a `MemoryMax`; VM cgroups lie outside it. Not -1000:
@@ -188,17 +251,19 @@ pick a VM.
      no confirmation limits or foresees and readings count either way.
      The claim covers the moments in which the guest is expected to
      refill; a guest with statistics just ends it sooner. A sandbox whose let-go is
-     unconfirmed is not ballooned again, but step 3 may still pause and
-     save it, keeping its claim, or give it back its claim if it turns
-     out unsavable and stays awake. Pausing frees nothing, so a claim
+     unconfirmed is not ballooned again, but once idle it may still be
+     paused and saved, keeping its claim, or given back its claim if it
+     turns out unsavable and stays awake. Pausing frees nothing, so a claim
      that ends, for whatever reason, still counts until a reading taken
      after that shows what the guest took; a removed sandbox's claim
      lasts until its VM is ended;
-  3. if that is still not enough, the sandbox furthest above its request
-     is paused and saved, held or not. It loses nothing: once its recorded
-     footprint fits above the high watermark, next to the footprints of
-     those let through before it until a reading shows them, it wakes by
-     itself with its programs. Asking for it meanwhile gets `host_full`.
+  3. (Removed by 24: a sandbox in use above its request was paused and
+     saved here, held or not, which lost CI jobs and connections. Busy
+     sandboxes are now bounded, compressed and shrunk from inside
+     instead.) One an earlier agent paused this way still wakes by itself
+     once its recorded footprint fits above the high watermark, next to
+     the footprints of those let through before it until a reading shows
+     them; asking for it meanwhile gets `host_full`.
   Sandboxes within their request are never touched by any of these.
   A VM's balloon is let go again once it runs after any step and after
   adoption, since a restored image or an earlier agent may have left it
@@ -232,7 +297,9 @@ pick a VM.
   at what it holds. A new one starts only in room above the buffer and the
   high watermark that no wake wants: none while a wake is queued for
   memory or refused and held, or before the first memory reading after a
-  start; and it is booked before it starts. Ready
+  start; and it is booked before it starts. A fill keeps room in the
+  budget above the buffer for claims of every ready clone kept, itself
+  included, too. Ready
   clones are the first relief for a wake, the buffer and memory pressure,
   oldest first, ahead of step 1 of the relief above; one still filling is
   left to finish. A ready clone is offered for relief only once it waits
@@ -270,10 +337,23 @@ pick a VM.
   held (anonymous, kernel, socket and huge-page memory and the cache that
   stays), which one read gives at once.
 - Local disk is booked the same way, because a full disk blocks the very
-  saves that relieve memory. Every VM whose state is not saved yet books
-  its worst-case next save: its memory size once where files share extents
-  (XFS), twice where they do not (the merge writes a whole new image), plus
-  64 MiB and a few inodes. Bookings plus a kept-back reserve
+  saves that relieve memory. Every VM whose state is not saved yet, and
+  that the host may save without being asked (its sleep settings save it
+  after some idle time or checkpoint it), books its worst-case next save:
+  its memory size once where files share extents (XFS), twice where they
+  do not (the merge writes a whole new image), plus 64 MiB and a few
+  inodes. A VM the host never saves on its own, such as a CI runner's,
+  which ends when its job does, books no save it would never take: on a
+  host of large runners those bookings alone would refuse creates and
+  wakes for disk that stays free. A save asked of it (a request to sleep
+  to saved or deeper, as a hand-off makes) books its save from the
+  request on, and the host refuses the request at once as host full
+  while the disk cannot book it, so its VM is never paused for a save
+  that would then wait for room. A request short by no more than what
+  bookings that ended since the last reading stood for waits for the next
+  reading, about a second, which decides it, as a create does, and one
+  asked before the host's first reading waits for that; its VM runs
+  meanwhile. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
   filesystem has free, read every sample. A booking whose save has written
@@ -292,8 +372,9 @@ pick a VM.
     disk's length in whole units plus 1/256 of it for the blocks that map
     it (ext4 maps 340 data blocks per 4 KiB of extent tree), less what the
     disk already holds alone. Until a VM is first measured it books the
-    whole bound. The agent measures every sample, before its disk
-    reading: on ext4 every allocated block counts; on XFS, where a disk
+    whole bound. The agent measures every sample, after its free-space
+    reading with the concurrent-write allowance from ADR 6: on ext4 every
+    allocated block counts; on XFS, where a disk
     copied from its template or the base image shares their blocks and a
     write to a shared block takes a new one, only blocks the disk holds
     alone count (`FS_IOC_FIEMAP`), and of those only extents stored as
@@ -301,10 +382,20 @@ pick a VM.
     blocks. On btrfs no block counts and the whole bound stays booked:
     every write there takes new blocks, and the old ones are freed only
     once nothing in their extent is used. A sleeping VM books no growth:
-    no guest writes to its disk.
+    no guest writes to its disk. Its headroom is nevertheless measured
+    while no step holds it, at admission and after a successful pause,
+    so a local wake need not assume the file is empty. A missing or
+    unreadable file keeps the whole bound; an in-flight step is never
+    measured as a resting disk.
   - A wake from object storage books its local copy from admission until
-    the copy is whole: its disk at that bound, its memory image (what the
-    pager fills while the guest runs) and 64 MiB of device state. A failed
+    the copy is whole: its memory image (what the pager fills while the
+    guest runs) and 64 MiB of device state, besides the one disk booking
+    above. Fetching the disk and guest writes fill the same file: they
+    share its bound, not two added reservations. A remote wake replaces
+    the file, so it starts at the whole bound regardless of an earlier
+    local copy's measured headroom; after Fetch it keeps that bound until
+    measured again. The disk is fetched whole before Restore; only memory
+    keeps hydrating alongside the guest. A failed
     fetch keeps it for its retry; a wake that gives up gives it up. The
     agent reports the end of the fill, measured every sample, and a
     restarted agent reports a fill it finds still running. A fill that
@@ -357,6 +448,50 @@ pick a VM.
   least recently used first. A step that fails, such as a save the disk
   cannot hold, shows in the sandbox's status as `failed_step` until the
   same step succeeds on a retry.
+
+### Amendment: count the disk file once (2026-11-04)
+
+`Size.disk` bounds the disk file, and `DiskGrowth` measures what it can
+still allocate. `Size.fetch` now holds only fetched memory and device
+state. The same decomposition applies to first-wake/adopt checks and to
+ongoing reservations. While hydration lasts, the disk's reservation falls
+with measured headroom, rather than retaining a second full disk inside
+`fetch`. Pauses and checkpoints still book the whole disk: trim can free
+blocks the guest immediately reuses, and a checkpoint clone makes formerly
+exclusive extents shared. Missing readings and unsupported extent proofs
+remain conservative. Failed fetches still carry their possible disk and
+memory writes until the next free-space reading, separately from the
+retry's future writes; this is not a second future copy of the disk.
+
+The two memory reservations are **not** the same bytes. Save and checkpoint
+first wait for the fetched base image to be whole (`Job::settled`), but
+that base remains allocated while the snapshot and merge are written.
+With shared extents, changed snapshot pages and their merged image share
+blocks (`copy_file_range`), so the save adds at most one memory image;
+they do not share changed pages with the fetched base. Without shared
+extents, the diff and separate merged output can each take an image, so
+the save needs two. Serializing hydration before the save therefore does
+not allow taking the maximum of the two bookings: the fetched image is
+not removed before the save writes. Keep `save + fetch`, with a 64 MiB
+allowance for each. No save/archive representation changes are needed.
+
+For a 32 GiB disk and 16 GiB memory, with 4 KiB allocation units:
+
+| Reservation | Before | After |
+| --- | ---: | ---: |
+| Remote wake, shared extents | 96.375 GiB / 103.48 GB | 64.25 GiB / 68.99 GB |
+| Remote wake, no shared extents | 112.375 GiB / 120.66 GB | 80.25 GiB / 86.17 GB |
+| Local wake, shared extents, disk holds 24 GiB exclusively after trim | 48.1875 GiB / 51.74 GB | 24.1875 GiB / 25.97 GB |
+
+The disk bound is 32.125 GiB (length plus 1/256); one memory allowance is
+16.0625 GiB. The remote shared-extents case is therefore
+`32.125 + 16.0625 + 16.0625`, not twice the disk plus those images.
+If that disk subsequently holds 24 GiB exclusively while memory still
+hydrates, its future booking is 40.25 GiB / 43.22 GB. A checkpoint during
+hydration restores the whole-disk booking, 64.25 GiB, until the step ends
+and a reading accounts for what it wrote. Local-wake savings depend on
+exclusive allocated blocks, not logical file length or guest-used space;
+shared extents and btrfs may still require the whole disk bound.
 
 ## Consequences
 

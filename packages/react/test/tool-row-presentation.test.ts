@@ -155,6 +155,34 @@ describe("shared tool row presentation", () => {
     expect(title.preview).toEqual({ kind: "text", text: "Fibonacci script" });
   });
 
+  test("a call says why while it rings, then how it ended", () => {
+    const args = { reason: "Production is down" };
+    const ringing = toolRowPresentation(
+      englishText,
+      call({ name: "opengeni__call_user", arguments: args, status: "running" }),
+    );
+    expect(ringing.title).toBe("Calling you");
+    expect(ringing.icon).toBe("phone");
+    expect(ringing.preview).toEqual({ kind: "text", text: "Production is down" });
+    const outcome = (result: Record<string, unknown>) =>
+      toolRowPresentation(
+        englishText,
+        call({ name: "opengeni__call_user", arguments: args, output: JSON.stringify(result) }),
+      ).preview;
+    expect(outcome({ placed: true, outcome: "missed" })).toEqual({
+      kind: "text",
+      text: "No answer · Production is down",
+    });
+    expect(outcome({ placed: true, outcome: "answered" })).toEqual({
+      kind: "text",
+      text: "Answered · Production is down",
+    });
+    expect(outcome({ placed: false, refusal: "no_phone" })).toEqual({
+      kind: "text",
+      text: "Didn't ring · Production is down",
+    });
+  });
+
   test("moving between machines and using a screen read as plain steps", () => {
     const row = (partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">) =>
       toolRowPresentation(englishText, call(partial));
@@ -278,5 +306,27 @@ describe("shared tool row presentation", () => {
     expect(row.tool).toBe("run_on");
     const plain = toolRowPresentation(englishText, call({ name: "tool_invoke", arguments: {} }));
     expect(plain.title).toBe("Used a tool");
+  });
+
+  test("a command's settlement receipt reads as its sentence, not JSON", () => {
+    const sentence =
+      "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.";
+    const row = toolRowPresentation(
+      englishText,
+      call({
+        name: "exec_command",
+        arguments: { cmd: "bun test" },
+        status: "failed",
+        output: { isError: true, content: [{ type: "text", text: sentence }] },
+      }),
+    );
+    expect(row.preview).toEqual({ kind: "text", text: sentence });
+    expect(row.body).toMatchObject({ kind: "term", command: "bun test", output: sentence });
+    // Any other object output keeps its JSON.
+    const other = toolRowPresentation(
+      englishText,
+      call({ name: "exec_command", arguments: { cmd: "ls" }, output: { files: 2 } }),
+    );
+    expect(other.body).toMatchObject({ output: '{\n  "files": 2\n}' });
   });
 });

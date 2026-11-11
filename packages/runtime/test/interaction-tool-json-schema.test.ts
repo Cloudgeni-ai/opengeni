@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { BrowserAction, BrowserActionBatch, ComputerAction } from "@opengeni/contracts";
+import {
+  BROWSER_WAIT_MAX_MS,
+  BrowserAction,
+  BrowserActionBatch,
+  ComputerAction,
+} from "@opengeni/contracts";
 import { jsonSchemaToTypeScript } from "@opengeni/tool-gateway";
 import { z } from "zod";
 import {
@@ -93,6 +98,28 @@ describe("interaction tool model schema", () => {
     expect(executed).toBe(1);
   });
 
+  test("a wait's time limit is shown, and a longer wait names the limit", () => {
+    const input = z.object({ action: z.union([BrowserAction, BrowserActionBatch]) }).strict();
+    const schema = interactionToolInputJsonSchema(input);
+    const action = (schema.properties as Record<string, Record<string, unknown>>).action!;
+    const timeout = (action.properties as Record<string, Record<string, unknown>>).timeoutMs!;
+    // The shown schema drops large bounds as overflow guards, so the limit is
+    // stated in words, matching the enforced one.
+    expect(String(timeout.description)).toContain(`Up to ${BROWSER_WAIT_MAX_MS} (2 minutes)`);
+    const parsed = input.safeParse({
+      action: { type: "wait", condition: "hidden", timeoutMs: BROWSER_WAIT_MAX_MS + 30_000 },
+    });
+    if (parsed.success) throw new Error("expected invalid arguments");
+    expect(describeInvalidToolArguments(parsed.error)).toBe(
+      `Interaction tool arguments are invalid: action.timeoutMs: Too big: expected number to be <=${BROWSER_WAIT_MAX_MS}.`,
+    );
+    expect(
+      input.safeParse({
+        action: { type: "wait", condition: "hidden", timeoutMs: BROWSER_WAIT_MAX_MS },
+      }).success,
+    ).toBe(true);
+  });
+
   test("invalid arguments name the exact field of the variant they chose", () => {
     const input = z
       .object({
@@ -130,6 +157,36 @@ describe("interaction tool model schema", () => {
     ).toBe(
       "Interaction tool arguments are invalid: action.actions.1.key: expected string, received undefined.",
     );
+    // A batch is still the branch chosen when its inner action is wrong,
+    // including an inner action whose own type or locator kind is unknown.
+    expect(
+      explain({
+        type: "batch",
+        fenceEachAction: true,
+        actions: [
+          { type: "click", locator: { kind: "ref", ref: "e1" } },
+          {
+            type: "scroll",
+            locator: { kind: "role", role: "dialog", name: "Notes" },
+            deltaY: 1200,
+          },
+        ],
+      }),
+    ).toBe(
+      "Interaction tool arguments are invalid: action.actions.1.deltaX: expected number, received undefined.",
+    );
+    expect(
+      explain({
+        type: "batch",
+        actions: [{ type: "click", locator: { kind: "ref", ref: "e1" } }, { type: "scrol" }],
+      }),
+    ).toContain("action.actions.1.type: Invalid discriminator value.");
+    expect(
+      explain({
+        type: "batch",
+        actions: [{ type: "click", locator: { kind: "rol", role: "button" } }],
+      }),
+    ).toContain("action.actions.0.locator.kind: Invalid discriminator value.");
     expect(explain({ type: "teleport" })).toContain("action.type: Invalid discriminator value.");
   });
 

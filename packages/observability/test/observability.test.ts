@@ -274,6 +274,19 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
   });
 
+  test("records a caller path rejection apart from provider failures", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    observe({ backend: "modal", op: "viewImage", outcome: "rejected", durationMs: 1 });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="viewImage"[^}]*outcome="rejected"[^}]*\} 1\b/,
+    );
+    // The failure-ratio alert reads outcome="failed" over outcome=~"ok|failed".
+    expect(metrics).not.toMatch(/opengeni_sandbox_operations_total\{[^}]*outcome="(?:failed|ok)"/);
+  });
+
   test("capture waits have distinct bounded metrics and never inflate provider call counts", async () => {
     const exported: unknown[] = [];
     const obs = createObservability(settings, {
@@ -986,6 +999,35 @@ describe("observability", () => {
       clientRoute: "unknown",
       clientRevision: "dev",
     });
+  });
+
+  test("public structured logs admit a desktop app version, never other text", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      for (const clientAppVersion of [
+        "0.1.32",
+        "1.2.3-beta.4",
+        "unknown",
+        "0.1",
+        "x0.1.32",
+        "0.1.32 (Mac)",
+      ]) {
+        obs.warn("version", { clientAppVersion });
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(observed.map((line) => JSON.parse(line).clientAppVersion ?? null)).toEqual([
+      "0.1.32",
+      "1.2.3-beta.4",
+      "unknown",
+      null,
+      null,
+      null,
+    ]);
   });
 
   test("public structured logs admit projected web client error text and nothing raw", () => {

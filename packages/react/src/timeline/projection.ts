@@ -14,8 +14,18 @@ import {
   type SessionStatus,
   type TimelineAnnotation,
 } from "@opengeni/sdk";
+import {
+  isAgentActivityEvent,
+  isTurnExecutionEvidence,
+  orderTimelineEvents,
+  prescanTurnAnchors,
+} from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
+import { isNoReplyText, mayBecomeNoReplyText } from "@opengeni/contracts/no-reply";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
+import { sessionStatusChangeIsArchive } from "../session-status-model";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
 import {
@@ -28,15 +38,18 @@ import {
   sessionUsageLimitReachedMessage,
 } from "@opengeni/sdk/session-usage-limits";
 import {
-  CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
+  creditRefusalKindFromText,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
+  type CreditRefusalKind,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
 import { startupPhaseTitle } from "./platform-activity-presentation";
+import { parseHumanInputDelegation } from "../human-input-delegation";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
@@ -46,6 +59,7 @@ import type {
   GoalItem,
   HumanInputAnswerSummary,
   HumanInputItem,
+  AutomationRunPresentation,
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
@@ -66,6 +80,8 @@ import type {
 } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
+/** Folders a reduced-save notice lists by path; a longer list names kinds. */
+const SAVED_WITHOUT_FOLDERS_SHOWN = 20;
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
 /** Message identity only: queue placement needs the surrounding turn history. */
@@ -264,6 +280,9 @@ export function buildTimeline(
   // (a recheck, a new message, a pause) ends them.
   let openAdmissionBlocks: SessionStatusItem[] = [];
   const presentationFailures = new Map<string | null, SessionStatusItem[]>();
+  // Failure notices of turns that failed before any work, by turn. A Retry
+  // turns them into quiet "retried" steps, like a failed attempt with work.
+  const noWorkFailureNotices = new Map<string, NoticeItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -282,6 +301,16 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // Open approval waits by the approval ids they ask about, so the person's
+  // answer is on the wait the moment it is recorded, before work resumes.
+  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
+  // How each approval was first worded: a later wait that asks again about
+  // the ones still open may carry no display of its own, or other words, and
+  // history keeps the question the person first saw.
+  const approvalWordingById = new Map<
+    string,
+    Pick<NonNullable<NoticeItem["approvalActions"]>[number], "title" | "facts">
+  >();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -370,6 +399,7 @@ export function buildTimeline(
         outcome,
         blockedReason,
         detail: undefined,
+        subject: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -474,6 +504,11 @@ export function buildTimeline(
       }
       if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
         item.status = disposition;
+      }
+      // A call that was still waiting for approval when its turn ended never ran.
+      if (item.kind === "tool-call" && item.awaitingApproval) {
+        item.status = disposition;
+        delete item.awaitingApproval;
       }
       if (item.kind === "sandbox" && item.status === "running") {
         item.status = disposition;
@@ -588,6 +623,11 @@ export function buildTimeline(
         blockedReason,
       );
       recordStartupFailureDetail(setupPhase, payload);
+      const rigName = setupPhase === "rig" ? stringValue(payload.rigName)?.trim() : undefined;
+      if (rigName) {
+        const rigItem = startupPhases.get(`${startupTurnId}:rig`)?.[0];
+        if (rigItem) rigItem.subject = rigName;
+      }
       continue;
     }
 
@@ -626,8 +666,9 @@ export function buildTimeline(
           });
           break;
         }
-        const voiceMessage = realtimeVoiceMessage(payload);
+        const voiceMessage = realtimeVoiceMessage(t, payload);
         const sender = messageSender(payload.initiator);
+        const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
           kind: "user-message",
           id: event.id,
@@ -648,6 +689,7 @@ export function buildTimeline(
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           ...(sender ? { sender } : {}),
+          ...(humanInputDelegation ? { humanInputDelegation } : {}),
           occurredAt: event.occurredAt,
         };
         items.push(userMessage);
@@ -1041,6 +1083,7 @@ export function buildTimeline(
               }
             : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
+        delete target.awaitingApproval;
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
           : truncation && typeof payload.preview === "string"
@@ -1271,6 +1314,7 @@ export function buildTimeline(
           break;
         }
         const blocked = status === "requires_action" && payload.code === "admission_blocked";
+        const archived = sessionStatusChangeIsArchive(payload);
         if (!blocked && openAdmissionBlocks.length > 0) {
           for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
           openAdmissionBlocks = [];
@@ -1290,7 +1334,8 @@ export function buildTimeline(
         if (
           previous?.status === status &&
           !previous.resolvedAt &&
-          Boolean(previous.blocked) === blocked
+          Boolean(previous.blocked) === blocked &&
+          Boolean(previous.archived) === archived
         ) {
           break;
         }
@@ -1300,12 +1345,27 @@ export function buildTimeline(
           status,
           occurredAt: event.occurredAt,
           ...(blocked ? { blocked: true as const } : {}),
+          ...(archived ? { archived: true as const } : {}),
         };
         if (blocked) {
           openAdmissionBlocks.push(item);
           items.push(item);
         } else if (status === "requires_action") rememberPresentationWait(item, turnId);
         else {
+          // A turn's own failure already settles its work row as failed, and
+          // the reason is shown in one place (see `presentedFailureEventIds`).
+          // The status change that follows it is the same fact again, and a
+          // Retry that reopens the turn continues that same work row, so it
+          // gets neither a "failed" divider nor a "work resumed" one.
+          if (
+            status === "failed" &&
+            // A pre-claim status without a turn has no other row to stand on.
+            turnFailedInTimeline(
+              items,
+              payload.code === "pre_claim_failure" ? turnId : (turnId ?? presentationTurnId),
+            )
+          )
+            break;
           items.push(item);
           if (status === "failed") {
             const key = turnId ?? presentationTurnId;
@@ -1326,6 +1386,74 @@ export function buildTimeline(
             text: payload.text,
             occurredAt: event.occurredAt,
           });
+        else if (payload.mode === "checkpoint" && typeof payload.capturedAt === "string") {
+          const capturedAt = new Date(payload.capturedAt);
+          if (!Number.isNaN(capturedAt.getTime()))
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              text: t("timeline.projection.restoredFromOlderSave", {
+                time: capturedAt.toLocaleString(t.locale, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                }),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
+        break;
+      }
+
+      case "sandbox.box.terminated": {
+        // Most shutdowns save the workspace and say nothing. Only a shutdown
+        // that could not save it, or saved it without rebuildable folders,
+        // is worth telling the person.
+        if (payload.captureAbandoned === true) {
+          const unsavedSince =
+            typeof payload.unsavedSince === "string" ? new Date(payload.unsavedSince) : null;
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text:
+              unsavedSince && !Number.isNaN(unsavedSince.getTime())
+                ? t("timeline.projection.filesChangedAfterCouldNotBeSaved", {
+                    time: unsavedSince.toLocaleString(t.locale, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }),
+                  })
+                : t("timeline.projection.filesCouldNotBeSaved"),
+            occurredAt: event.occurredAt,
+          });
+        } else if (
+          payload.persisted === true &&
+          Array.isArray(payload.omittedPaths) &&
+          payload.omittedPaths.length > 0
+        ) {
+          const paths = payload.omittedPaths.filter(
+            (path): path is string => typeof path === "string" && path.length > 0,
+          );
+          if (paths.length > 0)
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "input",
+              // A long list would bury the notice: past a few folders, name
+              // each kind once (node_modules, .venv, ...), a short list by
+              // construction.
+              text: t("timeline.projection.savedWithoutRebuildableFolders", {
+                folders:
+                  paths.length > SAVED_WITHOUT_FOLDERS_SHOWN
+                    ? [...new Set(paths.map((path) => path.slice(path.lastIndexOf("/") + 1)))]
+                        .slice(0, SAVED_WITHOUT_FOLDERS_SHOWN)
+                        .join(", ")
+                    : paths.join(", "),
+              }),
+              occurredAt: event.occurredAt,
+            });
+        }
         break;
       }
 
@@ -1376,17 +1504,69 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
-        rememberPresentationWait(
-          {
-            kind: "notice",
-            id: event.id,
-            tone: "waiting",
-            text: t("timeline.projection.approvalNeededTheTurnIs"),
-            approval: true,
-            occurredAt: event.occurredAt,
-          },
-          turnId,
-        );
+        // The calls named here have not run: they wait for the person.
+        for (const callId of approvalCallIds(payload)) {
+          const call = callsById.get(callId);
+          if (call?.kind === "tool-call" && call.status === "complete" && call.output == null) {
+            call.awaitingApproval = true;
+          }
+        }
+        const approvalActions = approvalActionsOf(payload).map((action) => {
+          const earlier = approvalWordingById.get(action.id);
+          if (earlier) {
+            const { facts: _later, ...rest } = action;
+            return { ...rest, ...earlier };
+          }
+          const worded = { ...action, title: action.title ?? null };
+          if (worded.title)
+            approvalWordingById.set(action.id, {
+              title: worded.title,
+              ...(action.facts ? { facts: action.facts } : {}),
+            });
+          return worded;
+        });
+        const notice: NoticeItem = {
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: t("timeline.projection.approvalNeededTheTurnIs"),
+          approval: true,
+          ...(approvalActions.length > 0 ? { approvalActions } : {}),
+          occurredAt: event.occurredAt,
+        };
+        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
+        rememberPresentationWait(notice, turnId);
+        break;
+      }
+
+      case "user.approvalDecision": {
+        // The person answered: the wait reads as answered at once, saying how,
+        // rather than waiting for the run to resume.
+        if (event.duplicateOfEventId) break;
+        const approvalId = stringValue(payload.approvalId);
+        if (!approvalId || (payload.decision !== "approve" && payload.decision !== "reject")) break;
+        // Opengeni itself rejects a call it refused or whose approval expired;
+        // that is not the person's answer and never reads as theirs.
+        const automatic =
+          payload.decision === "reject" &&
+          (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
+        const decision = automatic ? "automatic_reject" : payload.decision;
+        // The call it names stops waiting too: an approved call runs now, a
+        // rejected one never will.
+        const call = callsById.get(approvalId);
+        if (call?.kind === "tool-call" && call.awaitingApproval) {
+          delete call.awaitingApproval;
+          if (decision === "approve") call.status = "running";
+          else call.approvalRejected = automatic ? "automatic" : "person";
+        }
+        const open = approvalWaitsById.get(approvalId);
+        if (!open) break;
+        approvalWaitsById.delete(approvalId);
+        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+        if (action) action.decision = decision;
+        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+          resolvePresentationWait(event, turnId ?? open.turnId);
+        }
         break;
       }
 
@@ -1411,6 +1591,9 @@ export function buildTimeline(
 
       case "session.context.compacted": {
         closeStreamingTail();
+        // A checkpoint that trimmed history keeps why its summary failed.
+        const fallback = asRecord(payload.fallback);
+        const providerMessage = compactionProviderMessage(fallback);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1419,7 +1602,8 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
-          providerRejection: null,
+          providerRejection: compactionProviderRejection(fallback),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1429,6 +1613,7 @@ export function buildTimeline(
 
       case "session.context.compaction.skipped": {
         closeStreamingTail();
+        const providerMessage = compactionProviderMessage(payload);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1438,6 +1623,7 @@ export function buildTimeline(
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
           providerRejection: compactionProviderRejection(payload),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1470,6 +1656,10 @@ export function buildTimeline(
               item.resolvedAt = event.occurredAt;
             }
             presentationFailures.delete(turnId);
+            for (const notice of noWorkFailureNotices.get(turnId) ?? []) {
+              notice.retriedAttempt = true;
+            }
+            noWorkFailureNotices.delete(turnId);
           }
         }
         break;
@@ -1559,6 +1749,15 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
+          // Its startup rows (including the expected "compact first" model
+          // preparation stop) are part of that same maintenance. Left behind,
+          // they would form a work row no turn-end ever settles.
+          if (turnId) {
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              const item = items[index]!;
+              if (item.kind === "startup-phase" && item.turnId === turnId) items.splice(index, 1);
+            }
+          }
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
@@ -1591,12 +1790,13 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
+          const creditText = creditExhaustionPayloadText(t, payload);
+          items.push(turnEndItem(event, "failed", creditText));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE(t),
+            text: creditText,
             occurredAt: event.occurredAt,
           });
           break;
@@ -1703,7 +1903,7 @@ export function buildTimeline(
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
           : creditExhausted
-            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            ? creditExhaustionPayloadText(t, payload)
             : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
@@ -1727,7 +1927,17 @@ export function buildTimeline(
                   : t("timeline.projection.theTurnStoppedUnexpectedly")
                 : null,
             );
-        items.push(turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail));
+        const end = turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail);
+        items.push(end);
+        // A "failed" status recorded just before this event repeats it.
+        {
+          const key = turnId ?? presentationTurnId;
+          for (const status of presentationFailures.get(key) ?? []) {
+            const index = items.indexOf(status);
+            if (index >= 0 && !status.resolvedAt) items.splice(index, 1);
+          }
+          presentationFailures.delete(key);
+        }
         // The turn's own failed compaction landmark is the one place that
         // shows a compaction failure's recorded text: it receives it, and no
         // separate notice repeats it.
@@ -1756,8 +1966,9 @@ export function buildTimeline(
         }
         if (allowance) {
           allowanceNotice(event, turnId);
+          end.ownRow = "usage-limit";
         } else if (!hadActivity && !landmark) {
-          items.push({
+          const notice: NoticeItem = {
             kind: "notice",
             id: event.id,
             tone: "failed",
@@ -1766,8 +1977,12 @@ export function buildTimeline(
               ? { details: { label: t("timeline.projection.details"), value: failure.detail } }
               : {}),
             occurredAt: event.occurredAt,
-          });
-        }
+          };
+          items.push(notice);
+          end.ownRow = "notice";
+          if (turnId !== null)
+            noWorkFailureNotices.set(turnId, [...(noWorkFailureNotices.get(turnId) ?? []), notice]);
+        } else if (landmark) end.ownRow = "landmark";
         break;
       }
 
@@ -2011,10 +2226,137 @@ export function buildTimeline(
       item.text = stripOpaqueCitationTokens(item.text);
     }
   }
-  return items;
+  return withoutQuietReplies(items);
 }
 
-function realtimeVoiceMessage(payload: Record<string, unknown>): {
+/** What a quiet automation run may hold and still leave the chat. */
+const QUIET_RUN_ITEM_KINDS: ReadonlySet<TimelineItem["kind"]> = new Set([
+  "agent-message",
+  "reasoning",
+  "tool-call",
+  "worker",
+  "sandbox",
+  "startup-phase",
+  "machine-input-batch",
+  "context-compaction",
+  "memory",
+  "knowledge",
+  "turn-end",
+  "turn-steps",
+]);
+
+/**
+ * A final answer of exactly `NO_REPLY` means "nothing for the person here",
+ * so the token itself is never drawn (nor its first letters while it
+ * streams). An automation run that settles with it leaves the chat
+ * entirely: its line saying what happened, its work and its answer. A run
+ * that holds anything for the reader (a question, a connect card, a failure)
+ * stays, without the token.
+ */
+function withoutQuietReplies(items: TimelineItem[]): TimelineItem[] {
+  const answers = new Map<string, AgentMessageItem>();
+  const automationTurns = new Set<string>();
+  const loudTurns = new Set<string>();
+  for (const item of items) {
+    const turnId = "turnId" in item ? item.turnId : null;
+    if (!turnId) continue;
+    if (item.kind === "agent-message" && item.phase !== "commentary") answers.set(turnId, item);
+    if (
+      item.kind === "machine-input-batch" &&
+      item.members.length > 0 &&
+      item.members.every((member) => member.kind === "scheduled_occurrence")
+    ) {
+      automationTurns.add(turnId);
+    }
+    if (
+      !QUIET_RUN_ITEM_KINDS.has(item.kind) ||
+      (item.kind === "turn-end" && item.outcome !== "complete")
+    ) {
+      loudTurns.add(turnId);
+    }
+  }
+  const hiddenAnswers = new Set<AgentMessageItem>();
+  const quietTurns = new Set<string>();
+  for (const [turnId, answer] of answers) {
+    if (answer.streaming ? mayBecomeNoReplyText(answer.text) : isNoReplyText(answer.text)) {
+      hiddenAnswers.add(answer);
+      if (!answer.streaming && automationTurns.has(turnId) && !loudTurns.has(turnId)) {
+        quietTurns.add(turnId);
+      }
+    }
+  }
+  if (hiddenAnswers.size === 0) return items;
+  return items.filter((item) => {
+    if (item.kind === "agent-message" && hiddenAnswers.has(item)) return false;
+    const turnId = "turnId" in item ? item.turnId : null;
+    return !(turnId && quietTurns.has(turnId));
+  });
+}
+
+function automationRunTurnIds(items: readonly TimelineItem[]): Set<string> {
+  const turns = new Set<string>();
+  for (const item of items) {
+    if (
+      item.kind === "machine-input-batch" &&
+      item.turnId &&
+      item.members.length > 0 &&
+      item.members.every((member) => member.kind === "scheduled_occurrence")
+    ) {
+      turns.add(item.turnId);
+    }
+  }
+  return turns;
+}
+
+/**
+ * Automation runs as a person who never sees the agent's work reads them
+ * (`agentSignals: false`): the line saying what happened and the answer,
+ * plus anything that waits on them (a question, an approval, a connect
+ * card). Steps, narration, working rows and plain failures stay out; the
+ * line appears only once there is something under it, so a run that is
+ * still working or ends with nothing for the person never shows.
+ */
+export function automationRunOutcomesOnly(items: TimelineItem[]): TimelineItem[] {
+  const runs = automationRunTurnIds(items);
+  if (runs.size === 0) return items;
+  const runOf = (item: TimelineItem): string | null => {
+    const turnId = "turnId" in item ? item.turnId : null;
+    return turnId && runs.has(turnId) ? turnId : null;
+  };
+  const shown = (item: TimelineItem): boolean => {
+    if (item.kind === "machine-input-batch" || item.kind === "turn-end") return false;
+    if (item.kind === "agent-message") return item.phase !== "commentary";
+    return !QUIET_RUN_ITEM_KINDS.has(item.kind);
+  };
+  const runsWithOutcome = new Set<string>();
+  for (const item of items) {
+    const run = runOf(item);
+    if (run && shown(item)) runsWithOutcome.add(run);
+  }
+  return items.flatMap((item): TimelineItem[] => {
+    const run = runOf(item);
+    if (!run || shown(item)) return [item];
+    if (item.kind === "machine-input-batch") return runsWithOutcome.has(run) ? [item] : [];
+    // The run's end stays so the chat knows it finished, as a plain
+    // completion: a failure only an operator can act on draws nothing.
+    if (item.kind === "turn-end") {
+      if (item.outcome !== "failed") return [item];
+      const { failureDetail: _detail, ...end } = item;
+      return [{ ...end, outcome: "complete", failureText: null }];
+    }
+    return [];
+  });
+}
+
+/**
+ * A voice request shows its transcript. A voice handoff's stored text is a
+ * fixed English notice, not something the person said, so it shows in the
+ * reader's language.
+ */
+function realtimeVoiceMessage(
+  t: OpenGeniText,
+  payload: Record<string, unknown>,
+): {
   text: string;
   presentation: {
     kind: "realtime_voice" | "realtime_voice_handoff";
@@ -2025,9 +2367,14 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
   const visibleText = stringValue(payload.text);
   if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
     const context = stringValue(presentation.context);
-    return visibleText && context
-      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
-      : null;
+    if (!visibleText || !context) return null;
+    return {
+      text:
+        presentation.kind === "realtime_voice_handoff"
+          ? t("timeline.projection.voiceSessionEnded")
+          : visibleText,
+      presentation: { kind: presentation.kind, context },
+    };
   }
   return null;
 }
@@ -2073,7 +2420,9 @@ function humanInputItemFromResponse(
                 .filter((answer): answer is HumanInputAnswer => answer !== null)
             : [],
         }
-      : { outcome };
+      : outcome === "skipped" && response.agentDecides === true
+        ? { outcome, agentDecides: true }
+        : { outcome };
   const questionsById = new Map(questions.map((question) => [question.id, question]));
   const answers =
     normalizedResponse.outcome === "answered"
@@ -2274,10 +2623,40 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * the URL annotation table that would make them resolvable. Keep the canonical
  * model-history item untouched, but never expose those unusable handles in the
  * human timeline. Ordinary markdown links and structured URL citations remain.
+ *
+ * A handle is U+E200, `cite` or `filecite`, U+E202-separated references such
+ * as `turn0search3`, then U+E201. It also reaches the timeline without its
+ * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
+ * text), cut short, or still streaming at the end of the text.
+ *
+ * Claude's web-search citation tags (a `cite` tag with an `index="N-M"`
+ * attribute) become their quoted text. The Claude transport already links them to their
+ * search results where it can; any tag left over, for example in an answer
+ * stored before that, would otherwise show as raw markup. Code keeps them.
+ *
+ * Source links lose the tracking a hosted web search tags onto them
+ * (`utm_source=openai` and the `_t_q` search query); the page's own
+ * parameters stay. Stored history keeps the links as the model wrote them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text.replace(/\s*cite(?:[^]+)+/gu, "");
+  return withoutProviderTrackingInText(
+    rewriteClaudeCiteTags(
+      text
+        .replace(PROVIDER_CITATION_HANDLE, "")
+        .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+        .replace(PROVIDER_CITATION_DELIMITER, "")
+        .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
+    ),
+  );
 }
+
+const PROVIDER_CITATION_HANDLE =
+  /\s*\u{E200}(?:file)?cite(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+/** A handle whose end has not streamed in yet, or never will. */
+const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
+const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
+/** `cite` or `filecite` glued to one or more references, which no prose writes. */
+const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row
@@ -2285,6 +2664,15 @@ export function stripOpaqueCitationTokens(text: string): string {
  * the summary line stays a neutral fact instead of repeating remedy prose.
  */
 const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
+
+/** The credit-stop sentence for a turn-end payload (own key, API use, or none). */
+function creditExhaustionPayloadText(t: OpenGeniText, payload: Record<string, unknown>): string {
+  return creditExhaustionText(
+    t,
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
@@ -2303,6 +2691,26 @@ function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
  * settles any other way (someone topped up and kept working) clears it.
  */
 export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
+  const payload = lastTurnEndPayload(events);
+  return payload ? isCreditExhaustionPayload(payload) : false;
+}
+
+/**
+ * The one-fix refusal (own-key fee or API use) the session's most recent turn
+ * ended on, or null. Read from the same LAST turn-end as
+ * `creditExhaustedFromEvents`, so a stop between model calls (a completed,
+ * budget-exhausted turn) names its fix too, and an older failure never does.
+ */
+export function creditRefusalFromEvents(events: SessionEvent[]): CreditRefusalKind | null {
+  const payload = lastTurnEndPayload(events);
+  if (!payload || !isCreditExhaustionPayload(payload)) return null;
+  return creditRefusalKindFromText(
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
+
+function lastTurnEndPayload(events: SessionEvent[]): Record<string, unknown> | null {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const event = ordered[index];
@@ -2313,9 +2721,9 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
     ) {
       continue;
     }
-    return isCreditExhaustionPayload(asRecord(event.payload));
+    return asRecord(event.payload);
   }
-  return false;
+  return null;
 }
 
 /** The latest session status carried in the event log, if any. */
@@ -2331,6 +2739,184 @@ export function sessionStatusFromEvents(events: SessionEvent[]): SessionStatus |
     }
   }
   return null;
+}
+
+/**
+ * A span in which the session's work was paused: by Pause of the chat, of
+ * an ancestor, or of the workspace. An open span (no `endedAt`) is a pause
+ * still in force.
+ */
+export type TimelinePauseSpan = { startedAt: string; endedAt?: string };
+
+/**
+ * The host's live view of the session's Pause, from its effective control.
+ * `since` is when the pause in force began, when known. `resumedAt` is when
+ * the host saw the pause end, for a resume whose events have not arrived.
+ */
+export type TimelineLivePause = {
+  paused: boolean;
+  since?: string | null | undefined;
+  resumedAt?: string | null | undefined;
+};
+
+/** Interruption reasons that park a turn for Resume rather than end it. */
+const PAUSE_INTERRUPTION_REASONS: ReadonlySet<unknown> = new Set([
+  "session_pause",
+  "workspace_pause",
+]);
+
+type LivePauseBlocker = { changedAt?: string | null | undefined };
+
+/**
+ * The live pause from an effective session control; undefined when it is
+ * unknown. A pause in force since several blockers took hold began with the
+ * earliest of them.
+ */
+export function timelineLivePause(
+  control:
+    | {
+        state: string;
+        primaryBlocker?: LivePauseBlocker | null | undefined;
+        blockers?: readonly LivePauseBlocker[] | null | undefined;
+      }
+    | null
+    | undefined,
+): TimelineLivePause | undefined {
+  if (!control) return undefined;
+  if (control.state !== "paused") return { paused: false };
+  let since: string | null = null;
+  for (const blocker of [control.primaryBlocker, ...(control.blockers ?? [])]) {
+    const changedAt = blocker?.changedAt;
+    if (changedAt && (since === null || Date.parse(changedAt) < Date.parse(since)))
+      since = changedAt;
+  }
+  return { paused: true, since };
+}
+
+/** Events that start or end a pause span. */
+const PAUSE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "session.control.paused",
+  "session.control.resumed",
+  "turn.recovery.requested",
+  "session.status.changed",
+  "turn.started",
+]);
+
+/**
+ * When the session's work was paused, from its events and (when the host
+ * knows it) its live control.
+ *
+ * Pause parks the running turn for Resume instead of ending it, so the turn
+ * stays open. A direct Pause records `session.control.paused`; a Pause of an
+ * ancestor or of the workspace reaches the chat only as the interruption
+ * (`turn.recovery.requested` with a pause reason) and the parked idle status.
+ * Work resumes with `session.control.resumed`, or when the turn runs again.
+ * A wait that a pause held without interrupting anything has no events at
+ * all, so the live control decides whether a pause is in force now, and
+ * `observed` carries pauses the host saw begin and end only through it.
+ */
+export function timelinePauseSpans(
+  events: readonly SessionEvent[],
+  live?: TimelineLivePause | null,
+  observed: readonly TimelinePauseSpan[] = [],
+): TimelinePauseSpan[] {
+  let latest: SessionEvent | undefined;
+  const relevant: SessionEvent[] = [];
+  for (const event of events) {
+    if (!latest || event.sequence > latest.sequence) latest = event;
+    if (PAUSE_EVENT_TYPES.has(event.type)) relevant.push(event);
+  }
+  relevant.sort((left, right) => left.sequence - right.sequence);
+  const spans: TimelinePauseSpan[] = [];
+  let open: TimelinePauseSpan | null = null;
+  // Cancel also leaves the control paused while the turn winds down; that is
+  // not a pause of the work, which is ending.
+  let cancelling = false;
+  for (const event of relevant) {
+    const payload = asRecord(event.payload);
+    if (
+      (event.type === "session.control.paused" && payload.terminal === true) ||
+      // A parent's Cancel reaches its sub-chats as their status alone.
+      (event.type === "session.status.changed" && payload.status === "cancelled")
+    ) {
+      cancelling = true;
+      continue;
+    }
+    const starts =
+      event.type === "session.control.paused" ||
+      (event.type === "turn.recovery.requested" &&
+        PAUSE_INTERRUPTION_REASONS.has(payload.reason)) ||
+      (event.type === "session.status.changed" &&
+        payload.status === "idle" &&
+        payload.reason === "paused_recovery_settled");
+    if (starts) {
+      open ??= { startedAt: event.occurredAt };
+      continue;
+    }
+    if (
+      event.type === "session.control.resumed" ||
+      event.type === "turn.started" ||
+      (event.type === "session.status.changed" && payload.status === "running")
+    ) {
+      cancelling = false;
+      if (open) {
+        spans.push({ startedAt: open.startedAt, endedAt: event.occurredAt });
+        open = null;
+      }
+    }
+  }
+  const latestAt = latest?.occurredAt;
+  if (live?.paused && !cancelling) {
+    const startedAt = open?.startedAt ?? live.since ?? latestAt;
+    if (startedAt) spans.push({ startedAt });
+  } else if (open) {
+    if (live) {
+      // The host already sees the session running again; its resume events
+      // are still on their way. End the pause when the host saw it end.
+      const endedAt = live.resumedAt ?? latestAt ?? open.startedAt;
+      spans.push({
+        startedAt: open.startedAt,
+        endedAt: Date.parse(endedAt) > Date.parse(open.startedAt) ? endedAt : open.startedAt,
+      });
+    } else {
+      spans.push(open);
+    }
+  }
+  // A pause seen only through the live control, by the host's clock; skip it
+  // where the events record the same pause.
+  const recorded = [...spans];
+  for (const span of observed) {
+    if (!span.endedAt) continue;
+    const start = Date.parse(span.startedAt);
+    const end = Date.parse(span.endedAt);
+    const overlaps = recorded.some(
+      (other) =>
+        Date.parse(other.startedAt) < end &&
+        (other.endedAt === undefined || Date.parse(other.endedAt) > start),
+    );
+    if (!overlaps) spans.push(span);
+  }
+  return spans;
+}
+
+/** Total length of the union of intervals, each clipped to `[from, to)`. */
+function unionLength(
+  intervals: ReadonlyArray<readonly [number, number]>,
+  from: number,
+  to: number,
+): number {
+  const clipped = intervals
+    .map(([start, end]) => [Math.max(start, from), Math.min(end, to)] as const)
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+    .sort((left, right) => left[0] - right[0]);
+  let total = 0;
+  let cursor = Number.NEGATIVE_INFINITY;
+  for (const [start, end] of clipped) {
+    const begin = Math.max(start, cursor);
+    if (end > begin) total += end - begin;
+    cursor = Math.max(cursor, end);
+  }
+  return total;
 }
 
 /* ----------------------------------------------------------------------------
@@ -2395,11 +2981,36 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   }
 }
 
+/**
+ * Some models emit a whitespace-only assistant message (often just "\n\n")
+ * around every tool call. It has nothing to read, so it never becomes a
+ * timeline row: an empty row still takes the list's row gap, and dozens of
+ * them open a blank band in a long turn. It shows up once it has text.
+ */
+function isBlankAgentMessage(item: TimelineItem): boolean {
+  return item.kind === "agent-message" && !item.text.trim();
+}
+
 export type GroupTimelineOptions = {
   /** Readable assistant prose with an independent work summary for each turn. */
   readableTurns?: boolean;
   /** @deprecated Use readableTurns. Cross-turn exchange folding has been removed. */
   foldExchanges?: boolean;
+  /**
+   * When the session was paused ({@link timelinePauseSpans}). A readable
+   * turn still open under a pause in force reads as paused, and paused time
+   * is not counted as work.
+   */
+  pauses?: readonly TimelinePauseSpan[];
+  /**
+   * Session-failure event ids the host already presents itself, together
+   * with what can be done about them (for example a failed-session banner
+   * with Retry). A failure is shown once: for these the timeline keeps only a
+   * quiet "Failed" on the turn's work row and never repeats their text. The
+   * failure's own notice is left out, and its turn end keeps the outcome
+   * without the text. Other failures keep their text in the timeline.
+   */
+  presentedFailureEventIds?: readonly string[] | undefined;
 };
 
 export function groupTimeline(
@@ -2407,8 +3018,26 @@ export function groupTimeline(
   items: TimelineItem[],
   options: GroupTimelineOptions = {},
 ): TimelineGroup[] {
-  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(t, items);
+  if (options.presentedFailureEventIds?.length)
+    items = withoutPresentedFailureText(items, options.presentedFailureEventIds);
+  if (options.readableTurns || options.foldExchanges)
+    return groupReadableTurns(t, items, options.pauses ?? []);
   const groups: TimelineGroup[] = [];
+  // A failure's own notice (a turn that failed before any work, keyed by the
+  // failure event like its turn end) carries its text; the turn header then
+  // keeps only the outcome.
+  const failureNoticeIds = new Set(
+    items.flatMap((item) =>
+      item.kind === "notice" &&
+      item.tone === "failed" &&
+      !item.allowance &&
+      !item.sessionUsageLimit &&
+      !item.learningRefusal
+        ? [item.id]
+        : [],
+    ),
+  );
+  const replaced = replacedAttemptEnds(items);
   for (const item of items) {
     // A recovered capacity wait is over; it leaves no warning behind.
     if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
@@ -2426,20 +3055,101 @@ export function groupTimeline(
       continue;
     }
     if (item.kind === "turn-end") {
-      stampTurnOutcome(groups, item);
-      foldSettledTurn(groups, item);
+      const ownNotice =
+        item.outcome === "failed" && failureNoticeIds.has(item.id.replace(/-turn-end$/, ""));
+      // An attempt a Retry replaced is one quiet step; the turn's final
+      // settlement folds both attempts together. Its own steps keep its own
+      // outcome, and a failure with its own row needs no second step.
+      if (replaced.has(item.id)) {
+        // Its quiet step (or its own row) carries the text.
+        stampTurnOutcome(groups, withoutFailureText(item));
+        if (!item.ownRow) groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
+        continue;
+      }
+      const settled = ownNotice ? withoutFailureText(item) : item;
+      stampTurnOutcome(groups, settled);
+      foldSettledTurn(groups, settled);
       continue;
     }
+    if (isBlankAgentMessage(item)) continue;
     groups.push({ kind: "item", item });
   }
   return groups;
 }
 
+/** See `GroupTimelineOptions.presentedFailureEventIds`. Matches by item identity, never wording. */
+function withoutPresentedFailureText(
+  items: TimelineItem[],
+  eventIds: readonly string[],
+): TimelineItem[] {
+  const ids = new Set(eventIds);
+  const turnEnds = new Set(eventIds.map((id) => `${id}-turn-end`));
+  // An attempt a Retry really replaced keeps its own text on its quiet step.
+  const replaced = replacedAttemptEnds(items);
+  return items.flatMap((item): TimelineItem[] => {
+    if (
+      item.kind === "notice" &&
+      item.tone === "failed" &&
+      ids.has(item.id) &&
+      !(item.retriedAttempt && replaced.has(`${item.id}-turn-end`)) &&
+      !item.allowance &&
+      !item.sessionUsageLimit &&
+      !item.learningRefusal
+    )
+      return [];
+    if (item.kind === "turn-end" && item.outcome === "failed" && turnEnds.has(item.id)) {
+      if (replaced.has(item.id)) return [item];
+      return [withoutFailureText(item)];
+    }
+    return [item];
+  });
+}
+
+/**
+ * Failed settlements of attempts a Retry replaced (`resumedAt`). A Retry
+ * refused before it started records its own failure, so it reads as one more
+ * failed attempt.
+ */
+function replacedAttemptEnds(items: readonly TimelineItem[]): Set<string> {
+  const replaced = new Set<string>();
+  for (const item of items)
+    if (item.kind === "turn-end" && item.outcome === "failed" && item.resumedAt)
+      replaced.add(item.id);
+  return replaced;
+}
+
+/** A failed settlement that keeps its outcome but leaves its text to another row. */
+function withoutFailureText(item: TurnEndItem): TurnEndItem {
+  const { failureDetail: _detail, ...rest } = item;
+  return { ...rest, failureText: null };
+}
+
+/** The quiet "Attempt failed · retried" step for an attempt a Retry replaced. */
+function retriedAttemptNotice(t: OpenGeniText, item: TurnEndItem): NoticeItem {
+  return {
+    kind: "notice",
+    id: item.id,
+    tone: "failed",
+    text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
+    retriedAttempt: true,
+    ...(item.failureDetail
+      ? { details: { label: t("timeline.projection.details"), value: item.failureDetail } }
+      : {}),
+    occurredAt: item.occurredAt,
+  };
+}
+
 /** Live prose stays primary; settled progress joins its own turn's work history. */
-function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGroup[] {
+function groupReadableTurns(
+  t: OpenGeniText,
+  items: TimelineItem[],
+  pauses: readonly TimelinePauseSpan[],
+): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  // Attempts a Retry replaced; a Retry that never ran leaves the turn's outcome.
+  const replaced = replacedAttemptEnds(items);
   // Turn identity and settlement exist even when a final-only turn has no
   // disclosure. A late receipt must not become a new turn or revive its clock.
   const seenTurns = new Set<string>();
@@ -2572,12 +3282,12 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "notice" && item.capacityWait) {
-      const pauses = idleSpans.get(key) ?? [];
-      pauses.push({
+      const idle = idleSpans.get(key) ?? [];
+      idle.push({
         startedAt: item.occurredAt,
         ...(item.resolvedAt ? { endedAt: item.resolvedAt } : {}),
       });
-      idleSpans.set(key, pauses);
+      idleSpans.set(key, idle);
       if (!item.resolvedAt) {
         if (settlements.has(key)) groups.push({ kind: "item", item });
         else {
@@ -2587,10 +3297,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
     } else if (item.kind === "turn-end") {
       if (item.handedOver) handedOverTurns.add(key);
-      if (item.resumedAt) {
+      const retried = Boolean(item.resumedAt) && replaced.has(item.id);
+      if (retried) {
         idleSpans.set(key, [
           ...(idleSpans.get(key) ?? []),
-          { startedAt: item.occurredAt, endedAt: item.resumedAt },
+          { startedAt: item.occurredAt, endedAt: item.resumedAt! },
         ]);
       } else {
         settlements.set(key, {
@@ -2602,22 +3313,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
       const group = turns.get(key);
       if (group?.work) {
-        if (item.resumedAt) {
-          group.work.details.push({
-            kind: "item",
-            item: {
-              kind: "notice",
-              id: item.id,
-              tone: "failed",
-              text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
-              ...(item.failureDetail
-                ? {
-                    details: { label: t("timeline.projection.details"), value: item.failureDetail },
-                  }
-                : {}),
-              occurredAt: item.occurredAt,
-            },
-          });
+        if (retried) {
+          // A failure with its own row (a compaction landmark or usage-limit
+          // row) already stands for the attempt.
+          if (!item.ownRow)
+            group.work.details.push({ kind: "item", item: retriedAttemptNotice(t, item) });
           continue;
         }
         group.outcome = item.outcome;
@@ -2679,7 +3379,8 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
+      if (!liveApprovalWait && !liveStatusWait && !isBlankAgentMessage(item))
+        groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -2693,6 +3394,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
                 ? t("timeline.projection.waitingForYou")
                 : t("timeline.projection.waiting"),
             since: item.occurredAt,
+            ...(item.approval === true ? { waitingOn: "you" as const } : {}),
           };
         } else if (
           item.kind === "session-status" &&
@@ -2703,6 +3405,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
           current.waiting = {
             label: t("timeline.projection.waitingForYou"),
             since: item.occurredAt,
+            waitingOn: "you",
           };
         } else if (
           item.kind === "session-status" &&
@@ -2741,17 +3444,38 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         untimed: true,
       };
     }
-    const pausedMs = (idleSpans.get(key) ?? []).reduce((total, pause) => {
-      if (!pause.endedAt) return total;
-      const start = Math.max(Date.parse(work.startedAt), Date.parse(pause.startedAt));
-      const end = Math.min(
-        work.endedAt ? Date.parse(work.endedAt) : Number.POSITIVE_INFINITY,
-        Date.parse(pause.endedAt),
-      );
-      return Number.isFinite(start) && Number.isFinite(end) && end > start
-        ? total + end - start
-        : total;
-    }, 0);
+    const workStart = Date.parse(work.startedAt);
+    const workEnd = work.endedAt ? Date.parse(work.endedAt) : Number.POSITIVE_INFINITY;
+    // A pause still in force over this open turn: the turn is parked for
+    // Resume, so it reads as paused and its clock stops when the pause began.
+    // A wait on the person (an approval, a question) keeps saying so.
+    const openPause =
+      work.endedAt || work.waiting?.waitingOn === "you"
+        ? undefined
+        : pauses.find((pause) => !pause.endedAt && Date.parse(pause.startedAt) < workEnd);
+    const pausedAt = openPause
+      ? Math.max(workStart, Date.parse(openPause.startedAt))
+      : Number.POSITIVE_INFINITY;
+    if (openPause && Number.isFinite(pausedAt)) {
+      work.pausedAt = new Date(pausedAt).toISOString();
+      delete work.waiting;
+    }
+    // Capacity waits, failed-attempt gaps and pauses can overlap; their union
+    // is time the agent was not working. A span still open runs to the end of
+    // the work (a turn cancelled while paused) or to the pause that stopped
+    // its clock; on a turn still running it has no end yet and counts later.
+    const until = Math.min(workEnd, pausedAt);
+    const pausedMs = unionLength(
+      [...(idleSpans.get(key) ?? []), ...pauses].flatMap((span) =>
+        span.endedAt
+          ? [[Date.parse(span.startedAt), Date.parse(span.endedAt)] as const]
+          : Number.isFinite(until)
+            ? [[Date.parse(span.startedAt), until] as const]
+            : [],
+      ),
+      workStart,
+      until,
+    );
     if (pausedMs > 0) work.pausedMs = pausedMs;
   }
   groups = groups.filter((entry) => {
@@ -3127,14 +3851,7 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
 
 /* --- helpers ---------------------------------------------------------------- */
 
-type TurnAnchorPrescan = {
-  queuedTurnByTrigger: Map<string, string>;
-  startSeqByTrigger: Map<string, number>;
-  cancelledBeforeStartTriggers: Set<string>;
-  directChatSequenceByTrigger: Map<string, number>;
-  explicitQueuedTriggers: Set<string>;
-  startedTurnIds: Set<string>;
-};
+export { isTurnExecutionEvidence };
 
 /** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
 export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {
@@ -3150,235 +3867,6 @@ export function timelineQuestionPlacement(question: SessionEvent, evidence: Sess
   )
     return { kind: "pending" as const };
   return { kind: "visible" as const, sequence: question.sequence };
-}
-
-function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
-  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
-  const queuedTurnByTrigger = new Map<string, string>();
-  const startSeqByTrigger = new Map<string, number>();
-  const cancelledTurnIds = new Set<string>();
-  const withdrawnTurnIds = new Set<string>();
-  const fallbackSeqByTurn = new Map<string, number>();
-  const directChatSequenceByTrigger = new Map<string, number>();
-  const explicitQueuedTriggers = new Set<string>();
-  const queueSteerSequenceByTurn = new Map<string, number>();
-  const startedTurnIds = new Set<string>();
-  const userMessageSequenceById = new Map<string, number>();
-
-  for (const event of ordered) {
-    const payload = asRecord(event.payload);
-    const turnId = event.turnId ?? null;
-    if (event.type === "user.message") {
-      userMessageSequenceById.set(event.id, event.sequence);
-      if (payload.routing === "queued_for_execution") {
-        explicitQueuedTriggers.add(event.id);
-      } else if (
-        payload.routing === "accepted_for_execution" ||
-        payload.routing === "accepted_for_steering"
-      ) {
-        directChatSequenceByTrigger.set(event.id, event.sequence);
-      }
-    }
-    if (event.type === "user.message" && payload.delivery === "steer") {
-      directChatSequenceByTrigger.set(event.id, event.sequence);
-    }
-    if (event.type === "session.control.steer_requested") {
-      const targetTurnId = typeof payload.targetTurnId === "string" ? payload.targetTurnId : null;
-      if (targetTurnId && !queueSteerSequenceByTurn.has(targetTurnId)) {
-        queueSteerSequenceByTurn.set(targetTurnId, event.sequence);
-      }
-    }
-    if (
-      event.type === "session.queue.changed" &&
-      (payload.operation === "edit" || payload.operation === "delete")
-    ) {
-      const withdrawnTurnId =
-        typeof payload.turnId === "string" ? payload.turnId : (turnId ?? null);
-      if (withdrawnTurnId) withdrawnTurnIds.add(withdrawnTurnId);
-    }
-    if (event.type === "turn.queued") {
-      const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
-      if (triggerEventId && queuedTurnId) {
-        queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
-        if (
-          (payload.routing === "accepted_for_execution" ||
-            payload.routing === "accepted_for_steering") &&
-          !directChatSequenceByTrigger.has(triggerEventId)
-        ) {
-          directChatSequenceByTrigger.set(
-            triggerEventId,
-            userMessageSequenceById.get(triggerEventId) ?? event.sequence,
-          );
-        }
-      }
-      continue;
-    }
-    if (event.type === "turn.started") {
-      const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      if (triggerEventId && !startSeqByTrigger.has(triggerEventId)) {
-        startSeqByTrigger.set(triggerEventId, event.sequence);
-      }
-      if (turnId) {
-        startedTurnIds.add(turnId);
-      }
-    } else if (event.type === "turn.cancelled" && turnId) {
-      cancelledTurnIds.add(turnId);
-    }
-
-    if (turnId && isTurnExecutionEvidence(event.type)) {
-      const previous = fallbackSeqByTurn.get(turnId);
-      if (previous === undefined || event.sequence < previous) {
-        fallbackSeqByTurn.set(turnId, event.sequence);
-      }
-    }
-    if (
-      turnId &&
-      isTurnExecutionEvidence(event.type) &&
-      !(event.type === "turn.superseded" && payload.beforeAttempt === true)
-    ) {
-      startedTurnIds.add(turnId);
-    }
-  }
-
-  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
-    const queueSteerSequence = queueSteerSequenceByTurn.get(turnId);
-    if (queueSteerSequence !== undefined) {
-      directChatSequenceByTrigger.set(triggerEventId, queueSteerSequence);
-    }
-    if (!startSeqByTrigger.has(triggerEventId)) {
-      const fallbackSeq = fallbackSeqByTurn.get(turnId);
-      if (fallbackSeq !== undefined) {
-        startSeqByTrigger.set(triggerEventId, fallbackSeq);
-      }
-    }
-  }
-
-  const cancelledBeforeStartTriggers = new Set<string>();
-  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
-    if (
-      (cancelledTurnIds.has(turnId) || withdrawnTurnIds.has(turnId)) &&
-      !startSeqByTrigger.has(triggerEventId) &&
-      !fallbackSeqByTurn.has(turnId)
-    ) {
-      cancelledBeforeStartTriggers.add(triggerEventId);
-    }
-  }
-
-  return {
-    queuedTurnByTrigger,
-    startSeqByTrigger,
-    cancelledBeforeStartTriggers,
-    directChatSequenceByTrigger,
-    explicitQueuedTriggers,
-    startedTurnIds,
-  };
-}
-
-function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): SessionEvent[] {
-  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
-  const insertions = new Map<number, SessionEvent[]>();
-
-  for (const event of ordered) {
-    if (event.type !== "user.message") {
-      continue;
-    }
-    // Steer is an accepted direction change, not waiting queue copy. Keep it
-    // directly in chat across refresh/reconnect even before its turn starts.
-    const directChatSequence = prescan.directChatSequenceByTrigger.get(event.id);
-    if (directChatSequence !== undefined) {
-      pushInsertion(insertions, directChatSequence, event);
-      continue;
-    }
-    const queuedTurnId = prescan.queuedTurnByTrigger.get(event.id);
-    if (!queuedTurnId) {
-      if (prescan.explicitQueuedTriggers.has(event.id)) {
-        const startSeq = prescan.startSeqByTrigger.get(event.id);
-        if (startSeq !== undefined) {
-          pushInsertion(insertions, startSeq, event);
-        }
-        continue;
-      }
-      pushInsertion(insertions, event.sequence, event);
-      continue;
-    }
-    if (prescan.cancelledBeforeStartTriggers.has(event.id)) {
-      continue;
-    }
-    const startSeq = prescan.startSeqByTrigger.get(event.id);
-    if (startSeq !== undefined) {
-      pushInsertion(insertions, startSeq, event);
-      continue;
-    }
-    // A waiting prompt belongs only in the prompt queue. It enters the
-    // timeline at turn.started (or the first same-turn activity fallback),
-    // never as a second queued representation.
-  }
-
-  const projected: SessionEvent[] = [];
-  for (const event of ordered) {
-    const before = insertions.get(event.sequence);
-    if (before) {
-      projected.push(...before);
-    }
-    if (event.type !== "user.message") {
-      projected.push(event);
-    }
-  }
-  return projected;
-}
-
-function pushInsertion(
-  insertions: Map<number, SessionEvent[]>,
-  sequence: number,
-  event: SessionEvent,
-): void {
-  const bucket = insertions.get(sequence);
-  if (bucket) {
-    bucket.push(event);
-  } else {
-    insertions.set(sequence, [event]);
-  }
-}
-
-function isAgentActivityEvent(type: string): boolean {
-  return (
-    type.startsWith("agent.") ||
-    type.startsWith("sandbox.") ||
-    type === "subscription.account.selected" ||
-    type === "subscription.account.switched"
-  );
-}
-
-/**
- * Evidence that a queued prompt crossed the execution boundary when an older
- * or partially recovered ledger is missing its canonical `turn.started`.
- * Queue/control bookkeeping intentionally does not qualify: moving, editing,
- * steering, or deleting a waiting row must never make its prompt appear in the
- * transcript as though inference had begun.
- */
-export function isTurnExecutionEvidence(type: string): boolean {
-  return (
-    isAgentActivityEvent(type) ||
-    type === "turn.completed" ||
-    type === "turn.failed" ||
-    // An admission refusal can settle a queued turn before it ever starts:
-    // its prompt still belongs above the "usage limit reached" row.
-    type === "usage.exhausted" ||
-    type === "turn.superseded" ||
-    type === "turn.recovery.requested" ||
-    type === "turn.capacity_waiting" ||
-    type === "session.requiresAction" ||
-    type === "tool.auth_needed" ||
-    type === "credential.auth_needed" ||
-    type.startsWith("turn.startup.phase.") ||
-    type.startsWith("rig.setup.") ||
-    type === "codex.capacity.waiting" ||
-    type === "codex.capacity.resumed" ||
-    type === "codex.fleet.decision"
-  );
 }
 
 function turnEndItem(
@@ -3426,6 +3914,17 @@ function sessionUsageLimitNotice(
     },
     occurredAt: event.occurredAt,
   };
+}
+
+/** Whether this turn's latest settlement in the timeline is its own failure. */
+function turnFailedInTimeline(items: TimelineItem[], turnId: string | null): boolean {
+  if (turnId === null) return false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === "turn-end" && item.turnId === turnId)
+      return item.outcome === "failed" && !item.resumedAt;
+  }
+  return false;
 }
 
 function hasTurnActivity(items: TimelineItem[], turnId: string | null): boolean {
@@ -3576,10 +4075,12 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 
   const firstOccurredAt = groupStartedAt(body[0]) ?? turnEnd.occurredAt;
   const prior = startIndex > 0 ? groups[startIndex - 1] : undefined;
+  // The one-time rebuild for a new model has its own note; no facet repeats it.
   const contextCompactionCount =
     prior?.kind === "item" &&
     prior.item.kind === "context-compaction" &&
-    prior.item.phase === "compacted"
+    prior.item.phase === "compacted" &&
+    prior.item.implementation !== "portable_model_switch"
       ? 1
       : 0;
   const turnGroup: TimelineGroup = {
@@ -3720,6 +4221,50 @@ function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
   }
 }
 
+/** The tool call ids a `session.requiresAction` payload asks a person to approve. */
+function approvalCallIds(payload: Record<string, unknown>): string[] {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const ids: string[] = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+/** The actions an approval request asks about, with their display titles when given. */
+function approvalActionsOf(
+  payload: Record<string, unknown>,
+): NonNullable<NoticeItem["approvalActions"]> {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const actions: NonNullable<NoticeItem["approvalActions"]> = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    // The same id `user.approvalDecision` answers (see `approvalCallIds`).
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!id) continue;
+    const display = asRecord(record.display);
+    const title = stringValue(display.title).trim();
+    // Beside the display, which stays the strict shape every client parses.
+    const facts = (Array.isArray(record.targetFacts) ? record.targetFacts : [])
+      .slice(0, 12)
+      .map((fact) => ({
+        label: stringValue(asRecord(fact).label).trim(),
+        value: stringValue(asRecord(fact).value).trim(),
+      }))
+      .filter((fact) => fact.label && fact.value);
+    actions.push({ id, title: title || null, ...(facts.length > 0 ? { facts } : {}) });
+  }
+  return actions;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
@@ -3737,9 +4282,9 @@ function numberOrNull(value: unknown): number | null {
 }
 
 /**
- * Read the closed provider-rejection record a `summarization_failed` skip
- * carries. Only bounded identifiers are accepted; a provider message is never
- * part of the payload and would be ignored here anyway.
+ * Read the closed provider-rejection record a `summarization_failed` skip (or
+ * a trimmed checkpoint's `fallback`) carries. Only bounded identifiers are
+ * accepted; the provider's message is read separately.
  */
 function compactionProviderRejection(
   payload: Record<string, unknown>,
@@ -3757,6 +4302,12 @@ function compactionProviderRejection(
     param: text(record.param),
     requestId: text(record.requestId),
   };
+}
+
+/** The provider's bounded error message on a compaction record, when present. */
+function compactionProviderMessage(record: Record<string, unknown>): string | null {
+  const message = record.providerMessage;
+  return typeof message === "string" && message.trim() ? message.trim().slice(0, 1_000) : null;
 }
 
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {
@@ -3851,6 +4402,10 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
                 kind === "media_generation_result"
                   ? parseMediaGenerationResult(member.result)
                   : null;
+              const automation =
+                kind === "scheduled_occurrence"
+                  ? automationRunPresentation(member.automation)
+                  : null;
               return [
                 {
                   id: member.id,
@@ -3860,12 +4415,29 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
                   sourceId: member.sourceId,
                   summary: stringValue(member.summary),
                   ...(result ? { result } : {}),
+                  ...(automation ? { automation } : {}),
                 },
               ];
             })()
           : [];
       })
     : [];
+}
+
+function automationRunPresentation(value: unknown): AutomationRunPresentation | null {
+  const record = asRecord(value);
+  const name = stringValue(record.name).trim();
+  if (!name) return null;
+  const eventSummaries = Array.isArray(record.eventSummaries)
+    ? record.eventSummaries.filter(
+        (summary): summary is string => typeof summary === "string" && summary.trim().length > 0,
+      )
+    : [];
+  const eventCount =
+    typeof record.eventCount === "number" && Number.isFinite(record.eventCount)
+      ? Math.max(eventSummaries.length, Math.floor(record.eventCount))
+      : eventSummaries.length;
+  return { name, eventSummaries, eventCount };
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = [

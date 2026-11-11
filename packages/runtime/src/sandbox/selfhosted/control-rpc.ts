@@ -32,6 +32,11 @@ import {
   responderWaitExhausted,
 } from "./control-replay";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+} from "./process-start-failure";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -132,6 +137,13 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
+  /** The machine itself cannot start programs (a missing `/dev/null` the
+   *  agent had to open, or an older agent's shell that would not start). Its
+   *  message names only the started program, never the command text, and it
+   *  is never a missing-path answer, so `osNotFound` stays false. Any other
+   *  failed start (one missing program, brief resource pressure) keeps its
+   *  ordinary mapping, also with the command text removed. */
+  readonly processStartFailed: boolean;
   /** The reply exceeded the transport's max payload (a distinguishing flag so the
    *  fault renderer can name the size wall + recovery instead of a generic OS error). */
   readonly payloadTooLarge: boolean;
@@ -166,19 +178,37 @@ export class SelfhostedControlError extends Error {
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
-    super(input.message);
+    // Every failed process start is reduced to the program's name, so no
+    // command text reaches events, tool output or the person; only one that
+    // says the machine itself cannot start programs is flagged as such.
+    const startFailure = isProcessStartFailureMessage(input.message);
+    const processStartFailed = startFailure && isMachineProcessStartFailureMessage(input.message);
+    super(startFailure ? sanitizeProcessStartFailureMessage(input.message) : input.message);
     this.code = input.code;
     this.reason = input.reason;
     this.retryable = input.retryable;
     this.fenced = input.fenced ?? false;
     this.draining = input.draining ?? false;
     this.agentOffline = input.agentOffline ?? false;
-    this.osNotFound = input.osNotFound ?? false;
+    this.processStartFailed = processStartFailed;
+    // A failed process start is reported as ENOENT for whatever the spawn
+    // could not open; it says nothing about a path the caller asked about.
+    this.osNotFound = (input.osNotFound ?? false) && !processStartFailed;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
     this.connectionReplaced = input.connectionReplaced ?? false;
     this.controlRequestId = input.controlRequestId ?? null;
-    this.detail = input.detail ?? {};
+    this.detail =
+      startFailure && input.detail
+        ? Object.fromEntries(
+            Object.entries(input.detail).map(([key, value]) => [
+              key,
+              isProcessStartFailureMessage(value)
+                ? sanitizeProcessStartFailureMessage(value)
+                : value,
+            ]),
+          )
+        : (input.detail ?? {});
   }
 }
 
@@ -410,6 +440,11 @@ export function execDeadlineHint(seconds: number): string {
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
+/** The `detail` key a compute box's wake gate sets, to the seconds it waited,
+ *  when the box did not come back after a wake: no request was dispatched. A
+ *  detail rather than `neverSent`, which drives retry and abandon decisions. */
+export const COMPUTE_WAKE_TIMEOUT_SECONDS_DETAIL_KEY = "compute_wake_timeout_seconds";
+
 /** The reserved `detail` key the transport sets to "1" when the agent
  *  connection a request was sent to was replaced by a new one.
  *  `agentErrorToControlError` reads it into
@@ -463,6 +498,36 @@ export function commandOutcomeUnknownAfterReplacementAgentError(options: {
     },
   };
 }
+
+/** Detail key of the error of a command whose start its agent left
+ *  unanswered for the op stream's bound (`OP_START_UNANSWERED_MS`): the
+ *  milliseconds waited. Reserved (never sent by the agent). */
+export const AGENT_UNRESPONSIVE_DETAIL_KEY = "_agent_unresponsive_ms";
+/** Detail key set beside `AGENT_UNRESPONSIVE_DETAIL_KEY`: what kind of machine
+ *  stopped answering ("compute" or "connected_machine"). */
+export const AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY = "_agent_unresponsive_machine";
+/** Detail key set beside `AGENT_UNRESPONSIVE_DETAIL_KEY`: what was done about
+ *  it (an `UnresponsiveAgentRecovery`, or "none"). */
+export const AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY = "_agent_unresponsive_recovery";
+
+/** What was done about a machine whose agent stopped answering a command:
+ *  - `restarted`: the machine was restarted (files kept, programs stopped);
+ *  - `restarting`: a restart was asked for and has not finished yet;
+ *  - `already_restarted`: it was already restarted once this turn, so not again;
+ *  - `restart_failed`: a restart was tried and failed;
+ *  - `restart_unavailable`: no restart could be arranged (it could not be
+ *    recorded, so none was made);
+ *  - `answering`: its agent answered again before a restart, so none was made;
+ *  - `host_busy`: its host is busy with it, as handing it off to another host,
+ *    and refuses to wake it for a short while, so no restart was made. */
+export type UnresponsiveAgentRecovery =
+  | "restarted"
+  | "restarting"
+  | "already_restarted"
+  | "restart_failed"
+  | "restart_unavailable"
+  | "answering"
+  | "host_busy";
 
 /** The reserved `detail` key the transport sets to "1" when a no-responder fault
  *  comes after it already waited out its reconnect window for that exact process.
@@ -845,22 +910,31 @@ export class NatsControlRpc implements ControlRpc {
 
 /** A received but malformed response is not evidence of an offline agent.
  * Decoding stays outside the transport catch so corruption cannot become a
- * retryable refresh outage (or license retry of an already-sent operation). */
+ * retryable refresh outage (or license retry of an already-sent operation).
+ * A reply is accepted only for the request it names: anything published to
+ * this request's reply subject that answers another request (or none) is
+ * refused as malformed, never returned as this request's result. */
 function decodeControlReply(requestId: string, data: Uint8Array): ControlResponse {
+  let response: ControlResponse;
   try {
-    return ControlResponse.decode(data);
+    response = ControlResponse.decode(data);
   } catch {
-    return {
-      requestId,
-      error: {
-        code: ErrorCode.ERROR_CODE_PROTOCOL,
-        message: "The machine returned a malformed control response.",
-        retryable: false,
-        detail: {},
-      },
-      result: undefined,
-    };
+    return malformedControlResponse(requestId);
   }
+  return response.requestId === requestId ? response : malformedControlResponse(requestId);
+}
+
+function malformedControlResponse(requestId: string): ControlResponse {
+  return {
+    requestId,
+    error: {
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      message: "The machine returned a malformed control response.",
+      retryable: false,
+      detail: {},
+    },
+    result: undefined,
+  };
 }
 
 /** A `ControlResponse` carrying a synthesized AGENT_OFFLINE error. `neverSent` marks

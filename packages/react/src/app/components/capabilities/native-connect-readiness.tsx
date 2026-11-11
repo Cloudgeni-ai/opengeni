@@ -1,4 +1,5 @@
 import type { ConnectProvider } from "@opengeni/connect";
+import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "../../types";
 import type { IntegrationViewModel } from "./integration-view-model";
 
@@ -81,12 +82,13 @@ function restrictedStockFigma(item: CapabilityCatalogItem): boolean {
 }
 
 /** The provider refuses OAuth self-registration and this deployment has no
- * operator-registered client for it, so Connect would fail on the first click.
- * Server-projected from `data/catalog/oauth-client-requirements.json`. */
+ * operator-registered client for it (or the operator switched its setup off),
+ * so Connect would fail on the first click. The shared rule the agent's setup
+ * tools and the chat card also apply. */
 export function operatorOAuthClientMissing(
   item: Pick<CapabilityCatalogItem, "runtime" | "enabled">,
 ): boolean {
-  return item.runtime?.operatorOAuthClient?.configured === false && !item.enabled;
+  return deploymentCannotConnect(item);
 }
 
 export type NativeConnectionFacts = {
@@ -173,7 +175,7 @@ function hasManagedConnection(model: IntegrationViewModel): boolean {
     model.access !== undefined ||
     model.footer.kind === "connected" ||
     model.footer.kind === "repair" ||
-    ["Connected", "Needs attention", "Retired"].includes(model.chip.label)
+    ["Connected", "Needs attention"].includes(model.chip.label)
   );
 }
 
@@ -183,8 +185,6 @@ function primaryProviderId(modelId: string, slackBotMode: boolean): string | nul
       return slackBotMode ? "slack-bot" : "slack-personal";
     case "github":
       return "github-app";
-    case "google-drive":
-      return "google-drive-knowledge";
     case "microsoft-teams":
       return "microsoft-teams";
     case "outlook-mail":
@@ -195,6 +195,8 @@ function primaryProviderId(modelId: string, slackBotMode: boolean): string | nul
       return "microsoft-outlook-contacts";
     case "onedrive":
       return "microsoft-onedrive";
+    case "sharepoint":
+      return "microsoft-sharepoint";
     // Historical native Atlassian is absent from the Connect catalog but still
     // owns a disconnect surface. Unknown/custom providers keep their own flow.
     default:
@@ -228,30 +230,35 @@ export function nativeIntegrationModel(
   const providerId = primaryProviderId(model.id, slackBotMode);
   if (!providerId) return model;
   const managed = hasManagedConnection(model);
-  const available = nativeProviderAvailable(catalog, providerId);
-  const options = model.options.filter((option) => {
+  // A section that starts another provider (personal GitHub next to the
+  // workspace App) keeps the integration available on its own.
+  const available =
+    nativeProviderAvailable(catalog, providerId) ||
+    (model.sections ?? []).some(
+      (section) =>
+        section.action?.connectProviderId !== undefined &&
+        nativeProviderAvailable(catalog, section.action.connectProviderId),
+    );
+  const sections = model.sections?.map((section) => {
+    const sectionProviderId = section.action?.connectProviderId;
     if (
-      model.id === "github" &&
-      option.id === "github-personal-identity" &&
-      option.kind === "link" &&
-      option.action.label === "Connect"
-    ) {
-      return nativeProviderAvailable(catalog, "github-personal");
-    }
-    if (
-      model.id === "google-drive" &&
-      option.id === "google-drive-publish" &&
-      option.kind === "toggle" &&
-      !option.checked
-    ) {
-      return nativeProviderAvailable(catalog, "google-drive-publish");
-    }
-    return true;
+      !section.action ||
+      !sectionProviderId ||
+      nativeProviderAvailable(catalog, sectionProviderId)
+    )
+      return section;
+    if (catalog.status === "loading")
+      return { ...section, action: { ...section.action, disabled: true } };
+    const { action: _unavailable, ...rest } = section;
+    return {
+      ...rest,
+      note:
+        catalog.providers.find((candidate) => candidate.id === sectionProviderId)?.reason ??
+        "Setting this up isn't available with your access here.",
+    };
   });
-  const accountProviderId = model.id === "google-drive" ? "google-drive" : providerId;
   const access =
-    model.access?.editLabel === "Add account" &&
-    !nativeProviderAvailable(catalog, accountProviderId)
+    model.access?.editLabel === "Add account" && !nativeProviderAvailable(catalog, providerId)
       ? { ...model.access, editLabel: undefined, onEdit: undefined }
       : model.access;
   let footer = model.footer;
@@ -259,22 +266,12 @@ export function nativeIntegrationModel(
   if (!available && footer.kind === "setup") {
     footer = { kind: "locked", message: "" };
     blockedSetup = true;
-  } else if (
-    !available &&
-    model.id === "github" &&
-    footer.kind === "actions" &&
-    footer.primary &&
-    (!model.access || footer.primary.label === "Connect another account")
-  ) {
-    // Personal GitHub can be connected before the workspace App is installed.
-    footer = footer.secondary ? { ...footer, primary: undefined } : { kind: "locked", message: "" };
-    blockedSetup = true;
   }
   const blockedFresh = !available && !managed;
   return {
     ...model,
-    options,
     ...(access ? { access } : {}),
+    ...(sections ? { sections } : {}),
     footer,
     ...(blockedFresh && model.chip.label !== "Loading"
       ? {

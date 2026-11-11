@@ -8,6 +8,28 @@ import {
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
 import { fetchError, responseError } from "./openai";
+import { checkOwnSubscriptionPlan } from "../../billing/limits";
+
+/** Voice/recording operations obey the same app-only, paid-plan rule as chat. */
+export async function assertSubscriptionTranscriptionAllowed(input: {
+  db: Database;
+  settings: Settings;
+  accountId: string;
+}): Promise<void> {
+  const decision = await checkOwnSubscriptionPlan(input, input.accountId);
+  if (!decision.allowed) {
+    throw new TranscriptionServiceError({
+      subscriptionCode:
+        decision.code === "subscription_api_unavailable"
+          ? "subscription_api_unavailable"
+          : "subscription_plan_required",
+      code: decision.code === "subscription_api_unavailable" ? "permission_denied" : "unavailable",
+      message: decision.message,
+      status: decision.code === "subscription_api_unavailable" ? 403 : 402,
+      fallbackSafe: false,
+    });
+  }
+}
 
 /**
  * Once a shared-core provider is selected, its failures are final for that
@@ -28,6 +50,8 @@ export function withoutFallback(error: TranscriptionServiceError): Transcription
     status: error.status,
     retryable: error.retryable,
     fallbackSafe: false,
+    providerCode: error.providerCode,
+    subscriptionCode: error.subscriptionCode,
   });
 }
 
@@ -36,8 +60,8 @@ export async function coreTranscriptionResult(
   response: Response,
 ): Promise<{ text: string; languages: string[] }> {
   if (!response.ok) {
-    await response.arrayBuffer().catch(() => undefined);
-    throw withoutFallback(responseError(response.status));
+    // The body says why: a subscription out of credit is not a broken service.
+    throw withoutFallback(responseError(response.status, await response.json().catch(() => null)));
   }
   const body = await response.json().catch(() => null);
   if (!body || typeof body.text !== "string") throw withoutFallback(responseError(502));
@@ -72,6 +96,7 @@ export async function transcribeOnSubscriptionCore(input: {
   /** The provider refused the bearer (refresh once and retry). */
   unauthorized: (response: Response) => Promise<boolean>;
 }): Promise<{ text: string; languages: string[] }> {
+  await assertSubscriptionTranscriptionAllowed(input);
   const scope = {
     kind: "workspace" as const,
     accountId: input.accountId,

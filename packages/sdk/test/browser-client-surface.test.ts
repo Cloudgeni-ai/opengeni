@@ -38,6 +38,9 @@ const legacyBrowserUnusedMethods = [
   // Shared Insights methods are adopted by the separately owned Insights UI.
   "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
+  // The overloaded Insights call-list API predates this boundary too. Erasing
+  // type signatures must not mistake its overloads for runtime consumers.
+  "listInsightsCalls",
   // Keep the existing summary/workspace reads available to SDK callers after
   // Insights moved to getOrganizationModelUsage.
   "getOrganizationUsageSummary",
@@ -60,14 +63,12 @@ const legacyBrowserUnusedMethods = [
   "listFiles",
   "listGoalRevisionPage",
   "listGoalRevisions",
-  "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   // The organization account page reads usage from the account overview, so
   // this standalone usage read stays available to SDK callers only.
   "organizationCodexAccountUsage",
   "rejectGoalRevision",
-  "revokeUserResourceGrant",
   "rollbackCompanyProfile",
   "rollbackGoalRevision",
   "setAtlassianLifecycle",
@@ -144,12 +145,19 @@ const integrationMethods = [
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
 const nativeAppMethods = [
+  "answerAgentCall",
+  "declineAgentCall",
   "exchangeNativeAppCode",
+  "getAgentCall",
   "getNativePushDevice",
   "registerNativePushDevice",
   "signOutNativeApp",
   "unregisterNativePushDevice",
 ];
+
+// A product embedding Opengeni states, from its backend as the person, which
+// of their phones it rings for agent calls; no Opengeni browser surface uses it.
+const embeddingProductMethods = ["getAgentCallHostPhones", "setAgentCallHostPhones"];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
@@ -165,6 +173,9 @@ const retiredSettingsMethods = [
   "listWorkspaceInstructionPolicyOnboardingProposals",
   "rejectPreferenceRegistryProposal",
   "supersedePreferenceRegistry",
+  // The personal-fallback opt-in is retired (a person turns their own
+  // subscription on per workspace instead); the read stays for SDK callers.
+  "getModelAccountPreferences",
 ];
 
 // The web stopped calling the native Google Drive lifecycle methods when Drive
@@ -179,16 +190,35 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
-// Dictation is recorded as a recording since #6022; the resumable transcription
-// recording methods are deprecated and stay only for existing SDK callers.
-const deprecatedTranscriptionRecordingMethods = [
-  "createTranscriptionRecording",
-  "discardTranscriptionRecording",
-  "finalizeTranscriptionRecording",
-  "getTranscriptionRecording",
-  "processNextTranscriptionRecordingSegment",
-  "uploadTranscriptionRecordingChunk",
+// Organization credit alerts land as a backend/SDK slice before the separately
+// owned billing settings and inbox UI. Remove each classification when that
+// browser consumer lands; the exact equality below enforces the handoff.
+const pendingBillingAlertMethods = ["listBillingCreditNotifications"];
+
+// The Agents page has no revision history view yet; agent revisions are read
+// by SDK callers. Remove the entry when a browser consumer lands.
+const pendingAgentsMethods = ["listAgentRevisions"];
+
+// The Agents page replaced the Bot templates and Slack agents screens, so the
+// web calls the /agents methods instead. The legacy methods stay on the SDK for
+// existing callers until the contract step removes them.
+const retiredLegacyAgentScreenMethods = [
+  "createBotTemplate",
+  "createOpenGeniSlackAgent",
+  "deleteBotTemplate",
+  "deleteOpenGeniSlackAgent",
+  "getBotTemplate",
+  "listBotTemplates",
+  "listOpenGeniSlackAgentChannels",
+  "postOpenGeniSlackAgentIntro",
+  "updateBotTemplate",
+  "updateOpenGeniSlackAgent",
 ];
+
+// Chat share links: the public share page reads a link without the SDK (no
+// credentials, no SDK bundle for someone without an account), and listing a
+// person's links is offered to the agent and SDK callers, not a web screen yet.
+const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
 
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
@@ -197,6 +227,10 @@ const retiredDeadWebComponentMethods = [
   "listScheduledTaskSlackChannels",
   "publishSandboxFileArtifact",
   "saveAtlassianSources",
+  // Integration Knowledge sync is retired, with its Google Drive source
+  // dialog; these routes now answer 410 for existing callers.
+  "browseGoogleDriveFacetSource",
+  "saveGoogleDriveFacetSource",
 ];
 
 function countIdentifier(source: string, identifier: string): number {
@@ -205,6 +239,9 @@ function countIdentifier(source: string, identifier: string): number {
 }
 
 function browserUnusedMethods(clientSource: string, browserSource: string): string[] {
+  // A method named in a public projection type is not a runtime call. Count
+  // references after erasing types so adding typed views cannot hide unused API.
+  const runtimeSource = new Bun.Transpiler({ loader: "ts" }).transformSync(clientSource);
   const methodNames = [
     ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
   ].map((match) => match[1]!);
@@ -212,7 +249,7 @@ function browserUnusedMethods(clientSource: string, browserSource: string): stri
     .filter(
       (methodName) =>
         countIdentifier(browserSource, methodName) === 0 &&
-        countIdentifier(clientSource, methodName) === 1,
+        countIdentifier(runtimeSource, methodName) === 1,
     )
     .sort();
 }
@@ -263,10 +300,14 @@ describe("browser client runtime surface", () => {
         ...agentInteractionMethods,
         ...integrationMethods,
         ...nativeAppMethods,
+        ...embeddingProductMethods,
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
-        ...deprecatedTranscriptionRecordingMethods,
+        ...pendingBillingAlertMethods,
+        ...pendingAgentsMethods,
+        ...retiredLegacyAgentScreenMethods,
+        ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );
@@ -278,10 +319,16 @@ describe("browser client runtime surface", () => {
       readBrowserProductionSources(),
     ]);
     const baseline = browserUnusedMethods(clientSource, browserSource);
-    const extendedClient = `${clientSource}\n  async unclassifiedSdkMethod() {}\n`;
+    const extendedClient = `${clientSource}\nclass ExtraClient {\n  async unclassifiedSdkMethod() {}\n}\n`;
     expect(browserUnusedMethods(extendedClient, browserSource)).toEqual(
       [...baseline, "unclassifiedSdkMethod"].sort(),
     );
+    expect(
+      browserUnusedMethods(
+        `${extendedClient}\ntype Projection = Pick<ExtraClient, "unclassifiedSdkMethod">;`,
+        browserSource,
+      ),
+    ).toEqual([...baseline, "unclassifiedSdkMethod"].sort());
     expect(
       browserUnusedMethods(extendedClient, `${browserSource}\nclient.unclassifiedSdkMethod();`),
     ).toEqual(baseline);

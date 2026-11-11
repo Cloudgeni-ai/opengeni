@@ -99,6 +99,33 @@ Connector-permissions discovery and explicit tool-name updates use the same
 count allowance, so an admitted catalog can be managed without a lower cutoff.
 Duplicate names and repeated pagination cursors remain rejected.
 
+## Account parameters
+
+Some servers require an identifier on most tools that the connected account
+already fixes, such as the Atlassian site (`cloudId`). The runtime fills it in
+(`packages/runtime/src/mcp-account-parameters.ts`). Each server adds only
+declarative data, keyed by exact MCP URL like the account identity verifiers:
+the parameter name, a read-only tool on the same server that lists the
+account's values, and the fields holding each value and its label. Nothing
+adds connector-specific prompt or tool-instruction text.
+
+When the server lists that lookup tool, every tool that required the parameter
+lists it as optional, with the same generic note on every server. A call that
+leaves it unset (missing, empty, or a phrase with spaces, which no identifier
+contains) gets the account's only value. If the account has several values, the
+call isn't sent and needs no approval: the model gets a recoverable error
+listing each name and id, recorded as not executed. Codemode gets the same text,
+and the HTTP tool gateway returns it as a 422 with details code
+`account_parameter_choice_required`. A phrase value that matches
+one of those names case-insensitively picks it. Any other supplied value,
+including one padded with whitespace, is sent unchanged, and a parameter the
+tool already treats as optional is left alone. The values are looked up once
+per attempt by the wrapper around the physical server, with a 10-second limit
+that the caller's abort also ends. A failed or empty lookup sends the call on
+unchanged, so the provider's own error reaches the model, and the lookup isn't
+retried for a minute. Tools in recoverable operations, which dispatch exactly
+one physical call, keep their schema and are never filled.
+
 ## Attached accounts
 
 An enabled native connector can attach multiple authorized connections, including
@@ -112,6 +139,91 @@ is disabled.
 
 The chat account list only controls attachments. Adding or connecting accounts
 uses the connector's Capabilities page or a prepared inline Connect card.
+
+### Where your own logins work
+
+A personal (Only me) login belongs to its owner across the organization, but it
+works for their messages only where they turned it on:
+
+- Always in their Personal workspace.
+- In a shared workspace when they turned it on there. A login starts on in the
+  workspace it was added from. Connecting the same account again, or
+  reconnecting it, from another shared workspace turns it on there too.
+- Under each of the viewer's own logins, a connector's Capabilities page lists
+  **Where it works**: every workspace they belong to in the organization, with
+  a switch for each. The Personal workspace is always on. A workspace where
+  they may not add their own things shows the switch off with the reason; a
+  login that is on can always be turned off.
+- When a chat asks for a connector whose login the person added elsewhere, the
+  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- In a chat shared with the workspace, the owner sees one quiet line above the
+  composer, "N personal connections in this chat", counting the accounts that
+  are on. It opens a menu that says people in the workspace see what the agent
+  does with them, with one switch per account. Off turns every connection of
+  that account off in this workspace; on turns it back on with the same grant
+  as **Where it works**. An account connected more than once is listed once.
+  A row turned off stays in the menu until the chat is left. It never blocks a
+  turn.
+
+Turning a login on is the owner's standing `connection.use` grant for that
+workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other
+people's messages never use someone's own login. Logins that are off in a
+workspace are not attached to turns there, so the agent sees the connector as
+not connected and offers the Connect card. Accepted turns keep the accounts
+frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
+
+Editing a queued message keeps its accepted accounts only when its own sender
+resubmits it. When anyone else (another member, a workspace API key) edits and
+sends it, it becomes the editor's own message: it runs as the editor, with the
+editor's own logins and allowance, never the original sender's.
+
+A waiting action runs on the accounts its message froze, whoever decides it,
+so approving an action that runs on someone's own login is that person's
+decision alone. Anyone who can control the chat may decline it, and actions on
+workspace logins keep their ordinary rules. The owner's own requests count as
+the owner: their signed-in session, their personal API key and a token issued
+on their behalf (`asUser`). Another member, a workspace API key with no person
+behind it, or someone else's Slack click gets `403` with
+`details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` (and `details.accountOwnerLabel`
+when known; the SDK's `isApprovalRequiresAccountOwnerError` checks it), whose message names the owner when known
+("Only Alice can approve this action, because it runs on their own account.").
+A tool review tells each viewer the same: `approvedBy: "account_owner"` with
+`accountOwnerLabel` and only `reject` for everyone else, and
+`approvedBy: "you"` for the owner in a chat shared with the workspace.
+
+The same list serves a person's own logins, model subscriptions and machines:
+`GET /v1/workspaces/:workspaceId/own-resources/reach?resourceKind=&resourceId=`
+returns each workspace with `on`, `alwaysOn` and `canChange`, Personal first,
+and `PUT` on the same path with `{ resourceKind, resourceId, on }` turns it on
+or off in the path's workspace. `resourceKind` is `connection`,
+`subscription_connection` or `connected_machine` (the machine's enrollment id).
+Anything that isn't the caller's own answers `404`; turning a login or plan off
+in its owner's Personal workspace answers `422`.
+
+**My things** (account menu, or Settings under Your account) lists all of a
+person's own logins, plans and machines in the organization together, each
+with where it works, and opens the same switches.
+`GET /v1/workspaces/:workspaceId/own-resources` returns that list: logins, then
+plans, then machines, each with the same workspace rows as the reach endpoint.
+
+Logins that existed before this rule start on in every shared workspace their
+owner belonged to, so nothing that worked stops working.
+
+One account is one login. Before connecting reused an existing login, turning a
+connector on in a second workspace could save a second login to the same
+account, with its tool choices split between the two. Migration
+`1226_merge_duplicate_personal_logins.sql` merges those: logins of the same
+person to the same server (exact MCP URL, provider, authorization server and
+client) whose service verified the same account identity (Slack, Gmail, Google
+Calendar, Google Drive and Atlassian) keep one login. The kept login is a working
+one with the most scopes; another merges into it only when the kept login has
+every scope it has. Its tool choices join the kept login's (strictest wins),
+the kept login is turned on wherever it was, schedule pins and connector
+references move to the kept login, and it is revoked with
+`metadata.mergedIntoConnectionId`. A login whose identity is unknown, or that an
+event trigger, vault, Knowledge sync, Site tool allowance or API Integration
+depends on, is left for its owner to remove. Accepted turns and their audit
+records keep the login they ran with.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
@@ -167,11 +279,13 @@ connection revocation.
 Each accepted turn also records its account intent: whose personal accounts it
 may use (the person who sent it, or nobody for work without a person behind it)
 and which accounts that person explicitly picked. Work that continues a turn,
-such as a goal continuation, a wait wake-up, a command or child result, or
-informational input delivered into it, carries the same intent and resolves it
-again when it is claimed, exactly as that person's next message with the same
-picks would be resolved now. A reconnected or newly connected account is
-therefore used, and a revoked one is not. A picked account that can no longer
+such as a goal continuation, a wait wake-up, a command or child result,
+informational input delivered into it, or a compaction-only turn that compacts
+after it, carries the same intent and resolves it again when it is claimed,
+exactly as that person's next message with the same picks would be resolved
+now (a compaction-only turn has a few exceptions of its own, described under
+manual compaction in `docs/context-compaction.md`). A reconnected or newly
+connected account is therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`
 metadata. A carried intent that names someone other than the continued turn's
@@ -194,6 +308,31 @@ unselected tools are rejected. When a pinned account can no longer be used, the
 occurrence runs without that connector and records it in `degradedAccounts`;
 it never retries another identity. With `pinnedAccountsRequired` the
 occurrence is refused with `connection_account_unavailable` instead.
+
+A connector configured for a turn that runs without its tools is never
+silently missing. The turn's own input carries one notice naming each such
+connector with a plain reason category: not in this turn's registry
+(`not_available`), no account accepted with the turn (`no_account`, for
+example a personal sign-in not yet usable in the workspace after a membership
+change), accepted accounts that no longer fit its setup
+(`account_setup_changed`), or a superseded sign-in (`unsupported_sign_in`).
+Tool search and tool listing report the same connectors in
+`unavailableSources`, beside connectors that fail to connect or list at run
+time; a setup refused a credential there says why (for example an expired
+sign-in or a personal sign-in not usable in this workspace) instead of a bare
+HTTP 401. The notice is a new item of the current turn and never changes text
+an earlier request sent. Connectors the agent configuration excludes are not
+reported.
+
+An account whose refresh grant the provider rejected (status `needs_reauth`)
+is named, not hidden. The turn that first finds it broken posts one inbox
+notice to the person who started that turn, deduplicated per connection. The
+turn notice lists accounts that need reconnecting with the day they stopped
+working, and `capability_catalog_search` returns them in `setup.reconnect`.
+`capability_authorization_request` with that `connectionId` (chosen
+automatically when exactly one account fits) posts a card that reconnects the
+same account rather than a fresh Connect, which the already-connected account
+would refuse. An account added in another workspace is reconnected there.
 Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.

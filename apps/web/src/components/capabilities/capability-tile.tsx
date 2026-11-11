@@ -5,6 +5,7 @@ import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capa
 import { catalogStatusForChip } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { capabilityStateChip, type ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
+import { personalExtensionOrigin } from "./catalog-presentation";
 
 /** One full-row action; adding a connection always begins with its setup dialog. */
 export const CapabilityTile = memo(function CapabilityTile({
@@ -21,11 +22,12 @@ export const CapabilityTile = memo(function CapabilityTile({
   onQuickConnect?: (() => void) | undefined;
 }) {
   const chip = capabilityStateChip(item, health);
+  const origin = personalExtensionOrigin(item);
   return (
     <CapabilityCatalogRow
       data-capability-catalog-tile={item.id}
       name={item.name}
-      description={item.description ?? undefined}
+      description={origin ? `From ${origin}` : (item.description ?? undefined)}
       icon={
         item.kind === "skill" ? (
           <BookOpenIcon aria-hidden="true" />

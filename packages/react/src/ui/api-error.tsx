@@ -1,5 +1,6 @@
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ErrorDetail } from "./error-message";
+import { apiStatusInText, isExpectedApiStatus } from "./error-reference";
 
 /*
  * Errors from the Opengeni API arrive as "Opengeni API 403: missing permission:
@@ -123,15 +124,20 @@ export function apiErrorAdvice(error: unknown): string {
 
 /**
  * The text to show for a failed action where only one line fits (a toast
- * description, a form error). API errors become advice, followed by the
- * request reference for support; an error the app wrote itself keeps its own
- * message. Next to Technical details (which already show the reference), use
+ * description, a form error). API errors become advice; an error the app
+ * wrote itself keeps its own message. An expected refusal (a 4xx) is only
+ * what to do. An unexpected failure ends with "Reference: <id>." for support,
+ * which the toast and the shared error renderers turn into a discreet "Copy
+ * details" or Technical details instead of printing it. Next to Technical
+ * details (which already show the reference), use
  * `userErrorTextWithoutReference`.
  */
 export function userErrorText(error: unknown, fallback?: string): string {
   const text = userErrorTextWithoutReference(error, fallback);
   if (!isApiError(error)) return text;
-  const { reference } = apiErrorFacts(error);
+  const { status, reference } = apiErrorFacts(error);
+  const message = error instanceof Error ? error.message : "";
+  if (isExpectedApiStatus(status ?? apiStatusInText(message))) return text;
   return reference ? `${text} Reference: ${reference}.` : text;
 }
 
@@ -153,6 +159,37 @@ export function userErrorTextWithoutReference(error: unknown, fallback?: string)
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   return fallback ?? "Something went wrong. Try again.";
+}
+
+/** `details.code` from an API error body, when it has one. */
+export function apiErrorDetailCode(error: unknown): string | undefined {
+  const details =
+    error !== null && typeof error === "object"
+      ? (error as { details?: unknown }).details
+      : undefined;
+  const code =
+    details !== null && typeof details === "object"
+      ? (details as { code?: unknown }).code
+      : undefined;
+  return typeof code === "string" && code ? code : undefined;
+}
+
+/**
+ * The server's own sentence for an expected refusal (a 4xx) whose
+ * `details.code` is one of `detailCodes`. A route that words each refusal for
+ * people (what happened, then what to do next) marks it with such a code, and
+ * the page that knows the code shows the sentence instead of the generic advice
+ * `userErrorText` gives for its status. Undefined for any other error, so fall
+ * back to `userErrorText`.
+ */
+export function serverRefusalText(
+  error: unknown,
+  detailCodes: readonly string[],
+): string | undefined {
+  const { status, serverMessage } = apiErrorFacts(error);
+  if (status === undefined || status < 400 || status >= 500 || !serverMessage) return undefined;
+  const code = apiErrorDetailCode(error);
+  return code && detailCodes.includes(code) ? serverMessage : undefined;
 }
 
 /**

@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
-import { copyTextToClipboard } from "./lib/clipboard";
 import { useOpenGeniText } from "./messages/runtime";
 import { useConnectSetupFlow } from "./connect-setup-model";
+import { OrganizationApprovalHelp } from "./organization-approval-help";
 
 export {
   adminApprovalLink,
@@ -10,26 +10,6 @@ export {
   isCuratedDefinitionAttempt,
   isOwnerApprovalPending,
 } from "./connect-setup-model";
-
-function CopyLinkButton({ url }: { url: string }) {
-  const t = useOpenGeniText();
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="og-connect-setup-secondary"
-      onClick={() =>
-        void copyTextToClipboard(url).then((ok) => {
-          if (!ok) return;
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        })
-      }
-    >
-      {copied ? t("copyButton.copied") : t("connectSetup.copyAdminApprovalLink")}
-    </button>
-  );
-}
 
 export type ConnectSetupProps = {
   controller: ConnectController;
@@ -42,6 +22,18 @@ export type ConnectSetupProps = {
   className?: string;
   /** Provider-specific label supplied by the embedding host. */
   authorizeLabel?: string | undefined;
+  /**
+   * In a chat card the person signs in and moves on: offer "Check status" only
+   * when the provider asks them to finish elsewhere and come back.
+   */
+  inChat?: boolean;
+  /** Begin a fresh attempt after declined or administrator-gated authorization. */
+  onRetry?: (() => void | Promise<unknown>) | undefined;
+  /**
+   * The service being connected ("Outlook Mail"), as the person knows it. The
+   * ready-made message for an organization's IT names it.
+   */
+  serviceName?: string | undefined;
 };
 
 /** Controller-backed setup surface, styled by opt-in connect.css. No provider secrets enter React state. Host owns
@@ -66,11 +58,14 @@ function ScopedSetup({
   onSelectAccount,
   className,
   authorizeLabel: authorizeLabelProp,
+  inChat = false,
+  onRetry,
+  serviceName,
 }: ConnectSetupProps) {
   const t = useOpenGeniText();
   const authorizeLabel =
     authorizeLabelProp === undefined ? t("connectSetup.authorizeConnection") : authorizeLabelProp;
-  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount });
+  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount, inChat });
   const { view, attempt, navigating, invoke } = flow;
   if (!attempt)
     return (
@@ -82,7 +77,13 @@ function ScopedSetup({
       </section>
     );
   const action = attempt.nextAction;
-  const { verificationUrl, awaitingOwner, adminApproval, offersGitHubRequest } = flow;
+  const { verificationUrl, awaitingOwner, offersGitHubRequest } = flow;
+  // The provider said (or may have said) an administrator must approve first:
+  // that help is the whole step. After a sign-in the person never came back
+  // from, it sits beside the sign-in button instead.
+  const approval = flow.organizationApproval;
+  const adminApproval = approval && approval.reason !== "unfinished" ? approval : null;
+  const approvalNote = approval?.reason === "unfinished" ? approval : null;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -109,13 +110,24 @@ function ScopedSetup({
       aria-label={t("connectSetup.connectionSetup")}
       aria-busy={view.busy || navigating}
     >
-      <div className="og-connect-setup-summary">
-        <p className="og-connect-setup-scope">{flow.scopeLabel}</p>
-        <p role="status" className="og-connect-setup-status">
-          {flow.status}
-        </p>
-        <p className="og-connect-setup-description">{flow.scopeDescription}</p>
-      </div>
+      {/* A chat card already names the service and whose account it is; a
+          sign-in step there needs only its button, and any other step only
+          its status. */}
+      {adminApproval ? null : inChat ? (
+        action.type === "authorize" ? null : (
+          <p role="status" className="og-connect-setup-status">
+            {flow.status}
+          </p>
+        )
+      ) : (
+        <div className="og-connect-setup-summary">
+          <p className="og-connect-setup-scope">{flow.scopeLabel}</p>
+          <p role="status" className="og-connect-setup-status">
+            {flow.status}
+          </p>
+          <p className="og-connect-setup-description">{flow.scopeDescription}</p>
+        </div>
+      )}
       {attempt.account && <p>{t("connectSetup.accountLabel", { label: attempt.account.label })}</p>}
       {awaitingOwner && (
         <div className="og-connect-setup-pending">
@@ -128,27 +140,19 @@ function ScopedSetup({
         </div>
       )}
       {adminApproval && (
-        <div className="og-connect-setup-pending" role="alert">
-          <p>
-            {adminApproval.required
-              ? t("connectSetup.microsoftAdminApprovalRequired")
-              : t("connectSetup.microsoftAdminApprovalMaybe")}
-          </p>
-          <ol>
-            <li>{t("connectSetup.sendTheApprovalLinkTo")}</li>
-            <li>{t("connectSetup.afterTheyApproveConnectAgain")}</li>
-          </ol>
-          <p className="og-connect-setup-approval-link">
-            <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
-              {t("connectSetup.adminApprovalLink")}
-            </a>
-            <CopyLinkButton url={adminApproval.url} />
-          </p>
-        </div>
+        <OrganizationApprovalHelp
+          approval={adminApproval}
+          serviceName={serviceName}
+          retryDisabled={flow.busy}
+          onRetry={onRetry ? () => invoke(onRetry) : undefined}
+        />
+      )}
+      {approvalNote && flow.interactive && (
+        <OrganizationApprovalHelp approval={approvalNote} serviceName={serviceName} />
       )}
       {flow.errorText && <p role="alert">{flow.errorText}</p>}
-      {flow.notice && <p role="status">{flow.notice}</p>}
-      {flow.interactive && (
+      {flow.notice && !approvalNote && <p role="status">{flow.notice}</p>}
+      {flow.interactive && !adminApproval && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy || navigating}>
             {flow.formStep ? (
@@ -267,23 +271,33 @@ function ScopedSetup({
             )}
             {action.type === "wait" && (
               <>
+                {/* In reading order: the code to enter, the page to enter it
+                    on, then what to do there. */}
                 {action.userCode && (
                   <p>
                     {t("connectSetup.verificationCode")} <code>{action.userCode}</code>
                   </p>
                 )}
-                <p>{t("connectSetup.completeProviderAuthorizationThenCheck")}</p>
                 {verificationUrl && (
-                  <a href={verificationUrl} target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={verificationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="og-connect-setup-primary"
+                  >
                     {t("connectSetup.openProviderVerificationPageNew")}
+                    <span className="sr-only"> {t("connectSetup.opensInNewTab")}</span>
                   </a>
                 )}
+                <p>{t("connectSetup.completeProviderAuthorizationThenCheck")}</p>
               </>
             )}
             <div className="og-connect-setup-secondary">
-              <button type="button" onClick={flow.refresh}>
-                {t("connectSetup.checkStatus")}
-              </button>
+              {!inChat || action.type === "wait" ? (
+                <button type="button" onClick={flow.refresh}>
+                  {t("connectSetup.checkStatus")}
+                </button>
+              ) : null}
               <button type="button" onClick={flow.cancel}>
                 {t("connectSetup.cancelSetup")}
               </button>

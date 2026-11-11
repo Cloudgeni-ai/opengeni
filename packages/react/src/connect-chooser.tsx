@@ -1,7 +1,10 @@
-import { connectionServicePresentation } from "./connection-service-presentation";
+import {
+  connectionServicePresentation,
+  connectionServiceWording,
+} from "./connection-service-presentation";
 import { ConnectionCatalog } from "./connection-catalog";
 import { ConnectionLogo } from "./connection-logo";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
 import { useOpenGeniText } from "./messages/runtime";
@@ -18,6 +21,11 @@ export type ConnectChooserProps = {
   compact?: boolean;
   /** Select a service from the unified discovery list. */
   initialProviderId?: string;
+  /**
+   * Nobody else can use connections made here (the person is alone in the
+   * workspace): connect their own account without asking who may use it.
+   */
+  personalOnly?: boolean;
 };
 
 /** Catalog readiness is supplied by the authenticated backend, never inferred
@@ -44,10 +52,20 @@ function ScopedChooser({
   providerOnly = false,
   compact = false,
   initialProviderId = "",
+  personalOnly = false,
 }: ConnectChooserProps) {
   const t = useOpenGeniText();
   const view = useConnect(controller);
-  const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
+  const [loaded, setCatalog] = useState<ConnectProvider[] | null>(null);
+  // Services carry the host's name wherever they are listed, searched or chosen.
+  const catalog = useMemo(
+    () =>
+      loaded?.map((entry) => {
+        const name = connectionServiceWording(t, entry.id).name;
+        return name ? { ...entry, label: name } : entry;
+      }) ?? null,
+    [loaded, t],
+  );
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [failed, setFailed] = useState(false);
   const [load, setLoad] = useState(0);
@@ -112,17 +130,36 @@ function ScopedChooser({
     return () => abort.abort();
   }, [controller, load, presentation, customOnly, providerOnly, initialProviderId]);
   const provider = catalog?.find((entry) => entry.id === providerId);
+  // With only one sensible answer, there is no question to ask.
+  const onlyOwnership = provider
+    ? personalOnly && provider.ownership.includes("personal")
+      ? "personal"
+      : provider.ownership.length === 1
+        ? provider.ownership[0]!
+        : null
+    : null;
+  const chosenOwnership = onlyOwnership ?? ownership;
   const canBegin =
     provider?.readiness === "available" &&
-    (ownership === "personal" || ownership === "workspace") &&
-    provider.ownership.includes(ownership);
+    (chosenOwnership === "personal" || chosenOwnership === "workspace") &&
+    provider.ownership.includes(chosenOwnership);
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!canBegin || view.busy || (ownership !== "personal" && ownership !== "workspace")) return;
+    if (
+      !canBegin ||
+      view.busy ||
+      (chosenOwnership !== "personal" && chosenOwnership !== "workspace")
+    )
+      return;
     setFailed(false);
     try {
       void controller
-        .begin({ providerId, ownership, returnUrl, idempotencyKey: crypto.randomUUID() })
+        .begin({
+          providerId,
+          ownership: chosenOwnership,
+          returnUrl,
+          idempotencyKey: crypto.randomUUID(),
+        })
         .catch(() => setFailed(true));
     } catch {
       setFailed(true);
@@ -211,6 +248,7 @@ function ScopedChooser({
                             {
                               id: entry.id,
                               name: entry.label,
+                              description: connectionServiceWording(t, entry.id).description,
                               status: connected
                                 ? t("connectChooser.connected")
                                 : entry.readiness === "available"
@@ -300,25 +338,27 @@ function ScopedChooser({
                     {provider.reason ?? t("connectChooser.thisServiceIsNotAvailable")}
                   </p>
                 )}
-                <label>
-                  {t("connectChooser.whoCanUseThisConnection")}
-                  <select
-                    required
-                    value={ownership}
-                    onChange={(event) => setOwnership(event.target.value)}
-                  >
-                    <option value="" disabled>
-                      {t("connectChooser.chooseOwnership")}
-                    </option>
-                    {provider.ownership.map((choice) => (
-                      <option key={choice} value={choice}>
-                        {choice === "personal"
-                          ? t("connectChooser.onlyMe")
-                          : t("connectChooser.everyoneInThisWorkspace")}
+                {onlyOwnership ? null : (
+                  <label>
+                    {t("connectChooser.whoCanUseThisConnection")}
+                    <select
+                      required
+                      value={ownership}
+                      onChange={(event) => setOwnership(event.target.value)}
+                    >
+                      <option value="" disabled>
+                        {t("connectChooser.chooseOwnership")}
                       </option>
-                    ))}
-                  </select>
-                </label>
+                      {provider.ownership.map((choice) => (
+                        <option key={choice} value={choice}>
+                          {choice === "personal"
+                            ? t("connectChooser.onlyMe")
+                            : t("connectChooser.everyoneInThisWorkspace")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </>
             )}
             <button

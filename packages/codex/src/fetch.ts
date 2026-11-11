@@ -12,6 +12,10 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
+import {
   withResponsesContinuationAdmission,
   withModelTransportObservation,
   markModelSocketFailure,
@@ -35,6 +39,7 @@ import {
   type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
+  type CodexReportedUsage,
   type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
@@ -112,7 +117,7 @@ export type CodexEncryptedArtifactRejection = {
 };
 
 /** Exact Codex `error.code` for an opaque artifact the backend can no longer use. */
-export const CODEX_ENCRYPTED_CONTENT_REJECTION_CODE = "invalid_encrypted_content";
+export const CODEX_ENCRYPTED_CONTENT_REJECTION_CODE = ENCRYPTED_CONTENT_REJECTION_CODE;
 
 /**
  * Classify only the provider's definitive request rejection for an opaque
@@ -124,6 +129,19 @@ export function classifyCodexEncryptedArtifactRejection(
   error: unknown,
 ): CodexEncryptedArtifactRejection | null {
   if (!isCodexTransportError(error)) return null;
+  return classifyEncryptedArtifactRejection(error);
+}
+
+/**
+ * The same definitive HTTP 400 rejection of an opaque artifact from any
+ * Responses provider, such as one that cannot read ciphertext another provider
+ * issued ("Could not decrypt the provided encrypted_content"). Callers that
+ * need proof of the Codex transport use
+ * {@link classifyCodexEncryptedArtifactRejection}.
+ */
+export function classifyEncryptedArtifactRejection(
+  error: unknown,
+): CodexEncryptedArtifactRejection | null {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     const value = current as Record<string, unknown>;
@@ -147,19 +165,8 @@ export function classifyCodexEncryptedArtifactRejection(
       typeof body?.code === "string" ? body.code : "",
       typeof value.type === "string" ? value.type : "",
       typeof body?.type === "string" ? body.type : "",
-    ]
-      .join(" ")
-      .toLowerCase();
-    const unsupportedFieldShape =
-      /(?:invalid value|supported values?|unsupported|unknown (?:field|parameter|value))/.test(
-        message,
-      );
-    if (
-      status === 400 &&
-      !unsupportedFieldShape &&
-      /(?:encrypted[_ ]content|encrypted reasoning|reasoning artifact)/.test(message) &&
-      /(?:decrypt(?:ed|ion)?|could not be parsed|cannot be parsed|failed to parse)/.test(message)
-    ) {
+    ].join(" ");
+    if (status === 400 && isEncryptedReasoningRefusalText(message)) {
       return { status: 400, kind: "encrypted_content_rejected" };
     }
     current = value.cause;
@@ -250,6 +257,32 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
     secondaryResetAt: firstIsFiveHour ? secondaryResetAt : primaryResetAt,
     checkedAt: new Date(nowMs),
   };
+}
+
+/**
+ * Every usage window the response headers report, whether or not a duration
+ * identifies it. Unlike `parseCodexUsageHeaders`, which caches only fully
+ * identified windows, this serves request-boundary credit admission, which needs
+ * only whether a reported window is used up. A weekly-only account reports one
+ * identified window, so it never yields a `CodexUsageHeaderSnapshot`.
+ */
+export function parseCodexReportedUsage(headers: Headers): CodexReportedUsage | null {
+  const nowMs = Date.now();
+  const windows: CodexReportedUsage["windows"] = [];
+  for (const slot of ["primary", "secondary"] as const) {
+    const usedPercent = parseIntHeader(headers.get(`x-codex-${slot}-used-percent`));
+    if (usedPercent === null) continue;
+    windows.push({
+      usedPercent,
+      resetAt: resolveResetAt(
+        headers,
+        `x-codex-${slot}-reset-at`,
+        `x-codex-${slot}-reset-after-seconds`,
+        nowMs,
+      ),
+    });
+  }
+  return windows.length ? { windows, checkedAt: new Date(nowMs) } : null;
 }
 
 type RequestAudit = {
@@ -1082,6 +1115,8 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       // the optional durable observer is awaited independently of that cache.
       // `if (usage)` makes an absent/malformed header set a safe no-op. We read
       // res.headers only — the SSE body is never touched here.
+      const reported = parseCodexReportedUsage(res.headers);
+      if (reported) ctx.onReportedUsage?.(reported);
       const usage = parseCodexUsageHeaders(res.headers);
       if (usage) {
         ctx.onUsageHeaders?.(usage);

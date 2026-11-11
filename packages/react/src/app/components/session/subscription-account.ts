@@ -4,12 +4,21 @@
 // so every provider shows the same structure and copy. Only names, marks and
 // plan labels differ.
 import type { ClientModel, ModelAccountChoiceRefusal } from "@opengeni/sdk";
+import { isClaudeSubscriptionModelId } from "@opengeni/contracts/claude-subscription-model-ids";
+import { connectedSubscriptionProvider } from "../../../model-policy";
 import { isCodexProductModel } from "../../lib/session-model";
+import {
+  subscriptionLimit,
+  subscriptionPlanLabel,
+  subscriptionPlanWindows,
+  subscriptionWindows,
+  type SubscriptionLimit,
+  type SubscriptionWindow,
+} from "../../lib/subscription-accounts";
 import type { BillingClass } from "../billing-class-mark";
 import type {
   SubscriptionAccountMenuRow,
   SubscriptionAccountMenuUsage,
-  SubscriptionAccountUsageWindow,
 } from "./subscription-account-menu";
 
 export type SubscriptionAccountUsage = {
@@ -87,20 +96,6 @@ export function subscriptionProviderPresentation(provider: string): {
   return PROVIDER[provider] ?? { name: "Subscription", billingClass: "external" };
 }
 
-// Presentation labels only. Preserve every supplied window; never combine
-// family-specific, overage or partial windows into an account capacity score.
-const WINDOW_LABEL: Record<string, string> = {
-  // Neutral ids: they do not say how long the window is.
-  primary: "Primary",
-  secondary: "Secondary",
-  five_hour: "5h",
-  seven_day: "Week",
-  seven_day_opus: "Week · Opus",
-  seven_day_sonnet: "Week · Sonnet",
-  overage: "Overage",
-  billing: "Billing",
-};
-
 const REFUSAL_COPY: Record<ModelAccountChoiceRefusal, string> = {
   inactive: "Unavailable",
   personal_not_allowed: "Turned off here",
@@ -120,9 +115,11 @@ const STATUS_COPY: Record<string, string> = {
   limit_reached: "Limit reached",
 };
 
-function time(value: string | null): string | null {
-  if (!value || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toLocaleString(undefined, {
+function time(value: string | number | null): string | null {
+  if (value === null) return null;
+  const at = typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(at)) return null;
+  return new Date(at).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -130,8 +127,15 @@ function time(value: string | null): string | null {
   });
 }
 
-export function accountLabel(account: SubscriptionAccount): string {
-  return account.label ?? account.email ?? account.plan ?? "Account";
+/** The name an account goes by: its label, else its email, else its plan. */
+export function accountLabel(account: SubscriptionAccount, provider = ""): string {
+  return (
+    account.label ??
+    account.email ??
+    subscriptionPlanLabel(provider, account.plan) ??
+    account.plan ??
+    "Account"
+  );
 }
 
 export function accountStatus(account: SubscriptionAccount): string | null {
@@ -151,77 +155,52 @@ function accountSource(account: SubscriptionAccount): string | null {
         : null;
 }
 
-function windowLabel(id: string): string {
-  return WINDOW_LABEL[id] ?? id;
-}
+/** An account's usage as every surface shows it: its reported windows and its limit. */
+export type SubscriptionAccountUsageView = {
+  windows: SubscriptionWindow[];
+  limit: SubscriptionLimit;
+  /** Words instead of windows: no reading, or a limit with no window to show it. */
+  message: string | null;
+  /** "Updated 3 Nov, 15:29", when the reading says when it was taken. */
+  note: string | null;
+};
 
-/** The reading as usage rows: percentage used, with when each window resets. */
+/**
+ * The reading as the provider reported it: every window, labelled, never
+ * completed. A window the plan keeps quiet (Ultra's 5h) shows only while it
+ * holds the account back; limits are read from every window.
+ */
 export function subscriptionAccountUsage(
+  provider: string,
   usage: SubscriptionAccountUsage | null | undefined,
   now = Date.now(),
-): {
-  windows?: SubscriptionAccountUsageWindow[];
-  message?: string;
-  note?: string;
-  summary?: string;
-} {
-  if (!usage) return { message: "No usage reading yet" };
-  const observed = time(usage.observedAt);
-  const windows = usage.windows.map((window) => {
-    const reset = time(window.resetsAt);
-    const past = reset !== null && Date.parse(window.resetsAt!) <= now;
-    return {
-      label: windowLabel(window.id),
-      usedPercent: window.usedPercent,
-      detail: [
-        window.status === "unknown"
-          ? "Status unknown"
-          : window.status === "warning"
-            ? "Near its limit"
-            : window.status === "exhausted"
-              ? "Limit reached"
-              : null,
-        past ? "Reset passed; usage may be outdated" : reset ? `Resets ${reset}` : null,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-    };
-  });
-  const exhaustedTime = time(usage.exhaustedUntil);
-  // A limit whose end has passed no longer applies.
-  const exhausted =
-    usage.exhaustedKind !== null &&
-    !(usage.exhaustedUntil && Date.parse(usage.exhaustedUntil) <= now);
+  plan?: string | null,
+): SubscriptionAccountUsageView {
+  const reported = subscriptionWindows(provider, usage?.windows ?? [], now);
+  const windows = subscriptionPlanWindows(provider, plan, reported);
+  const limit = subscriptionLimit(reported, usage?.exhaustedUntil ?? null, now);
+  const until = time(limit.until);
+  const observed = time(usage?.observedAt ?? null);
   return {
     windows,
-    ...(windows.length === 0
-      ? {
-          message: exhausted
-            ? `Limit reached${exhaustedTime ? ` until ${exhaustedTime}` : ""}`
-            : "No usage reading yet",
-        }
-      : {}),
-    ...(observed ? { note: `Updated ${observed}` } : {}),
-    ...(windows.length > 0
-      ? {
-          summary: `${windows
-            .map(
-              (window) =>
-                `${window.label} ${window.usedPercent === null ? "unknown" : `${Math.round(window.usedPercent)}%`}`,
-            )
-            .join(" · ")} used`,
-        }
-      : {}),
+    limit,
+    // A limit that no account-wide window shows (a refusal) still says until
+    // when; a full model-scoped week (Fable) doesn't show the account's limit.
+    message:
+      limit.reached && !windows.some((window) => window.limitReached && !window.scoped)
+        ? `Limit reached${until ? ` until ${until}` : ""}`
+        : windows.length === 0
+          ? "No usage reading yet"
+          : null,
+    note: observed ? `Updated ${observed}` : null,
   };
 }
 
-function nearLimit(usage: SubscriptionAccountUsage | null | undefined): boolean {
-  return (usage?.windows ?? []).some(
-    (window) =>
-      window.status === "warning" ||
-      window.status === "exhausted" ||
-      (window.usedPercent !== null && window.usedPercent >= 90),
-  );
+/** One plan label when every listed account has the same plan, else null. */
+function sharedPlan(provider: string, accounts: readonly SubscriptionAccount[]): string | null {
+  const plans = new Set(accounts.map((account) => subscriptionPlanLabel(provider, account.plan)));
+  const [only] = plans;
+  return plans.size === 1 && only ? only : null;
 }
 
 /**
@@ -243,24 +222,31 @@ export function showsSubscriptionAccountMenu(state: SubscriptionAccountState): b
 /**
  * The subscription whose accounts a chat's header offers, or null for a chat
  * that does not run on a subscription. Codex product models are Codex
- * subscriptions even before the catalog lists them.
+ * subscriptions even before the catalog lists them, and so are Claude
+ * subscription model ids. The workspace catalog leaves `credentialSource`
+ * out, so its public provider id and rail decide for the rest.
  */
 export function subscriptionAccountProvider(
   modelId: string,
-  credentialSource: ClientModel["credentialSource"],
+  model: Pick<ClientModel, "id" | "provider" | "source" | "credentialSource"> | null | undefined,
 ): string | null {
   if (isCodexProductModel(modelId)) return "codex";
-  return credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  if (isClaudeSubscriptionModelId(modelId)) return "claude";
+  return model ? connectedSubscriptionProvider(model) : null;
 }
 
 /** Everything the account menu shows, from the neutral state. */
-export function subscriptionAccountMenuContent(state: SubscriptionAccountState) {
+export function subscriptionAccountMenuContent(
+  state: SubscriptionAccountState,
+  now: number = Date.now(),
+) {
   const { name } = subscriptionProviderPresentation(state.provider);
+  const provider = state.provider;
   const current = state.current;
   // A failed read does not know the selection; never claim Automatic for it.
   const unknown = state.unavailable && !current && !state.currentHidden;
   const displayName = current
-    ? accountLabel(current)
+    ? accountLabel(current, provider)
     : state.currentHidden
       ? "Account unavailable"
       : unknown
@@ -276,11 +262,14 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
         : current
           ? "Current account"
           : "Account selection";
-  const usageNearLimit = nearLimit(current?.usage);
+  const currentUsage = current
+    ? subscriptionAccountUsage(provider, current.usage, now, current.plan)
+    : null;
+  const limitTone = currentUsage?.limit.reached || currentUsage?.limit.near;
   const tone: "ok" | "warn" | "bad" =
     current?.status === "needs_relogin" || current?.status === "error"
       ? "bad"
-      : status || state.waiting || usageNearLimit
+      : status || state.waiting || limitTone
         ? "warn"
         : "ok";
   const usage: SubscriptionAccountMenuUsage = !current
@@ -295,34 +284,64 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
       ? { checking: true }
       : state.usageCheck === "failed"
         ? { unavailable: true }
-        : subscriptionAccountUsage(current.usage);
-  const accounts: SubscriptionAccountMenuRow[] = state.accounts.map((account) => ({
-    id: account.id,
-    label: accountLabel(account),
-    plan: account.plan,
-    status: accountStatus(account),
-    detail: [
-      accountLabel(account),
-      account.email,
-      account.plan,
-      accountSource(account),
-      accountStatus(account),
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    personal: account.source === "personal",
-    disabled: !account.choosable,
-    // The current account's usage is already shown above the list.
-    usageSummary:
+        : {
+            windows: currentUsage!.windows,
+            ...(currentUsage!.message ? { message: currentUsage!.message } : {}),
+            ...(currentUsage!.note ? { note: currentUsage!.note } : {}),
+          };
+  // The plan is shown once: beside the list when every account has the same
+  // plan, else on each row (by its own name, the provider being clear here).
+  const plan = sharedPlan(provider, state.accounts);
+  const selectedId = state.automatic || unknown ? null : state.chosenId;
+  const accounts: SubscriptionAccountMenuRow[] = state.accounts.map((account) => {
+    const label = accountLabel(account, provider);
+    const rowStatus = accountStatus(account);
+    // The current account's usage is shown above the list; a live check
+    // hides every reading until it answers.
+    const rowUsage =
       account.id === current?.id || state.usageCheck === "checking"
-        ? undefined
-        : subscriptionAccountUsage(account.usage).summary,
-  }));
+        ? null
+        : subscriptionAccountUsage(provider, account.usage, now, account.plan);
+    return {
+      id: account.id,
+      label,
+      email: account.email && account.email !== label ? account.email : null,
+      plan: plan ? null : subscriptionPlanLabel(provider, account.plan, { brand: false }),
+      status: rowStatus,
+      mark:
+        account.id === selectedId
+          ? "next_turn"
+          : account.id === current?.id && !state.currentHidden
+            ? "in_use"
+            : null,
+      windows: rowUsage?.windows ?? null,
+      // A row without a reading stays quiet; only a limit no window shows gets words.
+      usageMessage: rowUsage?.limit.reached ? rowUsage.message : null,
+      detail: [
+        label,
+        account.email,
+        subscriptionPlanLabel(provider, account.plan),
+        accountSource(account),
+        rowStatus,
+      ]
+        .filter((part, index, parts) => part && parts.indexOf(part) === index)
+        .join(" · "),
+      personal: account.source === "personal",
+      disabled: !account.choosable,
+    };
+  });
   return {
     ariaLabel: [
       `${name} account`,
       displayName,
-      state.waiting ? "Limit reached" : (status ?? (usageNearLimit ? "Near its limit" : null)),
+      state.waiting
+        ? "Limit reached"
+        : (status ??
+          (currentUsage?.limit.reached
+            ? "Limit reached"
+            : currentUsage?.limit.near
+              ? "Near its limit"
+              : null)),
     ]
       .filter(Boolean)
       .join(" · "),
@@ -330,13 +349,15 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
     displayName,
     identity: current?.email && current.email !== displayName ? current.email : null,
     metadata: current
-      ? [current.plan, accountSource(current), status].filter(Boolean).join(" · ") ||
-        `${name} subscription`
+      ? [subscriptionPlanLabel(provider, current.plan), accountSource(current), status]
+          .filter(Boolean)
+          .join(" · ") || `${name} subscription`
       : `${name} subscription`,
     tone,
     usage,
     accounts,
-    selectedId: state.automatic || unknown ? null : state.chosenId,
+    plan,
+    selectedId,
     automaticSelected: state.automatic && !unknown,
     actionLabel: state.waiting ? "Retry with" : "Use for next turn",
     automaticLabel: "Automatic",

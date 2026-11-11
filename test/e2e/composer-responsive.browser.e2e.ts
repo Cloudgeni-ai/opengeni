@@ -51,6 +51,108 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  test.each([
+    { width: 390, status: "ready" },
+    { width: 390, status: "uploading" },
+    { width: 768, status: "ready" },
+    { width: 768, status: "uploading" },
+  ])(
+    "adjacent attachment touch areas stay disjoint at $width px ($status)",
+    async ({ width, status }) => {
+      const context = await browser.newContext({
+        viewport: { width: 1000, height: 1000 },
+        hasTouch: true,
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      try {
+        // Each tap starts with both real React-managed attachments present. Test
+        // outside the visible 26px button, including the corners beside its neighbor.
+        for (const [dx, dy] of [
+          [-20, -20],
+          [0, -20],
+          [20, -20],
+          [-20, 0],
+          [20, 0],
+          [-20, 20],
+          [0, 20],
+          [20, 20],
+        ]) {
+          await page.goto(
+            `${baseUrl}/composer-responsive.html?width=${width}&attachments=${status}`,
+            {
+              waitUntil: "networkidle",
+            },
+          );
+          const remove = page.getByRole("button", {
+            name: "Remove e2e screenshot.png",
+            exact: true,
+          });
+          const neighbor = page.getByRole("button", { name: "Remove neighbor.png", exact: true });
+          await remove.waitFor();
+          const target = await remove.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            const hits = [-20, 0, 20].flatMap((y) =>
+              [-20, 0, 20].map((x) => {
+                const hit = document.elementFromPoint(center.x + x, center.y + y);
+                return hit === element || (hit !== null && element.contains(hit));
+              }),
+            );
+            const chip = element.parentElement!;
+            return {
+              center,
+              hits,
+              coarse: matchMedia("(pointer: coarse)").matches,
+              chipTop: chip.getBoundingClientRect().top,
+              neighborTop: chip.nextElementSibling!.getBoundingClientRect().top,
+            };
+          });
+          expect(target.coarse).toBe(true);
+          expect(target.hits).toEqual(Array(9).fill(true));
+          expect(target.neighborTop > target.chipTop).toBe(width === 390);
+          await page.touchscreen.tap(target.center.x + dx!, target.center.y + dy!);
+          await remove.waitFor({ state: "detached" });
+          expect(await neighbor.count()).toBe(1);
+          expect(await page.getByRole("dialog").count()).toBe(0);
+          expect(await page.getByRole("textbox").inputValue()).toBe(
+            "A long prompt remains editable while the panel resizes.",
+          );
+          // The surviving neighbor still works with a keyboard.
+          await neighbor.focus();
+          await page.keyboard.press("Enter");
+          await neighbor.waitFor({ state: "detached" });
+        }
+      } finally {
+        await context.close();
+      }
+    },
+    120_000,
+  );
+
+  test("attachment spacing remains compact for a fine pointer", async () => {
+    const context = await browser.newContext({ viewport: { width: 1000, height: 1000 } });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${baseUrl}/composer-responsive.html?width=768&attachments=ready`, {
+        waitUntil: "networkidle",
+      });
+      const remove = page.getByRole("button", { name: "Remove e2e screenshot.png", exact: true });
+      await remove.waitFor();
+      const geometry = await remove.evaluate((element) => ({
+        coarse: matchMedia("(pointer: coarse)").matches,
+        gap: getComputedStyle(element.parentElement!.parentElement!).gap,
+      }));
+      expect(geometry).toEqual({ coarse: false, gap: "6px" });
+      await remove.click();
+      expect(
+        await page.getByRole("button", { name: "Remove neighbor.png", exact: true }).count(),
+      ).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
   test.each([390, 1440])(
     "stock and opted-in model branding preserve credit/free truth at %spx",
     async (width) => {

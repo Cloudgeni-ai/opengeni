@@ -1,5 +1,6 @@
 # Optional independent operator job; never uses application/runtime credentials.
-# Retains latest nightly + a Sunday weekly checkpoint. See docs/backups.md.
+# Stores nightly recovery points in a restic repository (7 daily and 4 weekly
+# by default). See docs/backups.md.
 backup:
   enabled: false
   schedule: "15 3 * * *"
@@ -92,6 +93,9 @@ config:
   MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
+  # Comma-separated exact hosts, optionally host:port, allowed to resolve privately.
+  # Example: "admin-api.example.com:443,auth.example.com:8443". No wildcards or URLs.
+  OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS: ""
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"
@@ -127,6 +131,16 @@ config:
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
+  # OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING (default "true", unset here): with
+  # credit billing active, hosted web search and OpenAI hosted image generation
+  # cost credit on turns whose model Opengeni pays for. Set "false" to restore
+  # free hosted search and images, for example without the Gateway image
+  # credential. See docs/web-search.md.
+  # OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED (default "false", unset here):
+  # set "true" to let API-origin work (organization access keys, embedded
+  # products) use the organization's own connected subscriptions. Only for an
+  # operator who owns the subscriptions it connects and accepts its provider's
+  # terms. See docs/deployment.md.
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
   OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
@@ -137,9 +151,7 @@ config:
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",
-  # apply the drained maintenance migration
-  # 0389_model_catalog_and_gateway_custom_models.sql and follow the
-  # compatibility-first catalog cutover in docs/deployment.md; do not expose
+  # follow the compatibility-first catalog cutover in docs/deployment.md; do not expose
   # database-only membership during a mixed code/database rollout.
   OPENGENI_MODEL_CATALOG_SOURCE: code
   # Optional non-secret JSON values may be supplied here:
@@ -152,7 +164,7 @@ config:
   # Default for new work while an organization holds Opengeni credits and has
   # no connected subscription (see docs/model-providers.md):
   # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
-  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
+  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: medium
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
@@ -166,8 +178,11 @@ config:
 # Digest-pinned Modal Computer/Browser box. Defaults to Opengeni's public image
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
+# Packaged release and canary charts replace this default with the desktop image
+# built from their own source (scripts/package-release-chart.ts); the value here
+# is the fallback for unpackaged checkouts and equals DEFAULT_MODAL_IMAGE_REF.
 desktop:
-  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805"
+  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f"
 
 # Rotate the runtime database login's password without restarting pods. When
 # enabled, the api, worker-control and worker-turns pods mount the optional keys
@@ -195,12 +210,9 @@ secret:
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
   # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
   # (default: Claude Opus 5.5 EU).
-  # Google Drive release-readiness configuration is demonstrated in
-  # values.google-drive-readiness.example.yaml. When enabled, this Secret must
-  # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
-  # OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY, OPENGENI_GOOGLE_DRIVE_CLIENT_ID, and
-  # OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET. Never pass those values through Helm
-  # values or command-line --set arguments.
+  # When integrations are enabled, this Secret must provide
+  # OPENGENI_INTEGRATIONS_STATE_SECRET and OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY.
+  # Never pass those values through Helm values or command-line --set arguments.
   # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
   # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
   # secret; the API key automatically enables TLS.
@@ -288,6 +300,10 @@ api:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
+  # After SIGTERM the API drains: responses close their keep-alive connections, idle
+  # ones close, live streams end and in-flight requests finish, all within the grace
+  # left after preStop (rendered as OPENGENI_API_SHUTDOWN_GRACE_MS). It must exceed
+  # preStopDrainSeconds.
   terminationGracePeriodSeconds: 30
   # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
   # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
@@ -1443,6 +1459,11 @@ computeControl:
     schema: compute
     # Defaults: the chart's Postgres, its database, and sslmode disable.
     # host is required when the chart runs no Postgres.
+    # sslmode is disable, prefer or require. With require the service and
+    # its sweep connect over TLS and check the database's certificate
+    # against the image's system authorities; for a private authority,
+    # mount it (extraVolumes, extraVolumeMounts) and name it in extraEnv as
+    # COMPUTE_CONTROL_DATABASE_CA, which both read.
     host: ""
     port: 5432
     name: ""
@@ -1618,12 +1639,15 @@ computeControl:
     nodePort: null
     annotations: {}
     loadBalancerSourceRanges: []
-  # The store's daily sweep (`compute-host sweep --delete`, ADR 17), from the
-  # same image, with the same identity. Deleting sweeps are for Google Cloud
-  # Storage archives only: turn it off for az:// and s3://.
+  # The store's hourly sweep (`compute-control sweep --delete`, ADR 17, 25,
+  # 28 and 29), from the same image, with the same identity and database. It
+  # deletes on any archive: gs://, az:// and s3:// alike. Replaced copies
+  # (each sandbox's earlier checkpoints) stay stored until a sweep at least
+  # an hour after the hour they were written in, so run it hourly. Each run
+  # lists only the hours new since the last, and everything once a day.
   sweep:
     enabled: true
-    schedule: "17 3 * * *"
+    schedule: "17 * * * *"
   resources:
     requests:
       cpu: 100m
@@ -1747,11 +1771,15 @@ observability:
     # Must cover at least three configured sandbox reaper periods; Helm rejects
     # an incompatible pairing before generating a rule that would age out live data.
     inventoryFreshnessSeconds: 300
-    # Cumulative p95 startup SLOs, measured from the durable turn queue time.
-    # Keep these aligned with the canonical Turn Startup dashboard annotations.
-    turnStartupQueueP95Seconds: 5
-    # Accepted turn -> first provider dispatch is Opengeni-owned latency, so it
-    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # Age of the oldest runnable prompt (not held behind an active turn, a
+    # Pause, a capacity wait or a required human action). Prompts queued behind
+    # a running turn in their own chat are normal and never alert.
+    turnReadyPromptAgeSeconds: 60
+    turnReadyPromptAgeCriticalSeconds: 300
+    # Startup p95s measured from the start of the turn attempt, so they exclude
+    # time behind an earlier turn, capacity waits and recovery gaps. Attempt
+    # start -> first provider dispatch is Opengeni-owned preparation, so it gets
+    # tight tiers: a warning (investigate) and a paging critical tier that
     # replaces it. Normal p95 is a few seconds.
     turnStartupProviderDispatchP95Seconds: 20
     turnStartupProviderDispatchCriticalP95Seconds: 60
@@ -1775,6 +1803,11 @@ observability:
     providerTtftRegressionFloorSeconds: 5
     providerTtftRecentMinSamples: 30
     providerTtftBaselineMinSamples: 200
+    # Streaming p99 alerts (session event append and live publish) need at
+    # least this many observations in their window. Below 100 the p99 is just
+    # the slowest single observation, so one slow write on a quiet deployment
+    # would page.
+    sessionEventMinSamples: 100
     labels: {}
     annotations: {}
     rules: []

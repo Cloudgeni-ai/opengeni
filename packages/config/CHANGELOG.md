@@ -1,5 +1,494 @@
 # @opengeni/config
 
+## 6.14.0
+
+### Minor Changes
+
+- 5628a56: The Microsoft Teams bot names itself with the configured Teams app name, `OPENGENI_TEAMS_APP_NAME` (default `Opengeni`, at most 30 characters), the same variable the app package generator uses for `name.short`. It appears in the welcome, help, the connect welcome and reminder, the not-available and not-turned-on notices and the AI notice on a new task; text about the Opengeni service and accounts is unchanged. The app package's full description and command descriptions also name the bot by that app name, keeping Opengeni for the service, accounts and workspace. The package generator also accepts a full app name, `OPENGENI_TEAMS_APP_FULL_NAME` (at most 100 characters), for `name.full`, which defaults to the short name. Existing deployments and packages are unchanged.
+
+### Patch Changes
+
+- 6ae0528: Managed sign-in now allows at most 100 password attempts per account per hour (20 from one address), down from up to 200. New passwords found in the Have I Been Pwned breach corpus are refused at sign-up, password reset, password change and invited-user account setup; only a five-character hash prefix leaves the API, the check is on outside local and test environments by default (`OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK` overrides it), and an unreachable lookup never blocks anyone. Better Auth log lines no longer carry request bodies, links, tokens or email addresses. Delegated access tokens (`ogd_`) that would stay valid for more than 24 hours are refused.
+- e33947d: Claude Fable 5.2 (`claude-fable-5-2`) is a supported Claude model on Anthropic API keys and Claude subscriptions. It can be added from the Claude model list, runs with all five reasoning efforts (default high), a 1M-token context and 128K output, compacts automatically at 300K tokens like Opus 5.5, shows its progress updates between tool calls like Opus 5.5, keeps its signed thinking valid when the history is compacted, and is priced at $8 / $40 per million tokens ($0.20 cache reads, $10 five-minute cache writes).
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- 67905a7: Workspace budgets and the per-person Personal workspace limit can now be set without extra configuration: `OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `true`. It was a rollout gate whose precondition (every API and worker enforcing allowances) always holds now that a release only runs past the 0977 migration baseline, yet it stayed off unless an operator found and set it. `false` still refuses new budgets and limits; existing ones stay enforced and can be removed. Organization settings → Billing → Personal workspaces also shows a plain sentence when a limit can't be saved instead of the raw API error.
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 281af3a: Add `OPENGENI_CLAUDE_CODE_API_KEY_ENABLED` (default off): Connect provider offers a
+  "Claude Code (API key)" row that opens the Anthropic API-key connection, introduced by a short
+  explanation of the monthly API credits some Claude plans include and how to claim them and create
+  the key. Display only; the Claude subscription connection is unchanged.
+- f817cf5: Add `GET /v1/auth/display-identity` so a marketing site can show a signed-in visitor as signed in. It resolves the visitor like `GET /v1/auth/get-session` does on a freshly loaded app tab (the selected account in session-set modes) and returns only `{ "signedIn": false }` or `{ "signedIn": true, "name", "image" }` (no email, ids or session data), with `Cache-Control: private, no-store` and `Vary: Origin`. The new `OPENGENI_LANDING_ORIGINS` setting (comma-separated exact origins, empty by default) grants credentialed CORS for that one GET path only; it never widens `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`, and every other path keeps its existing CORS behaviour.
+- a64e6e4: Allow deployments to configure a separate model for stateless public decision calls without changing agent decisions. Unset public settings retain the shared model; partial overrides never borrow its credentials. Decision responses and usage receipts identify the answering model reported by the provider.
+- 913e2b4: Allow deployment operators to permit exact private-network integration hosts, optionally restricted by port, without enabling private destinations globally. Apply the allowlist at DNS-pinned connection time across MCP and OAuth traffic.
+
+### Patch Changes
+
+- 64fd53f: An agent can now ask to attach a repository the workspace GitHub App offers to its own chat with the new first-party `github_repository_attach` tool. Every call waits for a person's approval through the ordinary tool approval card, in the app and in the Slack thread of a chat started from Slack. The card names the repository, the branch and the access, and says when a person removed the repository from the chat earlier. Where nobody can answer, such as a scheduled or unattended run, the call is refused.
+
+  The API attaches only a call a person approved for exactly that repository and branch, from the same workspace GitHub App catalog and `github:use` permission as the repository picker, and never an archived or empty repository. The repository joins the chat's repositories as best effort (`optional`), ends any earlier removal record, and is one of the chat's repositories from the next turn. Asking for a repository the chat already has reports the branch it has, and a repository the App has since stopped offering no longer blocks attaching another. A new `session.resources.added` event records it.
+
+  `@opengeni/core` adds `attachSessionRepositoryResource`, `@opengeni/db` adds `listPersonApprovedFirstPartyToolCalls`, and the timeline shows the call as "Attaching a code repository".
+
+  An approval card for a first-party call whose review states its target facts now lists those facts, in the app and in Slack, as app action cards do; the call's raw arguments stay in Details. The Slack bot message card shows its channel and message this way too.
+
+- 00dd24b: Choosing Ultrafast now works. The database accepted only Standard, Priority and Fast, so with Ultrafast selected every draft save, new chat and message failed with a server error. Migrations 1302-1310 widen the latency-mode checks on chats, turns and both kinds of drafts (added NOT VALID, then validated separately, so no table is locked for long), and scheduled runs into an Ultrafast chat are admitted. Compaction turns, goal continuations and scheduled runs keep a chat's Ultrafast setting instead of dropping to its default. The built-in provider offers Ultrafast only on the direct OpenAI API, where OpenAI serves it, not on Azure OpenAI or another base URL; turns already accepted there keep running. Agents can start Ultrafast workers with `session_create`.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/codex@6.12.0
+  - @opengeni/xai-subscription@6.12.0
+
+## 6.11.0
+
+### Minor Changes
+
+- 8d1edfc: Self-hosted operators can let API-origin work (organization access keys, embedded products) use the organization's own connected subscriptions with `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` (`apiConnectedSubscriptionsEnabled`, default `false`). It is deployment configuration on the API and worker processes, never a request or tenant setting. With it on, agent turns, goals, schedules, stateless model calls, transcription, realtime voice, titles, model lists and defaults no longer refuse or skip connected subscriptions for API work; paid-plan requirements still apply where credit billing is active. Off, API selections of a subscription still return `403 subscription_api_unavailable`, as before. The operator is responsible for its provider's terms.
+- d8e2bbc: Add opt-in owner-authorized automatic credit top-up settings, card setup and SDK methods, with durable Stripe PaymentIntent recovery and tax-inclusive UTC monthly caps. Deployment activation is off by default.
+- 3f64150: Your GitHub can use **All my repositories** (offered once `OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is on, after every API and worker runs this release; `allRepositoriesAvailable` on the connection status), read only or read and write, instead of a chosen list: any repository the person can currently reach on GitHub works in chats, the git broker and the `github_personal__*` tools, checked live with GitHub (cached for a minute; renamed repositories are followed). A repository a person removed from a chat stays refused in that chat. The chosen list is kept, so switching back restores it; turning the mode off, or narrowing it, ends work accepted before, even if it is turned back on. Catalog items keep `selectedAccess` as the saved choice and add `effectiveAccess`, the access usable now. Repository search in the chooser and the session picker now asks GitHub, so it finds repositories beyond the first 100 (`query` on the personal repositories list; `allRepositoriesAccess` on the selection state and the replace request). New read tools work without a sandbox: `organizations_list`, `owner_repositories_list`, `workflow_runs_list`, `workflow_run_get` and `workflow_job_logs_get` (bounded, tail first, paged, read with HTTP ranges from the log storage). `organizations_list` comes from the person's repository access, which the connection's `repo` scope allows. One shared check, `checkPersonalGitHubRepositoryAccess` in `@opengeni/core`, decides repository access for every caller, including the `gh` gateway. GitHub REST bridge bodies and commit messages (issues, pull requests, comments, reviews, merges) keep their line breaks and tabs instead of being rejected as invalid.
+- 6abf872: Integration Knowledge sync is fully removed. A migration deletes the leftover Knowledge source sync tasks with their runs, sync state and wakes, and any saved `knowledge_source` facets; Automations no longer show "Sync retired" and the integration facets panel no longer shows "Retired" sources. Native Google Drive and Atlassian source connections left from the old sync stay hidden and inert; the generic connection DELETE still revokes them. Schedules only run agent turns. The native Google Drive and Atlassian source OAuth, callbacks, lifecycle and source routes are gone; Google Drive, OneDrive and Atlassian keep working through their agent-tool connections.
+
+  - Removed internal entry points: `@opengeni/documents/google-drive`, `@opengeni/documents/atlassian` and `@opengeni/contracts/google-drive-native-retirement`. `@opengeni/contracts/knowledge-source-sync-retirement` now exports only `KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE`, and `@opengeni/contracts/atlassian-native-retirement` only the historical tool names.
+  - Removed internal `@opengeni/contracts` root exports: `KnowledgeSourceSyncScheduleControl`, `scheduledTaskKnowledgeSource`, `requireScheduledTaskKnowledgeSource` and `knowledgeSourceAgentConfig`.
+  - The `OPENGENI_GOOGLE_DRIVE_CLIENT_ID`, `OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`, `OPENGENI_GOOGLE_DRIVE_SYNC_*`, `OPENGENI_GOOGLE_DRIVE_PROVIDER_*`, `OPENGENI_ATLASSIAN_CLIENT_ID` and `OPENGENI_ATLASSIAN_CLIENT_SECRET` settings are no longer read.
+  - Public SDK surface is unchanged until the next major: `browseAtlassianSources`, `saveAtlassianSources`, `setAtlassianLifecycle`, `transitionGoogleDriveLifecycle`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource`, `disconnectGoogleDriveConnection`, `CreateKnowledgeSourceSyncScheduledTaskRequest`, `agentConfig.knowledgeSource` and `KnowledgeSourceSyncRunSummary` are deprecated. Their routes answer 410, except `disconnectGoogleDriveConnection`, which now revokes through the generic connection DELETE.
+
+### Patch Changes
+
+- f12070a: A turn that waits a long time for subscription capacity is no longer silent, and switching the chat's model or pausing it now releases the waiting turn.
+
+  A wait is long when its reset is at least 15 minutes away, unknown, or needs a person. When one starts, a worker's parent gets a `child_waiting_capacity` notice right away: it now carries `resetsAt`, names the provider correctly, says how to continue sooner (switch the worker's model with `session_set_model`), wakes the parent instead of waiting for its next turn, and the worker delivers it as soon as the wait is armed. A top-level chat's person gets an inbox notification with the reset time, withdrawn when the wait ends. Short waits stay quiet. `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` now defaults to on; every image since August 2026 understands these notices.
+
+  Switching a chat's model moves a turn that is waiting for capacity onto the new model in the same commit, and the turn continues there now (the `session_set_model` receipt reports `capacityWaitingTurnContinuesNow`). Pausing a chat stops its capacity-waiting turn: the wait is removed and the turn waits for Resume, or for a model switch, like a paused running turn. A workspace pause still keeps the wait for Resume.
+
+- a505ce8: OpenAI-compatible endpoint models can now reason at the levels they support. When a model is connected, Opengeni reads its levels and default from the endpoint's own `/models` listing (`supported_reasoning_efforts`, with the default in `default_reasoning_effort` or `reasoning_effort`), and an organization administrator can set or re-read them from each model's **Reasoning levels** button. The model picker then offers exactly those levels, and each request sends the chosen one as `reasoning_effort` (a level the model doesn't declare is sent as the nearest declared one below it); a model without levels gets no reasoning parameter, where before compatible requests carried whatever level the turn had, without any way to choose it. The reasoning text and cached input tokens these endpoints return are read back as on other Chat Completions routes. Organization endpoint models carry `reasoning` (`OrganizationCompatibleEndpointModel`); connecting an endpoint or adding a model accepts an optional `reasoning`; a new `PUT …/endpoints/:connectionId/models/:customModelId/reasoning` route and the SDK's `setOrganizationCompatibleEndpointModelReasoning` change them; and a workspace compatible connection's `directModelProvider` accepts an optional `reasoning`.
+- 9b96f0e: Fresh compute sandboxes can now start with a Sandbox Environment's setup already done. Verification captures the set-up sandbox as a compute template, proves it with a separate cold boot, and new sandboxes start from it. Previously, every fresh compute sandbox ran the whole setup script again. Only environments with a setup script get a template. A template is tied to the compute image name and the deployment revision, so each release builds a new one. On compute, a version with setup that has no template, a failed or stopped build from an earlier release, and a build abandoned mid-way each ask once for a background build; a failed build of the current content waits for the next release. A build deletes only a template it created and no other build now owns. A capture is requested once and, if its answer is lost, found by name. A turn looks up the compute team once with a short timeout and remembers a failure briefly; a build never reuses a turn's failed lookup. A template deleted after it was chosen falls back to the plain image and the ordinary setup.
+- 8a8864c: `gh` in a managed sandbox acts as the person on repositories mounted through Your GitHub, as on their own computer: `gh repo`, `gh pr`, `gh run`, `gh workflow`, `gh issue`, `gh release` and `gh api` all work. A new personal GitHub gateway on the API (`/v1/github/personal/gateway/{api,uploads,git}/...`) adds the person's token per request after checking the session's short-lived broker pass, the connection, the repository allowlist and repositories removed from the chat; the token never enters the sandbox. The sandbox `gh` wrapper runs `gh` against the gateway through a per-command local proxy, and `gh repo clone` clones through it. Each request maps to the existing GitHub action policy, so one Allow/Ask/Block setting covers the `github_personal__*` tools and `gh`: reads pass, ordinary writes follow the policy, and destructive or unrecognised requests always ask. A request waiting for approval fails with a clear message and the normal approval card, and the exact same request runs once when sent again after approval. Git pushes as the person that delete a ref or force-push now ask. Sessions without a repository mounted as the person, Opengeni app repositories and Connected Machines are unchanged. The agent prompt tells the agent that `gh` acts as the person there.
+- aa5b122: A local-mode deployment that turns on the shared access key (`OPENGENI_AUTH_REQUIRED=true` with `OPENGENI_ACCESS_KEY`) no longer signs or accepts first-party delegated bearers with the built-in local delegation secret. It uses `OPENGENI_DELEGATION_SECRET` when set and otherwise derives the secret from the access key, as configured mode already does. The built-in secret remains only for local deployments without the access-key perimeter.
+- 5853742: The unauthenticated local access mode no longer answers with wildcard CORS when `OPENGENI_ENVIRONMENT` is something other than `local` (for example the Helm single-node profile). In local access mode, in any environment, only the `OPENGENI_WEB_BASE_URL` and `OPENGENI_PUBLIC_BASE_URL` origins and the exact origins in `OPENGENI_LOCAL_ALLOWED_ORIGINS` receive CORS responses; other origins get no CORS grant. The web app served from the API's own origin is unaffected. A browser app that calls such a deployment from another origin needs that origin in `OPENGENI_WEB_BASE_URL` or `OPENGENI_LOCAL_ALLOWED_ORIGINS`. The `Host` checks of the local development stack are unchanged and still apply only in the `local` environment.
+- 7d86f8b: An organization can connect its own OpenAI-compatible endpoints (a public HTTPS base URL, an API key and model IDs) as organization model accounts, from the same Connect provider list as its OpenAI, Azure OpenAI, OpenRouter, Opper and Vercel accounts, with the same "Available in" step, and it can connect several. Their models reach workspaces like the other organization accounts, billed by the provider with no Opengeni credits, and every request to them stays DNS-pinned to public addresses without redirects. New routes under `/v1/organizations/:id/model-providers/openai_compatible/endpoints` list, connect, re-key and disconnect endpoints and add or remove their models; the SDK adds `listOrganizationCompatibleEndpoints`, `createOrganizationCompatibleEndpoint`, `replaceOrganizationCompatibleEndpointKey`, `revokeOrganizationCompatibleEndpoint`, `createOrganizationCompatibleEndpointModel` and `deleteOrganizationCompatibleEndpointModel`, and model connection access accepts `openai_compatible`. The first sign-in model step offers it too. Workspace-only compatible connections made before keep working and stay listed on their workspace; new ones are connected for the organization.
+- 3b81d9b: A Microsoft 365 Global Administrator or Teams Administrator can now connect their organization to Opengeni for Teams themselves, without an operator allowlist entry, when `OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=true` (default off) and the tenant is admitted. People in an organization that hasn't connected Opengeni get a welcome in their 1:1 chat with a Connect your organization link, at most once per ten minutes and a few times a day. Setup needs their Opengeni sign-in, a Microsoft sign-in through the bot's Entra app whose tenant and user match the Teams message and whose roles include one of those administrator roles, and a shared workspace they administer. It never moves or replaces an existing connection. `POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in` starts the Microsoft sign-in, `PUT .../teams/bot` takes an optional `microsoft: { code, state }`, and `teamsApi` adds `startMicrosoftSignIn` and an optional second argument to `installBot`. Operator-approved installers keep working as before.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [a0b081b]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+- Updated dependencies [b1e049b]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/codex@6.11.0
+  - @opengeni/xai-subscription@6.11.0
+
+## 6.10.0
+
+### Minor Changes
+
+- c9e5547: Add opt-in owner-authorized automatic credit top-up settings, card setup and SDK methods, with durable Stripe PaymentIntent recovery and tax-inclusive UTC monthly caps. Deployment activation is off by default.
+
+### Patch Changes
+
+- 681bbac: The default Modal Computer/Browser image is now current: it carries pdftotext and pdfinfo (poppler-utils), uuidgen, the git identity setup and the latest browser engines. Packaged Helm charts now always default to the desktop image built from their own source, so the chart's desktop pin can no longer lag behind a release.
+- 2e02796: A chat computer whose workspace snapshot takes longer than the drain wait now finishes saving and shuts down, instead of retrying the same snapshot until Modal ends the box after 24 hours. The drain wait (`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`, or `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`) no longer doubles as Modal's own snapshot deadline: a drain gives the provider `OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS` (default 10 minutes, and at least twice the wait), and a snapshot still running when the wait ends publishes late under its claim. After a snapshot fails, the next full attempt for the same box waits 30 seconds, doubling up to 10 minutes, and never past the start of the final save window before the provider deadline. Migration 1253 adds the per-lease count of drain snapshot failures since the last successful save that drives this backoff.
+- 116acad: Workspace Slack bot tools are listed only when the workspace has a Slack bot available, so a Slack request in a workspace without one reaches the Slack connect offer. Where a person can answer, sending a prepared bot message follows the person's own Slack send permission: Ask first asks for approval and Block blocks it.
+- f45ab2f: Subscription accounts (Claude, ChatGPT and SuperGrok) now read the same everywhere they are listed. The "Use for next turn" account menu is wider and shows each account's full name and email, the plan once when every account shares it (or on each row when they differ), which account runs the next turn, and every usage window the provider reports with its short label ("5h", "Week", "Fable week", "Credits", "Extra usage"), the share left and when it resets. Nothing is assumed: a Claude Ultra or ChatGPT Pro account without a 5-hour limit shows none. Plans use the provider's current names ("Claude Max", "Claude Ultra", "ChatGPT Plus", "SuperGrok Heavy"), and a Claude Max account whose tier isn't known yet reads "Max or Ultra".
+
+  Claude usage also follows the October 2026 plan changes: the usage endpoint's explicit `null` for a limit the plan doesn't have (a verified Ultra plan has no five-hour limit) no longer stops an early weekly reset from ending a refusal, while an omitted or `null` window still never clears a limit that refused; the separate weekly Fable limit (`seven_day_fable`) is read and cools only Fable models; and a renewed sign-in reads the plan and Max tier from the Claude profile.
+
+- Updated dependencies [c9e5547]
+- Updated dependencies [232e713]
+- Updated dependencies [2a27f11]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/codex@6.10.0
+  - @opengeni/xai-subscription@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/codex@6.9.0
+  - @opengeni/xai-subscription@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/codex@6.8.0
+  - @opengeni/xai-subscription@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/codex@6.7.0
+  - @opengeni/xai-subscription@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- 3d82830: Claude Opus 5.5 and Sonnet 5.5 ask for summarized thinking again, so their reasoning shows in the chat timeline instead of only occasional progress notes. A progress note is still told apart from reasoning, by the marker in its signature.
+- c0ba1cc: Opengeni now refuses to build a sandbox on the worker or API host (`local` or `docker`) when that is not the deployment's configured default, for existing sessions too. Creating such sessions is already rejected, but sessions stored before that check, and shared-box children inheriting a parent's backend, could still name one. A turn on such a session now fails before any box, repository clone, setup, Rig or hydration hook or credential is prepared, with the terminal, non-retryable code `sandbox_backend_not_served` and a message telling the person to start a new chat. Terminal, files, browser, computer and viewer requests for it get a 409 with the same message. The deployment default is kept in `Settings.deploymentSandboxBackend`, which per-session settings rebinds preserve, so the sandbox client builder applies the same rule to every other caller, whatever is installed on the host. Remote providers and the default backend are unchanged.
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/codex@6.6.0
+  - @opengeni/xai-subscription@6.6.0
+
+## 6.5.1
+
+### Minor Changes
+
+- 564efe9: A deployment can choose how long the disk of each new compute sandbox is with `OPENGENI_COMPUTE_DISK_MIB`; unset, a sandbox keeps its image's length as before.
+
+### Patch Changes
+
+- 6bdd4d0: Opengeni's own tools get four minutes per call instead of the MCP client's 60-second default. Publishing a large file could take longer than a minute; the client gave up with "Request timed out" while the API went on to publish it, so the agent was left unsure whether the file existed. A server's explicit setup timeout now bounds its setup on its own, so the longer call bound never stretches setup against an unreachable server.
+- 707c444: Creating a session now fails with a clear 422 when it asks for a sandbox backend the deployment does not serve. Previously any `sandboxBackend` value was accepted, so on a cloud deployment an agent's `session_create`, a REST/SDK create or a schedule could ask for `local` and get a box that ran as processes on the worker host. A deployment serves its configured default backend, `none`, `selfhosted` when Connected Machines are enabled, and any provider whose credentials are configured; `local` and `docker` only as the default. Forks of a session on an unserved backend are refused too. Schedules are checked when saved and again when a run is admitted, and `session_create` advertises only the served backends. A keyed retry of an already-created session still returns it. Shared children, Connected Machine targets and `new` boxes on a served backend are unchanged.
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/codex@6.5.0
+  - @opengeni/xai-subscription@6.5.0
+
+## 6.4.0
+
+### Minor Changes
+
+- 000c023: Calls on a person's own provider key or subscription pay a platform fee (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5% of the list-price equivalent; custom endpoints with no list price use $1.25/$10 per million input/output tokens) while credit billing is active. The fee is payable only from paid credit: a paid plan's credit for app use, then topped-up or operator-granted credits that ordinary spending has not used (it draws promotional credits first). Free, signup and promotional credit never pay it; without paid credit the call is refused with `402 byok_paid_credit_required` and one action: Upgrade to Pro on the Free plan in the app, otherwise Add credits. Paid credit counts a coupon top-up net of its discount, and a past-due plan or leftover Free period never pays the fee; each fee and each top-up, grant or refund records on its row what it did to paid credit, and each receipt carries running totals, so the balance read takes paid credit and fee debt from the latest receipt (through the new partial index `credit_ledger_receipt_rows_idx`): it does not grow with the number of fees, and accounts with or without fees read their balance as fast as before. Fee debt is never repaid by plan or promotional credit; the next top-up repays it first. Migration 1129 (rolling) makes `plan_period_usage` count only the plan-paid part of a fee and lets `plan_app_general_balance` keep API debt and unpaid fee debt (not fees paid in full) out of plan credit, matching the app's balance; migration 1130 builds the index concurrently. The web app shows these refusals as credit stops. See `docs/billing-origin.md`.
+- cdb9d27: Agents answer privacy, retention, training and "where does it run" questions from server facts. The new always-visible `privacy_facts` tool reports the chat's model, provider route and how it is paid for, the route's declared region, whether the workspace is EU-only, the provider's training, retention and processing location from one reviewed table with source links and the date checked, Opengeni's own retention facts, where the deployment hosts app data and where this chat's sandbox runs, and the deployment's privacy policy, subprocessor list, terms and support contact. New optional settings `OPENGENI_DATA_HOSTING_LOCATION` and `OPENGENI_LEGAL_SUBPROCESSORS_URL` declare the hosting and subprocessor list; unset, they are reported as unknown and the agent is pointed to the privacy policy. Unknowns are stated as unknown. The operational contract tells agents to call it for these questions and answer only from it.
+
+### Patch Changes
+
+- 8a7d1c8: Provider-hosted web search and OpenAI hosted image generation now cost credit on turns whose model Opengeni pays for while credit billing is active (one check point, `paidHostedToolsChargeCredits`). Such a turn gets Opengeni's billed `web_search`/`web_fetch` tools instead of hosted search whenever a search provider is configured. Without one, the hosted searches each response reports (Claude's count, and now OpenAI `web_search_call` items) are charged at $10 per 1,000 plus the 5% web-search margin, as a separate, idempotent web-search debit per response, including a response that reported no token usage. Gateway-reported costs already include search and are not charged again. OpenAI hosted image generation on the deployment's own key is no longer offered on those turns. They use the priced Gateway image tool, so they have no image tool unless the managed Gateway image credential or a workspace Gateway key is configured.
+
+  Paid tools on those turns are paid like other app tools: plan credit first (the Free plan's monthly credit included, whatever models its scope lists), then grants that list the turn's model, then general credit. The new tool credit usage (`toolCreditUsage`) applies to Gateway images too, so Free plan credit now pays for them on any model. These debits keep the turn's billing origin, so API work pays from credits only. Turns on the user's own keys or subscriptions, free models, billing-off deployments and legacy billing accounts (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`, CloudGeni's host account by default) are unchanged. `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false` (default `true`) turns the new charges off and restores free hosted search and images on every turn.
+
+- Updated dependencies [1f918a4]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/codex@6.4.0
+  - @opengeni/xai-subscription@6.4.0
+
+## 6.3.1
+
+### Minor Changes
+
+- 32bc3e9: App use is paid from monthly plan credit; API use (organization and personal API keys, products on the SDK, outside agents over MCP) is paid from credits only. Each turn freezes its funding origin, sub-agents and tools inherit their chat's, and API work with no credits is refused with `402 api_credits_required` and an Add credits action (`1128_billing_usage_origin`, rolling; it adds `billing_origin` to the scheduled-task execution exclusion lists in place, keeping 1115's `creator_locked`). See `docs/billing-origin.md`. A schedule an API caller edits or runs by hand, or an automation an API caller's test event or replay fires, is API use from then on, and so is an automation fired by a webhook whose signing secret or custom format an API caller set or received (`event_sources.secret_billing_origin`), and so is an automation fired by a workspace MCP source an API caller pointed at a server's URL. The agent tools that create and change webhook sources mark them the same way for an outside agent or an agent in an API chat. A custom webhook format can no longer read its event type or ids from the header its signature is in, so a shared token is never stored in events or the delivery log; one stored before reads that header as absent. Intake also drops any header that contains the source's secret and replaces copies of it in the kept body with `[secret]`, so a `url_token` secret echoed by the app or a proxy is never kept. The web app shows an API turn refused for lack of credits as a credit stop. Paid tools in the app are paid from plan credit too, the Free plan's included. Internal accounts (CloudGeni's host account and our own team's organizations) keep today's billing through `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` (listed by default). The SDK keeps the `add_credits` and `upgrade_plan` refusal actions and names the fix in its messages.
+- 40b79c9: Claude subscription models no longer disappear from a workspace when the Claude accounts serving it are not managed by that workspace. The catalog, model admission and cross-provider failover now count every Claude account that serves the workspace, the same accounts placement already used, for both the `workspace-claude-subscription/` and `organization-claude-subscription/` model ids. Readers also accept the upcoming canonical `claude/<model>` ids (provider `claude-subscription`), which a later release starts writing; the two legacy ids stay accepted as aliases.
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [c35704f]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
+## 6.2.1
+
+### Minor Changes
+
+- 7af3643: A workspace can connect its own OpenAI-compatible model API: Settings → Models → "Connect an OpenAI-compatible endpoint" asks for an HTTPS base URL, an API key, a model ID, the API format (Chat Completions or Responses) and an optional name. The model then appears in that workspace's picker like any other direct model, billed to the workspace's own key, which never leaves that workspace. The same works through `POST /connections` with `metadata.credentialRole: "direct_openai_compatible"` and `metadata.directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+
+  Only public HTTPS hosts are accepted, and every request resolves the host once and refuses private addresses and redirects. These endpoints report an unknown data location, so residency policies that require a known region leave them out. A model check that cannot reach any direct provider now answers 422 with the reason instead of a generic "temporarily unavailable".
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/codex@6.2.0
+  - @opengeni/xai-subscription@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- f385091: A person can share a chat with a read-only link. The link opens a snapshot of the conversation exactly as the chat shows it (each person's messages under the name the chat shows for them, never an email, and the replies; queued messages that were deleted, edited or cancelled before they ran, images and links to the chat's own files left out) without signing in, and only while the person who shared it can still read the chat. The share page loads no third-party analytics that record its address and is never indexed. The person who started the chat creates, refreshes or stops it from the chat's Share… menu item or by asking the agent, which runs `createSessionShareLink` after one confirmation; `listSessionShareLinks` lists their links. `OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED=false` turns links off and stops existing ones opening. Member changes on a personal workspace now say that personal workspaces are private to their owner and point to a share link when that person can create one, instead of "missing permission: members:manage".
+- 050ca2f: New chats and scheduled tasks that start on Opengeni credits now default to medium reasoning instead of extra high (`OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT`, still clamped to the model). Most first chats are everyday questions, and medium is the model's own default, so answers come faster and use fewer credits. A deployment that wants the previous behaviour sets `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT=xhigh`; saved workspace and organization defaults and explicit choices are unchanged.
+- ecc876a: Enforce EU-only inference. When a workspace is EU-only, model resolution
+  refuses routes that are not EU, every provider adapter checks each request
+  against the EU routes before it is sent (including the deployment an Azure
+  deployment-path URL calls), and the worker checks the setting again on every
+  attempt and applies it to the whole attempt. Refusals use the
+  `region_restricted` code, are never retried, and end a turn once.
+- f6c6c0f: EU-only inference covers side features. Web search, image and video
+  generation, live voice, transcription, Knowledge embeddings and decision
+  models each have residency records; under EU only routes with an EU record
+  run, nothing falls back outside the EU, and switched-off features report
+  `region_restricted` (shown as "Not supported in EU"). Operators declare EU
+  routes with `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`, each for the one endpoint
+  (and, for Azure voice and transcription, the one deployment) it describes; a
+  declaration missing that deployment leaves the route unknown with a warning
+  rather than failing boot. Usage events record where each call ran. Under EU
+  the model transport admits only tools Opengeni executes itself.
+
+### Patch Changes
+
+- 86c3295: Decision models (tool-search selection and code search) can run on an Azure OpenAI resource that has key sign-in turned off. Set `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` with provider `openai`, the deployment name and the resource's v1 base URL, and requests are signed with a cached Microsoft Entra token for the deployment's own identity. `createHttpDecisionModel` accepts an access-token function in place of a static key, and drops a token the provider rejects.
+- 3742a21: Knowledge embeddings can run on an Azure OpenAI resource that has key sign-in turned off. Set `OPENGENI_DOCUMENT_EMBEDDING_AUTH=deployment_identity` with the resource's v1 base URL in `OPENGENI_DOCUMENT_EMBEDDING_BASE_URL` and the embedding deployment's name as the model, and requests are signed with a cached Microsoft Entra token for the deployment's own identity. A rejected token is dropped so the next request signs in again. Without a usable identity or base URL, embeddings report themselves unavailable and no other key is tried. `OpenAIEmbeddingProvider` and `OpenAICurationProvider` accept an access-token function in place of a static key.
+- dfc7190: Show EU-only inference in the app. Organization settings > Security & data has
+  an EU-only inference switch: members see it, owners and admins turn it on, and
+  turning it off is offered only when the API answers `canTurnOff`, after a
+  confirmation; without a recent sign-in it offers "Sign in again" first. In an
+  EU-only workspace, models and features the server switched
+  off (reason `region_restricted`) show "Not supported in EU" and can't be chosen
+  or turned on. The app reads this for the open workspace and again after a workspace switch
+  or a change to the setting. New SDK methods `getOrganizationInferenceResidency` and
+  `updateOrganizationInferenceResidency`, `ClientConfig.inferenceFeatures` and
+  `ClientModel.availability` types, and `@opengeni/react` helpers
+  `isRegionRestricted`, `regionRestrictedText` and `inferenceFeatureRestriction`.
+  The curated Opper model is labelled "Claude Opus 5.5": EU status comes from
+  residency records, never a name.
+- 09972b5: One mechanism reads every app's webhooks. Linear and Sentry are now presets of the custom webhook, like Tailscale, and their own adapters are gone: `WEBHOOK_FORMAT_PRESETS` has `linear`, `sentry` and `tailscale`, and sources stored with the `linear` or `sentry` adapter read as `custom` with that preset (`currentWebhookAdapter`, `webhookPresetOf`). Creating one with the older adapter still works and stores it as `custom`. A format can now say more:
+
+  - `signedContent` on `hmac_sha256` for apps that sign more than the body, such as `v0:{header:X-Request-Timestamp}:{body}`.
+  - An `ed25519` scheme, whose secret is the app's public key.
+  - A `url_token` scheme for apps that can't sign: the secret is part of the address, at least 24 URL-safe characters.
+  - `freshness`, which refuses deliveries whose send time is too old.
+  - A `type` joined from `parts`, lists of fallback paths for the text fields, and `actorKind` to tell people from bots.
+
+  Agents with `scheduled_tasks:manage` can add webhook sources themselves. `event_sources_create_webhook` takes a preset or a format and a signing secret, which can be a secret reference, and returns the address to give the app. `event_sources_update` and `event_sources_delete` change and remove sources. For a webhook source, `event_sources_list` with its `sourceId` now shows its format and last five deliveries. The event-triggers Skill explains how to write a format from an app's webhook docs.
+
+  A secret reference in those tools' `signingSecret` resolves to its value, and only there: the source keeps the secret encrypted, and a name or format next to it stays reference text. A reference that could not resolve is refused rather than stored.
+
+- 54f07b1: Reject explicit hosted-search context sizes on non-Responses or hosted-search-disabled registry routes, including database catalogs. Routes without the setting remain unchanged.
+- f249828: Allow operators to configure a registry model's hosted-search context size. Omitted settings preserve the existing SDK default and execution identity. Explicit changes are bound to the model definition so accepted turns cannot silently switch search settings.
+- a6004c8: Compact a session's context right after a person's own turn leaves a root session at its automatic compaction threshold, instead of making the next message wait for the checkpoint. The idle request reuses the existing `/compact` maintenance execution, is labeled `proactive` (new `sessions.compact_request_trigger`, migration 1102), skips sessions with an active goal, a held `wait_for_input` or a pending delayed wake, is dropped (with a `capacity_unavailable` skipped landmark) when no subscription capacity is available, and can be turned off with `OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED=false`. API turns are not included. While it runs the session counts as running, as during a manual `/compact`.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/codex@6.0.0
+  - @opengeni/xai-subscription@6.0.0
+
+## 5.5.1
+
+### Minor Changes
+
+- 220c431: Record where every model route processes data. Each configured model carries a
+  residency record (geography, deployment type, regions and evidence); registry
+  providers and the built-in provider can declare it, other providers use reviewed
+  built-in rules, and an undeclared route is unknown, never EU. The model catalog
+  exposes the residency verdict without the evidence text.
+
+### Patch Changes
+
+- b2e3119: Resolve canonical model ids and aliases from one freshly constructed catalog instead of constructing it twice per provider lookup. Configuration and provider credentials remain freshly read on each call.
+- c09ae08: GPT-6.1 Terra (`gpt-6.1-terra`) now has a reviewed list price, so usage insights can show what its Codex and OpenAI-route turns would cost at API rates: $1 input, $0.05 cached input, $1.25 cache write and $5 output per million tokens, and $2, $0.10, $2.50 and $7.50 for the whole request once input exceeds 272K tokens. GPT-6.1 Sol and GPT-6.1 Terra also get compact picker labels ("6.1 Sol", "6.1 Terra") when they come from the built-in model lists.
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes

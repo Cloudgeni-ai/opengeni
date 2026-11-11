@@ -90,6 +90,47 @@ describe("native composer attachment tray", () => {
   });
 });
 
+describe("native attachment upload scope", () => {
+  test("a private chat's uploads are Only me; without a scope the server decides", async () => {
+    for (const scope of ["personal", "workspace", undefined] as const) {
+      const sent: Array<Record<string, unknown>> = [];
+      const recording = {
+        uploadFile: async (_workspaceId: string, input: Record<string, unknown>) => {
+          sent.push(input);
+          return asset("doc-1");
+        },
+      } as unknown as FileAttachmentClientLike;
+      const hook = await renderHook(
+        () =>
+          useNativeFileAttachments({
+            client: recording,
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            scope,
+            files: { ...files, readBytes: async () => new Uint8Array([1, 2, 3]) },
+            crypto,
+          }),
+        undefined,
+      );
+      await act(async () =>
+        hook.result.current.addFiles([
+          {
+            id: "doc-1",
+            uri: "file:///doc-1.txt",
+            name: "doc-1.txt",
+            contentType: "text/plain",
+            sizeBytes: 3,
+            kind: "document",
+          },
+        ]),
+      );
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.scope).toBe(scope);
+      await hook.unmount();
+    }
+  });
+});
+
 describe("removeReadyNativeAttachments", () => {
   test("keeps unfinished uploads and unrelated ready files", () => {
     const current: NativeAttachment[] = [

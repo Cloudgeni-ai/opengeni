@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { SitePublicationLink } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import type { Session, SessionEvent, WorkspaceArtifactVersion } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionEvent, WorkspaceArtifactVersion } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -98,6 +98,10 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({ useAppApi: () => ({ request: async () => ({}) }) }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async () => {},
+  useSearch: () => ({}),
+  useStringifySearch: () => () => "",
+  // Copy link reads the page's origin only when clicked.
+  usePage: () => ({ origin: () => "https://console.example.test" }),
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("../lib/console-site", () => ({
@@ -109,13 +113,15 @@ mock.module("../lib/use-session-list-hint-refresh", () => ({
 }));
 // The conversation streams what a real one would; the test drives it.
 let stream: ((event: Pick<SessionEvent, "type">) => void) | null = null;
-mock.module("../../components/session-conversation", () => ({
-  SessionConversation: (props: { sessionId: string; onEvent?: (event: SessionEvent) => void }) => {
+mock.module("./session", () => ({
+  SessionRoute: (props: { sessionId: string; onEvent?: (event: SessionEvent) => void }) => {
     stream = (event) => props.onEvent?.(event as SessionEvent);
     return <div data-conversation={props.sessionId} />;
   },
 }));
-mock.module("../../components/new-conversation", () => ({ NewConversation: () => null }));
+mock.module("../components/session/console-new-conversation", () => ({
+  ConsoleNewConversation: () => null,
+}));
 
 let module: typeof import("./site-view");
 let ownsDom = false;

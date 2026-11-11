@@ -129,7 +129,10 @@ USER bun
 # Our own CPU speaker models for meeting recordings (apps/worker/speakers):
 # the Rust executable, cross-built natively for the target with xx, and the
 # pinned open models it loads (pyannote segmentation 3.0, MIT; 3D-Speaker
-# CAM++ trained on VoxCeleb, Apache-2.0), both as exported by sherpa-onnx.
+# CAM++ "common advanced", trained on about 200,000 Chinese and English
+# speakers, Apache-2.0), both as exported by sherpa-onnx. On real phone and
+# laptop meetings it tells voices apart far better than the VoxCeleb-only
+# models (docs/recordings.md).
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS speakers-xx
 FROM --platform=$BUILDPLATFORM rust:1.97.1-trixie AS speakers-build
 COPY --from=speakers-xx / /
@@ -152,7 +155,7 @@ RUN --mount=type=cache,id=opengeni-speakers-cargo-registry,target=/usr/local/car
     install -D -m 0755 "target/${rust_target}/release/opengeni-speakers" /out/bin/opengeni-speakers; \
     xx-verify /out/bin/opengeni-speakers
 ADD --checksum=sha256:24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 /tmp/segmentation.tar.bz2
-ADD --checksum=sha256:357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx /tmp/embedding.onnx
+ADD --checksum=sha256:aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /tmp/embedding.onnx
 ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 https://raw.githubusercontent.com/modelscope/3D-Speaker/065629c313eaf1a01c65c640c46d77e61e9607b4/LICENSE /tmp/embedding-LICENSE
 # The word aligner: Meta's Omnilingual ASR CTC 300M (Apache-2.0, about 1,600
 # languages) as exported to int8 ONNX by sherpa-onnx, 365 MB.
@@ -170,8 +173,19 @@ RUN set -eux; \
   install -D -m 0444 /tmp/alignment-tokens.txt /out/models/alignment-tokens.txt; \
   install -D -m 0444 /tmp/alignment-LICENSE /out/models/alignment-LICENSE
 
+# The pinned rg builds the worker delivers to managed sandboxes, with the static
+# musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+
 FROM source-base AS worker-build
-RUN bun scripts/build-runtime-processes.ts worker \
+COPY --from=shell-tools-linux --chown=bun:bun /cache/ /tmp/shell-tools-cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/tmp/shell-tools-cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /tmp/shell-tools \
+  && OPENGENI_SHELL_TOOLS_DIR=/tmp/shell-tools bun scripts/build-runtime-processes.ts worker \
   && bun scripts/assemble-server-runtime.ts worker
 
 FROM oven/bun:${BUN_VERSION}-slim AS worker
@@ -259,11 +273,12 @@ ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
 # Voice normalization/segmentation executes ffmpeg here, without a worker hop.
-# Artifact rasterization needs fonts. Documents upload parsing is queued to the
+# Artifact rasterization needs fonts; a bot's emoji avatar for Slack is drawn
+# with the colour emoji font. Documents upload parsing is queued to the
 # existing control worker, so LibreOffice and OCR data belong only in worker.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \

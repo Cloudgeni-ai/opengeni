@@ -855,7 +855,25 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px 12px;
-  padding: 0 19px 14px;
+  padding: 0 16px 14px;
+}
+.og-tc-card .og-session-capability-header {
+  padding-bottom: 12px;
+}
+.og-tc-card .og-session-capability-copy {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+@container og-capability (min-width: 28rem) {
+  .og-tc-card-foot,
+  .og-tc-card .og-tc-card-note {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  .og-tc-card .og-tc-card-foot > :is(button, a) {
+    width: auto;
+    min-height: 36px;
+  }
 }
 .og-tc-card-foot > p {
   flex: 1 1 14rem;
@@ -871,13 +889,15 @@
 .og-tc-card-foot > :is(button, a) {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  min-height: 34px;
+  width: 100%;
+  min-height: 40px;
   padding: 0 14px;
-  border: 1px solid var(--og-color-primary-border);
-  border-radius: 8px;
-  background: var(--og-color-primary);
-  color: var(--og-color-primary-fg);
+  border: 1px solid transparent;
+  border-radius: var(--og-radius-md, 10px);
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
   font: inherit;
   font-size: 12.5px;
   font-weight: 500;
@@ -895,7 +915,7 @@
 }
 .og-tc-card-note {
   margin: 0;
-  padding: 0 19px 14px;
+  padding: 0 16px 14px;
   font-size: 11px;
   line-height: 1.5;
   color: var(--og-color-fg-muted);
@@ -939,7 +959,8 @@
 }
 @media (pointer: coarse) {
   .og-tc-button,
-  .og-tc-card-foot > :is(button, a) {
+  .og-tc-card-foot > :is(button, a),
+  .og-tc-card .og-tc-card-foot > :is(button, a) {
     min-height: 44px;
   }
 }

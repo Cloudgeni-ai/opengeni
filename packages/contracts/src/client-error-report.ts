@@ -55,7 +55,7 @@ const ROUTE_SEGMENT = String.raw`(?:[a-z]+(?:-[a-z]+)*|\$[A-Za-z][A-Za-z0-9]{0,3
 /**
  * A route pattern of at most 160 characters that is `/`, `unknown`, or up to
  * twelve `/`-separated segments that are each either a lowercase literal
- * (`variable-sets`) or a `$param` placeholder. The grammar excludes digits in
+ * (`rigs`) or a `$param` placeholder. The grammar excludes digits in
  * literals, so a concrete id cannot pass as one.
  */
 export const CLIENT_ERROR_ROUTE_PATTERN = new RegExp(
@@ -86,12 +86,17 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 // Every control character except tab and newline.
 // oxlint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B-\u001F\u007F]/g;
-const URL_WITH_QUERY = /\bhttps?:\/\/[^\s?#"'<>()`]*[?#][^\s"'<>()`]*/gi;
+// A whole http(s) URL token. The query or fragment is cut in the replacement,
+// so a match never backtracks and the scan stays linear in the text length.
+const URL_TOKEN = /\bhttps?:\/\/[^\s"'<>()`]*/gi;
 const LINE_AND_COLUMN_SUFFIX = /(?::\d+){1,2}$/;
 // A credential, not prose such as "Basic authentication": it contains a digit.
 const AUTHORIZATION_VALUE =
   /\b(Bearer|Basic|Token)\s+(?=[A-Za-z._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{8,}/gi;
-const JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*)?/g;
+// A JWT-shaped candidate: `eyJ`, a header run, and up to two `.`-separated
+// runs. Every part is optional, so a match never backtracks; `redactJwts`
+// decides whether the candidate is long enough to be a token.
+const JWT_CANDIDATE = /\beyJ([A-Za-z0-9_-]*)(?:\.([A-Za-z0-9_-]*)(?:\.[A-Za-z0-9_-]*)?)?/g;
 const KNOWN_TOKEN =
   /\b(?:sk-(?:proj-|ant-)?|sk_(?:live|test)_|rk_(?:live|test)_|gh[pousr]_|github_pat_|glpat-|npm_|xox[abposr]-|ops_|AKIA|ASIA|AIza)[A-Za-z0-9_-]{12,}/g;
 // The value never starts with `[` or `…`, so an already redacted value and a
@@ -115,6 +120,29 @@ function isOpaqueCredential(run: string): boolean {
 }
 
 /**
+ * Replace each JWT (`eyJ` plus at least five header characters, a `.`, at
+ * least five payload characters, and an optional `.signature`) with
+ * `[redacted]` in one linear pass. A candidate that is too short is skipped
+ * to the end of its header run: any later `eyJ` inside that run has a shorter
+ * header followed by the same text, so it cannot be a JWT either.
+ */
+function redactJwts(text: string): string {
+  const candidates = new RegExp(JWT_CANDIDATE);
+  let result = "";
+  let copied = 0;
+  for (let match = candidates.exec(text); match; match = candidates.exec(text)) {
+    const [candidate, header = "", payload] = match;
+    if (header.length >= 5 && payload !== undefined && payload.length >= 5) {
+      result += text.slice(copied, match.index) + REDACTED;
+      copied = match.index + candidate.length;
+    } else {
+      candidates.lastIndex = match.index + "eyJ".length + header.length;
+    }
+  }
+  return result + text.slice(copied);
+}
+
+/**
  * Remove what an error text must never carry while keeping what makes it
  * useful. Query strings and fragments are dropped from http(s) URLs (keeping a
  * stack frame's `:line:column`); authorization values, JWTs, well-known API
@@ -124,18 +152,18 @@ function isOpaqueCredential(run: string): boolean {
  * UUIDs and stack frames survive. Applying it twice changes nothing.
  */
 export function scrubClientErrorText(text: string): string {
-  return text
+  const scrubbed = text
     .replace(LONE_SURROGATE, "\uFFFD")
     .replace(/\r\n?/g, "\n")
     .replace(CONTROL_CHARACTERS, " ")
-    .replace(URL_WITH_QUERY, (url) => {
-      if (ERROR_DECODER_URL.test(url)) return url;
+    .replace(URL_TOKEN, (url) => {
       const cut = url.search(/[?#]/);
+      if (cut < 0 || ERROR_DECODER_URL.test(url)) return url;
       const suffix = url.slice(cut).match(LINE_AND_COLUMN_SUFFIX)?.[0] ?? "";
       return url.slice(0, cut) + suffix;
     })
-    .replace(AUTHORIZATION_VALUE, `$1 ${REDACTED}`)
-    .replace(JWT, REDACTED)
+    .replace(AUTHORIZATION_VALUE, `$1 ${REDACTED}`);
+  return redactJwts(scrubbed)
     .replace(KNOWN_TOKEN, REDACTED)
     .replace(SECRET_ASSIGNMENT, `$1${REDACTED}`)
     .replace(OPAQUE_RUN, (run) => (isOpaqueCredential(run) ? REDACTED : run));
@@ -203,7 +231,12 @@ export function projectClientErrorDetail(
  * reject signal reports as invalid, so the extension is backward compatible in
  * both directions.
  */
-export const CLIENT_SIGNALS = ["request_failure", "stream", "web_vital"] as const;
+export const CLIENT_SIGNALS = [
+  "request_failure",
+  "stream",
+  "web_vital",
+  "desktop_bridge_missing",
+] as const;
 export type ClientSignal = (typeof CLIENT_SIGNALS)[number];
 
 /**
@@ -279,6 +312,7 @@ export const CLIENT_PAGES = [
   "memory",
   "schedules",
   "automations",
+  "bot-templates",
   "artifacts",
   "settings",
   "organization",
@@ -288,10 +322,9 @@ export const CLIENT_PAGES = [
   "files",
   "agents",
   "secrets",
-  "variable-sets",
-  "environments",
   "rigs",
   "playground",
+  "archived",
   "read-only-chats",
   "inbox",
   "sites",
@@ -306,6 +339,7 @@ export const CLIENT_PAGES = [
   "connect-agent",
   "native-sign-in",
   "reset-password",
+  "shared-chat",
   "setup-account",
   "account-auth",
   "site-auth",
@@ -339,10 +373,32 @@ export type ClientWebVitalReport = {
   revision: string;
 };
 
+/** Desktop app platforms, as the desktop bridge names them. */
+export const CLIENT_DESKTOP_PLATFORMS = ["macos", "windows", "linux"] as const;
+export type ClientDesktopPlatform = (typeof CLIENT_DESKTOP_PLATFORMS)[number];
+
+/** A desktop app version as its user agent writes it (`Opengeni/<version>`). */
+export const CLIENT_DESKTOP_APP_VERSION_PATTERN =
+  /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:-[0-9A-Za-z.]{1,24})?$/;
+
+/**
+ * The page runs in the Opengeni desktop app's own window (its user agent says
+ * so) but the shell's bridge is missing. Sent at most once per page load.
+ */
+export type ClientDesktopBridgeMissingReport = {
+  signal: "desktop_bridge_missing";
+  platform: ClientDesktopPlatform;
+  /** The app version from the user agent, or `unknown`. */
+  appVersion: string;
+  route: string;
+  revision: string;
+};
+
 export type ClientSignalReport =
   | ClientRequestFailureReport
   | ClientStreamReport
-  | ClientWebVitalReport;
+  | ClientWebVitalReport
+  | ClientDesktopBridgeMissingReport;
 
 /** Every body the beacon route accepts. */
 export type ClientBeaconReport = ClientErrorReport | ClientSignalReport;

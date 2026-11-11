@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
-  CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
   CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
@@ -9,11 +8,6 @@ import {
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
   WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
-  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
-  MODEL_CATALOG_MAINTENANCE_CUTOVER,
-  PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER,
-  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
-  SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -638,145 +632,6 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications for every documented maintenance cutover", () => {
-    for (const cutover of [
-      MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
-      SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
-      CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
-      MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
-      PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER,
-    ]) {
-      const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-      });
-      const commands = plan.deployCommands.join("\n");
-
-      expect(
-        plan.deployCommands.filter(
-          (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-        ),
-      ).toHaveLength(2);
-      const helmCommands = plan.deployCommands.filter(
-        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      );
-      expect(helmCommands[0]).not.toContain("--atomic");
-      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-      expect(commands).toContain("--set migrations.enabled=false");
-      expect(commands).toContain("wait --for=delete pod");
-      expect(plan.notes.join("\n")).toContain(cutover);
-      expect(plan.notes.join("\n")).toContain("applications-disabled revision");
-      if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
-        expect(plan.notes.join("\n")).toContain("migration 0403");
-      }
-      if (cutover === MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER) {
-        expect(plan.notes.join("\n")).toContain("migrations 0404 and 0405");
-      }
-      expect(() =>
-        stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
-        }),
-      ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
-    }
-
-    const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);
-    expect(rollingPlan.deployCommands.join("\n")).not.toContain("--atomic");
-
-    expect(() =>
-      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
-      }),
-    ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
-    expect(() =>
-      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: "unknown-maintenance-cutover",
-      }),
-    ).toThrow("unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER");
-  });
-
-  test("pins every non-managed Kubernetes image before a maintenance drain", () => {
-    for (const profile of ["single-node-kubernetes", "kubernetes-external"] as const) {
-      expect(() =>
-        stackPlanFor(deploymentProfiles[profile], "none", {
-          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-          OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        }),
-      ).toThrow("OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest");
-
-      const plan = stackPlanFor(deploymentProfiles[profile], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        ...maintenanceImageDigests,
-      });
-      const helmCommands = plan.deployCommands.filter(
-        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      );
-      expect(helmCommands).toHaveLength(2);
-      expect(helmCommands[0]).not.toContain("--atomic");
-      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-      for (const command of helmCommands) {
-        expect(command).toContain(
-          `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string worker.image.digest=${maintenanceImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string web.image.digest=${maintenanceImageDigests.OPENGENI_WEB_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string migrations.image.digest=${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}`,
-        );
-      }
-    }
-
-    expect(() =>
-      stackPlanFor(deploymentProfiles["kubernetes-external"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        ...testImageDigests,
-      }),
-    ).toThrow("OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST");
-  });
-
-  test("binds a local Kubernetes maintenance drain and final upgrade to one built image set", () => {
-    const plan = stackPlanFor(deploymentProfiles["local-kubernetes"], "none", {
-      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-    });
-    const commands = plan.deployCommands.join("\n");
-    const helmCommands = plan.deployCommands.filter(
-      (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-    );
-
-    expect(commands).toContain("opengeni-api:local-k8s-maintenance-candidate");
-    expect(commands).toContain("docker image inspect --format '{{.Id}}'");
-    expect(commands).toContain("git hash-object --stdin");
-    expect(commands).toContain("maintenance-image-tag.env");
-    expect(commands).toContain(
-      'kind load docker-image "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG"',
-    );
-    expect(helmCommands).toHaveLength(2);
-    for (const command of helmCommands) {
-      expect(command).toContain(". .agent/generated/local-kubernetes/maintenance-image-tag.env");
-      for (const component of ["api", "worker", "web", "migrations"]) {
-        expect(command).toContain(
-          `--set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-        );
-      }
-    }
-    expect(helmCommands[0]).not.toContain("if ! helm status");
-    expect(helmCommands[0]).not.toContain("--atomic");
-    expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-    expect(commands.indexOf("kind load docker-image")).toBeLessThan(
-      commands.indexOf("--set api.enabled=false"),
-    );
-    expect(commands.indexOf("wait --for=delete pod")).toBeLessThan(
-      commands.lastIndexOf("helm upgrade"),
-    );
-  });
-
   test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {
     const contract = withSandboxBackend("opensandbox");
     const plan = stackPlanFor(contract);
@@ -1141,6 +996,7 @@ describe("deployment contract", () => {
         OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
         OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
         OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+        OPENGENI_TEAMS_APP_NAME: "Opengeni Assistant",
 
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
@@ -1204,6 +1060,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
     );
@@ -1214,6 +1071,7 @@ describe("deployment contract", () => {
       "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_APP_NAME=Opengeni Assistant");
 
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
@@ -1879,6 +1737,7 @@ describe("deployment contract", () => {
     expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_EVENT_TRIGGERS_ENABLED",
       "OPENGENI_WEBHOOK_BASE_URL",
+      "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
     ]);
     const outputs = {
       temporal_host: { value: "host:7233" },
@@ -1945,6 +1804,7 @@ describe("deployment contract", () => {
       "OPENGENI_DECISION_MODEL_ID",
       "OPENGENI_DECISION_MODEL_API_KEY",
       "OPENGENI_DECISION_MODEL_BASE_URL",
+      "OPENGENI_DECISION_MODEL_AUTH",
       "OPENGENI_JEV_API_KEY",
       "OPENGENI_JEV_BASE_URL",
       "OPENGENI_JEV_MODEL",

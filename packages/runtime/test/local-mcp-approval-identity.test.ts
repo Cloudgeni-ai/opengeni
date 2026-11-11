@@ -46,7 +46,7 @@ function localServer(executions: string[]): MCPServer {
   } as unknown as MCPServer;
 }
 
-async function harness(approvedToolCallId?: string) {
+async function harness(approvedToolCallId?: string, approvedToolCallIds?: readonly string[]) {
   const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
   const prepareCalls: ConnectorActionToolCall[] = [];
   const beginCalls: ConnectorActionToolCall[] = [];
@@ -79,6 +79,7 @@ async function harness(approvedToolCallId?: string) {
     resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
     connectorActionPolicy: hooks,
     ...(approvedToolCallId ? { approvedToolCallId } : {}),
+    ...(approvedToolCallIds ? { approvedToolCallIds } : {}),
   });
   const tools = await agent.getMcpTools(new RunContext());
   const tool = (name: string) => {
@@ -138,6 +139,29 @@ test("the approved local MCP call is admitted under the identity it paused with"
     expect(beginCalls[0]).toMatchObject({ approvalId: callId, toolName: "task_create" });
     expect(beginCalls[0]!.connectionId).toBe(prepareCalls[0]!.connectionId);
     expect(beginCalls[0]!.connectionId).toBe(synthetic);
+  } finally {
+    await prepared.close();
+  }
+});
+
+test("a resume runs every call of the pause the person approved, and only those", async () => {
+  // Rebuilt for the resume: no call was asked about in this process.
+  const { prepared, executions, tool } = await harness(undefined, [
+    "parallel-approved-a",
+    "parallel-approved-b",
+  ]);
+  try {
+    const create = tool("task_create");
+    const run = async (callId: string) =>
+      await create.invoke(new RunContext(), JSON.stringify({ title: callId }), {
+        toolCall: { callId },
+      } as never);
+    expect(await run("parallel-approved-a")).not.toMatchObject({ isError: true });
+    expect(await run("parallel-approved-b")).not.toMatchObject({ isError: true });
+    expect(executions).toEqual(["task_create", "task_create"]);
+    // A call nobody approved is still refused.
+    await run("parallel-undecided-c").catch(() => undefined);
+    expect(executions).toEqual(["task_create", "task_create"]);
   } finally {
     await prepared.close();
   }

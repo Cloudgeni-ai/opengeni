@@ -1,11 +1,19 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, BillingOrigin } from "@opengeni/contracts";
 import {
+  agentPrivateFileOwnerSubjectId,
+  billingOriginForGrant,
+  fundedBillingOrigin,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  ambientBillingOrigin,
+  billingOriginOverride,
   freezeAgentLearningPolicy,
+  getSlackPrivateSessionOwnerSubjectId,
+  readTurnBillingOrigin,
+  withBillingOriginOverride,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
   type CreditDebitAttribution,
@@ -14,6 +22,8 @@ import {
 import { ApiHttpError } from "./http/api-error";
 
 const AGENT_ATTEMPT_AUTHORITY_INVALID = "agent attempt authority is invalid";
+const AGENT_ATTEMPT_CALLER_STALE =
+  "This process's tool access belongs to a turn attempt that is no longer active. Stop retrying this process; start a fresh command from the current live turn. If a tool call may already have run, check its existing receipt or actual state before submitting it again.";
 
 /**
  * A refused agent-attempt credential. The detail code names why, so request
@@ -26,7 +36,8 @@ function agentAttemptAuthorityError(
 ): ApiHttpError {
   const error = new ApiHttpError(403, {
     code: "forbidden",
-    message: AGENT_ATTEMPT_AUTHORITY_INVALID,
+    message:
+      reason === "caller_stale" ? AGENT_ATTEMPT_CALLER_STALE : AGENT_ATTEMPT_AUTHORITY_INVALID,
     retryable: false,
     outcomeUnknown: false,
     details: { code: `agent_attempt_${reason}` },
@@ -42,11 +53,89 @@ function agentAttemptAuthorityError(
  */
 export function creditDebitAttributionForGrant(grant: AccessGrant): CreditDebitAttribution {
   if (grant.principalKind === "agent_attempt") return currentCreditDebitAttribution();
+  // Who pays: a trusted dispatcher's origin, else the credential's.
+  const billingOrigin = fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
   return grant.principalKind === "human_session"
-    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId }
+    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId, billingOrigin }
     : ["service", "api_key", "configured_key", "mcp_gateway"].includes(grant.principalKind ?? "")
-      ? { kind: "service" }
+      ? { kind: "service", billingOrigin }
       : { kind: "unknown" };
+}
+
+/**
+ * A turn's funding origin never changes once accepted, so remember it per
+ * exact turn instead of reading it on every agent request.
+ */
+const TURN_ORIGIN_LIMIT = 4_096;
+const turnOriginsByDatabase = new WeakMap<object, Map<string, BillingOrigin>>();
+
+async function agentTurnBillingOrigin(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+  turnId: string,
+): Promise<BillingOrigin> {
+  let cache = turnOriginsByDatabase.get(deps.db);
+  if (!cache) {
+    cache = new Map();
+    turnOriginsByDatabase.set(deps.db, cache);
+  }
+  const key = `${grant.accountId}:${grant.workspaceId}:${turnId}`;
+  const remembered = cache.get(key);
+  if (remembered) return remembered;
+  const stored = await readTurnBillingOrigin(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    turnId,
+  });
+  // Plan credit never pays for work whose chat cannot be found. Only a
+  // decided origin is remembered: a turn not yet visible is read again.
+  if (!stored) return "api";
+  const origin = stored;
+  if (cache.size >= TURN_ORIGIN_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, origin);
+  return origin;
+}
+
+/**
+ * Who pays for work this grant starts outside a turn (a single model call,
+ * a tool): an agent attempt's chat, else a trusted dispatcher's origin, else
+ * the credential's (see `billingOriginForGrant`).
+ */
+export async function billingOriginForAccessGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<BillingOrigin> {
+  const turnId = grant.metadata?.turnId;
+  if (grant.principalKind === "agent_attempt") {
+    return fundedBillingOrigin(
+      grant.accountId,
+      typeof turnId === "string" ? await agentTurnBillingOrigin(deps, grant, turnId) : "api",
+    );
+  }
+  return fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
+}
+
+/**
+ * Run a direct model API call (the OpenAI-compatible endpoint) as API use,
+ * whatever credential signed it: a person's own sign-in (browser session or
+ * native app credential) pays from credits only, like an API key. Two callers
+ * keep the origin they already have: an agent attempt (its chat's origin)
+ * and a trusted in-process dispatcher's stamp (an agent's app action keeps
+ * its chat's origin). Internal (legacy) accounts stay app
+ * (`fundedBillingOrigin`).
+ */
+export function asDirectModelApiUse<T>(grant: AccessGrant, work: () => Promise<T>): Promise<T> {
+  if (grant.principalKind === "agent_attempt" || billingOriginOverride()) return work();
+  return withBillingOriginOverride("api", work);
 }
 
 /**
@@ -98,7 +187,15 @@ function sameLearningActor(left: AgentLearningActor, right: AgentLearningActor):
   );
 }
 
-type FrozenLearningPolicy = Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+/**
+ * What decides an attempt's personal file owner: its frozen learning policy and
+ * the private Slack interaction, if any, that owns its session's root. Both are
+ * fixed for the attempt's lifetime.
+ */
+type FrozenLearningPolicy = {
+  learning: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+  slackPrivateOwnerSubjectId: string | null;
+};
 
 /**
  * An agent's learning policy is frozen once per accepted turn (a durable
@@ -107,7 +204,8 @@ type FrozenLearningPolicy = Awaited<ReturnType<typeof freezeAgentLearningPolicy>
  * attempts. Re-reading it on every agent request took row locks on the
  * session, turn and attempt for an answer that cannot change, so remember the
  * verified answer per exact attempt. Liveness is still checked on every
- * request; only the immutable policy read is reused.
+ * request; only the immutable policy read (and the session's equally
+ * immutable Slack ownership) is reused.
  */
 const FROZEN_LEARNING_LIMIT = 4_096;
 const FROZEN_LEARNING_TTL_MS = 15 * 60_000;
@@ -177,11 +275,19 @@ export async function withAccessGrantSessionRlsContext<T>(
     throw agentAttemptAuthorityError("malformed");
   }
   const freezeLearning = (actor: AgentLearningActor) =>
-    freezeAgentLearningPolicy(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      actor,
-    });
+    Promise.all([
+      freezeAgentLearningPolicy(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor,
+      }),
+      getSlackPrivateSessionOwnerSubjectId(deps.db, grant.workspaceId, actor.sessionId),
+    ]).then(
+      ([learning, slackPrivateOwnerSubjectId]): FrozenLearningPolicy => ({
+        learning,
+        slackPrivateOwnerSubjectId,
+      }),
+    );
   try {
     // The learning policy is keyed by the exact attempt, which a live actor
     // takes verbatim from the grant's claims. Read it for the claimed attempt
@@ -208,11 +314,17 @@ export async function withAccessGrantSessionRlsContext<T>(
         ? speculative
         : (rememberedLearning(deps.db, verifiedKey) ?? (await freezeLearning(verified)));
     rememberLearning(deps.db, verifiedKey, learning);
+    // Tools and sub-agents of a chat are billed like the chat.
+    const billingOrigin = fundedBillingOrigin(
+      grant.accountId,
+      await agentTurnBillingOrigin(deps, grant, actor.turnId),
+    );
     return await withCreditDebitAttribution(
       {
         kind: "turn",
         turnId: actor.turnId,
         initiatingHumanSubjectId: actor.initiatingHumanSubjectId ?? null,
+        billingOrigin,
       },
       () =>
         withSessionRlsActorContext(
@@ -220,8 +332,10 @@ export async function withAccessGrantSessionRlsContext<T>(
             subjectId: actor.subjectId,
             initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
             agentRootSessionId: actor.callerRootSessionId,
-            privateFileOwnerSubjectId:
-              learning.defaultScope === "personal" ? learning.subjectId : null,
+            privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+              learning.learning,
+              learning.slackPrivateOwnerSubjectId,
+            ),
           },
           fn,
         ),

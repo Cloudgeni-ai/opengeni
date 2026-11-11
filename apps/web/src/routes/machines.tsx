@@ -33,6 +33,12 @@ import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { ConnectMachineDialog } from "@opengeni/react/app/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
+import {
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+} from "@/components/organization-compute-reach-dialog";
+import { useOrganizationName } from "@/lib/use-organization-name";
+import { OwnWhereItWorksCard } from "@opengeni/react/app/components/own-where-it-works";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
@@ -44,7 +50,11 @@ import {
   apiErrorTechnicalFacts,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -62,14 +72,14 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client, workspaces, accessContext } = useAppContext();
+  const { client, workspaces, accessContext, clientConfig, managedSelfContext } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const machines = useWorkspaceMachines({
     pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
   });
   const pageLive = usePageLiveActivity();
-  const personalWorkspace =
-    workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const personalWorkspace = activeWorkspace?.kind === "personal";
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
   const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
   const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
@@ -78,6 +88,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   // "Who can use it?" for the open machine.
   const [audienceOpen, setAudienceOpen] = useState(false);
+  // "Available in" for the open organization machine.
+  const [reachOpen, setReachOpen] = useState(false);
   const [detailWindow, setDetailWindow] = useState<MetricWindow>("1h");
   const [detailSeries, setDetailSeries] = useState<MetricSample[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -100,10 +112,29 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const canChangeSelected = selectedMachine ? machines.canManageMachine(selectedMachine) : false;
   const subjectId = accessContext?.subjectId ?? null;
   const workspaceAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  // Sharing with the whole workspace: a workspace admin, or in a Personal
+  // workspace (still only them) its owner, as the server allows.
+  const canShareWithWorkspace =
+    workspaceAdmin ||
+    (personalWorkspace &&
+      canManageWorkspaceSettings(accessContext, activeWorkspace, managedSelfContext));
   const audienceMachine =
     audienceOpen && selectedMachine?.enrollmentId && selectedMachine.scope !== "organization"
       ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
       : null;
+  // Organization machines work in the workspaces their organization picks;
+  // the organization's owner or an admin changes that, as the server allows.
+  const organizationId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+  const organizationAdmin = canAdministerOrganization({
+    accessContext,
+    clientConfig,
+    accountId: organizationId,
+  });
+  const organizationName =
+    useOrganizationName(organizationId ?? "", organizationAdmin) ?? "your organization";
+  const selectedReach = selectedMachine?.scope === "organization" ? selectedMachine.reach : null;
+  const canChangeReach =
+    Boolean(selectedReach && organizationId && organizationAdmin) && canChangeSelected;
 
   // Fetch the compact card sparkline history for every enrolled machine. Keyed on
   // the SET of enrollment ids (not the 5s-polled array identity) + a 30s refresh,
@@ -238,7 +269,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected so agents can work on them. Opengeni Runner on a machine can serve this workspace alongside any other Opengeni workspaces or deployments it is already connected to."
+        description="Computers connected so agents can work on them. Agents can see and use a computer's screen only when it is shared."
       />
 
       <div className="pt-6">
@@ -268,10 +299,32 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             loadingSeries={detailLoading}
             onBack={() => {
               setAudienceOpen(false);
+              setReachOpen(false);
               setDetailId(null);
             }}
             {...(machines.canManage && subjectId
               ? { onChangeAudience: () => setAudienceOpen(true) }
+              : {})}
+            {...(selectedReach
+              ? { reachSummary: organizationComputeReachSummary(selectedReach) }
+              : {})}
+            {...(canChangeReach ? { onChangeReach: () => setReachOpen(true) } : {})}
+            {...(selectedMachine.scope === "user" &&
+            selectedMachine.enrollmentId &&
+            !selectedMachine.isSessionGroup
+              ? {
+                  // Shows only for the viewer's own machine; anyone else's isn't found.
+                  whereItWorks: (
+                    <OwnWhereItWorksCard
+                      key={selectedMachine.enrollmentId}
+                      client={client}
+                      workspaceId={workspaceId}
+                      resourceKind="connected_machine"
+                      resourceId={selectedMachine.enrollmentId}
+                      name={selectedMachine.name}
+                    />
+                  ),
+                }
               : {})}
             {...(machines.canUpdateAgent && canChangeSelected
               ? {
@@ -368,6 +421,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           machinesError={machines.error}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={machines.canManage}
+          canConnectOwnMachine={machines.canConnectOwnMachine}
         />
       ) : null}
 
@@ -474,10 +528,41 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           machine={audienceMachine}
           subjectId={subjectId}
           workspaceAdmin={workspaceAdmin}
+          canShareWithWorkspace={canShareWithWorkspace}
           personalWorkspace={personalWorkspace}
           open
           onOpenChange={setAudienceOpen}
           onChanged={() => void machines.refresh()}
+        />
+      ) : null}
+      {canChangeReach && selectedMachine?.enrollmentId && selectedReach && organizationId ? (
+        <OrganizationComputeReachDialog
+          key={selectedMachine.enrollmentId}
+          open={reachOpen}
+          onOpenChange={setReachOpen}
+          client={client}
+          kind="machine"
+          name={selectedMachine.name}
+          reach={selectedReach}
+          organizationId={organizationId}
+          organizationName={organizationName}
+          hereId={workspaceId}
+          save={async (next) => {
+            const enrollmentId = selectedMachine.enrollmentId!;
+            return (await client.updateMachineReach(workspaceId, enrollmentId, next)).reach;
+          }}
+          onSaved={(reach) => {
+            setReachOpen(false);
+            // Taken out of this workspace: it is no longer listed here.
+            const stillHere =
+              reach.homeWorkspaceId === workspaceId ||
+              (personalWorkspace
+                ? reach.allowPersonalWorkspaces
+                : reach.allowedWorkspaceIds === null ||
+                  reach.allowedWorkspaceIds.includes(workspaceId));
+            if (!stillHere) setDetailId(null);
+            void machines.refresh();
+          }}
         />
       ) : null}
     </ContentPage>

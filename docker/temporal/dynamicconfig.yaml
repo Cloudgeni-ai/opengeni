@@ -1,0 +1,10 @@
+# Dynamic config of the single-node local Temporal service.
+#
+# One task-queue partition: a single matching host gains nothing from more,
+# and the default four make a backlog run out of order. With every turn slot
+# busy, a woken or resumed turn could wait behind turns queued long after it.
+# One partition serves the backlog in arrival order.
+matching.numTaskqueueReadPartitions:
+  - value: 1
+matching.numTaskqueueWritePartitions:
+  - value: 1

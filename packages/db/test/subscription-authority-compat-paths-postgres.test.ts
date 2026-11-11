@@ -13,8 +13,7 @@
 //   paths the case shows the writer's copy instead.
 // Runtime calls run as the restricted application role; fixture rows the
 // application never writes directly (scheduler runs, cutover records,
-// delivered internal turns) are written by the database owner, as in
-// subscription-authority-compat-postgres.test.ts.
+// delivered internal turns) are written by the database owner.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -80,7 +79,10 @@ type RecordContent = {
 
 /** The organization owner; every session below is in the owner's Personal workspace. */
 let org: Org | null = null;
-/** A second human of the organization, an admin of the owner's Personal workspace. */
+/**
+ * A second human of the organization, planted as a legacy admin row in the
+ * owner's Personal workspace (see `secondMember`).
+ */
 let other = "";
 /** The owner's personal entry every source record carries. */
 let entry: { ownerMembershipId: string; authorityGeneration: number; connectionIds: string[] } = {
@@ -132,7 +134,13 @@ async function organization(db: DbClient): Promise<Org> {
   };
 }
 
-/** A second member of the owner's organization, admin of the owner's Personal workspace. */
+/**
+ * A second member of the owner's organization, admin of the owner's Personal
+ * workspace. Migration 1159 refuses that row (a Personal workspace has exactly
+ * one member, its owner), so the fixture plants it as legacy data with
+ * triggers off: these cases prove the SQL copy rule still narrows for a
+ * non-owner causal human even if such a row ever existed.
+ */
 async function secondMember(owner: Org): Promise<string> {
   const subjectId = `user:authority-compat-other-${crypto.randomUUID()}`;
   const [workspace] = await database!.admin<{ id: string }[]>`
@@ -141,9 +149,12 @@ async function secondMember(owner: Org): Promise<string> {
   await database!.admin`
     insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
     values (${owner.accountId}::uuid, ${subjectId}, 'active', ${workspace!.id}::uuid)`;
-  await database!.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-    values (${owner.accountId}::uuid, ${owner.personalWorkspaceId}::uuid, ${subjectId}, 'admin')`;
+  await database!.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${owner.accountId}::uuid, ${owner.personalWorkspaceId}::uuid, ${subjectId}, 'admin')`;
+  });
   return subjectId;
 }
 

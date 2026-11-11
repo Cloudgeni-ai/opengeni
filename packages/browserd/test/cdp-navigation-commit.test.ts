@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { BrowserActionCommand } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, CdpConnection, type BrowserCommandRunner } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 // Chromium answers Page.navigate before the new document commits, and reports
 // the commit in an event that can arrive later still. These tests script
@@ -91,6 +92,12 @@ function navigationFixture() {
         break;
       }
       case "Page.navigate": {
+        // A javascript: URL runs in the current document and commits nothing;
+        // Chromium answers it as an aborted load.
+        if (String(command.params?.url).startsWith("javascript:")) {
+          result = { frameId: "frame-1", errorText: "net::ERR_ABORTED" };
+          break;
+        }
         const page = Object.values(pages).find((entry) => entry.url === command.params?.url);
         result = {
           frameId: "frame-1",
@@ -172,6 +179,9 @@ function navigationFixture() {
           ],
         };
         break;
+      case "DOMSnapshot.captureSnapshot":
+        result = { strings: [], documents: [] };
+        break;
       case "Page.getLayoutMetrics":
         result = {
           cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },
@@ -239,6 +249,7 @@ function navigationFixture() {
         }
         break;
     }
+    result = protectedFieldsProbeAnswer(command.method, command.params) ?? result;
     queueMicrotask(() =>
       socket.dispatchEvent(
         new MessageEvent("message", {
@@ -458,6 +469,29 @@ test("a navigation the browser cancels after answering fails at once on the page
     );
     expect(receipt.observation?.target.url).toBe(fixture.pages.a!.url);
     expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a javascript: URL runs in the page and completes there, not as a failed load", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    const receipt = await fixture.controller.run(
+      await fixture.command({
+        type: "batch",
+        actions: [
+          { type: "navigate", url: "javascript:void document.body.append('ran')" },
+          { type: "hover", locator: grantAccess },
+        ],
+      }),
+    );
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    // Nothing committed: the tab keeps its page, and the next action uses it.
+    expect(receipt.observation?.target.url).toBe(fixture.pages.a!.url);
+    expect(inputCalls(fixture.calls).length).toBeGreaterThan(0);
   } finally {
     await fixture.driver.close();
   }

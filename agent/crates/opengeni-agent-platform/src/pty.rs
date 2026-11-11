@@ -42,6 +42,8 @@ pub struct PtyProcess {
 struct OwnedChild {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     reservation: Option<crate::WorkReservation>,
+    /// Counts the terminal's shell as a running command while it is owned.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 impl Drop for OwnedChild {
@@ -153,6 +155,40 @@ impl PtyProcess {
     }
 }
 
+/// The program and arguments a terminal starts: the request's command, else
+/// the run-as user's login shell, else the default shell. A missing `/bin/sh`
+/// is replaced by a fallback shell, as for exec.
+fn pty_argv(
+    req: &v1::PtyOpenRequest,
+    identity: Option<&crate::run_as::RunAsIdentity>,
+    default_shell: &[String],
+) -> Vec<String> {
+    if let (true, Some(identity)) = (req.command.is_empty(), identity) {
+        // The account's login shell, or a fallback when it cannot start.
+        #[cfg(unix)]
+        let shell = crate::system_shell::usable_shell(&identity.shell);
+        #[cfg(not(unix))]
+        let shell = identity.shell.clone();
+        vec![shell.to_string_lossy().into_owned()]
+    } else if req.command.is_empty() {
+        default_shell.to_vec()
+    } else {
+        // An explicitly requested `/bin/sh` starts a fallback shell when it
+        // is gone, like exec does.
+        #[cfg(unix)]
+        if let Some(shell) = req
+            .command
+            .first()
+            .and_then(|program| crate::system_shell::substitute(std::ffi::OsStr::new(program)))
+        {
+            let mut argv = req.command.clone();
+            argv[0] = shell.to_string_lossy().into_owned();
+            return argv;
+        }
+        req.command.clone()
+    }
+}
+
 /// Allocates a PTY, spawns the requested command (or the default login shell when
 /// `command` is empty), and returns the live [`PtyProcess`].
 ///
@@ -178,13 +214,7 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         .openpty(size)
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
-    let argv: Vec<String> = if let (true, Some(identity)) = (req.command.is_empty(), &identity) {
-        vec![identity.shell.to_string_lossy().into_owned()]
-    } else if req.command.is_empty() {
-        default_shell.to_vec()
-    } else {
-        req.command.clone()
-    };
+    let argv = pty_argv(req, identity.as_ref(), default_shell);
     if argv.is_empty() {
         return Err(PlatformError::os("pty: no command and no default shell"));
     }
@@ -208,8 +238,19 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
             cmd.env(k, v);
         }
     }
+    #[cfg(unix)]
+    if let Some(shell) = crate::system_shell::fallback_in_use() {
+        cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
+    }
     for (k, v) in &req.env {
         cmd.env(k, v);
+    }
+    if let Some(email) = crate::default_git_email(req.env.keys()) {
+        cmd.env("EMAIL", email);
+    }
+    // The agent's own shell tools go last, so the machine's copies win.
+    if let Some(path) = crate::shell_tools::path_with_shell_tools(&req.env) {
+        cmd.env("PATH", path);
     }
     // Advertise a sensible TERM so curses apps render; the request may override.
     let term = if req.term.is_empty() {
@@ -238,9 +279,19 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
             crate::run_as::on_identity_thread(identity, spawn)?
         }
     };
+    // A terminal's commands are work the supervisor runs, like an exec: give
+    // the shell (and whatever it starts) the same kernel OOM victim preference,
+    // so a memory-heavy command typed into a terminal is killed before the
+    // supervisor that carries the terminal. Best-effort and post-spawn: the
+    // shell is interactive, so its commands start after this write.
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.process_id() {
+        crate::cgroup::raise_exec_oom_score_adj(pid, crate::cgroup::exec_oom_score_adj());
+    }
     let child = OwnedChild {
         child: Some(child),
         reservation: crate::current_work_reservation(),
+        _running_command: crate::command_activity::RunningCommand::start(),
     };
 
     let reader = pair
@@ -332,6 +383,7 @@ mod tests {
         drop(OwnedChild {
             child: Some(Box::new(RecoveringChild(exited.clone()))),
             reservation: drain.reserve_work(None),
+            _running_command: crate::command_activity::RunningCommand::start(),
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while drain.unavailable_reason().is_none() {
@@ -491,5 +543,33 @@ mod tests {
         // Resize should not error on a freshly spawned pty.
         proc.resize(100, 40).expect("resize");
         let _ = proc.kill();
+    }
+
+    /// A terminal shell gets the same OOM victim preference as an exec child.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pty_shell_gets_the_command_oom_score_adj() {
+        let req = v1::PtyOpenRequest {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut proc = spawn_pty_resilient(&req, &default_shell()).expect("spawn pty");
+        let pid = proc
+            .child
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .expect("pty child pid");
+        let observed = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .expect("read pty child OOM score");
+        let _ = proc.kill();
+        let expected = crate::cgroup::exec_oom_score_adj().expect("supervisor OOM score");
+        assert_eq!(observed.trim(), expected.to_string());
     }
 }

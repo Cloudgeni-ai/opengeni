@@ -8,6 +8,7 @@ import {
   annotationDisplayOrdinal,
   annotationHasNote,
   annotationNoteNeedsDisclosure,
+  annotationQuoteText,
   truncateAnnotationQuote,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
@@ -63,11 +64,15 @@ export type AnnotationReveal = (
 ) => boolean;
 
 /** The text a revealed quote is found by. */
-export function annotationQuoteQuery(annotation: NativeAnnotationLike): QuoteAnchorQuery {
+export function annotationQuoteQuery(
+  annotation: Pick<NativeAnnotationLike, "quote" | "source">,
+): QuoteAnchorQuery {
+  // Quotes and their context are source markdown; native text is rendered.
+  const rendered = (quote: string) => annotationQuoteText({ quote, source: annotation.source });
   return {
-    quote: annotation.quote,
-    before: annotation.source.contextBefore,
-    after: annotation.source.contextAfter,
+    quote: rendered(annotation.quote),
+    before: rendered(annotation.source.contextBefore),
+    after: rendered(annotation.source.contextAfter),
   };
 }
 
@@ -105,9 +110,7 @@ export function draftMarkersBySource(
       id: annotation.id,
       ordinal: index + 1,
       incomplete: !annotationHasNote(annotation.note),
-      quote: annotation.quote,
-      before: annotation.source.contextBefore,
-      after: annotation.source.contextAfter,
+      ...annotationQuoteQuery(annotation),
     });
     markers.set(annotation.source.eventId, list);
   });
@@ -441,7 +444,7 @@ function QuoteButton({
         color: theme.colors["fg-muted"],
       }}
     >
-      {quotePreview(annotation.quote)}
+      {quotePreview(annotationQuoteText(annotation))}
     </Text>
   );
   if (!onReveal) return text;
@@ -459,7 +462,7 @@ function QuoteButton({
                 : annotation.source.kind === "assistant_message"
                   ? t("timelineAnnotationShared.assistant")
                   : t("timelineAnnotationShared.toolOutput")),
-            truncateAnnotationQuote: truncateAnnotationQuote(annotation.quote, 88),
+            truncateAnnotationQuote: truncateAnnotationQuote(annotationQuoteText(annotation), 88),
           },
         )}
         onPress={() =>

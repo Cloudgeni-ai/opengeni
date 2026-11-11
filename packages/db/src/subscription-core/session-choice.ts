@@ -44,7 +44,6 @@ import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "../lo
 import { lockSessionEventWriteRows } from "../session-control";
 import {
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
   isSubscriptionSessionBindingRollingConflict,
   writeSubscriptionSessionBinding,
@@ -53,7 +52,7 @@ import {
   subscriptionCoreProvider,
   subscriptionCoreProviderIds,
 } from "../subscription-core-providers";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import { type SubscriptionCoreProvider } from "./provider";
 import {
   projectSubscriptionCoreAccountUsage,
   type SubscriptionCoreAccountUsage,
@@ -196,23 +195,6 @@ function registeredProviders(): SubscriptionCoreChoiceProviders {
   return subscriptionCoreProviderIds().map((providerId) => subscriptionCoreProvider(providerId));
 }
 
-/** The providers whose cutover is enabled for the organization, in the given order. */
-async function enabledProviders(
-  tx: Database,
-  accountId: string,
-  providers: SubscriptionCoreChoiceProviders,
-): Promise<SubscriptionCoreProvider[]> {
-  const enabled: SubscriptionCoreProvider[] = [];
-  for (const binding of providers) {
-    const state = await readSubscriptionProviderCutoverState(tx, {
-      accountId,
-      provider: subscriptionCoreProviderId(binding),
-    });
-    if (state === "enabled") enabled.push(binding);
-  }
-  return enabled;
-}
-
 /**
  * Every connection this caller could name for the session: the pool's shared
  * connections and the caller's own personal ones, per enabled provider.
@@ -226,7 +208,7 @@ async function listChoosableConnections(
   providers: SubscriptionCoreChoiceProviders,
 ): Promise<SubscriptionCoreChoosableConnection[]> {
   const connections: SubscriptionCoreChoosableConnection[] = [];
-  for (const binding of await enabledProviders(tx, input.accountId, providers)) {
+  for (const binding of providers) {
     const providerId = binding.adapter.provider;
     const pool = await readSubscriptionCoreWorkspacePool(tx, binding, {
       ...input,
@@ -917,6 +899,9 @@ export async function readSubscriptionPersonPreferences(
  * Save the caller's own personal-fallback opt-in. `expectedVersion`
  * (optional) is the version last read: 0 for no saved preference. A stale
  * version is a `conflict` and changes nothing.
+ *
+ * @deprecated Kept for API compatibility. Placement no longer reads it: a
+ * person turns their own subscription on per workspace instead (D-53).
  */
 export async function writeSubscriptionPersonPreferences(
   db: Database,
@@ -926,16 +911,12 @@ export async function writeSubscriptionPersonPreferences(
     personalFallbackOptIn: boolean;
     expectedVersion?: number;
   },
-  providers: SubscriptionCoreChoiceProviders = registeredProviders(),
+  _providers: SubscriptionCoreChoiceProviders = registeredProviders(),
 ): Promise<
   | {
       outcome: "written";
       preferences: SubscriptionPersonPreferences;
-      /**
-       * Capacity wakes to deliver after commit: turning the opt-in on can
-       * make the person's own account eligible for a waiting turn. Turning
-       * it off wakes nothing (D-27: no forced move).
-       */
+      /** Always empty: the opt-in no longer changes placement (D-53). */
       wakes: SubscriptionCoreProviderWake[];
     }
   | { outcome: "conflict"; preferences: SubscriptionPersonPreferences }
@@ -989,25 +970,13 @@ export async function writeSubscriptionPersonPreferences(
         },
       };
     }
-    // Wake the person's own waiting turns of every provider on the core when
-    // the opt-in turns on. Placement offers a personal account only to
-    // sessions its owner owns, so no other session can place differently.
-    const wakes: SubscriptionCoreProviderWake[] =
-      row.personal_fallback_opt_in && !own.optIn
-        ? (await enabledProviders(tx, input.accountId, providers)).map((binding) => ({
-            provider: binding.adapter.provider,
-            accountId: input.accountId,
-            reason: subscriptionCoreWakeReason(binding, "person_preferences_changed"),
-            ownerMembershipId: own.membershipId,
-          }))
-        : [];
     return {
       outcome: "written" as const,
       preferences: {
         personalFallbackOptIn: row.personal_fallback_opt_in,
         version: Number(row.version),
       },
-      wakes,
+      wakes: [],
     };
   });
 }

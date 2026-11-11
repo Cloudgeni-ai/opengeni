@@ -21,6 +21,9 @@ export type ComputerBackendTarget = {
   focused: boolean;
   /** A window that cannot be captured or read until it is back on screen. */
   offScreen?: true;
+  /** A person used the computer's keyboard, mouse or trackpad this many whole
+   * seconds before the listing or observation, within the last minute. */
+  personInputSecondsAgo?: number;
 };
 
 export type ComputerBackendObservation = {

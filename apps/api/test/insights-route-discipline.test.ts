@@ -23,8 +23,8 @@ const routesSrc = readFileSync(resolve(here, "..", "src", "routes", "insights.ts
 const appSrc = readFileSync(resolve(here, "..", "src", "app.ts"), "utf8");
 
 describe("insights route discipline", () => {
-  test("requires workspace:admin before aggregating", () => {
-    const grantCall = 'requireAccessGrant(c, deps, workspaceId, "workspace:admin")';
+  test("requires workspace administration (admin or Personal owner) before aggregating", () => {
+    const grantCall = "requireWorkspaceSettingsGrant(c, deps, workspaceId)";
     const grantAt = routesSrc.indexOf(grantCall);
     expect(grantAt).toBeGreaterThanOrEqual(0);
     const validationAt = routesSrc.indexOf(
@@ -210,9 +210,7 @@ describe("insights route discipline", () => {
 
   test("records bounded route timing across success and failure without changing the response", () => {
     const timerAt = routesSrc.indexOf("const startedAtMs = performance.now()");
-    const grantAt = routesSrc.indexOf(
-      'requireAccessGrant(c, deps, workspaceId, "workspace:admin")',
-    );
+    const grantAt = routesSrc.indexOf("requireWorkspaceSettingsGrant(c, deps, workspaceId)");
     const responseAt = routesSrc.indexOf("WorkspaceInsightsResponse.parse(response)", grantAt);
     const finallyAt = routesSrc.indexOf("} finally {", responseAt);
     const observeAt = routesSrc.indexOf("observeRequest({", finallyAt);
@@ -324,12 +322,21 @@ describe("insights route discipline", () => {
         await gate;
         return { snapshot: { privateSessionsVisibleTo: actor } } as never;
       });
-      const parse = spyOn(contracts.WorkspaceInsightsResponse, "parse").mockImplementation(
-        (value: unknown) => value as never,
-      );
+      // Zod exposes `parse` as a lazily bound accessor, which spyOn cannot
+      // wrap, so replace it with a plain value and put the accessor back after.
+      const schema = contracts.WorkspaceInsightsResponse;
+      const parseDescriptor = Object.getOwnPropertyDescriptor(schema, "parse");
+      Object.defineProperty(schema, "parse", {
+        configurable: true,
+        writable: true,
+        value: (value: unknown) => value as never,
+      });
       restores.push(
         () => insights.mockRestore(),
-        () => parse.mockRestore(),
+        () => {
+          if (parseDescriptor) Object.defineProperty(schema, "parse", parseDescriptor);
+          else delete (schema as { parse?: unknown }).parse;
+        },
       );
       const app = new Hono();
       registerInsightsRoutes(app, {

@@ -11,8 +11,12 @@
 //   produced by stream-health.ts
 // - web vitals (`opengeni_client_web_vital{metric,page}`), produced by the
 //   lazily loaded web-vitals-reporting.ts
+// - a desktop app page without the shell's bridge
+//   (`opengeni_client_desktop_bridge_missing_total{platform}`), from desktop.tsx
 import {
+  CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_WEB_VITAL_MAX_VALUE,
+  type ClientDesktopPlatform,
   type ClientPage,
   type ClientRequestAction,
   type ClientRequestFailureReason,
@@ -115,6 +119,15 @@ export type ClientSignalReporter = {
   requestFailure(action: ClientRequestAction, reason: ClientRequestFailureReason): boolean;
   stream(stream: ClientStream, event: ClientStreamEvent): boolean;
   webVital(metric: ClientWebVitalMetric, page: ClientPage, value: number): boolean;
+  /**
+   * `routePattern` overrides the reporter's own, for a report sent while the
+   * page loads, before the router has resolved its matches.
+   */
+  desktopBridgeMissing(
+    platform: ClientDesktopPlatform,
+    appVersion: string | null,
+    routePattern?: () => string,
+  ): boolean;
 };
 
 export type ClientSignalReporterOptions = {
@@ -145,6 +158,7 @@ export function createClientSignalReporter(
   const revision = clientRevision(options.revision);
   const lastReportedAt = new Map<string, number>();
   const reportedVitals = new Set<ClientWebVitalMetric>();
+  let reportedDesktopBridgeMissing = false;
   let sentAt: number[] = [];
   const send = (report: ClientSignalReport) => {
     try {
@@ -163,9 +177,9 @@ export function createClientSignalReporter(
     lastReportedAt.set(key, at);
     return true;
   };
-  const route = () => {
+  const route = (routePattern = options.routePattern) => {
     try {
-      return clientRoutePattern(options.routePattern());
+      return clientRoutePattern(routePattern());
     } catch {
       return "unknown";
     }
@@ -192,6 +206,21 @@ export function createClientSignalReporter(
         metric,
         page,
         value: Math.round(value * 10_000) / 10_000,
+        revision,
+      });
+      return true;
+    },
+    desktopBridgeMissing(platform, appVersion, routePattern) {
+      if (reportedDesktopBridgeMissing) return false;
+      reportedDesktopBridgeMissing = true;
+      send({
+        signal: "desktop_bridge_missing",
+        platform,
+        appVersion:
+          appVersion && CLIENT_DESKTOP_APP_VERSION_PATTERN.test(appVersion)
+            ? appVersion
+            : "unknown",
+        route: route(routePattern),
         revision,
       });
       return true;
@@ -237,4 +266,13 @@ export function reportClientWebVital(
   value: number,
 ): void {
   defaultReporter?.webVital(metric, page, value);
+}
+
+/** Count a desktop app page whose shell bridge is missing; once per page load. */
+export function reportDesktopBridgeMissing(
+  platform: ClientDesktopPlatform,
+  appVersion: string | null,
+  routePattern?: () => string,
+): void {
+  defaultReporter?.desktopBridgeMissing(platform, appVersion, routePattern);
 }

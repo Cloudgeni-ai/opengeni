@@ -3,11 +3,9 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
-import { readFileSync } from "node:fs";
 
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   applyCreditLedgerEntryOnce,
   completeSelfServiceOrganizationSetup,
@@ -110,41 +108,28 @@ describe("verified signup eligibility and post-use credit settlement", () => {
     const debit = {
       accountId,
       type: "model_usage_debit",
-      requestedAmountMicros: 12_000_000,
-      modelId: "model-a",
+      amountMicros: 12_000_000,
+      usage: "model-a",
       sourceType: "model_response",
       sourceId: "turn:response-1",
       idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
     };
-    const first = await applyCreditDebitUpToBalance(client.db, debit);
+    const first = await applyCreditDebitAfterUse(client.db, debit);
     expect(first.debitedMicros).toBe(12_000_000);
     expect(first.grantDebitedMicros).toBe(10_000_000);
-    const replay = await applyCreditDebitUpToBalance(client.db, debit);
+    const replay = await applyCreditDebitAfterUse(client.db, debit);
     expect(replay).toMatchObject({ debitedMicros: 0, grantDebitedMicros: 0 });
 
     // A model monthly credit does not cover is paid from general credit only.
-    const general = await applyCreditDebitUpToBalance(client.db, {
+    const general = await applyCreditDebitAfterUse(client.db, {
       ...debit,
-      modelId: "model-b",
-      requestedAmountMicros: 1_000_000,
+      usage: "model-b",
+      amountMicros: 1_000_000,
+      sourceId: "turn:response-2",
       idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
     });
     expect(general).toMatchObject({ debitedMicros: 1_000_000, grantDebitedMicros: 0 });
   }, 180_000);
-
-  test("launch flag and one-shot receipt trigger are the only grant authority", () => {
-    const migration = readFileSync(
-      new URL("../drizzle/0509_verified_signup_trial_credits.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(migration).toContain("IS DISTINCT FROM 'on'");
-    expect(migration).toContain("AFTER INSERT ON self_service_organization_setup_receipts");
-    expect(migration).toContain("'verified-signup-trial:v1:' || NEW.auth_user_id");
-    expect(migration).toContain(
-      "REVOKE ALL ON FUNCTION opengeni_private.grant_verified_signup_trial_credit() FROM PUBLIC",
-    );
-  });
 
   test("rejects an unverified user without creating an organization or trial ledger entry", async () => {
     if (!owned || !client) return;

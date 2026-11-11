@@ -13,6 +13,7 @@ import {
   encryptEnvironmentValue,
   connectSubscriptionCoreCodexConnection,
   setSubscriptionCoreCodexPrimary,
+  withBillingOriginOverride,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -346,19 +347,21 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       model: "codex/gpt-6-sol",
     });
     const retryIdempotencyKey = crypto.randomUUID();
-    const retried = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json", ...fixture.headers },
-      body: JSON.stringify({
-        initialMessage: draftPayload.text,
-        resources: draftPayload.resources,
-        model: codexDraft.model,
-        reasoningEffort: codexDraft.reasoningEffort,
-        clientEventId: crypto.randomUUID(),
-        idempotencyKey: retryIdempotencyKey,
-        expectedNewSessionDraftRevision: codexDraft.revision,
+    const retried = await withBillingOriginOverride("app", () =>
+      app.request(workspacePath(fixture.workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json", ...fixture.headers },
+        body: JSON.stringify({
+          initialMessage: draftPayload.text,
+          resources: draftPayload.resources,
+          model: codexDraft.model,
+          reasoningEffort: codexDraft.reasoningEffort,
+          clientEventId: crypto.randomUUID(),
+          idempotencyKey: retryIdempotencyKey,
+          expectedNewSessionDraftRevision: codexDraft.revision,
+        }),
       }),
-    });
+    );
     expect(retried.status).toBe(202);
     const created = (await retried.json()) as {
       id: string;
@@ -738,6 +741,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
         maintainBrowserStateArtifacts: async () => ({}),
         recoverVideoGenerationWorkflows: async () => ({}),
         reconcileRecentModelCallFacts: async () => ({}),
+        recordRecentTurnTimingProfiles: async () => ({}),
       },
     });
     const run = worker.run();

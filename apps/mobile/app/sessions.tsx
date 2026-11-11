@@ -1,9 +1,11 @@
 import { groupSessionsByProject } from "@opengeni/react/session-list-model";
-import type { Channel, Session, Workspace } from "@opengeni/sdk";
+import type { Channel, ChatSession as Session, Workspace } from "@opengeni/sdk";
 import {
   fontStyle,
   Icon,
+  SessionAvatar,
   SessionRowList,
+  type SessionAvatarClient,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
@@ -22,7 +24,7 @@ import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
-import { cachedLists, rememberLists } from "@/session-list-cache";
+import { cachedLists, rememberLists, subscribeLists } from "@/session-list-cache";
 import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
@@ -85,6 +87,15 @@ function Sessions() {
     setLists(cached.sessions ?? EMPTY_SESSION_LISTS);
     setProjects(cached.projects ?? []);
     setLoaded(cached.sessions !== undefined);
+    if (!workspaceId) return;
+    // A chat open above this screen keeps its row here current, so coming back
+    // shows the list already in order instead of reordering under a tap.
+    return subscribeLists(workspaceId, (next) => {
+      if (next.sessions) {
+        setLists(next.sessions);
+        setLoaded(true);
+      }
+    });
   }, [workspaceId]);
 
   useFocusEffect(
@@ -218,7 +229,12 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {searching ? null : <MeetingsRow />}
+        {searching ? null : (
+          <>
+            <MeetingsRow />
+            <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
+          </>
+        )}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -240,6 +256,7 @@ function Sessions() {
                 <SessionRowList
                   sessions={results.chats.map((hit) => hit.session)}
                   models={models}
+                  avatarClient={client}
                   onOpen={openResult}
                   workspaceNameOf={(session) => {
                     const where = hitWorkspace.get(session.id);
@@ -273,6 +290,7 @@ function Sessions() {
             <SessionRowList
               sessions={pinned}
               models={models}
+              avatarClient={client}
               onOpen={open}
               onTogglePin={onTogglePin}
             />
@@ -280,10 +298,17 @@ function Sessions() {
         ) : null}
         {sections.map((section) => (
           <View key={section.key} style={{ marginTop: 16 }}>
-            <SectionHeader icon="folder" name={section.name} count={section.sessions.length} />
+            <SectionHeader
+              icon="folder"
+              name={section.name}
+              count={section.sessions.length}
+              project={projects.find((project) => project.id === section.channelId)}
+              client={client}
+            />
             <SessionRowList
               sessions={section.sessions}
               models={models}
+              avatarClient={client}
               onOpen={open}
               onTogglePin={onTogglePin}
             />
@@ -368,15 +393,45 @@ function WorkspaceResultRow(props: {
 
 /* The rail's Meetings entry, saying so while a recording is running. */
 function MeetingsRow() {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
   const recorder = useMeetingRecorder();
   const live = isCapturing(recorder);
   return (
-    <Pressable
-      accessibilityRole="button"
+    <RailRow
+      icon="audio-lines"
+      label="Meetings"
       accessibilityLabel={live ? "Meetings, recording now" : "Meetings"}
       onPress={() => router.push("/meetings")}
+      accessory={live ? <RecordingNow /> : null}
+    />
+  );
+}
+
+function RecordingNow() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
+      <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
+    </View>
+  );
+}
+
+/** A workspace page above the chats (Meetings, Automations), as on the web's rail. */
+function RailRow(props: {
+  icon: "audio-lines" | "zap";
+  label: string;
+  accessibilityLabel?: string;
+  accessory?: React.ReactNode;
+  onPress: () => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel ?? props.label}
+      onPress={props.onPress}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
@@ -389,14 +444,11 @@ function MeetingsRow() {
         backgroundColor: pressed ? c.hover : "transparent",
       })}
     >
-      <Icon name="audio-lines" size={16} color={c["fg-muted"]} />
-      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>Meetings</Text>
-      {live ? (
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
-          <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
-        </View>
-      ) : null}
+      <Icon name={props.icon} size={16} color={c["fg-muted"]} />
+      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>
+        {props.label}
+      </Text>
+      {props.accessory}
       <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
@@ -406,9 +458,13 @@ function SectionHeader(props: {
   icon: "pin" | "folder" | "message-square";
   name: string;
   count: number;
+  /** A project shows its avatar, as in the web sidebar; the folder without one. */
+  project?: Channel | undefined;
+  client?: SessionAvatarClient | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const project = props.project;
   return (
     <View
       style={{
@@ -416,10 +472,21 @@ function SectionHeader(props: {
         alignItems: "center",
         gap: 6,
         paddingHorizontal: 4,
-        marginBottom: 2,
+        marginBottom: 4,
       }}
     >
-      <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
+      {project?.avatar ? (
+        <SessionAvatar
+          avatar={project.avatar}
+          name={project.name}
+          workspaceId={project.workspaceId}
+          seed={project.id}
+          size="xs"
+          client={props.client}
+        />
+      ) : (
+        <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
+      )}
       <Text
         accessibilityRole="header"
         numberOfLines={1}

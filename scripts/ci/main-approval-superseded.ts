@@ -4,6 +4,7 @@
 // older parked runs never finish and pile up, slowing every scan of active
 // runs. Cancel parked runs that are clearly superseded; keep the approval gate.
 import { errorMessage } from "@opengeni/contracts/values";
+import { retryingFetch, type RetryOptions } from "./batch-receipt";
 
 export type ParkedRun = {
   id: number;
@@ -104,25 +105,108 @@ export function supersededQueuedRuns(
     .map((r) => r.id);
 }
 
-async function main() {
-  const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new Error("GITHUB_TOKEN is required");
-  const dryRun = process.argv.includes("--dry-run");
-  const api = async (path: string, init?: RequestInit) => {
-    const res = await fetch(`https://api.github.com/repos/${repo}/${path}`, {
+export type MainRun = {
+  id: number;
+  headSha: string;
+  runAttempt: number;
+  /** When this attempt was requested. */
+  runStartedAt: string;
+  status: string;
+  conclusion: string | null;
+  versionMerge: boolean;
+};
+
+/** How often main runs the full suite while it changes (docs/merge-batcher.md). */
+export const MAIN_CI_INTERVAL_MS = 30 * 60 * 1000;
+
+/** The repository variable MAIN_CI_INTERVAL_MINUTES overrides the interval (minimum 5). */
+export function mainCiInterval(minutes: string | undefined): number {
+  const value = Number(minutes);
+  return minutes && Number.isFinite(value) && value >= 5 ? value * 60_000 : MAIN_CI_INTERVAL_MS;
+}
+
+/**
+ * With MAIN_CI_DEFERRED, ordinary main pushes cancel their own first attempt.
+ * Re-run the newest main SHA's run when no full run is in progress and the last
+ * one started at least the interval ago. A full run is any re-run, or a
+ * Version merge's first attempt; a run parked on an approval is not in progress.
+ */
+export function dueMainRun(
+  runs: MainRun[],
+  mainSha: string,
+  now: number,
+  intervalMs = MAIN_CI_INTERVAL_MS,
+): number | null {
+  const head = runs.find((r) => r.headSha === mainSha);
+  if (
+    !head ||
+    head.runAttempt > 1 ||
+    head.versionMerge ||
+    head.status !== "completed" ||
+    head.conclusion !== "cancelled"
+  )
+    return null;
+  const full = runs.filter((r) => r.runAttempt > 1 || r.versionMerge);
+  if (full.some((r) => r.status !== "completed" && r.status !== "waiting")) return null;
+  const last = Math.max(
+    -Infinity,
+    ...full.map((r) => Date.parse(r.runStartedAt)).filter(Number.isFinite),
+  );
+  return now - last >= intervalMs ? head.id : null;
+}
+
+/**
+ * The newest full main run that failed on its first full attempt is re-run
+ * once, failed jobs only, the same retry a batch gets: one flaky test must not
+ * cost main its images for a whole interval. A failure on that retry stays.
+ */
+export function retryableMainRun(runs: MainRun[]): number | null {
+  const newest = runs
+    .filter((r) => r.runAttempt > 1 || r.versionMerge)
+    .sort((a, b) => Date.parse(b.runStartedAt) - Date.parse(a.runStartedAt))[0];
+  if (!newest || newest.versionMerge || newest.runAttempt !== 2) return null;
+  return newest.status === "completed" && newest.conclusion === "failure" ? newest.id : null;
+}
+
+/**
+ * The pass's GitHub API call. A read retries a network error, a timeout, a 5xx
+ * or a 429 like the batch receipt does, so one gateway error does not end the
+ * whole pass; a mutation is sent exactly once.
+ */
+export function cadenceApi(
+  repo: string,
+  token: string,
+  fetcher: typeof fetch = fetch,
+  retry: RetryOptions = {},
+) {
+  return async (path: string, init?: RequestInit): Promise<unknown> => {
+    const method = init?.method ?? "GET";
+    const request: RequestInit = {
       ...init,
       headers: {
         authorization: `Bearer ${token}`,
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
       },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok && res.status !== 202)
-      throw new Error(`${init?.method ?? "GET"} ${path}: ${res.status}`);
+    };
+    const res = await retryingFetch(
+      fetcher,
+      `https://api.github.com/repos/${repo}/${path}`,
+      request,
+      30_000,
+      method === "GET" ? retry : { ...retry, delaysMs: [] },
+    );
+    if (!res.ok && res.status !== 202) throw new Error(`${method} ${path}: ${res.status}`);
     return res.status === 202 || res.status === 204 ? null : res.json();
   };
+}
+
+async function main() {
+  const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error("GITHUB_TOKEN is required");
+  const dryRun = process.argv.includes("--dry-run");
+  const api = cadenceApi(repo, token);
   const mainSha = ((await api("commits/main")) as { sha: string }).sha;
   type CiRun = {
     id: number;
@@ -130,6 +214,8 @@ async function main() {
     created_at: string;
     run_attempt: number;
     run_started_at: string;
+    status: string;
+    conclusion: string | null;
     head_commit?: { message?: string } | null;
   };
   const ciRuns = (query: string) =>
@@ -217,6 +303,35 @@ async function main() {
     }
   }
   if (failed) console.log(`${failed} cancels skipped; the next pass retries`);
+
+  if (process.env.MAIN_CI_DEFERRED === "true") {
+    const recent = (await ciRuns("per_page=100")).workflow_runs;
+    const mainRuns = recent.map((r) => ({
+      id: r.id,
+      headSha: r.head_sha,
+      runAttempt: r.run_attempt,
+      runStartedAt: r.run_started_at,
+      status: r.status,
+      conclusion: r.conclusion,
+      versionMerge: isVersionMerge(r.head_commit?.message),
+    }));
+    const retry = retryableMainRun(mainRuns);
+    if (retry) {
+      console.log(`re-run the failed jobs of ${retry}${dryRun ? " (dry run)" : ""}`);
+      if (!dryRun) await api(`actions/runs/${retry}/rerun-failed-jobs`, { method: "POST" });
+      return;
+    }
+    const due = dueMainRun(
+      mainRuns,
+      mainSha,
+      Date.now(),
+      mainCiInterval(process.env.MAIN_CI_INTERVAL_MINUTES),
+    );
+    console.log(
+      due ? `re-run ${due} for main ${mainSha}${dryRun ? " (dry run)" : ""}` : "main CI is not due",
+    );
+    if (due && !dryRun) await api(`actions/runs/${due}/rerun`, { method: "POST" });
+  }
 }
 
 if (import.meta.main) await main();

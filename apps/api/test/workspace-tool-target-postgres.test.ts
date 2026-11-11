@@ -412,7 +412,10 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
               },
               options,
             ),
-          ).rejects.toMatchObject({ status: changed === "identity" ? 404 : 409 });
+          ).rejects.toMatchObject({
+            // A Site the caller cannot read is refused before any approval is used.
+            status: changed === "identity" ? 404 : changed === "site" ? 403 : 409,
+          });
         }
       }
       expect(effects).toBe(2);

@@ -14,6 +14,10 @@ classes still collapse and unknown codes/messages are omitted. Caller-supplied
 `errorMessage`, provider bodies, SQL and customer content remain excluded;
 protected diagnostics below are the separate cause-investigation boundary.
 
+Where each finished turn's wall time went (queue, startup, model inference,
+provider and network time, tools, sandbox, waits and gaps) is stored per turn
+in SQL and exported as metrics; see [turn timing profiles](turn-timing-profiles.md).
+
 ### Temporal SDK logs
 
 The worker process installs the Temporal Runtime with
@@ -175,6 +179,23 @@ refusal such as `holder_in_progress` or `mutation_in_progress`, `lease_not_warm`
 every turn heartbeat, so a sustained blocker increments it repeatedly. An attempt
 that is not due yet or whose archive already covers the current generation is not
 counted.
+
+`opengeni_sandbox_setup_operation_duration_seconds{backend,op,purpose,outcome}`
+times platform setup operations on the raw provider session. A read-only probe
+(`listDir`, `readFile`, `pathExists`) whose provider proves the path absent, such
+as repository skill discovery listing a missing `.agents/skills`, is
+`outcome="not_found"`, the same label the routed per-operation metric uses; only
+other errors are `failed`. `opengeni_repository_skill_discovery_failures_total{backend,error_class,handling}`
+counts failed discovery runs by a closed error class; `handling` is `degraded` or
+`unreachable` when the turn continued without repository skills and `propagated`
+when the error reached turn recovery. A single skipped search path or skill
+folder does not fail the run; it counts once in
+`opengeni_repository_skill_entries_skipped_total{backend,error_class}` (entries,
+not runs) and is logged as `Repository skill skipped` with its `reason` (a
+symlinked search path whose sibling search path is indexed is not shown to the
+model and logs `Repository skill folder skipped`). The `not_found` rule is
+shared with the routed metric and applies to every setup `purpose`; for
+purposes other than `repository_skills` a miss may still matter to its caller.
 
 `opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
 `stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
@@ -358,19 +379,34 @@ rising `rate_limited` series as either a real incident or abuse. See
 `apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
 semantics and the coverage limits.
 
+## Unclassified API errors
+
+An API request that fails with an internal error no route mapped to a response
+(status 500, `errorCode` `internal_error`, not an `ApiHttpError` or
+`HTTPException`) adds `causeMessage` to its `HTTP request failed` line: the
+message of the first error under any response wrapper, or for a query-builder
+error the database error under it (never the query or its parameters). This is
+the second deliberate free-text exception, so that an unexpected 500 says why
+and not only `causeName: Error`. The message gets the same scrubbing and 1 KiB
+bound as a web client error message, and the log projection admits
+`causeMessage` only on `internal_error` HTTP lines whose value is already
+exactly that projection. It is server-log only: the response, metrics and
+failure diagnostics are unchanged.
+
 ### Web client failure and health signals
 
 The same route admits closed operational signals, discriminated by a `signal`
 field. A body without `signal` is an error report as above; an older API refuses
 a signal body as `invalid`, so the extension is backward compatible.
 
-| `signal`          | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
-| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `request_failure` | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
-| `stream`          | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
-| `web_vital`       | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
+| `signal`                 | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `request_failure`        | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream`                 | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
+| `web_vital`              | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
+| `desktop_bridge_missing` | `opengeni_client_desktop_bridge_missing_total` (counter)             | `platform`: `macos`, `windows`, `linux`                                                                                                                                                                                              |
 
-Both counters are published at zero for every label pair on API start, and a
+The counters are published at zero for every label value on API start, and a
 rate-limited signal is counted in
 `opengeni_client_error_reports_rejected_total{reason="rate_limited",kind=<signal>}`.
 Request-failure and stream signals use the same token-bucket bounds as the
@@ -387,6 +423,18 @@ response` / `Web client live stream degraded`) with `surface`, `op` (the action
 or stream), `reason`, `clientRoute` and `clientRevision`; reconnects and vitals
 do not log. Histogram buckets cover the published thresholds: CLS 0.1/0.25, INP
 0.2/0.5 s, TTFB 0.8/1.8 s, LCP 2.5/4 s.
+
+`desktop_bridge_missing` is sent at most once per page load when the page runs
+in the Opengeni desktop app's own window (its user agent says
+`Opengeni/<version> … Electron/…`, with no opener and no frame) but the shell's
+preload bridge (`window.opengeniDesktop`) is missing. The page then takes its
+desktop layout from the user agent, but desktop features that need the bridge
+are off. It uses the failure-signal bucket for its platform and writes one
+`Desktop app page without the shell bridge` warning with `surface: "desktop"`,
+`op` (the platform), `reason: "bridge_missing"`, `clientAppVersion` (the app
+version from the user agent, or `unknown`; never a metric label),
+`clientRoute` and `clientRevision`. Any non-zero rate is worth a look: read the
+log's versions and routes to see which builds and views lose the bridge.
 
 Automated browsers (`navigator.webdriver`) do not send signals. Useful ratios: `opengeni_client_request_failures_total` against the matching
 HTTP request rate for that route, `long_disconnect` per active session view, and
@@ -464,3 +512,50 @@ occurs before bounded flush and required exit(1). Session-event persistence
 capture occurs before failure-settlement DB recovery work, so a second DB error
 cannot prevent its enqueue. Startup failures before an observer is attached
 still have only the existing safe fallback diagnostic.
+
+
+### Platform versus customer-provider failures
+
+`opengeni_turns_total`, `opengeni_model_calls_total`, and the canonical startup
+milestone histogram carry bounded `failure_origin` values: `none`, `platform`,
+and `customer_provider`. Platform includes unclassified failures: missing
+labels from older workers also remain in platform alerts during rolling updates.
+
+Turn attribution uses the accepted execution policy's upstream payer identity
+and the typed failure committed by the winning settlement. It never infers
+ownership from a model name or from the failure's display text. Only known
+provider quota, rate, billing, plan and capacity refusals (including a failed
+compaction request's closed `quotaScope`) and the closed
+`providerAccountRefusal` marker are excluded. That marker is set from the
+provider's own response when the customer's provider account refused to serve:
+`byok_capacity_restricted` for an OpenRouter account restricted to its own
+provider keys with no key eligible for the request (a 404 whose body carries
+OpenRouter's restriction wording, since OpenRouter sends no structured code),
+`customer_verification_required` for a Vercel AI Gateway 403 with that
+structured type, and `key_limit_exceeded` for an OpenRouter 403 refusing the
+customer's own key at the credit or budget limit the customer set on it. Vercel AI Gateway credit and budget refusals (402) are already
+exhausted quota. Other 404s, including other "No endpoints found" refusals, stay
+platform failures. Generic provider-unavailable
+turn failures remain unclassified because they can also represent our transport
+or stream handling. Invalid tool
+names, malformed requests, internal lease errors, persistence failures and
+unknown errors remain platform failures even on a customer's connection.
+Transport-call attribution uses reserved connected-provider identities (including
+the workspace's direct and organization compatible connections) and
+provider HTTP responses (401/402/403/429/5xx, and a 404 whose bounded body clone
+carries the same account refusal); statusless failures remain unclassified. A
+404 call is counted once its body clone is classified, off the request path; a
+body that does not arrive within five seconds is counted as an unclassified 404. It
+does not change retries, copy, billing, history or session outcomes.
+
+The canonical turn-failure, model-call-failure and first-byte-availability alerts
+exclude `failure_origin="customer_provider"` from both sides of their ratios
+and their traffic gates. Runtime Failures keeps all outcomes and a separate
+customer-provider failure series. Customer connection problems still belong in
+the session and connection UI; they are not proof of a platform outage.
+
+Custom dashboards and locally installed alert rules must adopt the same filter
+only after deploying the instrumentation. Never subtract model-call counts from
+turn failures: several calls can belong to one turn. Synthetic subscription
+capacity checks should be reported separately from a platform-funded end-to-end
+probe; a quota-exhausted subscription does not establish platform unavailability.

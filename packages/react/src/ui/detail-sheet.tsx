@@ -19,6 +19,7 @@ import { Sheet, SheetClose, SheetDescription, SheetTitle, SheetTrigger } from ".
 import { Skeleton } from "./skeleton";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
+import { WindowBarTitleBoundary } from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
@@ -102,6 +103,7 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
       <DialogPrimitive.Content
         ref={ref}
         data-slot="detail-sheet"
+        data-window-layer
         {...props}
         onOpenAutoFocus={(event) => {
           // Focus hasn't moved yet: this is still the row that opened the sheet.
@@ -132,7 +134,9 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
           className,
         )}
       >
-        <PresentationContext.Provider value="sheet">{children}</PresentationContext.Provider>
+        <PresentationContext.Provider value="sheet">
+          <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
+        </PresentationContext.Provider>
       </DialogPrimitive.Content>
     </DialogContainedPortal>
   );

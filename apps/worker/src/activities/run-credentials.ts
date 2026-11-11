@@ -25,7 +25,6 @@ export type RunCredentialResolutionContext = {
   turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
-  variableSet: { id: string; name: string } | null;
   /** Enables the workspace's configured HTTP credential provider. */
   settings?: Settings;
   initiatingHumanSubjectId?: string | null;
@@ -68,7 +67,6 @@ export function buildRunCredentialsRequest(
     sandboxOs: input.turn.sandboxOs ?? input.session.sandboxOs,
     purpose: input.purpose,
     forceRefresh: input.forceRefresh,
-    variableSet: input.variableSet,
   };
 }
 
@@ -159,7 +157,6 @@ export async function bindRunCredentialResolver(
       turn: input.turn,
       attemptId: input.attemptId,
       effectiveSandboxBackend: input.effectiveSandboxBackend,
-      variableSet: input.variableSet,
       rootSessionId,
       purpose: "provision",
       forceRefresh: false,

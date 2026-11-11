@@ -17,31 +17,43 @@
 //!
 //! Only a sweep (see [`crate::sweep`]) deletes chunks and manifests, once
 //! no pointer names them; the rules in [`crate::fresh`] keep it from
-//! deleting what an archive in flight is about to name.
-use std::sync::Arc;
+//! deleting what an archive in flight is about to name. Chunks and
+//! manifests are written only under the current period's name, so a delete
+//! never needs a condition. Pointers are kept by a [`PointerStore`]: the
+//! control service's in a fleet, the object store's own otherwise.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use futures::TryStreamExt as _;
 use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
 
 use crate::{
     Error, Result,
-    chunk::{ChunkRef, EncodedChunk, decode},
-    fresh::{Clock, Freshness},
+    chunk::{ChunkRef, EncodedChunk, MAX_PACK, decode},
+    fresh::{Clock, period_of},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
-    upload::{Created, Deleted, Gcs},
+    pace::{self, Pace},
+    pack::Packer,
+    pointer_store::{ObjectPointers, PointerStore},
+    upload::{Created, Gcs, md5_hex, tag_is_md5},
 };
 
 /// Largest pointer object accepted; pointers only name manifests.
 pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 
+mod carried;
 mod pointers;
+mod records;
 
+pub use carried::{Held, Kept};
+pub use records::RECORDS;
+
+#[cfg(test)]
+pub(crate) use crate::pointer_store::unstamped;
 pub use pointers::{Begun, Publication, Rewrite, Stock};
 #[cfg(test)]
-pub(crate) use pointers::{TEST_EPOCH, next_save, unstamped};
+pub(crate) use pointers::{TEST_EPOCH, next_save};
 
 /// Use provider-native environment or machine-identity credentials.
 pub fn provider_from_env(kind: &str) -> Result<Arc<dyn ObjectStore>> {
@@ -84,28 +96,78 @@ pub trait QuarantineWatch: Send + Sync + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
+    /// The same store, for uploads: its requests may take longer
+    /// ([`UPLOAD_TIMEOUT`]).
+    uploads: Arc<dyn ObjectStore>,
+    /// The slots uploads take, shared by every clone ([`crate::pace`]).
+    pace: Arc<Pace>,
     prefix: Path,
     uploader: Uploader,
-    freshness: Freshness,
+    pointers: Arc<dyn PointerStore>,
     clock: Clock,
     watch: Option<Arc<dyn QuarantineWatch>>,
+    /// How long a read of a chunk or manifest keeps trying while the store
+    /// says it is not there ([`SETTLE`]).
+    settle: Duration,
+    /// The chunks this store (and its clones) stored, by the period they
+    /// were stored in: what a later period's write copies.
+    stored: Arc<Mutex<carried::Stored>>,
+    /// The archive this store stores chunks for, if any, which holds every
+    /// chunk it stores until it publishes ([`Self::holding`]).
+    held: Option<Arc<Held>>,
+    /// Whether archives through it may write packs at all
+    /// ([`Self::with_packs`]).
+    packs: bool,
 }
 
-/// The kinds of stored object, each under its own prefix.
+/// How long a read of a chunk or manifest keeps trying while the store
+/// answers that it is not there, before it is taken as gone. Something
+/// names every object read, and it was stored before anything named it;
+/// but not every store reads what was just written: Garage, run so that a
+/// write lands once one of its nodes has it, can answer from a node that
+/// was away while the write landed until that node has caught up, minutes
+/// after it is back.
+pub const SETTLE: Duration = Duration::from_secs(5 * 60);
+
+/// How long one upload request may take, sending its bytes included. The
+/// client's usual 30 s covers the whole request, and a store busy with
+/// other writers has been seen taking three minutes to read one pack
+/// ([`crate::pack::PACK_BYTES`]) that it then stored; a create that ran
+/// out of time is not sent again by the client. Other requests keep the
+/// client's usual deadline.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// The longest wait between two reads while one settles.
+const SETTLE_DELAY_MAX: Duration = Duration::from_secs(10);
+
+/// The kinds of stored object a sweep deletes, each under its own prefix
+/// (every layout of it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Area {
-    /// The only objects ever replaced: each names a copy's manifests.
-    Pointers,
     Manifests,
     Chunks,
+    /// Chunks stored together, an archive's file at a time (ADR 31).
+    Packs,
 }
 
 impl Area {
+    /// Every area, in the order a sweep lists them.
+    pub const ALL: [Self; 3] = [Self::Manifests, Self::Chunks, Self::Packs];
+
     fn prefix(self) -> &'static str {
         match self {
-            Self::Pointers => pointers::POINTERS,
-            Self::Manifests => "manifests/v1",
-            Self::Chunks => "chunks/v1",
+            Self::Manifests => "manifests",
+            Self::Chunks => "chunks",
+            Self::Packs => "packs",
+        }
+    }
+
+    /// The prefix of its layout whose keys name their period.
+    pub(crate) fn periodic(self) -> &'static str {
+        match self {
+            Self::Manifests => "manifests/v2",
+            Self::Chunks => "chunks/v2",
+            Self::Packs => "packs/v1",
         }
     }
 }
@@ -119,38 +181,75 @@ pub struct Listed {
     pub size: u64,
 }
 
-/// What a delete on condition did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Removal {
-    Deleted,
-    /// It was stored again recently, so it stays.
-    Kept,
-    /// Nothing was stored under the key any more.
-    Gone,
+/// A chunk as [`ChunkStore::put_chunk`] stored it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Put {
+    /// What names it now: the reference it was given, under the period it
+    /// was stored in.
+    pub reference: ChunkRef,
+    /// Whether this call wrote it; otherwise another write of the same
+    /// bytes did, the same period.
+    pub new: bool,
+    /// Whether this call wrote it by copying, within the store, the object
+    /// this store stored of the same bytes in an earlier period, rather
+    /// than uploading the bytes.
+    pub copied: bool,
+}
+
+/// A pack as [`ChunkStore::put_pack`] stored it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutPack {
+    /// What names each chunk in it, in the order they were packed.
+    pub references: Vec<ChunkRef>,
+    /// Whether this call wrote it, as [`Put::new`].
+    pub new: bool,
+    /// Whether this call wrote it by a copy within the store, as
+    /// [`Put::copied`].
+    pub copied: bool,
+    /// Its length.
+    pub len: u64,
+}
+
+/// A record of up to `most` chunks a store stored.
+fn remembering(most: usize) -> Arc<Mutex<carried::Stored>> {
+    Arc::new(Mutex::new(carried::Stored::new(most)))
 }
 
 /// What is stored under a content name.
 enum Found {
-    /// Exactly the bytes the name allows, stored at the time given if the
-    /// store says.
-    Ours(Option<SystemTime>),
+    /// Exactly the bytes the name allows.
+    Ours,
     /// Nothing, or other bytes.
     Other,
 }
 
 impl ChunkStore {
     /// A store over any backend. Uploads are read back to verify them; use
-    /// [`Self::from_url`] for stores that verify checksums themselves.
+    /// [`Self::from_url`] for stores that verify checksums themselves. A
+    /// read of what is not there fails at once ([`Self::with_settle`]).
     #[must_use]
     pub fn new(backend: Arc<dyn ObjectStore>, prefix: Path) -> Self {
         Self {
+            pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
             backend,
             prefix,
             uploader: Uploader::ReadBack,
-            freshness: Freshness::DEFAULT,
             clock: Clock::system(),
             watch: None,
+            settle: Duration::ZERO,
+            stored: remembering(carried::REMEMBERED),
+            held: None,
+            packs: true,
         }
+    }
+
+    /// The same store reading a chunk or manifest again, for up to
+    /// `settle`, while the store answers that it is not there ([`SETTLE`]).
+    #[must_use]
+    pub fn with_settle(self, settle: Duration) -> Self {
+        Self { settle, ..self }
     }
 
     /// The same store telling `watch` about every object it quarantines.
@@ -162,11 +261,26 @@ impl ChunkStore {
         }
     }
 
-    /// The same store under other time rules; host agents and sweeps of
-    /// one store must agree on them.
+    /// The same store keeping its pointers in `pointers` rather than in
+    /// its object store: a fleet's control service keeps them (ADR 25).
     #[must_use]
-    pub fn with_freshness(self, freshness: Freshness) -> Self {
-        Self { freshness, ..self }
+    pub fn with_pointers(self, pointers: Arc<dyn PointerStore>) -> Self {
+        Self { pointers, ..self }
+    }
+
+    /// The pointers kept in its object store itself, as a host on its own
+    /// and every host of an earlier release keeps them, whatever
+    /// [`Self::with_pointers`] chose: what a control service imports when
+    /// it takes over a fleet's pointers (ADR 25).
+    #[must_use]
+    pub fn object_pointers(&self) -> ObjectPointers {
+        ObjectPointers::new(self.backend.clone(), self.prefix.clone())
+    }
+
+    /// The object store and prefix it is over, for logs and records.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("{} under {}", self.backend, self.prefix)
     }
 
     /// The same store reading the time from `clock`.
@@ -175,9 +289,26 @@ impl ChunkStore {
         Self { clock, ..self }
     }
 
+    /// The same store remembering at most `most` of the chunks it stores
+    /// from now on, none with 0: it then never copies.
+    #[cfg(test)]
     #[must_use]
-    pub fn freshness(&self) -> Freshness {
-        self.freshness
+    pub(crate) fn remembering(self, most: usize) -> Self {
+        Self {
+            stored: remembering(most),
+            ..self
+        }
+    }
+
+    /// The same store holding every chunk it stores in `held`, so that
+    /// [`Self::keeping`] carries it into each new hour until the archive
+    /// `held` is for publishes.
+    #[must_use]
+    pub fn holding(self, held: Arc<Held>) -> Self {
+        Self {
+            held: Some(held),
+            ..self
+        }
     }
 
     #[must_use]
@@ -185,16 +316,47 @@ impl ChunkStore {
         self.clock.now()
     }
 
+    /// Checks that its pointers can be kept safely: an object store must
+    /// refuse a second create of the same object (see
+    /// [`ObjectPointers::check`]). Done once, before anything is stored.
+    pub async fn check_pointers(&self) -> Result<()> {
+        self.pointers.check().await
+    }
+
+    /// The name of every pointer kept, for a sweep.
+    pub async fn pointer_names(&self) -> Result<Vec<String>> {
+        self.pointers.names().await
+    }
+
     /// A store over `fake`'s bucket, under `prefix`, on `fake`'s clock.
     #[cfg(test)]
     pub(crate) fn over_fake(fake: &Arc<crate::fake::Fake>, prefix: &str) -> Self {
+        let backend: Arc<dyn ObjectStore> = Arc::new(crate::fake::Bucket(fake.clone()));
         Self {
-            backend: Arc::new(crate::fake::Bucket(fake.clone())),
+            pointers: Arc::new(ObjectPointers::new(backend.clone(), Path::from(prefix))),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
+            backend,
             prefix: Path::from(prefix),
             uploader: Uploader::Gcs(crate::fake::gcs(fake)),
-            freshness: Freshness::DEFAULT,
             clock: fake.clock.clone(),
             watch: None,
+            settle: Duration::ZERO,
+            stored: remembering(carried::REMEMBERED),
+            held: None,
+            packs: true,
+        }
+    }
+
+    /// A store over `fake`'s bucket as over S3: it trusts the store to
+    /// check what it is sent, and the bucket tags each object with the MD5
+    /// of its bytes.
+    #[cfg(test)]
+    pub(crate) fn over_fake_s3(fake: &Arc<crate::fake::Fake>, prefix: &str) -> Self {
+        *fake.tags_follow_bytes.lock().unwrap() = true;
+        Self {
+            uploader: Uploader::StoreVerified,
+            ..Self::over_fake(fake, prefix)
         }
     }
 
@@ -202,8 +364,28 @@ impl ChunkStore {
     /// `az://container/prefix` with the provider's usual credential chain;
     /// `None` when `url` is not a store URL.
     pub fn from_url(url: &str) -> Result<Option<Self>> {
-        use object_store::aws::{AmazonS3Builder, Checksum};
-        use object_store::azure::MicrosoftAzureBuilder;
+        Self::open(url, None)
+    }
+
+    /// Opens a store as [`Self::from_url`] does, configured by `settings`
+    /// alone instead of the environment: the provider's environment
+    /// variables by name, such as `AWS_ENDPOINT` and `AWS_ACCESS_KEY_ID`
+    /// for `s3://`, `GOOGLE_SERVICE_ACCOUNT` for `gs://` and
+    /// `AZURE_STORAGE_ACCOUNT_NAME` for `az://`; other providers' are
+    /// ignored. For a process that uses two stores of one kind, such as a
+    /// copy between two S3 stores.
+    ///
+    /// # Errors
+    ///
+    /// When a setting of the store's provider is not one it takes.
+    pub fn from_url_with(url: &str, settings: &[(String, String)]) -> Result<Option<Self>> {
+        Self::open(url, Some(settings))
+    }
+
+    fn open(url: &str, settings: Option<&[(String, String)]>) -> Result<Option<Self>> {
+        use object_store::ClientConfigKey;
+        use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, Checksum};
+        use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
         use object_store::client::{HttpConnector as _, ReqwestConnector};
         use object_store::gcp::GoogleCloudStorageBuilder;
 
@@ -212,46 +394,99 @@ impl ChunkStore {
         };
         let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
         let prefix = Path::from(prefix.trim_end_matches('/'));
-        let (backend, uploader): (Arc<dyn ObjectStore>, _) = match scheme {
-            "gs" => {
-                let store = GoogleCloudStorageBuilder::from_env()
+        // Uploads go through a client of their own with a longer deadline:
+        // a request's deadline covers sending its body, which for a pack is
+        // megabytes.
+        let upload_timeout = format!("{}s", UPLOAD_TIMEOUT.as_secs());
+        let (backend, uploads, uploader): (Arc<dyn ObjectStore>, Arc<dyn ObjectStore>, _) =
+            match scheme {
+                "gs" => {
+                    let builder = match settings {
+                        None => GoogleCloudStorageBuilder::from_env(),
+                        Some(settings) => configured(
+                            GoogleCloudStorageBuilder::new(),
+                            settings,
+                            "GOOGLE_",
+                            GoogleCloudStorageBuilder::with_config,
+                        )?,
+                    };
+                    let store = builder.with_bucket_name(bucket).build()?;
+                    let client = ReqwestConnector::default()
+                        .connect(&ClientOptions::new().with_timeout(UPLOAD_TIMEOUT))?;
+                    let gcs = Gcs::new(
+                        client,
+                        store.credentials().clone(),
+                        "https://storage.googleapis.com",
+                        bucket,
+                    );
+                    // Cloud Storage uploads go through `gcs`, not the store.
+                    let store: Arc<dyn ObjectStore> = Arc::new(store);
+                    (store.clone(), store, Uploader::Gcs(gcs))
+                }
+                "s3" => {
+                    let builder = match settings {
+                        None => AmazonS3Builder::from_env(),
+                        Some(settings) => configured(
+                            AmazonS3Builder::new(),
+                            settings,
+                            "AWS_",
+                            AmazonS3Builder::with_config,
+                        )?,
+                    }
                     .with_bucket_name(bucket)
-                    .build()?;
-                let client = ReqwestConnector::default().connect(&ClientOptions::new())?;
-                let gcs = Gcs::new(
-                    client,
-                    store.credentials().clone(),
-                    "https://storage.googleapis.com",
-                    bucket,
-                );
-                (Arc::new(store), Uploader::Gcs(gcs))
-            }
-            "s3" => (
-                Arc::new(
-                    AmazonS3Builder::from_env()
-                        .with_bucket_name(bucket)
-                        .with_checksum_algorithm(Checksum::SHA256)
-                        .build()?,
-                ),
-                Uploader::StoreVerified,
-            ),
-            "az" => (
-                Arc::new(
-                    MicrosoftAzureBuilder::from_env()
-                        .with_container_name(bucket)
-                        .build()?,
-                ),
-                Uploader::ReadBack,
-            ),
-            _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
-        };
+                    .with_checksum_algorithm(Checksum::SHA256);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::StoreVerified,
+                    )
+                }
+                "az" => {
+                    let builder = match settings {
+                        None => MicrosoftAzureBuilder::from_env(),
+                        Some(settings) => configured(
+                            MicrosoftAzureBuilder::new(),
+                            settings,
+                            "AZURE_",
+                            MicrosoftAzureBuilder::with_config,
+                        )?,
+                    }
+                    .with_container_name(bucket);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AzureConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::ReadBack,
+                    )
+                }
+                _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
+            };
         Ok(Some(Self {
+            pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
             backend,
+            uploads,
+            pace: Arc::new(Pace::new()),
             prefix,
             uploader,
-            freshness: Freshness::DEFAULT,
             clock: Clock::system(),
             watch: None,
+            settle: SETTLE,
+            stored: remembering(carried::REMEMBERED),
+            held: None,
+            packs: true,
         }))
     }
 
@@ -263,15 +498,16 @@ impl ChunkStore {
             .fold(self.prefix.clone(), |path, part| path.child(part))
     }
 
-    /// Whether this store deletes on condition (GCS), which a sweep that
-    /// deletes needs.
-    #[must_use]
-    pub fn deletes_on_condition(&self) -> bool {
-        matches!(self.uploader, Uploader::Gcs(_))
-    }
-
-    /// Returns true only when this call created the object; never overwrites it.
-    pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<bool> {
+    /// Stores `chunk` under this period's name (see [`crate::fresh`]) unless
+    /// another write stored the same bytes under it already, and returns
+    /// the reference naming it there. An object of the same bytes another
+    /// write stored in an earlier period is not looked for: what an archive
+    /// reuses of an earlier copy it names by that copy's references. One
+    /// this store stored itself in an earlier period, as an archive a
+    /// sweep's fence stopped did, is copied within the store rather than
+    /// uploaded again, when it is still there and the store can copy; one
+    /// it stored this period is checked rather than sent again.
+    pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<Put> {
         // Public structs may have been modified since encoding.
         decode(&chunk.reference, &chunk.bytes)?;
         if chunk
@@ -282,29 +518,197 @@ impl ChunkStore {
         {
             return Err(Error::Integrity);
         }
-        self.put_immutable(&chunk.object_key(), Bytes::copy_from_slice(&chunk.bytes))
-            .await
+        let period = period_of(self.clock.now());
+        let reference = chunk.reference.on_day(period);
+        let stored = self.stored().period(&chunk.reference);
+        let mut put = None;
+        if stored == Some(period) && self.has_chunk(&reference).await? {
+            // Stored this period by this store, as what an archive keeps
+            // is: no sweep deletes it before the period has ended.
+            put = Some(Put {
+                reference: reference.clone(),
+                new: false,
+                copied: false,
+            });
+        } else if let Some(earlier) = stored.filter(|stored| *stored < period) {
+            let from = chunk.reference.on_day(earlier).key();
+            if let Some(copied) = self.carry(&from, &reference).await? {
+                if copied {
+                    self.stored().remember(&chunk.reference, period);
+                }
+                put = Some(Put {
+                    reference: reference.clone(),
+                    new: copied,
+                    copied,
+                });
+            }
+        }
+        let put = if let Some(put) = put {
+            put
+        } else {
+            let bytes = Bytes::copy_from_slice(&chunk.bytes);
+            let new = self.put_immutable(&reference.key(), bytes).await?;
+            if new {
+                self.stored().remember(&chunk.reference, period);
+            }
+            Put {
+                reference,
+                new,
+                copied: false,
+            }
+        };
+        if let Some(held) = &self.held {
+            held.hold(&put.reference);
+        }
+        Ok(put)
     }
 
+    /// Stores the chunks `packer` holds as one pack under this period's
+    /// name (ADR 31), unless another write stored the same bytes under it
+    /// already, and returns what names each chunk there. As
+    /// [`Self::put_chunk`] does a chunk, a pack this store stored itself in
+    /// an earlier period is copied within the store, and one it stored this
+    /// period is checked rather than sent again: an archive started again
+    /// whose packs come out the same sends nothing.
+    pub async fn put_pack(&self, packer: Packer) -> Result<PutPack> {
+        let (bytes, chunks) = packer.finish();
+        if chunks.is_empty() || bytes.len() as u64 > MAX_PACK {
+            return Err(Error::Invalid(
+                "a pack holds one chunk or more, within its limit",
+            ));
+        }
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        let checksums = crate::upload::checksums(&bytes);
+        let len = bytes.len() as u64;
+        let period = period_of(self.clock.now());
+        let references = crate::pack::named(chunks, period, &digest, len, &checksums);
+        for reference in &references {
+            reference.validate()?;
+        }
+        let probe = &references[0];
+        let stored = self.stored().pack_period(&digest);
+        let mut put = None;
+        if stored == Some(period) && self.has_chunk(probe).await? {
+            put = Some((false, false));
+        } else if let Some(earlier) = stored.filter(|stored| *stored < period) {
+            let from = probe.on_day(earlier).key();
+            if let Some(copied) = self.carry(&from, probe).await? {
+                put = Some((copied, copied));
+            }
+        }
+        let (new, copied) = match put {
+            Some(put) => put,
+            None => (
+                self.put_immutable(&probe.key(), Bytes::from(bytes)).await?,
+                false,
+            ),
+        };
+        if new {
+            self.stored().remember_pack(&digest, period);
+        }
+        if let Some(held) = &self.held {
+            for reference in &references {
+                held.hold(reference);
+            }
+        }
+        Ok(PutPack {
+            references,
+            new,
+            copied,
+            len,
+        })
+    }
+
+    /// Whether an archive through this store may write packs, and so copies
+    /// of [`crate::copy::VERSION_PACKS`]: in a fleet, once every live host
+    /// reads them (ADR 31).
+    #[must_use]
+    pub fn writes_packs(&self) -> bool {
+        self.packs && self.pointers.writes_packs()
+    }
+
+    /// The same store writing packs only if `packs`, and otherwise each
+    /// chunk as an object of its own, as a release before packs did.
+    #[must_use]
+    pub fn with_packs(self, packs: bool) -> Self {
+        Self { packs, ..self }
+    }
+
+    fn stored(&self) -> std::sync::MutexGuard<'_, carried::Stored> {
+        self.stored.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes the chunk `to` names, which this store stored under `from` in
+    /// an earlier period, by a copy within the store, and checks it as
+    /// [`Self::has_chunk`] does. `Some(true)` when it copied it,
+    /// `Some(false)` when another write stored it under `to` already, and
+    /// `None` when it could not: `from` is gone (a sweep took it), the store
+    /// does not copy, or what is under `to` is not that chunk. The caller
+    /// then stores it as it would have.
+    async fn carry(&self, from: &str, to: &ChunkRef) -> Result<Option<bool>> {
+        let (from, path) = (self.path(from), self.path(&to.key()));
+        match self.backend.copy_if_not_exists(&from, &path).await {
+            Ok(()) => {}
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                return Ok(self.has_chunk(to).await?.then_some(false));
+            }
+            Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented) => {
+                // S3 and most stores like it (Garage) copy with no
+                // condition, over whatever is there. Look first; a write of
+                // the same bytes landing between the look and the copy is
+                // replaced by the same bytes, which the name allows.
+                if self.has_chunk(to).await? {
+                    return Ok(Some(false));
+                }
+                if self.backend.copy(&from, &path).await.is_err() {
+                    return Ok(None);
+                }
+            }
+            Err(_) => return Ok(None),
+        }
+        Ok(self.has_chunk(to).await?.then_some(true))
+    }
+
+    /// Writes `bytes` under `key`, a name that allows no other bytes,
+    /// unless they are stored there already; whether this call wrote them.
+    ///
+    /// It waits for a slot among the store's uploads, and an upload that
+    /// fails as a busy store's do is sent again after a pause, up to
+    /// [`pace::TRIES`] times ([`crate::pace`]).
     async fn put_immutable(&self, key: &str, bytes: Bytes) -> Result<bool> {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let slot = self.pace.slot().await;
+            match self.put_immutable_once(key, &bytes).await {
+                Ok(new) => {
+                    slot.stored();
+                    return Ok(new);
+                }
+                Err(error) if pace::crowded(&error) => {
+                    slot.crowded();
+                    if tries >= pace::TRIES {
+                        return Err(error);
+                    }
+                    tracing::debug!(key, tries, %error, "upload failed: sending it again");
+                    tokio::time::sleep(pace::pause(tries)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One try of [`Self::put_immutable`].
+    async fn put_immutable_once(&self, key: &str, bytes: &Bytes) -> Result<bool> {
+        let bytes = bytes.clone();
         let path = self.path(key);
         if self.create(&path, &bytes).await? == Created::New {
             return Ok(true);
         }
-        if let Found::Ours(stored_at) = self.found(&path, &bytes).await? {
-            // Reused as it is, unless it was stored too long ago for a
-            // sweep to see the pointer this archive will publish: then it
-            // is stored again (see `crate::fresh`).
-            let now = self.clock.now();
-            if stored_at.is_some_and(|at| !self.freshness.is_stale(at, now)) {
-                return Ok(false);
-            }
-            self.replace(&path, &bytes).await?;
-            return if self.holds(&path, &bytes).await? {
-                Ok(false)
-            } else {
-                Err(Error::Integrity)
-            };
+        if self.holds(&path, &bytes).await? {
+            // Stored this period by another write of the same bytes: no
+            // sweep deletes it before the period has ended (`crate::fresh`).
+            return Ok(false);
         }
         // Something else is stored under our name: the remains of a bad
         // write or a damaged copy. Keep it for inspection and write ours
@@ -331,7 +735,7 @@ impl ChunkStore {
             mode: PutMode::Overwrite,
             ..Default::default()
         };
-        self.backend
+        self.uploads
             .put_opts(path, bytes.clone().into(), options)
             .await?;
         Ok(())
@@ -348,7 +752,7 @@ impl ChunkStore {
             ..Default::default()
         };
         match self
-            .backend
+            .uploads
             .put_opts(path, bytes.clone().into(), options)
             .await
         {
@@ -366,16 +770,14 @@ impl ChunkStore {
 
     /// Whether the object at `path` holds exactly `bytes`.
     async fn holds(&self, path: &Path, bytes: &Bytes) -> Result<bool> {
-        Ok(matches!(self.found(path, bytes).await?, Found::Ours(_)))
+        Ok(matches!(self.found(path, bytes).await?, Found::Ours))
     }
 
     async fn found(&self, path: &Path, bytes: &Bytes) -> Result<Found> {
         if let Uploader::Gcs(gcs) = &self.uploader {
             // GCS kept the checksums it verified at upload: no download.
             return Ok(match gcs.stored(path).await? {
-                Some(stored) if stored.checksums == crate::upload::checksums(bytes) => {
-                    Found::Ours(stored.at)
-                }
+                Some(stored) if stored.checksums == crate::upload::checksums(bytes) => Found::Ours,
                 _ => Found::Other,
             });
         }
@@ -387,9 +789,8 @@ impl ChunkStore {
         if result.meta.size != bytes.len() as u64 {
             return Ok(Found::Other);
         }
-        let stored_at = SystemTime::from(result.meta.last_modified);
         Ok(if result.bytes().await? == *bytes {
-            Found::Ours(Some(stored_at))
+            Found::Ours
         } else {
             Found::Other
         })
@@ -433,13 +834,22 @@ impl ChunkStore {
 
     /// Whether the chunk `reference` names is stored with exactly the bytes
     /// it names. A local copy may be deleted on this answer, so a stored
-    /// length is not enough: same-length damage must be found too.
+    /// length is not enough: same-length damage must be found too. For a
+    /// chunk in a pack, whether the whole pack is: the checksums a
+    /// reference to it records are the pack's, so one answer proves every
+    /// chunk in it.
     ///
     /// GCS keeps the CRC32C and MD5 it computed when the object was stored;
     /// matching them against the checksums recorded in `reference` proves
     /// the bytes without downloading them, and any write that changed the
-    /// bytes changed them. Other stores, and references recorded without
-    /// checksums, are read and hashed in full.
+    /// bytes changed them. S3, and stores like it, give an object stored by
+    /// one plain write, or copied from one, the MD5 of its bytes as its
+    /// entity tag: one request for the object's size and tag proves it the
+    /// same way. A tag that is no plain MD5, or not the one recorded (a
+    /// store may tag by its own scheme, as when it encrypts with its own
+    /// keys), proves nothing either way, and the object is read. Other
+    /// stores, and references recorded without checksums, are read and
+    /// hashed in full.
     pub async fn has_chunk(&self, reference: &ChunkRef) -> Result<bool> {
         reference.validate()?;
         let path = self.path(&reference.key());
@@ -449,8 +859,29 @@ impl ChunkStore {
                 .await?
                 .is_some_and(|stored| stored.checksums == *expected));
         }
-        match self.read_chunk(&path, reference).await {
-            Ok(_) => Ok(true),
+        let md5 = reference.checksums.as_deref().and_then(md5_hex);
+        if let (Uploader::StoreVerified, Some(md5)) = (&self.uploader, md5) {
+            let meta = match self.backend.head(&path).await {
+                Ok(meta) => meta,
+                Err(object_store::Error::NotFound { .. }) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if meta.size != reference.object_len() {
+                return Ok(false);
+            }
+            let tagged = meta.e_tag.as_deref().and_then(|tag| tag_is_md5(tag, &md5));
+            if tagged == Some(true) {
+                return Ok(true);
+            }
+        }
+        let read = if reference.pack.is_some() {
+            // The whole pack, which every chunk it holds is then proven by.
+            self.read_pack(&path, reference).await.map(drop)
+        } else {
+            self.read_chunk(&path, reference).await.map(drop)
+        };
+        match read {
+            Ok(()) => Ok(true),
             Err(
                 Error::Integrity
                 | Error::Truncated { .. }
@@ -465,12 +896,28 @@ impl ChunkStore {
     /// have happened in transit; a chunk that is bad twice is copied to
     /// quarantine, and a later upload of the same content repairs it.
     pub async fn get_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
+        self.get_chunk_within(reference, self.settle).await
+    }
+
+    /// Reads a chunk whose absence only costs time, such as a wake's
+    /// profile or a working-set pack, as [`Self::get_chunk`] does but
+    /// taking a store that says it is not there at its word at once: the
+    /// reader goes on without it rather than wait for a store that may be
+    /// catching up.
+    pub async fn get_optional_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
+        self.get_chunk_within(reference, Duration::ZERO).await
+    }
+
+    async fn get_chunk_within(&self, reference: &ChunkRef, settle: Duration) -> Result<Vec<u8>> {
         reference.validate()?;
         let path = self.path(&reference.key());
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.read_chunk(&path, reference).await {
+            match self
+                .settled(&path, settle, || self.read_chunk(&path, reference))
+                .await
+            {
                 Err(Error::Integrity | Error::Truncated { .. }) if attempt == 1 => {}
                 Err(error @ (Error::Integrity | Error::Truncated { .. })) => {
                     self.quarantine(&path, &error.to_string()).await?;
@@ -483,6 +930,19 @@ impl ChunkStore {
 
     async fn read_chunk(&self, path: &Path, reference: &ChunkRef) -> Result<Vec<u8>> {
         let expected = u64::from(reference.stored_len);
+        if reference.pack.is_some() {
+            let bytes = self
+                .backend
+                .get_range(path, reference.stored_range())
+                .await?;
+            if bytes.len() as u64 != expected {
+                return Err(Error::Truncated {
+                    expected,
+                    actual: bytes.len() as u64,
+                });
+            }
+            return decode(reference, &bytes);
+        }
         let result = self.backend.get(path).await?;
         if result.meta.size != expected {
             return Err(Error::Truncated {
@@ -500,38 +960,135 @@ impl ChunkStore {
         decode(reference, &bytes)
     }
 
+    /// Reads and decodes `references`, in order, as [`Self::get_chunk`]
+    /// does each. Chunks that follow one another in one pack
+    /// ([`crate::pack::follows`]) are read with one ranged read and each
+    /// checked against its own hashes; when that read fails its checks,
+    /// each is read on its own, which finds the bad one.
+    pub async fn get_chunks(&self, references: &[ChunkRef]) -> Result<Vec<Vec<u8>>> {
+        let run = references
+            .windows(2)
+            .all(|pair| crate::pack::follows(&pair[0], &pair[1]));
+        let (Some(first), Some(last), true) = (references.first(), references.last(), run) else {
+            let mut chunks = Vec::with_capacity(references.len());
+            for reference in references {
+                chunks.push(self.get_chunk(reference).await?);
+            }
+            return Ok(chunks);
+        };
+        if references.len() == 1 {
+            return Ok(vec![self.get_chunk(first).await?]);
+        }
+        for reference in references {
+            reference.validate()?;
+        }
+        let path = self.path(&first.key());
+        let range = first.stored_range().start..last.stored_range().end;
+        let read = || async {
+            let bytes = self.backend.get_range(&path, range.clone()).await?;
+            let expected = range.end - range.start;
+            if bytes.len() as u64 != expected {
+                return Err(Error::Truncated {
+                    expected,
+                    actual: bytes.len() as u64,
+                });
+            }
+            references
+                .iter()
+                .map(|reference| {
+                    let at = reference.stored_range();
+                    let within = usize::try_from(at.start - range.start)
+                        .map_err(|_| Error::Invalid("pack offset"))?;
+                    let stored = &bytes[within..within + reference.stored_len as usize];
+                    decode(reference, stored)
+                })
+                .collect()
+        };
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity | Error::Truncated { .. }) => {
+                let mut chunks = Vec::with_capacity(references.len());
+                for reference in references {
+                    chunks.push(self.get_chunk(reference).await?);
+                }
+                Ok(chunks)
+            }
+            result => result,
+        }
+    }
+
+    /// Reads the whole pack holding the chunk `reference` names, checked
+    /// against the length and digest the reference records.
+    async fn read_pack(&self, path: &Path, reference: &ChunkRef) -> Result<Bytes> {
+        let Some(pack) = &reference.pack else {
+            return Err(Error::Invalid("not a chunk in a pack"));
+        };
+        let result = self.backend.get(path).await?;
+        if result.meta.size != pack.len {
+            return Err(Error::Truncated {
+                expected: pack.len,
+                actual: result.meta.size,
+            });
+        }
+        let bytes = result.bytes().await?;
+        if bytes.len() as u64 != pack.len {
+            return Err(Error::Truncated {
+                expected: pack.len,
+                actual: bytes.len() as u64,
+            });
+        }
+        if blake3::hash(&bytes).to_hex().as_str() != pack.digest {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
+    }
+
     /// Publish only after every referenced chunk has completed uploading.
     /// This does NOT commit a control-plane checkpoint or permit local deletion.
+    /// Returns the manifest's name: `<period>/<digest>`, the period it is
+    /// stored under this one (see [`crate::fresh`]) and its digest.
     pub async fn put_manifest(&self, manifest: &DiskManifest) -> Result<String> {
         let bytes = manifest.encode()?;
         let digest = blake3::hash(&bytes).to_hex().to_string();
-        self.put_immutable(&Self::manifest_key(&digest), Bytes::from(bytes))
+        let name = format!("{}/{digest}", period_of(self.clock.now()));
+        self.put_immutable(&Self::manifest_key(&name)?, Bytes::from(bytes))
             .await?;
-        Ok(digest)
+        Ok(name)
     }
 
-    /// The key of the manifest whose digest is `digest`.
-    #[must_use]
-    pub fn manifest_key(digest: &str) -> String {
-        format!("manifests/v1/{digest}.json")
+    /// The key of the manifest named `name`: `<period>/<digest>`, or a
+    /// digest alone for one stored in the old layout.
+    pub fn manifest_key(name: &str) -> Result<String> {
+        Ok(match manifest_name(name)? {
+            (Some(day), digest) => format!("manifests/v2/{day}/{digest}.json"),
+            (None, digest) => format!("manifests/v1/{digest}.json"),
+        })
     }
 
-    /// Reads the manifest whose digest is `digest`, checking it. A read
-    /// that does not match its digest is tried once more, since the damage
-    /// may have happened in transit; one bad twice is copied to quarantine.
-    pub async fn get_manifest(&self, digest: &str) -> Result<DiskManifest> {
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(Error::Invalid("manifest digest"));
-        }
-        let path = self.path(&Self::manifest_key(digest));
+    /// Reads the manifest named `name` (see [`Self::manifest_key`]),
+    /// checking it against its digest. A read that does not match is tried
+    /// once more, since the damage may have happened in transit; one bad
+    /// twice is copied to quarantine.
+    pub async fn get_manifest(&self, name: &str) -> Result<DiskManifest> {
+        self.get_manifest_within(name, self.settle).await
+    }
+
+    /// Reads a manifest whose absence only costs time, such as the one of
+    /// the image an archive reuses chunks of, taking a store that says it
+    /// is not there at its word at once (see [`Self::get_optional_chunk`]).
+    pub async fn get_optional_manifest(&self, name: &str) -> Result<DiskManifest> {
+        self.get_manifest_within(name, Duration::ZERO).await
+    }
+
+    async fn get_manifest_within(&self, name: &str, settle: Duration) -> Result<DiskManifest> {
+        let (_, digest) = manifest_name(name)?;
+        let path = self.path(&Self::manifest_key(name)?);
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.read_manifest(&path, digest).await {
+            match self
+                .settled(&path, settle, || self.read_manifest(&path, digest))
+                .await
+            {
                 Err(Error::Integrity) if attempt == 1 => {}
                 Err(Error::Integrity) => {
                     self.quarantine(&path, "the manifest does not match its digest")
@@ -555,59 +1112,256 @@ impl ChunkStore {
         DiskManifest::decode(&bytes)
     }
 
-    /// Every object stored in `area`.
-    pub async fn list(&self, area: Area) -> Result<Vec<Listed>> {
-        let prefix = self.path(area.prefix());
-        self.backend
-            .list(Some(&prefix))
-            .map_err(Error::from)
-            .and_then(|meta| async move {
-                let key = meta
-                    .location
-                    .prefix_match(&self.prefix)
-                    .map(|parts| parts.map(|part| part.as_ref().to_owned()))
-                    .ok_or(Error::Invalid("listed object outside the store"))?
-                    .collect::<Vec<_>>()
-                    .join("/");
-                Ok(Listed {
-                    key,
-                    stored_at: meta.last_modified.into(),
-                    size: meta.size,
-                })
-            })
-            .try_collect()
-            .await
+    /// The bytes stored for the chunk `reference` names, as they are
+    /// stored (compressed), checked against its stored length and hash,
+    /// for copying it to another store: for a chunk in a pack, the whole
+    /// pack, checked against its length and digest. A read that fails the check is
+    /// tried once more; nothing is quarantined, so a copy never writes to
+    /// the store it copies from.
+    pub async fn get_stored_chunk(&self, reference: &ChunkRef) -> Result<Bytes> {
+        reference.validate()?;
+        let path = self.path(&reference.key());
+        let read = || self.read_stored_chunk(&path, reference);
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity | Error::Truncated { .. }) => {
+                self.settled(&path, self.settle, read).await
+            }
+            result => result,
+        }
     }
 
-    /// Deletes the chunk or manifest at `key` if it was stored before
-    /// `before` and has not been stored again since this call looked. Only
-    /// GCS deletes on that condition; elsewhere this refuses with
-    /// [`Error::Unsupported`].
-    pub async fn delete_if_stored_before(&self, key: &str, before: SystemTime) -> Result<Removal> {
-        let Uploader::Gcs(gcs) = &self.uploader else {
-            return Err(Error::Unsupported(
-                "deleting stored objects needs a delete on condition (GCS)",
-            ));
-        };
-        if !(key.starts_with(Area::Chunks.prefix()) || key.starts_with(Area::Manifests.prefix())) {
-            return Err(Error::Invalid("only chunks and manifests are deleted"));
+    async fn read_stored_chunk(&self, path: &Path, reference: &ChunkRef) -> Result<Bytes> {
+        if reference.pack.is_some() {
+            return self.read_pack(path, reference).await;
         }
-        let path = self.path(key);
-        let Some(stored) = gcs.stored(&path).await? else {
-            return Ok(Removal::Gone);
-        };
-        let (Some(at), Some(generation)) = (stored.at, stored.generation) else {
-            return Ok(Removal::Kept);
-        };
-        if at >= before {
-            return Ok(Removal::Kept);
+        let bytes = self.backend.get(path).await?.bytes().await?;
+        if bytes.len() != reference.stored_len as usize {
+            return Err(Error::Truncated {
+                expected: u64::from(reference.stored_len),
+                actual: bytes.len() as u64,
+            });
         }
-        Ok(match gcs.delete_generation(&path, &generation).await? {
-            Deleted::Yes => Removal::Deleted,
-            Deleted::Changed => Removal::Kept,
-            Deleted::Gone => Removal::Gone,
-        })
+        if blake3::hash(&bytes).to_hex().as_str() != reference.stored_hash {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
     }
+
+    /// The bytes stored for the manifest named `name`, checked against its
+    /// digest, for copying it to another store; as
+    /// [`Self::get_stored_chunk`], tried once more and never quarantined.
+    pub async fn get_stored_manifest(&self, name: &str) -> Result<Bytes> {
+        let (_, digest) = manifest_name(name)?;
+        let path = self.path(&Self::manifest_key(name)?);
+        let read = || self.read_stored_manifest(&path, digest);
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity) => self.settled(&path, self.settle, read).await,
+            result => result,
+        }
+    }
+
+    async fn read_stored_manifest(&self, path: &Path, digest: &str) -> Result<Bytes> {
+        let result = self.backend.get(path).await?;
+        if result.meta.size > MAX_MANIFEST_BYTES as u64 {
+            return Err(Error::Invalid("manifest too large"));
+        }
+        let bytes = result.bytes().await?;
+        if blake3::hash(&bytes).to_hex().as_str() != digest {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
+    }
+
+    /// Stores `bytes`, read from another store with
+    /// [`Self::get_stored_chunk`] or [`Self::get_stored_manifest`], under
+    /// the chunk or manifest key `key` they were stored under there, as an
+    /// archive stores them: verified in transit, and over other bytes found
+    /// under the name only after keeping those in quarantine. Keys keep
+    /// their period, so a sweep of this store judges a copied object by
+    /// when it was first stored.
+    pub async fn put_stored(&self, key: &str, bytes: Bytes) -> Result<()> {
+        if written(key).is_none() {
+            return Err(Error::Invalid(
+                "only chunks, packs and manifests are copied",
+            ));
+        }
+        self.put_immutable(key, bytes).await.map(|_| ())
+    }
+
+    /// Runs `read` of `path`, again while the store answers that nothing is
+    /// there, for up to `settle` ([`Self::with_settle`]'s time, [`SETTLE`]).
+    async fn settled<T, F: Future<Output = Result<T>>>(
+        &self,
+        path: &Path,
+        settle: Duration,
+        mut read: impl FnMut() -> F,
+    ) -> Result<T> {
+        let started = tokio::time::Instant::now();
+        let mut delay = Duration::from_millis(100);
+        loop {
+            match read().await {
+                Err(Error::Object(object_store::Error::NotFound { .. }))
+                    if started.elapsed() < settle =>
+                {
+                    if delay == Duration::from_millis(100) {
+                        tracing::warn!(
+                            %path,
+                            settle_s = settle.as_secs(),
+                            "the store does not have an object a stored copy names; reading it \
+                             again while the store may still be catching up"
+                        );
+                    }
+                    tokio::time::sleep(delay.min(settle.saturating_sub(started.elapsed()))).await;
+                    delay = (delay * 2).min(SETTLE_DELAY_MAX);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Every object stored in `area`.
+    pub async fn list(&self, area: Area) -> Result<Vec<Listed>> {
+        self.list_under(area.prefix()).await
+    }
+
+    /// Deletes the chunk or manifest at `key` (as a listing gives it), with
+    /// no condition: only a sweep does, of objects nothing writes again
+    /// (see [`crate::fresh`]). Whether it was there.
+    pub async fn delete(&self, key: &str) -> Result<bool> {
+        if written(key).is_none() {
+            return Err(Error::Invalid(
+                "only chunks, packs and manifests are deleted",
+            ));
+        }
+        match self.backend.delete(&self.path(key)).await {
+            Ok(()) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// When a chunk or manifest was written, as its key says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written {
+    /// In this period ([`crate::fresh::period_of`]): an hour, or a day for
+    /// one written before periods were hours.
+    On(u32),
+    /// In the old layout, named by its content alone: its listing tells
+    /// when it was last stored.
+    Legacy,
+}
+
+/// `builder` given `settings` as its `from_env` takes the environment:
+/// each named with `prefix`, the provider's, by its lowercase name. Others
+/// are another provider's, and left out.
+fn configured<B, K: std::str::FromStr>(
+    builder: B,
+    settings: &[(String, String)],
+    prefix: &str,
+    with: impl Fn(B, K, String) -> B,
+) -> Result<B> {
+    settings
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .try_fold(builder, |builder, (name, value)| {
+            let key = name
+                .to_ascii_lowercase()
+                .parse()
+                .map_err(|_| Error::Invalid("a store setting its provider does not take"))?;
+            Ok(with(builder, key, value.clone()))
+        })
+}
+
+/// The settings `text` holds, one `NAME=value` a line, as an environment
+/// file does (for [`ChunkStore::from_url_with`]): blank lines and lines
+/// starting with `#` are skipped, and a value in matching quotes loses
+/// them.
+///
+/// # Errors
+///
+/// When a line holds no `=`, or no name before it.
+pub fn settings(text: &str) -> Result<Vec<(String, String)>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (name, value) = line
+                .split_once('=')
+                .filter(|(name, _)| !name.trim().is_empty())
+                .ok_or(Error::Invalid("a setting line is not NAME=value"))?;
+            let value = value.trim();
+            let value = ['"', '\'']
+                .iter()
+                .find_map(|quote| {
+                    value
+                        .strip_prefix(*quote)
+                        .and_then(|inner| inner.strip_suffix(*quote))
+                })
+                .unwrap_or(value);
+            Ok((name.trim().to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+/// When the chunk or manifest under `key` (as a listing gives it) was
+/// written; `None` for a key of no layout this build writes or wrote,
+/// which a sweep leaves alone.
+#[must_use]
+pub fn written(key: &str) -> Option<Written> {
+    let parts: Vec<&str> = key.split('/').collect();
+    let named = |part: &str| !part.is_empty();
+    match parts.as_slice() {
+        ["chunks", "v2", day, rest @ ..] if rest.len() == 3 && rest.iter().all(|p| named(p)) => {
+            canonical_day(day).map(Written::On)
+        }
+        ["chunks", "v1", rest @ ..] if rest.len() == 3 && rest.iter().all(|p| named(p)) => {
+            Some(Written::Legacy)
+        }
+        ["manifests", "v2", day, file] => {
+            let digest = file.strip_suffix(".json")?;
+            is_digest(digest).then_some(())?;
+            canonical_day(day).map(Written::On)
+        }
+        ["packs", "v1", period, digest] if is_digest(digest) => {
+            canonical_day(period).map(Written::On)
+        }
+        ["manifests", "v1", file] => {
+            let digest = file.strip_suffix(".json")?;
+            is_digest(digest).then_some(Written::Legacy)
+        }
+        _ => None,
+    }
+}
+
+/// A day as keys write it: decimal digits with no leading zero.
+fn canonical_day(day: &str) -> Option<u32> {
+    let parsed: u32 = day.parse().ok()?;
+    (parsed.to_string() == day).then_some(parsed)
+}
+
+/// Whether `digest` is a manifest digest: 64 lowercase hex digits.
+fn is_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The day (none in the old layout) and digest a manifest's name holds.
+fn manifest_name(name: &str) -> Result<(Option<u32>, &str)> {
+    let (day, digest) = match name.split_once('/') {
+        Some((day, digest)) => (
+            Some(canonical_day(day).ok_or(Error::Invalid("manifest day"))?),
+            digest,
+        ),
+        None => (None, name),
+    };
+    if !is_digest(digest) {
+        return Err(Error::Invalid("manifest digest"));
+    }
+    Ok((day, digest))
 }
 
 #[cfg(test)]

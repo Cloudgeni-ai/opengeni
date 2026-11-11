@@ -18,7 +18,7 @@ import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
-import { createOpenGeniText } from "../src/messages/runtime";
+import { createOpenGeniText, OpenGeniMessagesProvider } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
@@ -825,6 +825,31 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
+  test("keeps the stopping status on one line beside Activity at the rail's end", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({ stoppingAttempt: "current" })}
+        commandsCount={2}
+        commandsPanel={<div />}
+      />,
+    );
+
+    const stopping = mounted.container.querySelector<HTMLElement>(
+      '[data-testid="session-chrome-stopping"]',
+    )!;
+    const activity = mounted.container.querySelector<HTMLElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    // A crowded rail clips its end, and wrapping would grow the row: the status
+    // takes the free space just before Activity and truncates instead of wrapping.
+    expect(stopping.nextElementSibling).toBe(activity);
+    expect(stopping.className).toContain("ml-auto");
+    expect(stopping.className).toContain("whitespace-nowrap");
+    expect(stopping.getAttribute("title")).toBe("Current work stopping");
+    expect(activity.className).not.toContain("ml-auto");
+  });
+
   test("shows stopping even when no Steer is queued", async () => {
     mounted = await renderComponent(
       <SessionChrome
@@ -1312,6 +1337,59 @@ describe("SessionChrome goal pill reasons", () => {
       "human decision",
     );
     expect(sessionChromeGoalPillExplanation(englishText, "pursuing", goal().goal)).toBeNull();
+  });
+
+  test("a host's catalog translates every pause reason in the pill", async () => {
+    const norwegian = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "sessionChrome.pausedSuffix": "Satt på pause · {suffix}",
+        "sessionChrome.pausedReasonAgent": "venter på deg",
+        "sessionChrome.pausedReasonAllowance": "kvote brukt opp",
+        "sessionChrome.pausedReasonBudget": "budsjett",
+        "sessionChrome.pausedReasonCap": "maks nådd",
+        "sessionChrome.pausedReasonCredits": "kreditt",
+        "sessionChrome.pausedReasonLimits": "grense",
+        "sessionChrome.pausedReasonManually": "manuelt",
+        "sessionChrome.pausedReasonModel": "modell",
+        "sessionChrome.pausedReasonPolicy": "regler",
+        "sessionChrome.usageLimit": "bruksgrense",
+      },
+    });
+    for (const [reason, label] of [
+      ["agent", "venter på deg"],
+      ["allowance", "kvote brukt opp"],
+      ["budget", "budsjett"],
+      ["max_auto_continuations", "maks nådd"],
+      ["credits", "kreditt"],
+      ["limits", "grense"],
+      ["usage_policy", "grense"],
+      ["user_pause", "manuelt"],
+      ["api", "manuelt"],
+      ["model_unavailable", "modell"],
+      ["model_policy", "regler"],
+      ["usage_limit", "bruksgrense"],
+      ["session_usage_limit", "bruksgrense"],
+    ]) {
+      expect(sessionChromeGoalPillLabel(norwegian, "paused", paused(reason!).goal)).toBe(
+        `Satt på pause · ${label}`,
+      );
+    }
+    // The rendered pill reads the provider's catalog too.
+    mounted = await renderComponent(
+      <OpenGeniMessagesProvider
+        locale="nb"
+        messages={{
+          "sessionChrome.pausedSuffix": "Satt på pause · {suffix}",
+          "sessionChrome.pausedReasonAgent": "venter på deg",
+        }}
+      >
+        <SessionChrome queue={queue({ queue: [] })} composer={composer()} goal={paused("agent")} />
+      </OpenGeniMessagesProvider>,
+    );
+    const chip = mounted.container.querySelector('[data-og-session-chrome-signal="goal"]');
+    expect(chip?.textContent).toContain("Satt på pause · venter på deg");
+    expect(chip?.textContent).not.toContain("agent");
   });
 
   test("explains idle backoff as the next goal check time", () => {

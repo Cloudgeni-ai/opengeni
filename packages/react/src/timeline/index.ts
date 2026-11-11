@@ -17,16 +17,21 @@
 
 // projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
   mcpToolLeaf,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
   toolMatchesLeaf,
 } from "./projection";
-export type { GroupTimelineOptions } from "./projection";
+export type { GroupTimelineOptions, TimelineLivePause, TimelinePauseSpan } from "./projection";
+export { useTimelinePauses } from "./use-timeline-pauses";
 
 // item types
 export type {
@@ -145,6 +150,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,

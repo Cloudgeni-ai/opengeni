@@ -5,6 +5,10 @@ import { HTTPException } from "hono/http-exception";
 import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
 import {
+  OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+} from "@opengeni/sdk/browser";
+import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
   appendVary,
@@ -543,6 +547,13 @@ describe("API helpers", () => {
     );
     // A conversation scopes media and Site reads to its session for proxies.
     expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Session-Id");
+    // Every header the SDK's browser clients may send passes the preflight.
+    const allowedHeaders = (external.headers.get("access-control-allow-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_REQUEST_HEADERS.filter((name) => !allowedHeaders.includes(name)),
+    ).toEqual([]);
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
@@ -550,13 +561,18 @@ describe("API helpers", () => {
     expect(externalResponse.status).toBe(200);
     expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
     expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+    // Header names are case-insensitive; the exposed list is the SDK's lowercase contract.
+    const exposedHeaders = (externalResponse.headers.get("access-control-expose-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_RESPONSE_HEADERS.filter((name) => !exposedHeaders.includes(name)),
+    ).toEqual([]);
+    for (const exposedHeader of [
       "Accept-Ranges",
-    );
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
-    );
-    for (const eventHeader of [
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",
@@ -564,7 +580,7 @@ describe("API helpers", () => {
       "X-OpenGeni-Page-Bytes",
       "X-OpenGeni-Truncated-By",
     ]) {
-      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+      expect(exposedHeaders).toContain(exposedHeader.toLowerCase());
     }
 
     const trusted = await preflight("http://localhost:5173");
@@ -832,9 +848,6 @@ describe("API helpers", () => {
     );
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
-    );
-    expect(routeLabel("/v1/integrations/google-drive/callback")).toBe(
-      "/v1/integrations/google-drive/callback",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/plugins/preview`)).toBe(
       "/v1/workspaces/:workspaceId/plugins/preview",

@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -169,12 +170,12 @@ import {
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
   readActiveSandbox,
-  terminalizeStaleConnectedInteractionPlacement,
   recordAuditEvent,
   type AgentHeldBrowserSession,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
+  type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
@@ -266,6 +267,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
 } from "../http/interaction-control-error";
@@ -280,6 +283,10 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  connectedMachineBrowserClosingNotice,
+  withBrowserClosingNotice,
+} from "../sandbox/agent-update";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
   BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
@@ -290,6 +297,7 @@ import {
 } from "../browser-recording-save";
 import {
   recordSourcePlacementMove,
+  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -423,17 +431,28 @@ export function registerBrowserSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/browser-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const listed = await listBrowserSessions(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      ...parseInteractionSessionListQuery(context.req.query()),
-    });
-    return context.json(
-      BrowserSessionListResponse.parse({
+    const list = async () => {
+      const listed = await listBrowserSessions(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        ...parseInteractionSessionListQuery(context.req.query()),
+      });
+      return {
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      }),
-    );
+      };
+    };
+    let listed = await list();
+    // A browser left behind by its task's move is retired, not reusable.
+    if (
+      await reconcileListedSourcePlacementMoves(channelServices, {
+        grant,
+        sessions: listed.sessions,
+      })
+    ) {
+      listed = await list();
+    }
+    return context.json(BrowserSessionListResponse.parse(listed));
   });
 
   app.get("/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId", async (context) => {
@@ -804,7 +823,7 @@ export function registerBrowserSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw browserRouteError(error);
+      throw browserRouteError(error, "open");
     }
   });
 
@@ -893,8 +912,13 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient }) =>
-          BrowserObservation.parse(await sessionClient.selectTarget(targetId)),
+        async ({ sessionClient, record }) => {
+          const [observation, notice] = await Promise.all([
+            sessionClient.selectTarget(targetId, agentObservationNotices(grant)),
+            agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+          ]);
+          return withBrowserClosingNotice(BrowserObservation.parse(observation), notice);
+        },
       );
       return context.json(result);
     },
@@ -1596,10 +1620,14 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => {
+        async ({ sessionClient, record }) => {
           stages.mark("placement");
           try {
-            return await sessionClient.observe(targetId);
+            const [observation, notice] = await Promise.all([
+              sessionClient.observe(targetId, agentObservationNotices(grant)),
+              agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+            ]);
+            return withBrowserClosingNotice(observation, notice);
           } finally {
             stages.mark("dispatch");
           }
@@ -1839,12 +1867,22 @@ export function registerBrowserSessionRoutes(
               });
               stages.mark("secrets");
               try {
-                return await sessionClient.action(
-                  BrowserActionCommand.parse({
-                    ...commandFields,
-                    ...(secretValues === undefined ? {} : { secretValues }),
-                  }),
-                );
+                const [receipt, notice] = await Promise.all([
+                  sessionClient.action(
+                    BrowserActionCommand.parse({
+                      ...commandFields,
+                      ...(secretValues === undefined ? {} : { secretValues }),
+                    }),
+                    agentObservationNotices(grant),
+                  ),
+                  agentBrowserClosingNotice(deps.db, grant, workspaceId, record),
+                ]);
+                return notice && receipt.observation
+                  ? {
+                      ...receipt,
+                      observation: withBrowserClosingNotice(receipt.observation, notice),
+                    }
+                  : receipt;
               } finally {
                 stages.mark("dispatch");
                 // Write back what the action did (new registrations, sign counts)
@@ -4192,9 +4230,8 @@ export function registerBrowserSessionRoutes(
               if ("hold" in caller) {
                 throw new BrowserSessionStateError("BrowserSession source placement changed");
               }
-              return await throwBrowserSourcePlacementChanged(
-                caller,
-                sourceSession.id,
+              throw sourcePlacementElsewhereApiError(
+                "browser_session",
                 expectedPlacement.sandboxId,
               );
             }
@@ -4581,9 +4618,8 @@ export function registerBrowserSessionRoutes(
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
         if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
-          return await throwBrowserSourcePlacementChanged(
-            grant,
-            record.sourceSessionId,
+          throw sourcePlacementElsewhereApiError(
+            "browser_session",
             record.session.placement.sandboxId,
           );
         }
@@ -4763,35 +4799,8 @@ export function registerBrowserSessionRoutes(
         browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
-      throw browserRouteError(error);
+      throw browserRouteError(error, interactionControlRequestFor(channelOperation));
     }
-  }
-
-  async function throwBrowserSourcePlacementChanged(
-    grant: AccessGrant,
-    sourceSessionId: string,
-    connectedSandboxId: string,
-  ): Promise<never> {
-    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sourceSessionId,
-      connectedSandboxId,
-    });
-    if (reconciliation.sourcePlacementChanged) {
-      // End what the move left running on its former machines without making
-      // this request wait for it. Earlier failed retirements of this task's
-      // resources are retried too; a failure leaves the binding for later.
-      void retireSourceFormerPlacements(channelServices, {
-        grant,
-        sourceSessionId,
-        origin: null,
-      });
-      throw sourcePlacementChangedApiError("browser_session");
-    }
-    throw new BrowserSessionStateError(
-      "BrowserSession source placement changed during the request; retry",
-    );
   }
 
   /** See `interactionControllerGone`: a removed machine, or a Chrome profile
@@ -4920,9 +4929,8 @@ export function registerBrowserSessionRoutes(
           record.sourceSessionId,
         );
         if (source.activeSandboxId !== record.session.placement.sandboxId) {
-          return await throwBrowserSourcePlacementChanged(
-            grant,
-            record.sourceSessionId,
+          throw sourcePlacementElsewhereApiError(
+            "browser_session",
             record.session.placement.sandboxId,
           );
         }
@@ -5443,17 +5451,19 @@ export function registerBrowserSessionRoutes(
   return { renewBrowserHolds };
 }
 
-function sourcePlacementChangedApiError(interactionResource: "browser_session"): ApiHttpError {
+function sourcePlacementElsewhereApiError(
+  interactionResource: "browser_session",
+  connectedSandboxId: string,
+): ApiHttpError {
   return new ApiHttpError(409, {
     code: "conflict",
-    message:
-      "This browser belonged to a previous task placement and was retired. Open a new browser.",
+    message: `This browser runs on Connected Machine ${connectedSandboxId}, and this task now runs on another machine. It is kept running there: move this task back to that machine to use it, or open a browser here.`,
     retryable: false,
     outcomeUnknown: false,
     details: {
       interactionResource,
-      interactionFailureCode: "source_placement_changed",
-      interactionLifecycle: "lost",
+      interactionFailureCode: "source_placement_elsewhere",
+      connectedSandboxId,
     },
   });
 }
@@ -5708,6 +5718,14 @@ async function ensureLinkedComputerController(
   } catch (error) {
     if (!isMissingLinkedComputerControllerSession(error)) throw error;
     await client.createComputerSession({
+      cursorIdentity: await computerCursorIdentity(
+        deps,
+        grant,
+        await getSession(deps.db, browser.workspaceId, record.sourceSessionId).then((session) => {
+          if (!session) throw new BrowserSessionStateError("Associated session not found");
+          return session;
+        }),
+      ),
       ...reference,
       tokenGeneration: record.tokenGeneration,
       ...tokens,
@@ -6101,6 +6119,7 @@ export function withInitialView<
     }) {
   if (
     !launched?.targets ||
+    !launched.observation ||
     response.operation.state !== "completed" ||
     response.operation.replayed ||
     response.session.lifecycle !== "active" ||
@@ -6552,6 +6571,24 @@ export function browserScreenshotError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // The controller's own reasons a tab produced no capture (Chrome has not
+  // drawn it yet, or a tab behind another one never drew) are fixed texts with
+  // no page or host detail, and say what to do instead, so they are published.
+  if (
+    error instanceof BrowserControlRequestError &&
+    error.error.code === "timeout" &&
+    (error.error.message.startsWith("browser screenshot timed out: Chrome ") ||
+      error.error.message.startsWith("browser screenshot stalled: Chrome "))
+  ) {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message: error.error.message,
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
     const failure = new ApiHttpError(504, {
       code: "upstream_unavailable",
@@ -6567,7 +6604,7 @@ export function browserScreenshotError(error: unknown): unknown {
 }
 
 export function browserScreenshotResponse(
-  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader">,
+  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader" | "inexactScrollbars">,
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
@@ -6577,6 +6614,7 @@ export function browserScreenshotResponse(
       "cache-control": "no-store",
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
+      ...(frame.inexactScrollbars ? { "x-opengeni-browser-frame-note": "inexact-scrollbars" } : {}),
       ...USER_CONTENT_SECURITY_HEADERS,
     },
   });
@@ -6591,6 +6629,32 @@ function isUuid(value: unknown): value is string {
 
 function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
   return validateInteractionRequestOrigin(context.req.header("origin"), settings);
+}
+
+/** For an agent's own browser tools on a Connected Machine whose older agent
+ * will close its browsers at an announced update, the notice saying when. A
+ * person's viewer and other API clients do not get it, and a failed read
+ * never fails the browser step. */
+export async function agentBrowserClosingNotice(
+  db: Database,
+  grant: AccessGrant,
+  workspaceId: string,
+  record: Pick<BrowserSessionControlRecord, "session">,
+  lookup: typeof connectedMachineBrowserClosingNotice = connectedMachineBrowserClosingNotice,
+): Promise<string | null> {
+  const placement = record.session.placement;
+  if (grant.principalKind !== "agent_attempt" || placement?.kind !== "connected_machine") {
+    return null;
+  }
+  if (!placement.sandboxId) return null;
+  return await lookup(db, workspaceId, placement.sandboxId).catch(() => null);
+}
+
+/** An agent's own browser tools receive a tab's notice (for example that a
+ * browser relaunch reloaded its page), which it is given once. A person's
+ * viewer and other API clients neither see it nor use it up. */
+function agentObservationNotices(grant: AccessGrant): { notices?: true } {
+  return grant.principalKind === "agent_attempt" ? { notices: true } : {};
 }
 
 export function interactionActorForGrant(
@@ -7186,12 +7250,15 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-export function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
-  const connectedMachineError = interactionControlApiError(error, "browser");
+  const connectedMachineError = interactionControlApiError(error, "browser", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;

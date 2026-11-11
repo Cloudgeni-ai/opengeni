@@ -26,7 +26,11 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
-import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
+import { mcpElicitationApproval, mcpInputRequestOf } from "./mcp-input-requests";
+import {
+  isInternalGenericDispatchRegistrationItem,
+  isOpeningToolLoadResponse,
+} from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { isPreemptedModelResponse } from "./model-preemption";
 import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
@@ -320,6 +324,12 @@ export type ModelResponseUsage = {
 export type ModelTerminalResponse = {
   responseId?: string;
   usage: ModelResponseUsage | null;
+  /**
+   * Hosted searches the response ran, also when it reported no usage; the
+   * worker then settles them for this response alone (with usage, `usage`
+   * carries them).
+   */
+  webSearchRequests?: number;
 };
 
 export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
@@ -702,8 +712,10 @@ export function modelTerminalResponseFromSdkEvent(
     return null;
   }
   const responseId = modelResponseIdFromResponse(response);
+  const webSearchRequests = webSearchRequestsFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    ...(webSearchRequests ? { webSearchRequests } : {}),
     usage: modelResponseUsageFromResponse(response),
   };
 }
@@ -735,13 +747,42 @@ function thinkingBlocksDroppedFromResponse(response: unknown): Record<string, nu
   return parsePromptCacheObservation({ thinkingBlocksDropped: value })?.thinkingBlocksDropped;
 }
 
-/** Claude reports its billed server-side searches; the transport keeps the count. */
+const MAX_WEB_SEARCH_REQUESTS = 10_000;
+
+/**
+ * Provider-run (hosted) web searches of one response. Claude reports its
+ * billed server-side searches and the transport keeps that count; its output
+ * also carries the search blocks, so they are never counted again. OpenAI
+ * Responses bills each `web_search_call` output item: the raw terminal
+ * response carries them as `web_search_call`, the SDK's `response_done` as a
+ * `hosted_tool_call` named `web_search_call`. A failed call is not counted.
+ */
 function webSearchRequestsFromResponse(response: unknown): number | undefined {
-  const value = (response as { providerData?: { anthropic?: { webSearchRequests?: unknown } } })
-    ?.providerData?.anthropic?.webSearchRequests;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 10_000
-    ? value
-    : undefined;
+  const anthropic = (response as { providerData?: { anthropic?: unknown } } | null)?.providerData
+    ?.anthropic;
+  if (anthropic && typeof anthropic === "object") {
+    const value = (anthropic as { webSearchRequests?: unknown }).webSearchRequests;
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      value <= MAX_WEB_SEARCH_REQUESTS
+      ? value
+      : undefined;
+  }
+  const output = (response as { output?: unknown } | null)?.output;
+  if (!Array.isArray(output)) return undefined;
+  let count = 0;
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { type?: unknown; name?: unknown; status?: unknown };
+    const searchCall =
+      record.type === "web_search_call" ||
+      (record.type === "hosted_tool_call" && record.name === "web_search_call");
+    // OpenAI prices web search per tool call and reports no count, so each
+    // call item counts once; a call the provider marked failed is not charged.
+    if (searchCall && record.status !== "failed") count += 1;
+  }
+  return count > 0 ? Math.min(count, MAX_WEB_SEARCH_REQUESTS) : undefined;
 }
 
 function modelResponseIdFromResponse(response: unknown): string | undefined {
@@ -865,7 +906,9 @@ function modelResponseFromSdkEvent(event: RunStreamEvent): any {
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "response_done") {
-      return data.response;
+      // The local opening tool load is not a provider response: no usage,
+      // timing, billing or context signal.
+      return isOpeningToolLoadResponse(data) ? null : data.response;
     }
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
@@ -981,7 +1024,14 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
           interruptionToolName(item),
         ),
     )
-    .map(serializeApprovalInterruption);
+    .map((item) => {
+      const serialized = serializeApprovalInterruption(item);
+      // A call paused by its MCP server's question carries that question.
+      const request = mcpInputRequestOf(item);
+      return request && serialized && typeof serialized === "object"
+        ? { ...serialized, elicitation: mcpElicitationApproval(request) }
+        : serialized;
+    });
   return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 

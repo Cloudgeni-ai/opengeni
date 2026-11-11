@@ -4,24 +4,38 @@ import {
   approvalIdentifier,
   withPublicApprovalFields,
   type HumanInputResponse,
+  type McpElicitationContent,
   type SessionEvent,
 } from "@opengeni/contracts";
 import {
   appendSessionHistoryItems,
   getActiveSessionHistoryItems,
   interruptedToolCallResult,
+  listRecordedInteractionToolCallIds,
+  listTurnApprovalDecisions,
   listTurnOpenSuffixToolCalls,
   nextSessionHistoryPosition,
   recordPendingSessionToolCallResult,
+  replacePendingToolCallMcpInputRequest,
   type Database,
   type OpenSuffixPendingToolCall,
 } from "@opengeni/db";
 import {
   functionCallResultItem,
   invokePreparedAgentTool,
+  mcpElicitationApproval,
+  mcpInputRequestOf,
+  parseMcpInputRequest,
   sanitizeHistoryItemsForModel,
+  type McpInputAnswer,
+  type McpInputRequest,
 } from "@opengeni/runtime";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  interactionPauseCallFromItem,
+  type InteractionPauseCall,
+  type InteractionPauseRequest,
+} from "./agent-turn/interaction-pause";
 
 export type OpenSuffixResumeOutcome =
   | { action: "continue" }
@@ -39,8 +53,21 @@ type OpenSuffixSettle = (input: {
   runState: {
     serializedRunState: string;
     pendingApprovals: unknown[];
+    interactionInterventionRequests?: InteractionPauseRequest[];
   };
 }) => Promise<boolean>;
+
+/**
+ * How a re-freeze records interaction_request_human calls of the same pause
+ * that hold no intervention yet: a call refused while another refusal
+ * resumed the turn (a pause records one refusal at a time) is passed to the
+ * settlement again, so it is recorded or refused as its own result.
+ */
+export type OpenSuffixInteractionRequests = {
+  build: (calls: InteractionPauseCall[]) => Promise<InteractionPauseRequest[]>;
+  /** Called after the re-freeze committed, with the calls it passed. */
+  recorded?: (calls: InteractionPauseCall[]) => Promise<void>;
+};
 
 function argumentsJsonFromCallItem(callItem: Record<string, unknown>): string {
   const raw = callItem.arguments;
@@ -60,6 +87,9 @@ function pendingApprovalProjection(row: OpenSuffixPendingToolCall): unknown {
     name: toolNameFromCallItem(row.callItem),
     arguments: row.callItem.arguments ?? null,
     raw: row.callItem,
+    ...(row.mcpInputRequest
+      ? { elicitation: mcpElicitationApproval(parseMcpInputRequest(row.mcpInputRequest)) }
+      : {}),
   };
 }
 
@@ -126,6 +156,96 @@ export function resolveOpenSuffixResumeTarget(
   return rows.find((row) => row.callId === callId) ?? null;
 }
 
+/** The trigger of a resume: the decision or answer that claimed it, with its log position. */
+export type OpenSuffixResumeTrigger = Pick<SessionEvent, "type" | "payload"> & {
+  sequence?: number;
+};
+
+/** The question round a still-open call asks, if its MCP server asked one. */
+function openSuffixRowRound(row: OpenSuffixPendingToolCall): number | undefined {
+  return row.mcpInputRequest ? parseMcpInputRequest(row.mcpInputRequest).round : undefined;
+}
+
+/**
+ * The other approvals of this pause that already hold a decision: every
+ * still-open approval call with a decision recorded up to the resume's
+ * trigger, for the question round it asks now. A pause's decisions are
+ * applied in one resume, so deciding several approvals never costs a
+ * restart (or a fresh ask) per decision. A decision recorded after the
+ * trigger resumes the turn again; it is never lost and never applied twice.
+ */
+export async function openSuffixSiblingDecisions(input: {
+  db: Database;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  trigger: OpenSuffixResumeTrigger;
+  rows?: readonly OpenSuffixPendingToolCall[];
+}): Promise<Array<{ row: OpenSuffixPendingToolCall; payload: Record<string, unknown> }>> {
+  if (
+    typeof input.trigger.sequence !== "number" ||
+    (input.trigger.type !== "user.approvalDecision" &&
+      input.trigger.type !== "user.humanInputResponse")
+  ) {
+    return [];
+  }
+  const rows =
+    input.rows ??
+    (await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId));
+  const triggerCallId =
+    input.trigger.type === "user.approvalDecision"
+      ? (input.trigger.payload as { approvalId?: unknown }).approvalId
+      : undefined;
+  const open = rows.filter(
+    (row) =>
+      row.resultItem == null &&
+      row.callId !== triggerCallId &&
+      (row.interruptionKind === "approval" || row.interruptionKind === "interaction_intervention"),
+  );
+  if (open.length === 0) return [];
+  const decisions = await listTurnApprovalDecisions(input.db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    throughSequence: input.trigger.sequence,
+  });
+  const siblings: Array<{ row: OpenSuffixPendingToolCall; payload: Record<string, unknown> }> = [];
+  for (const row of open) {
+    const round = openSuffixRowRound(row);
+    // Oldest first: the newest decision for this round wins.
+    const decision = [...decisions]
+      .reverse()
+      .find(
+        (candidate) => candidate.approvalId === row.callId && candidate.elicitationRound === round,
+      );
+    if (decision) siblings.push({ row, payload: decision.payload });
+  }
+  return siblings;
+}
+
+/** The calls a resume runs as approved: its trigger's and its approved siblings'. */
+export async function openSuffixApprovedCallIds(input: {
+  db: Database;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  trigger: OpenSuffixResumeTrigger;
+}): Promise<string[]> {
+  const ids: string[] = [];
+  const payload = input.trigger.payload as { approvalId?: unknown; decision?: unknown };
+  if (
+    input.trigger.type === "user.approvalDecision" &&
+    payload.decision === "approve" &&
+    typeof payload.approvalId === "string"
+  ) {
+    ids.push(payload.approvalId);
+  }
+  for (const sibling of await openSuffixSiblingDecisions(input)) {
+    if (sibling.payload.decision === "approve") ids.push(sibling.row.callId);
+  }
+  return ids;
+}
+
 /** True when the paired call and result already exist in durable history. */
 export function openSuffixPairPresentInHistory(
   items: readonly Record<string, unknown>[],
@@ -166,6 +286,33 @@ function memberResult(input: {
   };
 }
 
+/**
+ * A resumed member either finishes with a result or, when its MCP server asks
+ * the person another question, stays paused with that question.
+ */
+export type OpenSuffixMemberOutcome =
+  | { resultItem: Record<string, unknown>; eventOutput: unknown }
+  | { asked: McpInputRequest };
+
+/**
+ * What the model reads after the person declined an MCP server's question:
+ * the server's own result for the declined call, then who declined and, if
+ * they wrote one, their message.
+ */
+export function declinedMcpQuestionOutput(input: {
+  output: unknown;
+  server: string;
+  message?: string | undefined;
+}): string {
+  const result =
+    typeof input.output === "string" ? input.output : JSON.stringify(input.output ?? null);
+  const message = input.message?.trim();
+  const note = message
+    ? `The person declined ${input.server}'s question and said: ${message}`
+    : `The person declined ${input.server}'s question.`;
+  return result.trim().length > 0 ? `${result}\n\n${note}` : note;
+}
+
 export async function resultItemForOpenSuffixMember(input: {
   agent: Agent<any, any>;
   row: OpenSuffixPendingToolCall;
@@ -175,15 +322,31 @@ export async function resultItemForOpenSuffixMember(input: {
     toolCallId: string;
     response: HumanInputResponse;
   } | null;
-}): Promise<{ resultItem: Record<string, unknown>; eventOutput: unknown }> {
+}): Promise<OpenSuffixMemberOutcome> {
   const name = toolNameFromCallItem(input.row.callItem);
+  const asked = input.row.mcpInputRequest ? parseMcpInputRequest(input.row.mcpInputRequest) : null;
+  const payload = input.trigger.payload as {
+    decision?: unknown;
+    message?: unknown;
+    refusal?: unknown;
+    content?: McpElicitationContent;
+  };
+  const message =
+    typeof payload.message === "string" && payload.message.trim().length > 0
+      ? payload.message
+      : undefined;
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
-    const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
     if (
-      input.row.interruptionKind === "approval" &&
+      input.row.interruptionKind === "interaction_intervention" &&
       payload.decision === "reject" &&
-      !(typeof payload.message === "string" && payload.message.trim().length > 0)
+      typeof payload.refusal === "string" &&
+      payload.refusal.trim().length > 0
     ) {
+      // Refused at the pause itself (a person-handoff request whose target
+      // changed): nothing ran, and the refusal says what to do next.
+      return memberResult({ callId: input.row.callId, name, output: payload.refusal });
+    }
+    if (input.row.interruptionKind === "approval" && payload.decision === "reject" && !message) {
       // This approval was rejected before invocation, not interrupted during execution.
       return memberResult({
         callId: input.row.callId,
@@ -191,20 +354,17 @@ export async function resultItemForOpenSuffixMember(input: {
         output: "Tool approval was rejected. This proposed tool call was not executed.",
       });
     }
-    const message =
-      typeof payload.message === "string" && payload.message.trim().length > 0
-        ? payload.message
-        : "Tool approval was rejected.";
+    const reason = message ?? "Tool approval was rejected.";
     const interrupted = interruptedToolCallResult({
       callType: input.row.callType,
       callId: input.row.callId,
       callItem: input.row.callItem,
-      reason: message,
+      reason,
     });
     return memberResult({
       callId: input.row.callId,
       name,
-      output: message,
+      output: reason,
       ...(interrupted ? { resultItem: interrupted } : {}),
     });
   };
@@ -222,30 +382,42 @@ export async function resultItemForOpenSuffixMember(input: {
       output,
     });
   }
-  const payload = input.trigger.payload as { decision?: unknown };
-  if (payload.decision !== "approve") {
-    return rejected();
+  const invoke = async (
+    mcpInputAnswer?: McpInputAnswer,
+  ): Promise<{ output: unknown } | { asked: McpInputRequest }> => {
+    try {
+      const output = await invokePreparedAgentTool({
+        agent: input.agent,
+        toolName: name,
+        argumentsJson: argumentsJsonFromCallItem(input.row.callItem),
+        callId: input.row.callId,
+        ...(mcpInputAnswer ? { mcpInputAnswer } : {}),
+      });
+      const askedAgain = mcpInputRequestOf(output);
+      return askedAgain ? { asked: askedAgain } : { output };
+    } catch (error) {
+      return { output: errorMessage(error) };
+    }
+  };
+  if (payload.decision === "approve") {
+    const outcome = await invoke(
+      asked ? { request: asked, action: "accept", content: payload.content ?? {} } : undefined,
+    );
+    if ("asked" in outcome) return outcome;
+    return memberResult({ callId: input.row.callId, name, output: outcome.output });
   }
-  try {
-    const output = await invokePreparedAgentTool({
-      agent: input.agent,
-      toolName: name,
-      argumentsJson: argumentsJsonFromCallItem(input.row.callItem),
-      callId: input.row.callId,
-    });
+  if (asked && input.row.interruptionKind === "approval" && payload.decision === "reject") {
+    // The server stopped mid-call to ask: it is told the person declined and
+    // finishes the call its own way, or asks something else.
+    const outcome = await invoke({ request: asked, action: "decline" });
+    if ("asked" in outcome) return outcome;
     return memberResult({
       callId: input.row.callId,
       name,
-      output,
-    });
-  } catch (error) {
-    const message = errorMessage(error);
-    return memberResult({
-      callId: input.row.callId,
-      name,
-      output: message,
+      output: declinedMcpQuestionOutput({ output: outcome.output, server: asked.server, message }),
     });
   }
+  return rejected();
 }
 
 export async function settleOpenSuffixResumeIfNeeded(input: {
@@ -259,7 +431,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   turnId: string;
   executionGeneration: number;
   attemptId: string;
-  trigger: Pick<SessionEvent, "type" | "payload">;
+  trigger: OpenSuffixResumeTrigger;
   humanInputResume: {
     requestId: string;
     toolCallId: string;
@@ -270,6 +442,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   publish?: (
     events: Array<{ type: "agent.toolCall.output"; payload: { id: string; output: unknown } }>,
   ) => Promise<unknown>;
+  interactionRequests?: OpenSuffixInteractionRequests;
 }): Promise<OpenSuffixResumeOutcome> {
   if (
     input.trigger.type !== "user.approvalDecision" &&
@@ -301,99 +474,22 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   ) {
     throw new Error("Open suffix resume event does not match an interruption");
   }
-  if (target && callId) {
-    const truncationTokens =
-      input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
-    let resultItem = target.resultItem;
-    let eventOutput: unknown = resultItem?.output;
-    if (!resultItem) {
-      const member = await resultItemForOpenSuffixMember({
-        agent: input.agent,
-        row: target,
-        trigger: input.trigger,
-        humanInputResume: input.humanInputResume,
-      });
-      resultItem = member.resultItem;
-      eventOutput = member.eventOutput;
-      const recorded = await recordPendingSessionToolCallResult(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        executionGeneration: input.executionGeneration,
-        attemptId: input.attemptId,
-        callId: target.callId,
-        ...(truncationTokens !== undefined
-          ? { modelToolOutputTruncationTokens: truncationTokens }
-          : {}),
-        resultItem,
-        eventOutput,
-      });
-      if (!recorded.accepted) {
-        return { action: "cancelled" };
-      }
-      if (!recorded.recorded) {
-        const latest = resolveOpenSuffixResumeTarget(
-          await listTurnOpenSuffixToolCalls(
-            input.db,
-            input.workspaceId,
-            input.sessionId,
-            input.turnId,
-          ),
-          callId,
-        );
-        resultItem = latest?.resultItem ?? resultItem;
-      } else if (input.publish) {
-        await input.publish([
-          {
-            type: "agent.toolCall.output",
-            payload: { id: target.callId, output: eventOutput },
-          },
-        ]);
-      }
-    }
-    if (!resultItem) {
-      throw new Error(`Open suffix resume for ${target.callId} has no result item`);
-    }
-    const history = await getActiveSessionHistoryItems(
-      input.db,
-      input.workspaceId,
-      input.sessionId,
+  // The pause's other decisions, recorded up to this resume's trigger, run
+  // now too, all in the model's call order. Decisions recorded after the
+  // trigger wait for the next resume, which applies them without asking.
+  const settlements: Array<{ row: OpenSuffixPendingToolCall; trigger: OpenSuffixResumeTrigger }> = [
+    ...(target && callId ? [{ row: target, trigger: input.trigger }] : []),
+    ...(await openSuffixSiblingDecisions({ ...input, rows })).map((sibling) => ({
+      row: sibling.row,
+      trigger: { type: "user.approvalDecision", payload: sibling.payload } as const,
+    })),
+  ].sort((left, right) => rows.indexOf(left.row) - rows.indexOf(right.row));
+  for (const settlement of settlements) {
+    const settled = await settleOpenSuffixTarget(
+      settlement.trigger === input.trigger ? input : { ...input, trigger: settlement.trigger },
+      settlement.row,
     );
-    if (
-      !openSuffixPairPresentInHistory(
-        history.map((row) => row.item),
-        callId,
-      )
-    ) {
-      const historyItems = openSuffixHistoryItems(target, resultItem);
-      if (historyItems.length === 0) {
-        throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
-      }
-      const nextPosition = await nextSessionHistoryPosition(
-        input.db,
-        input.workspaceId,
-        input.sessionId,
-      );
-      const appended = await appendSessionHistoryItems(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        expectedExecutionGeneration: input.executionGeneration,
-        expectedAttemptId: input.attemptId,
-        ...(truncationTokens !== undefined
-          ? { modelToolOutputTruncationTokens: truncationTokens }
-          : {}),
-        items: historyItems.map((item, offset) => ({
-          position: nextPosition + offset,
-          item,
-        })),
-      });
-      if (!appended) {
-        return { action: "cancelled" };
-      }
-    }
+    if (settled === "cancelled") return { action: "cancelled" };
   }
   const remaining = (
     await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId)
@@ -409,6 +505,11 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     ...remainingRunStatePendingApprovalsFromSuffix(remaining),
     ...(input.additionalApprovals ?? []),
   ];
+  const unrecordedInteractionCalls = await unrecordedInteractionCallsOf(input, remaining);
+  const interactionInterventionRequests =
+    unrecordedInteractionCalls.length > 0 && input.interactionRequests
+      ? await input.interactionRequests.build(unrecordedInteractionCalls)
+      : [];
   const settled = await input.settle({
     events: [
       ...(requiresActionApprovals.length > 0
@@ -430,9 +531,146 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     runState: {
       serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals,
+      ...(interactionInterventionRequests.length > 0 ? { interactionInterventionRequests } : {}),
     },
   });
+  if (settled && interactionInterventionRequests.length > 0) {
+    await input.interactionRequests?.recorded?.(unrecordedInteractionCalls);
+  }
   return settled ? { action: "requires_action" } : { action: "cancelled" };
+}
+
+async function unrecordedInteractionCallsOf(
+  input: {
+    db: Database;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    interactionRequests?: OpenSuffixInteractionRequests;
+  },
+  remaining: readonly OpenSuffixPendingToolCall[],
+): Promise<InteractionPauseCall[]> {
+  if (!input.interactionRequests) return [];
+  const interactionRows = remaining.filter(
+    (row) => row.interruptionKind === "interaction_intervention",
+  );
+  if (interactionRows.length === 0) return [];
+  const recorded = await listRecordedInteractionToolCallIds(input.db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    toolCallIds: interactionRows.map((row) => row.callId),
+  });
+  return interactionRows
+    .filter((row) => !recorded.has(row.callId))
+    .map((row) => interactionPauseCallFromItem(row.callId, row.callItem));
+}
+
+/**
+ * Settle the call the person decided on: record its result and pair it in
+ * history, or keep it open with its MCP server's next question.
+ */
+async function settleOpenSuffixTarget(
+  input: Parameters<typeof settleOpenSuffixResumeIfNeeded>[0],
+  target: OpenSuffixPendingToolCall,
+): Promise<"settled" | "asked" | "cancelled"> {
+  const truncationTokens =
+    input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
+  let resultItem = target.resultItem;
+  if (!resultItem) {
+    const member = await resultItemForOpenSuffixMember({
+      agent: input.agent,
+      row: target,
+      trigger: input.trigger,
+      humanInputResume: input.humanInputResume,
+    });
+    if ("asked" in member) {
+      const replaced = await replacePendingToolCallMcpInputRequest(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.executionGeneration,
+        attemptId: input.attemptId,
+        callId: target.callId,
+        mcpInputRequest: member.asked,
+      });
+      return replaced.accepted ? "asked" : "cancelled";
+    }
+    resultItem = member.resultItem;
+    const recorded = await recordPendingSessionToolCallResult(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      callId: target.callId,
+      ...(truncationTokens !== undefined
+        ? { modelToolOutputTruncationTokens: truncationTokens }
+        : {}),
+      resultItem,
+      eventOutput: member.eventOutput,
+    });
+    if (!recorded.accepted) {
+      return "cancelled";
+    }
+    if (!recorded.recorded) {
+      const latest = resolveOpenSuffixResumeTarget(
+        await listTurnOpenSuffixToolCalls(
+          input.db,
+          input.workspaceId,
+          input.sessionId,
+          input.turnId,
+        ),
+        target.callId,
+      );
+      resultItem = latest?.resultItem ?? resultItem;
+    } else if (input.publish) {
+      await input.publish([
+        {
+          type: "agent.toolCall.output",
+          payload: { id: target.callId, output: member.eventOutput },
+        },
+      ]);
+    }
+  }
+  const history = await getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId);
+  if (
+    !openSuffixPairPresentInHistory(
+      history.map((row) => row.item),
+      target.callId,
+    )
+  ) {
+    const historyItems = openSuffixHistoryItems(target, resultItem);
+    if (historyItems.length === 0) {
+      throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
+    }
+    const nextPosition = await nextSessionHistoryPosition(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const appended = await appendSessionHistoryItems(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      expectedExecutionGeneration: input.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      ...(truncationTokens !== undefined
+        ? { modelToolOutputTruncationTokens: truncationTokens }
+        : {}),
+      items: historyItems.map((item, offset) => ({
+        position: nextPosition + offset,
+        item,
+      })),
+    });
+    if (!appended) {
+      return "cancelled";
+    }
+  }
+  return "settled";
 }
 
 export function interruptionCallIdsFromPause(input: {

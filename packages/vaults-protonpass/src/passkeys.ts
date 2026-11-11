@@ -265,6 +265,10 @@ export function decodeProtonPasskey(passkey: ProtonPasskey): ProviderPasskey | n
       userDisplayName: textOf(field(document, "udn")) ?? (passkey.user_display_name || null),
       privateKey,
       signCount: typeof counter === "number" && Number.isSafeInteger(counter) ? counter : 0,
+      // Proton's passkey-rs authenticator starts registration and assertion
+      // data with Flags::default() = BE | BS; its serialized key omits them.
+      backupEligibility: true,
+      backupState: true,
     };
   } catch {
     return null;

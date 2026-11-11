@@ -3,11 +3,25 @@
 // renderers decide identically what a turn shows (preparing, working, waiting, worked).
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
-import type { ActivityItem, TimelineGroup } from "./types";
+import type { ActivityItem, TimelineGroup, TimelineItem } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 export type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
+
+/** Once useful output exists, startup decoration must not compete with it. */
+export function timelineTurnsWithOutput(items: readonly TimelineItem[]): Set<string> {
+  return new Set(
+    items.flatMap((item) =>
+      "turnId" in item &&
+      item.turnId &&
+      (item.kind === "tool-call" ||
+        ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
+        ? [item.turnId]
+        : [],
+    ),
+  );
+}
 
 export function durationBetween(startedAt: string, endedAt: string): number | undefined {
   const started = Date.parse(startedAt);
@@ -18,13 +32,17 @@ export function durationBetween(startedAt: string, endedAt: string): number | un
   return ended - started;
 }
 
-/** Compaction landmarks among a fold's groups (secondary summary facet). */
+/**
+ * Compaction landmarks among a fold's groups (secondary summary facet). The
+ * one-time rebuild for a new model has its own note and is not counted.
+ */
 export function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
   return groups.filter(
     (group) =>
       group.kind === "item" &&
       group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
+      group.item.phase === "compacted" &&
+      group.item.implementation !== "portable_model_switch",
   ).length;
 }
 
@@ -74,6 +92,7 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
     !options.startupDismissed &&
     !group.work.endedAt &&
     !group.work.waiting &&
+    !group.work.pausedAt &&
     phases.length > 0 &&
     group.items.every(
       (item) => item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
@@ -114,9 +133,10 @@ export function readableWorkHasDetails(
 /**
  * Status of a readable turn's work row, minus the host-rendered live preview.
  * Time spent waiting for model capacity, or between a failed attempt and its
- * Retry, is not work: the worked duration and the live working clock exclude
- * it, and a capacity wait itself shows no clock. A
- * wait's `detail` is its one quiet secondary line.
+ * Retry, or paused, is not work: the worked duration and the live working
+ * clock exclude it, and a capacity wait itself shows no clock. A turn parked
+ * by a pause still in force reads as paused, its clock stopped where the
+ * pause began. A wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
   t: OpenGeniText,
@@ -136,6 +156,13 @@ export function readableWorkStatus(
       };
     return {
       kind: "worked",
+      durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
+    };
+  }
+  if (group.work.pausedAt) {
+    const durationMs = durationBetween(group.work.startedAt, group.work.pausedAt);
+    return {
+      kind: "paused",
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
     };
   }
@@ -167,6 +194,21 @@ export function readableWorkDefaultOpen(group: ActivityGroup): true | undefined 
     )
     ? true
     : undefined;
+}
+
+/**
+ * A settled turn row with nothing under it. For a reader who never sees the
+ * agent's work (`agentSignals: false`) it says nothing, so it is not drawn.
+ */
+export function readableWorkIsEmpty(group: ActivityGroup): boolean {
+  return (
+    !!group.work?.endedAt &&
+    group.outcome !== "failed" &&
+    group.items.length === 0 &&
+    group.work.details.length === 0 &&
+    !group.work.steps &&
+    !group.work.cycles
+  );
 }
 
 /** Whether the live preview should show (images stay primary output instead). */

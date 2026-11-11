@@ -1,5 +1,54 @@
 # @opengeni/browser-extension
 
+## 0.2.5
+
+### Patch Changes
+
+- 8767fab: In a person's own connected Chrome, Chrome can leave a capture of a tab behind another one in its window unanswered while it draws for the next capture request, and then answers both with that drawing. Such a capture, viewport or full page, is now asked again every second with a small request while it has not answered, so these captures complete in about a second instead of stalling or timing out; a viewport capture still unanswered (or still refused as undrawn) after 5 s stops with a plain reason that suggests trying again. A capture of any other tab has the whole capture deadline instead of being cut short at 3 s. The extension transport now honours command time limits, so no connected Chrome capture waits past the capture deadline. The screenshot API now passes the stall reason, and the reason a capture of a tab Chrome had not drawn yet gave up, to the caller instead of a generic error.
+
+  Chromium serves a full-page capture by changing the tab's emulation and puts back what each capture request saw when it began, so a small request sent while a full-page capture waits puts the capture's emulation back after the capture restored the tab's own; left there, the tab stayed at the capture's size and stopped following its window. Once every request has answered, the driver now clears that emulation, which the extension now admits (`Emulation.clearDeviceMetricsOverride`, which only removes an emulated size). A tab Chrome does not show can keep the page's height as its view size until Chrome next lays it out, when it is shown or its window changes. With an older extension the clear is refused and a full-page capture of such a tab behaves as before.
+
+## 0.2.4
+
+### Patch Changes
+
+- 923c161: Keep known numeric secrets masked when payment widgets add digit grouping, and
+  redact complete three-digit security codes without shortening the existing
+  clipped-password prefix threshold. Browser protected-field discovery now covers
+  accessibility as well as DOM reads, including frames and flattened closed
+  shadow roots. Payment fills accept formatting-only grouping, not changed digits.
+  Browser tabs that encounter payment fields or known card data withhold screenshots,
+  live frames and video while preserving semantic controls and unrelated tabs. Privacy-discovery and masking
+  failures withhold output instead of returning unprotected data.
+  The Chrome extension admits the read-only privacy snapshot method. Hidden
+  metadata and expiry options stay protected in place without becoming session
+  secrets; remembered card numbers and security codes cannot age out behind
+  unrelated values.
+  The extension advertises the additive privacy capability to the native agent;
+  older extensions receive the existing update-required refusal and start
+  Chrome's update check before protected reads are allowed.
+
+## 0.2.3
+
+### Patch Changes
+
+- 205b05a: Agents can now set camera, microphone, geolocation and notifications permissions in the person's own Chrome, for the exact top-level origin (scheme, host and port) of a tab the session opened and no other session is using; the person's own tabs are refused. The first such action opens a page in the extension where the person allows it once; until then the action fails with a short message saying so. The extension records every change and lists it in its popup with Remove, Chrome shows the settings as set by an extension in its normal site settings, and setting a permission back to prompt clears it. Other permission types, and extensions without this support, fail with a clear message. The browser_act description no longer says permission actions only work in managed browsers.
+- 8af985d: Attached Chrome keeps working on sign-in pages whose password manager loads its inline menu into a frame it created blank. The extension found other extensions' frames only by their address, and such a frame's address stays blank while it shows the other extension's page, so Chrome kept refusing the tab and every call failed with "it could not be removed". The extension now also removes such a frame when it is the one place the tab can hold that page. Chrome's debugging targets show other extensions' pages only for the whole browser, and Chrome does not list every frame of a page to the extension (it omits other extensions' pages and some of the page's own, such as a data: page loaded by script into a blank frame). So the frame must be the tab's only frame the extension cannot see into and hold no frames of its own, every frame Chrome lists must have run the extension's script and said so, the page must add no frame while the extension searches and hold no other extension's page found by its address, and Chrome's debugging targets must hold another extension's page. A frame that merely does not answer is never removed, so a page's own frames (including error pages, data: frames, frames still loading or posting, and sites the person took the extension's access from) always stay; when the page holds one of those, the menu frame is not removed either, and the tab can be debugged again once the menu closes. This adds the `webNavigation` permission, which brings no new permission warning. A removal that removes nothing no longer counts towards the tab's removal limit, so it is no longer reported as an extension that keeps adding its frame.
+
+  An observation made just before Chrome ended the tab's debugging (as it does whenever another extension adds a frame) now still holds when the new attachment finds the same document. browserd used to give every new attachment a new target, document and frame generation, so an action right after a fresh observation failed with `target_stale` whenever a password manager's menu appeared in between. A new attachment now keeps the ended one's generations and element references when the tab's main frame still has the same frame and loader ids; a new document, a crash or a closed tab still gets fresh ones, and commands of the ended attachment still never reach the new one.
+
+## 0.2.2
+
+### Patch Changes
+
+- 1a4e2ec: Attached Chrome keeps working in a tab while a password manager shows its inline menu. Chrome ends the extension's debugging of a tab as soon as another extension's frame starts loading in it, and while that frame loads it can refuse every command on a new attachment without running it. The extension now removes those frames and sends a refused command again once (never onto a different attachment). Commands refused together for the same frame share one removal, so they count once against the existing limit on how often the extension removes frames, and only Chrome's actual refusal starts a removal. A removal the page does not answer within a few seconds is given up rather than holding up the tab, and a frame added back right after the removal a refusal reused is removed once more. A frame that keeps coming back fails with the existing error that names the password manager and says what to do.
+
+  browserd now treats Chrome's "Debugger is not attached" answer as the end of that attachment instead of an unclassified error, so the next call attaches again. Observations, tab state, page reads and screenshots whose attachment ends part way are read once more on a new attachment. An action whose attachment ends after input was sent is `outcome_unknown` with a fresh observation of the tab on the new attachment, so the agent can see whether the input landed; an action that ended before any input stays a definite `failed`. Chrome also gives its other-extension-frame refusal for a tab it is about to stop debugging, so with an extension that relays that refusal as is, the first one ends the attachment the same way; only a refusal that persists on a new attachment is a definite failure that says what to do, rather than a retryable error that never cleared. The tab state and page read routes of browserd no longer answer a lost attachment with a 500.
+
+- c3aa91c: Attached Chrome sessions now survive a restart of the extension's background worker. Chrome stops and restarts an extension's worker whenever it likes while it keeps the tabs and the extension's debugger attachments, but the extension used to start a new state generation with every worker, so each such restart ended every browser session on the profile. The extension now keeps its state generation and the tabs it has attached in `chrome.storage.session`, which Chrome keeps exactly as long as those attachments. A new worker checks each recorded attachment with a debugger command that changes nothing, carries on with the ones that answer, and reconnects under the same generation, so the same browser session continues on the same tabs. An attachment an earlier worker left without recording it is taken over instead of refused. Reloading or updating the extension, or restarting Chrome, still starts a new generation and ends the sessions as before. Each time a worker carries on an earlier worker's state, the extension records how many attachments it kept, how many had ended and how many tabs were closed (`stateResumptions` in the extension's local storage, the latest 20).
+
+  A command that was in flight when the worker stopped still reports its outcome as unknown, and nothing replays it. Each event poll now names the worker's event stream; browserd treats a new stream as lost event history and resynchronizes even when the new worker's sequence numbers have caught up with its cursor, and a tab whose input was in flight on the old worker can be used again once a new worker answers. Ending or leaving an attached session also no longer closes an empty tab that is still on its way to a page.
+
 ## 0.2.1
 
 ### Patch Changes

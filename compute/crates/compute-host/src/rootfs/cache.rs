@@ -45,7 +45,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -326,6 +326,43 @@ impl Cache {
         Ok(self.used(image, path, shared).await)
     }
 
+    /// Keeps the file at `path`, whose id is `image`, as the host's copy of
+    /// that image, marked used now: synced and renamed into place (on the
+    /// same file system), or removed when the host has the image already.
+    /// An image the host built itself then serves its creates without a
+    /// fetch, and stays on its disk only as any cached image does: disk
+    /// relief and the week rule remove it once nothing holds it.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be synced or moved; it is left where it was.
+    pub async fn adopt(&self, image: ImageId, path: &Path) -> io::Result<()> {
+        let shared = self.shared(image).await;
+        let work = self.locks(image).work;
+        let _work = work.lock().await;
+        let kept = self.path(image);
+        let have = self.has(image);
+        let from = path.to_owned();
+        self.blocking({
+            let kept = kept.clone();
+            move || {
+                if have {
+                    return remove_if_present(&from);
+                }
+                fs::File::open(&from)?.sync_all()?;
+                fs::rename(&from, &kept)?;
+                sync_parent(&kept)
+            }
+        })
+        .await?;
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(image);
+        drop(self.used(image, kept, shared).await);
+        Ok(())
+    }
+
     /// The image `image` if the host has it, marked used now; never
     /// fetches.
     pub async fn hold(&self, image: ImageId) -> Option<Held> {
@@ -366,74 +403,104 @@ impl Cache {
         Held { path, _lock: lock }
     }
 
+    /// Every image the host keeps, checked or not.
+    pub fn images(&self) -> Vec<ImageId> {
+        let present = self.present.lock().unwrap_or_else(PoisonError::into_inner);
+        let recovered = self
+            .recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut images: Vec<ImageId> = present.union(&recovered).copied().collect();
+        images.sort_unstable();
+        images
+    }
+
+    /// When a create last used `image`: its use mark's time, or for one
+    /// without a mark (an earlier agent's) when its own file last changed.
+    /// Blocks.
+    pub fn last_used(&self, image: ImageId) -> io::Result<SystemTime> {
+        last_used(&self.path(image), &self.mark(image))
+    }
+
     /// Removes the images no create used for long, except those in `keep`.
     /// Returns the ones removed.
     pub async fn retire(&self, keep: &HashSet<ImageId>, now: SystemTime) -> Vec<ImageId> {
-        let present: Vec<ImageId> = {
-            let present = self.present.lock().unwrap_or_else(PoisonError::into_inner);
-            let recovered = self
-                .recovered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            present
-                .union(&recovered)
-                .copied()
-                .filter(|image| !keep.contains(image))
-                .collect()
-        };
         let mut removed = Vec::new();
-        for image in present {
-            // A copy holding it is using it.
-            let Ok(_lock) = self.locks(image).file.try_write_owned() else {
-                continue;
-            };
-            let path = self.path(image);
-            let mark = self.mark(image);
-            let used = self
-                .blocking({
-                    let path = path.clone();
-                    let mark = mark.clone();
-                    move || match fs::metadata(&mark) {
-                        Ok(marked) => marked.modified(),
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                            fs::metadata(&path)?.modified()
-                        }
-                        Err(error) => Err(error),
-                    }
-                })
-                .await;
-            let unused = used.is_ok_and(|used| {
-                now.duration_since(used)
-                    .is_ok_and(|since| since >= self.unused_after)
-            });
-            if !unused {
+        for image in self.images() {
+            if keep.contains(&image) {
                 continue;
             }
-            self.present
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&image);
-            self.recovered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&image);
-            // A mark left behind if this stops between the two is removed
-            // when the next agent opens the cache.
-            match self
-                .blocking(move || {
-                    remove_if_present(&path)?;
-                    remove_if_present(&mark)
-                })
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(%image, "image unused for long; removed");
-                    removed.push(image);
-                }
-                Err(error) => tracing::warn!(%image, %error, "could not remove an unused image"),
+            let unused_after = self.unused_after;
+            let unused = move |used: SystemTime| {
+                now.duration_since(used)
+                    .is_ok_and(|since| since >= unused_after)
+            };
+            if self.remove_if(image, unused).await {
+                tracing::info!(%image, "image unused for long; removed");
+                removed.push(image);
             }
         }
         removed
+    }
+
+    /// Removes `image` now, as disk relief asks, unless a copy, a fetch
+    /// or a check holds it. Returns whether it did.
+    pub async fn remove(&self, image: ImageId) -> bool {
+        self.remove_if(image, |_| true).await
+    }
+
+    /// Removes `image` with its use mark if nothing holds it and `unused`
+    /// says so of when it was last used, read under the image's lock.
+    /// Returns whether it did.
+    async fn remove_if(&self, image: ImageId, unused: impl FnOnce(SystemTime) -> bool) -> bool {
+        // A copy holding it is using it.
+        let Ok(_lock) = self.locks(image).file.try_write_owned() else {
+            return false;
+        };
+        let (path, mark) = (self.path(image), self.mark(image));
+        let used = self
+            .blocking({
+                let (path, mark) = (path.clone(), mark.clone());
+                move || last_used(&path, &mark)
+            })
+            .await;
+        if !used.is_ok_and(unused) {
+            return false;
+        }
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+        // A mark left behind if this stops between the two is removed
+        // when the next agent opens the cache.
+        match self
+            .blocking(move || {
+                remove_if_present(&path)?;
+                remove_if_present(&mark)
+            })
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%image, %error, "could not remove an image");
+                false
+            }
+        }
+    }
+}
+
+/// When a create last used the image at `path`: its use `mark`'s time, or
+/// for one without a mark (an earlier agent's) when its own file last
+/// changed. Blocks.
+fn last_used(path: &Path, mark: &Path) -> io::Result<SystemTime> {
+    match fs::metadata(mark) {
+        Ok(marked) => marked.modified(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::metadata(path)?.modified(),
+        Err(error) => Err(error),
     }
 }
 

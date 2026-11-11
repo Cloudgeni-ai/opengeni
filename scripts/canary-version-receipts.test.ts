@@ -187,6 +187,36 @@ test("a later canary publication's tag does not block a re-run confirmation", as
   }
 });
 
+test("a backfill publication confirms under canary-backfill while canary stays on the newer source", async () => {
+  for (const [tags, settles] of [
+    [{ latest: "1.0.0", canary: "1.0.1-canary.5", "canary-backfill": version }, true],
+    [{ latest: "1.0.0", canary: "1.0.1-canary.5", "canary-backfill": "1.0.1-canary.9" }, true],
+    [{ latest: "1.0.0", canary: "1.0.1-canary.5", "canary-backfill": "1.0.1-canary.6" }, false],
+    [{ latest: "1.0.0", canary: "1.0.1-canary.5" }, false],
+  ] as const) {
+    let elapsed = 0;
+    const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+      readRegistryPackage(
+        name,
+        async (url) =>
+          String(url).includes("/dist-tags")
+            ? Response.json(tags)
+            : Response.json({ name, version, dist }),
+        "https://registry.example.test",
+        options,
+      );
+    const confirmation = confirmCanaryCohort([archive()], read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+      timeoutMs: 60_000,
+    });
+    if (settles) await confirmation;
+    else await expect(confirmation).rejects.toThrow("canary_tag_pending");
+  }
+});
+
 test.each(["name", "version"] as const)(
   "a targeted receipt rejects a mismatched %s identity",
   async (field) => {

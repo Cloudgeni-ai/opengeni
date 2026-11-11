@@ -19,12 +19,15 @@ import type { RigCheck, RigVersion } from "@opengeni/react/app/types";
 export function RigVersionsTimeline({
   versions,
   activeVersionId,
+  personName,
   canManage,
   mutating,
   onActivate,
 }: {
   versions: RigVersion[];
   activeVersionId: string | null;
+  /** Names a person's subject ("you" for the viewer); null when unknown. */
+  personName?: (subjectId: string) => string | null;
   canManage: boolean;
   mutating: boolean;
   onActivate: (versionId: string) => Promise<unknown>;
@@ -56,7 +59,7 @@ export function RigVersionsTimeline({
               titleAddon={isActive ? <MetaChip dot="idle">Active</MetaChip> : null}
               description={version.changelog ?? "No changelog"}
               meta={[
-                rigActorLabel(version.createdBy),
+                rigActorLabel(version.createdBy, personName),
                 <RelativeTime key="time" date={version.createdAt} />,
               ]}
               control={

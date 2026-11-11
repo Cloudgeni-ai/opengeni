@@ -51,7 +51,7 @@ function event(type: string, payload: unknown, turnId: string | null = "turn-1")
 
 function tool(id: string, name: string, turnId = "turn-1", output: unknown = "ok") {
   return [
-    event("agent.toolCall.created", { id, name, arguments: { cmd: id } }, turnId),
+    event("agent.toolCall.created", { id, name, arguments: { cmd: `cat ${id}.md` } }, turnId),
     event("agent.toolCall.output", { id, output }, turnId),
   ];
 }
@@ -405,6 +405,63 @@ describe("readable per-turn rows", () => {
     }
   });
 
+  test("a proactive maintenance compaction as the last turn settles without a live Working row", async () => {
+    sequence = 0;
+    const maintenance = (type: string, payload: unknown) => event(type, payload, "maintenance");
+    const running = [
+      event("user.message", { text: "Research this" }, null),
+      event("turn.started", {}),
+      ...tool("read", "exec_command"),
+      event("agent.message.completed", { text: "Here it is.", phase: "final_answer" }),
+      event("turn.completed", {}),
+      event("session.status.changed", { status: "idle" }, null),
+      event(
+        "session.context.compaction.requested",
+        { trigger: "proactive", initiator: "service" },
+        null,
+      ),
+      maintenance("turn.started", {}),
+      ...["tools", "credential_mint", "credential_materialization"].flatMap((phase) => [
+        maintenance("turn.startup.phase.started", { phase }),
+        maintenance("turn.startup.phase.completed", { phase, durationMs: 20 }),
+      ]),
+      maintenance("turn.startup.phase.started", { phase: "model_preparation" }),
+      maintenance("turn.startup.phase.failed", {
+        phase: "model_preparation",
+        durationMs: 60,
+        expectedTransition: true,
+        failureCategory: "context_compaction",
+        failureStage: "context_compaction",
+        failureCode: "compaction_required",
+        retryable: true,
+      }),
+      maintenance("session.context.compaction.started", { trigger: "proactive" }),
+    ];
+    const settled = [
+      ...running,
+      maintenance("session.context.compacted", { trigger: "proactive" }),
+      maintenance("turn.completed", { result: "compacted", maintenance: "context_compaction" }),
+      event("session.status.changed", { status: "idle" }, null),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={running} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(r.container.querySelector('[data-og-exchange-status="working"]')).not.toBeNull();
+      await r.rerender(<MessageTimeline events={settled} turnSummary={{ rolling: true }} />);
+      await flush();
+      // The chat's last turn was maintenance: no live row or clock outlives it.
+      expect(r.container.querySelector('[data-og-exchange-status="working"]')).toBeNull();
+      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
+      expect(statusTrigger(r.container).textContent).toStartWith("Worked for");
+      expect(r.container.textContent).toContain("Conversation history compacted");
+      expect(r.container.textContent).toContain("Here it is.");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("finished work that compacted first stays folded", async () => {
     sequence = 0;
     const r = await renderComponent(
@@ -658,7 +715,9 @@ describe("capacity limit rows", () => {
       await act(async () => trigger.click());
       await flush();
       expect(trigger.getAttribute("aria-expanded")).toBe("true");
-      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain("ls");
+      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain(
+        "Looked through files",
+      );
       expect(guidance()).toBe(GUIDANCE);
       expect(trigger.textContent).not.toMatch(/\d+[smh]\b/);
     } finally {

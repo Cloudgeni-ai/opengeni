@@ -186,6 +186,48 @@ describe("image generation paid-operation fence", () => {
     expect(calls).toEqual(["prepare", "begin", "provider", "retain", "complete"]);
   });
 
+  test("completion carries the image route's processing residency to its usage event", async () => {
+    const completed: unknown[] = [];
+    const processingResidency = {
+      geography: "global" as const,
+      deploymentType: "gateway" as const,
+      regions: [],
+    };
+    await executeImageGenerationOperation(
+      { ...executionInput({ count: 0 }), processingResidency },
+      operationPorts({
+        complete: async (_db, completeInput) => {
+          completed.push(completeInput);
+          return { status: "completed" } as never;
+        },
+      }),
+    );
+    expect(completed).toEqual([expect.objectContaining({ processingResidency })]);
+  });
+
+  test("Codex images record the subscription's code-owned region", async () => {
+    const completed: unknown[] = [];
+    await executeCodexImageGeneration(
+      {
+        ...executionInput({ count: 0 }),
+        credentialId: "credential",
+        codexContext: { clientVersion: "test", getToken: async () => "token" } as never,
+        generateImage: async () => ({ bytes: Uint8Array.of(1), declaredMediaType: "image/png" }),
+      },
+      operationPorts({
+        complete: async (_db, completeInput) => {
+          completed.push(completeInput);
+          return { status: "completed" } as never;
+        },
+      }),
+    );
+    expect(completed).toEqual([
+      expect.objectContaining({
+        processingResidency: { geography: "us", deploymentType: "subscription", regions: [] },
+      }),
+    ]);
+  });
+
   test("freezes a credit price on the operation and never dispatches a refused image", async () => {
     const generateCalls = { count: 0 };
     const prepared: unknown[] = [];

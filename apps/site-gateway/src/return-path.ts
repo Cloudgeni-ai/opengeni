@@ -6,6 +6,7 @@ const BASE = "https://return-path.invalid";
  * A same-origin relative path to send the viewer back to, or null. Refuses
  * absolute and protocol-relative URLs, backslashes, control characters and
  * gateway-owned `/_og` paths (no redirect loops through sign-in).
+ * Keeps the query and `#hash`, so a Site opens where the viewer was.
  */
 export function safeReturnPath(value: string | null | undefined): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 2048) return null;
@@ -20,6 +21,6 @@ export function safeReturnPath(value: string | null | undefined): string | null 
   if (url.origin !== BASE) return null;
   if (url.pathname === SITE_GATEWAY_PREFIX || url.pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`))
     return null;
-  const path = `${url.pathname}${url.search}`;
+  const path = `${url.pathname}${url.search}${url.hash}`;
   return path.startsWith("//") ? null : path;
 }

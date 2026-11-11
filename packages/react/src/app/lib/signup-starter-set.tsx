@@ -1,11 +1,12 @@
-import type { OnboardingUseCase } from "./onboarding-use-case";
+import { isOnboardingUseCase, type OnboardingUseCase } from "./onboarding-use-case";
 
 /**
- * The signup answer ("Add AI agents to my product" or "Run agents in the
- * cloud"), remembered in this browser per account and organization so the
- * new-chat page can lead with the matching suggestions. The server keeps the
- * answer only for analytics, so this is the one place the app reads it back;
- * without it (another device, cleared storage) people get the general set.
+ * The signup answer ("Get help with everyday things", "Add AI agents to my
+ * product" or "Run agents in the cloud") decides which suggestions the
+ * new-chat page leads with. The server keeps the person's current answer and
+ * returns it with their memberships, so it follows them to every device. This
+ * browser copy, per account and organization, is only a fallback for a server
+ * that doesn't return it.
  */
 const STORAGE_KEY = "opengeni.signupUseCase.v1";
 /** Enough for every organization one browser realistically signs up. */
@@ -28,9 +29,8 @@ function readEntries(): Record<string, OnboardingUseCase> {
     const parsed: unknown = JSON.parse(storage()?.getItem(STORAGE_KEY) ?? "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, OnboardingUseCase] =>
-          entry[1] === "embed" || entry[1] === "cloud",
+      Object.entries(parsed).filter((entry): entry is [string, OnboardingUseCase] =>
+        isOnboardingUseCase(entry[1]),
       ),
     );
   } catch {
@@ -56,11 +56,40 @@ export function rememberSignupUseCase(input: {
   }
 }
 
-/** Which starters the new-chat page leads with for this account and organization. */
+/**
+ * Which starters the new-chat page leads with for this account and
+ * organization. `serverAnswer` is the membership's `signupUseCase`: when the
+ * server keeps an answer it wins; only without one does the browser copy
+ * decide. Only people who chose to build or run agents get the developer sets;
+ * everyone else, including people who skipped the question or signed up before
+ * it existed, gets the everyday set.
+ */
 export function signupStarterSet(
   account: string | null | undefined,
   organizationId: string | null | undefined,
-): "general" | "product" {
-  if (!account || !organizationId) return "general";
-  return readEntries()[entryKey(account, organizationId)] === "embed" ? "product" : "general";
+  serverAnswer?: OnboardingUseCase | undefined,
+): "everyday" | "general" | "product" {
+  const answer =
+    serverAnswer ??
+    (account && organizationId ? readEntries()[entryKey(account, organizationId)] : undefined);
+  return answer === "embed" ? "product" : answer === "cloud" ? "general" : "everyday";
 }
+
+type NewChatWording = {
+  heading: string;
+  placeholder: string;
+  /** Composer copy overrides: the text box's screen-reader label. */
+  composerMessages: { inputLabel: string };
+};
+
+/**
+ * The new-chat heading, composer placeholder and composer label. Everyone gets
+ * the same plain words about asking: a quick question and a long task both
+ * start here, and the starters below (not the heading) are what follow the
+ * signup answer. A constant, so passing it on doesn't change on every render.
+ */
+export const NEW_CHAT_WORDING: NewChatWording = {
+  heading: "What can I help with?",
+  placeholder: "Ask anything, or describe what you need…",
+  composerMessages: { inputLabel: "Ask anything" },
+};

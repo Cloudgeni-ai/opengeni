@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { cn } from "../../../lib/cn";
+import { useWindowLayerOpen } from "../../../lib/window-layer";
 import { Button } from "../../../ui/button";
 import { containedPortal } from "../../../ui/portal-container";
 
@@ -25,12 +26,14 @@ export const ArtifactFullWindowDialog = /* @__PURE__ */ forwardRef<
     children: ReactNode;
   } & Omit<ComponentPropsWithoutRef<typeof Dialog.Content>, "children" | "className">
 >(function ArtifactFullWindowDialog({ onClose, children, ...content }, ref) {
+  useWindowLayerOpen(true);
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <DialogContainedPortal>
         <Dialog.Content
           ref={ref}
           data-artifact-fullscreen
+          data-window-layer
           aria-describedby={undefined}
           {...content}
           className="fixed inset-0 z-50 flex h-dvh w-dvw flex-col overflow-hidden bg-surface text-left text-fg outline-hidden"

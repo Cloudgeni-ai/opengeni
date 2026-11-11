@@ -61,7 +61,9 @@ export function impactPlanConsoleSummary(plan: ImpactPlan, outputPath: string): 
 
 const GLOBAL_FENCES = [
   /^\.bun-version$/,
-  /^\.changeset\//,
+  // A changeset note only feeds the release plan, which source contracts
+  // validate on every run; changeset configuration still fences.
+  /^\.changeset\/(?![^/]+\.md$)/,
   /^\.github\//,
   /^\.dockerignore$/,
   /^\.npmrc$/,
@@ -97,7 +99,7 @@ const PUBLIC_API_WORKSPACES = new Set([
   "@opengeni/sdk",
 ]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
-const DOC_PATTERN = /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/;
+const DOC_PATTERN = /^(?:docs\/.+\.mdx?|[^/]+\.md|\.changeset\/[^/]+\.md)$/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",
@@ -111,6 +113,28 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/sdk-compatibility.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/sdk",
+    "@opengeni/react",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/runtime",
+    "@opengeni/worker-bundle",
+    "@opengeni/storage",
+    "@opengeni/testing",
+  ],
+  "test/integration/background-command-wake.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/core",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/child-wait-boundary.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -314,6 +338,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/teams-approval.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/connector-accounts.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -329,6 +358,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/session-relay-headers.browser.e2e.ts": ["@opengeni/sdk", "@opengeni/contracts"],
   "test/e2e/secrets-fake-login-suite.browser.e2e.ts": ["@opengeni/testing"],
   "test/e2e/external-vaults.e2e.ts": [
     "@opengeni/api-router",
@@ -362,6 +392,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/testing",
   ],
+  "test/e2e/archived-chat-status.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/slack-settings.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-access-link.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-installation-binding.browser.e2e.ts": [
@@ -374,6 +413,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/timeline-exchange-fold.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/timeline-tip-follow.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/lossless-message.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/machine-card.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -426,9 +466,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/capability-details.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/project-profile.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/desktop-corner.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/agents.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
@@ -448,6 +491,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/site-conversations.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/site-navigation.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/setup-account-token.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/personal-resource-attachments.browser.e2e.ts": [
     "opengeni-web",
@@ -521,6 +570,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/timeline-exchange-fold.browser.e2e.ts",
     "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/lossless-message.browser.e2e.ts",
+    "test/e2e/machine-card.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/session-search.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
@@ -542,6 +592,12 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/integration/sdk-compatibility/consumer.ts": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
+  "test/integration/sdk-compatibility/versions.json": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
   "test/e2e/browser-account-read-diagnostics.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-read-diagnostics.test.ts",
@@ -553,6 +609,13 @@ const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
   "test/e2e/browser-account-request-observation.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
+  "test/e2e/desktop-window-bar.ts": [
+    "test/e2e/artifact-desktop.browser.e2e.ts",
+    "test/e2e/desktop-corner.browser.e2e.ts",
+    "test/e2e/desktop-rail.browser.e2e.ts",
+    "test/e2e/session-sidebar.browser.e2e.ts",
+    "test/e2e/signed-out-page.browser.e2e.ts",
   ],
 };
 
@@ -728,6 +791,7 @@ function fullPlan(
       "format",
       "workspace-billing",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       // A migration ordinal that protected main has meanwhile assigned to
@@ -743,19 +807,18 @@ function fullPlan(
       // drains the whole fleet for its release and must justify itself.
       "migration-deployment-mode",
       "migration-online-safety",
-      // A migration missing from the release-schema forward list is framed by
-      // the governed checkpoint input, so the pinned aggregate only breaks after
-      // merge, on protected main.
-      "migration-schema-contract",
+      // Shipped migrations are applied once by name: a head may only add them.
+      "migration-immutability",
+      // A rolling migration runs while the previous release serves: it must not
+      // revoke, drop or rename what that release's runtime posture requires.
+      "migration-previous-release",
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
       // Contract requirement IDs and the tests that claim them stay consistent.
       "subscription-contract",
-      // The public API surface snapshot and the published-SDK compatibility
-      // run (docs/design/api-compatibility-policy.md).
+      // The public API surface snapshot (docs/design/api-compatibility-policy.md).
       "public-api",
-      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -833,7 +896,15 @@ export function createImpactPlan(
       exampleBuildProjects: [],
       // The subscription contract is a document, so a docs-only change to it
       // must still be checked against the tests that claim its requirements.
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
+      guards: [
+        "format",
+        "docs-refs",
+        // Docs samples are typechecked against the SDK they describe.
+        "doc-snippets",
+        "generated-fonts",
+        "public-hygiene",
+        "subscription-contract",
+      ],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -845,6 +916,12 @@ export function createImpactPlan(
   const direct = new Set<string>();
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
+    // Docs and changeset notes select no tests; the docs, format and
+    // release-plan guards check them on every run.
+    if (DOC_PATTERN.test(path)) {
+      reasons.push({ path, reason: "documentation or changeset note" });
+      continue;
+    }
     const pkg = workspaceForPath(graph, path);
     if (pkg && !ARTIFACT_SKILL_PATTERN.test(path)) {
       direct.add(pkg.name);
@@ -955,6 +1032,8 @@ export function createImpactPlan(
     "format",
     "workspace-billing",
     "docs-refs",
+    // Any SDK or React change can break a docs sample; the check takes seconds.
+    "doc-snippets",
     "generated-fonts",
     "public-hygiene",
     // Not gated on `packages/db/drizzle/`: the case this exists for is a NEW
@@ -972,11 +1051,15 @@ export function createImpactPlan(
       "migration-lock-order",
       "migration-deployment-mode",
       "migration-online-safety",
-      "migration-schema-contract",
+      "migration-immutability",
+      "migration-previous-release",
     );
   }
-  if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
-    guards.push("public-api", "sdk-compat");
+  if (
+    [...affected].some((name) => PUBLIC_API_WORKSPACES.has(name)) ||
+    changedFiles.includes("test/integration/sdk-compatibility/versions.json")
+  ) {
+    guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");

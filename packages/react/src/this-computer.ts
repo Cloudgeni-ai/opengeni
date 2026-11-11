@@ -42,6 +42,7 @@ export {
   computerUsePermissionText,
   computerUseProblemText,
   computerUseState,
+  computerUseStalledText,
   useComputerUse,
   type ComputerUseControl,
   type ComputerUseFix,

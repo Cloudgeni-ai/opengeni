@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::compute::{Compute, NewSandbox};
 use crate::github::wire::{Message, Session};
 use crate::github::{Github, Polled, Removed, SessionError};
+use crate::room::Room;
 
 /// The metadata keys a runner's sandbox carries: its pool's [`key`], and
 /// its runner's name, id and start.
@@ -48,7 +49,8 @@ pub struct Settings {
     pub name: String,
     /// Idle runners kept beyond the jobs assigned.
     pub min_idle: u32,
-    /// The most runners at once.
+    /// The most sandboxes at once: runners, and a warm template's builder
+    /// while it refreshes ([`Room`]).
     pub max: u32,
     /// The longest a runner's sandbox lives, in seconds.
     pub timeout_s: u64,
@@ -83,9 +85,25 @@ pub struct Pool {
     settings: Settings,
     /// The template new runners start from.
     template: watch::Receiver<String>,
+    /// The pool's places, which its warm template's builder shares.
+    room: Room,
+    /// Whether a builder held a place when the pool last scaled.
+    scaled_for_builder: bool,
     runners: BTreeMap<String, Runner>,
     /// The jobs GitHub has assigned the scale set, as it last said.
     assigned: u32,
+    /// Fresh runners owed to jobs GitHub took back. A job it assigned the
+    /// scale set that no runner took in time (a start that failed for want
+    /// of room, say) is reported completed, `canceled` with no runner, and
+    /// drops out of `assigned`; but it stays queued, and GitHub offers it
+    /// again only once something changes, such as a runner registering.
+    /// An idle runner that was there already changes nothing. So each job
+    /// taken back wants a runner started after it: owed, at most
+    /// [`Settings::max`], until a scale starts every runner it lacks; the
+    /// starts that fail stay owed. Once GitHub offers the jobs again they
+    /// are assigned, and scaled for as any. In memory only: a restart
+    /// forgets it.
+    owed: u32,
 }
 
 fn now_s() -> u64 {
@@ -141,17 +159,32 @@ impl Pool {
             github,
             compute,
             set,
+            room: Room::new(settings.max),
             settings,
             template,
+            scaled_for_builder: false,
             runners: BTreeMap::new(),
             assigned: 0,
+            owed: 0,
         }
     }
 
-    /// How many runners the pool wants.
-    fn target(&self) -> usize {
-        let wanted = self.assigned.saturating_add(self.settings.min_idle);
-        usize::try_from(wanted.min(self.settings.max)).unwrap_or(usize::MAX)
+    /// The pool's places, for its warm template's builder to take one.
+    #[must_use]
+    pub fn room(&self) -> Room {
+        self.room.clone()
+    }
+
+    /// Says what the pool holds, and returns how many runners it wants:
+    /// the jobs assigned, the fresh runners owed and the idle runners
+    /// asked for, within the places a builder leaves, and whether a
+    /// builder held one. The runners it lacks count as held from now on.
+    fn want(&self) -> (usize, bool) {
+        let demand = self.assigned.saturating_add(self.owed);
+        let wanted = demand.saturating_add(self.settings.min_idle);
+        self.room.hold(self.runners.len(), demand, |places| {
+            usize::try_from(wanted.min(places)).unwrap_or(usize::MAX)
+        })
     }
 
     /// Handles a message: jobs started and completed, then the scale.
@@ -166,14 +199,20 @@ impl Pool {
             }
         }
         for completed in message.of("JobCompleted") {
-            if let Some(name) = &completed.runner_name {
-                tracing::info!(
-                    runner = %name,
-                    result = completed.result.as_deref().unwrap_or("?"),
-                    job = completed.job_display_name.as_deref().unwrap_or("?"),
-                    "a job ended; its sandbox goes"
-                );
+            let result = completed.result.as_deref().unwrap_or("?");
+            let job = completed.job_display_name.as_deref().unwrap_or("?");
+            let runner = completed.runner_name.as_deref();
+            if let Some(name) = runner.filter(|name| !name.is_empty()) {
+                tracing::info!(runner = %name, result, job, "a job ended; its sandbox goes");
                 self.end(name).await;
+            } else {
+                self.owed = self.owed.saturating_add(1).min(self.settings.max);
+                tracing::info!(
+                    result,
+                    job,
+                    owed = self.owed,
+                    "GitHub took back a job no runner took in time; a fresh runner starts for it"
+                );
             }
         }
         if let Some(statistics) = message.statistics {
@@ -183,18 +222,23 @@ impl Pool {
     }
 
     /// Starts or removes runners until the pool has as many as it wants;
-    /// the runners missing start at once, side by side.
+    /// the runners missing start at once, side by side. A builder taking a
+    /// place or giving it back meanwhile is seen in [`Pool::hold`], which
+    /// scales again.
     pub async fn scale(&mut self) {
-        let target = self.target();
+        let (target, building) = self.want();
+        self.scaled_for_builder = building;
         let missing = target.saturating_sub(self.runners.len());
         if missing > 0 {
             let started = futures::future::join_all((0..missing).map(|_| self.start())).await;
+            let mut failed = 0;
             for result in started {
                 match result {
                     Ok((name, runner)) => {
                         self.runners.insert(name, runner);
                     }
                     Err(error) => {
+                        failed += 1;
                         tracing::warn!(
                             error = format!("{error:#}"),
                             "starting a runner failed; the next scale tries again"
@@ -202,6 +246,7 @@ impl Pool {
                     }
                 }
             }
+            self.owed = self.owed.min(failed);
         }
         let settled = now_s().saturating_sub(SETTLE.as_secs());
         let idle: Vec<(String, u64)> = self
@@ -229,6 +274,7 @@ impl Pool {
                 }
             }
         }
+        self.want();
     }
 
     /// Registers a runner and starts its sandbox.
@@ -443,6 +489,7 @@ pub async fn listen(
         leading.send_replace(true);
         pool.assigned = session.statistics.unwrap_or_default().total_assigned_jobs;
         let stopped = pool.hold(&mut session, stop).await;
+        pool.room.forget();
         leading.send_replace(false);
         if let Err(error) = github.close_session(set, &session).await {
             tracing::warn!(
@@ -461,9 +508,12 @@ pub async fn listen(
 
 impl Pool {
     /// Polls the session and handles its messages until `stop` (then
-    /// true) or until the session is lost (false).
+    /// true) or until the session is lost (false). A builder taking a
+    /// place or giving it back ends the poll: the pool scales at once,
+    /// and polls again saying how many jobs it now takes.
     async fn hold(&mut self, session: &mut Session, stop: &CancellationToken) -> bool {
         let github = Arc::clone(&self.github);
+        let room = self.room.clone();
         let mut reconciled: Option<Instant> = None;
         let mut last: Option<u64> = None;
         let mut failures = 0u32;
@@ -474,8 +524,14 @@ impl Pool {
                 }
                 reconciled = Some(Instant::now());
             }
+            let building = self.scaled_for_builder;
+            let capacity = self.settings.max.saturating_sub(u32::from(building));
             let polled = tokio::select! {
-                polled = github.poll(session, last, self.settings.max) => polled,
+                polled = github.poll(session, last, capacity) => polled,
+                () = room.moved(building) => {
+                    self.scale().await;
+                    continue;
+                }
                 () = stop.cancelled() => return true,
             };
             let message = match polled {

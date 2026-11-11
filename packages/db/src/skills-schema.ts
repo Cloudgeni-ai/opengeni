@@ -1,4 +1,6 @@
 import {
+  boolean,
+  index,
   jsonb,
   pgTable,
   primaryKey,
@@ -7,6 +9,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /** Source identity, not another mutable Skill head. Portable ownership stays upstream. */
 export const skillSourceBindings = pgTable(
@@ -37,7 +40,17 @@ export const skillWriteReceipts = pgTable(
     activationEventId: uuid("activation_event_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.workspaceId, table.operationId] })],
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    // Activation-authority lookups for preference snapshot descriptors
+    // (migrations 1357 and 1358): by activation event, and by the text form
+    // of operation_id that a deferred publication receipt names.
+    index("skill_write_receipts_activation_event_idx").on(table.accountId, table.activationEventId),
+    index("skill_write_receipts_operation_text_idx").on(
+      table.workspaceId,
+      sql`(${table.operationId}::text)`,
+    ),
+  ],
 );
 
 /** Immutable maintenance evidence; never an execution configuration head. */
@@ -60,4 +73,22 @@ export const skillConfigConversionReceipts = pgTable(
       columns: [table.workspaceId, table.sourceKind, table.sourceId, table.conversionVersion],
     }),
   ],
+);
+
+/**
+ * Where an organization Skill works (migration 1195): every shared workspace
+ * (null) or the listed ones, plus members' Personal workspaces when switched
+ * on. No row means every workspace, Personal ones included.
+ */
+export const organizationSkillReach = pgTable(
+  "organization_skill_reach",
+  {
+    accountId: uuid("account_id").notNull(),
+    preferenceId: uuid("preference_id").notNull(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.accountId, table.preferenceId] })],
 );

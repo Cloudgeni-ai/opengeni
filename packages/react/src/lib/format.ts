@@ -114,14 +114,112 @@ export function tryParseJson(text: string): unknown {
 
 /**
  * The canonical credit-death sentence. Credit exhaustion is the one failure a
- * user can fix themselves — the copy must say what happened (the remaining
- * credit does not cover this model, though it may cover others), what to do
- * (choose a covered model or add credits), and what is safe (nothing was lost). Crucially it
+ * user can fix themselves — the copy must say what happened (there isn't
+ * enough credit for this model), what to do (add credits or choose another
+ * model), and what is safe (nothing was lost). It must stay true both with no
+ * credit at all and with credit that covers only other models, since the app's
+ * credit notice beside it names which one applies. Crucially it
  * must NOT say "send a message to revive": a revive turn burns credits the
  * workspace no longer has.
  */
 export const CREDIT_EXHAUSTION_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.outOfCreditsThisWorkspace");
+
+// The server's own refusals that one action fixes. Each gets its own sentence.
+const BYOK_UPGRADE_TEXT = /upgrade to pro to use your own key/i;
+const SUBSCRIPTION_UPGRADE_TEXT = /upgrade to pro to use your own subscription/i;
+const BYOK_PAID_CREDIT_TEXT = /add credits to use your own key/i;
+const API_CREDITS_TEXT = /api usage uses credits, not your plan credit/i;
+
+/**
+ * A credit refusal more specific than "no credit": the own-key platform fee
+ * (on the Free plan, Upgrade to Pro fixes it; otherwise Add credits), the
+ * person's own subscription, which needs a paid plan (Upgrade to Pro), or API
+ * use, which only credits pay for. No model choice fixes any of them.
+ */
+export type CreditRefusalKind =
+  | "byok_upgrade_required"
+  | "subscription_upgrade_required"
+  | "byok_paid_credit_required"
+  | "api_credits_required";
+
+/** Refusals a paid plan fixes: their one action is Upgrade to Pro. */
+export function isUpgradeRefusal(kind: CreditRefusalKind | null | undefined): boolean {
+  return kind === "byok_upgrade_required" || kind === "subscription_upgrade_required";
+}
+
+/** The refusal kind named in recorded failure text, if any. */
+export function creditRefusalKindFromText(
+  ...texts: ReadonlyArray<string | null | undefined>
+): CreditRefusalKind | null {
+  const matches = (pattern: RegExp) =>
+    texts.some((text) => typeof text === "string" && pattern.test(text));
+  if (matches(BYOK_UPGRADE_TEXT)) return "byok_upgrade_required";
+  if (matches(SUBSCRIPTION_UPGRADE_TEXT)) return "subscription_upgrade_required";
+  if (matches(BYOK_PAID_CREDIT_TEXT)) return "byok_paid_credit_required";
+  if (matches(API_CREDITS_TEXT)) return "api_credits_required";
+  return null;
+}
+
+/**
+ * The refusal kind of a 402 from the API: its stable code, then its action
+ * (on the Free plan the server offers Upgrade to Pro as the fix).
+ */
+export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 402) return null;
+  const details = error.details as { code?: unknown; action?: { type?: unknown } } | undefined;
+  if (details?.code === "api_credits_required") return "api_credits_required";
+  if (details?.code === "subscription_plan_required") return "subscription_upgrade_required";
+  if (details?.code === "byok_paid_credit_required") {
+    return details.action?.type === "upgrade_plan" || BYOK_UPGRADE_TEXT.test(error.message)
+      ? "byok_upgrade_required"
+      : "byok_paid_credit_required";
+  }
+  return null;
+}
+
+const CREDIT_REFUSAL_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequired",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequired",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequired",
+  api_credits_required: "lib.format.apiCreditsRequired",
+} as const;
+
+const CREDIT_REFUSAL_HEADLINE_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequiredHeadline",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequiredHeadline",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequiredHeadline",
+  api_credits_required: "lib.format.apiCreditsRequiredHeadline",
+} as const;
+
+const CREDIT_REFUSAL_ASK_OWNER_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequiredAskOwner",
+  subscription_upgrade_required: "lib.format.subscriptionUpgradeRequiredAskOwner",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequiredAskOwner",
+  api_credits_required: "lib.format.apiCreditsRequiredAskOwner",
+} as const;
+
+/**
+ * The short sentence that names a refusal of this kind and its one fix,
+ * without what was kept. Someone who can't buy credits or upgrade is told to
+ * ask an organization owner instead.
+ */
+export function creditRefusalHeadline(
+  t: OpenGeniText,
+  kind: CreditRefusalKind,
+  canFix = true,
+): string {
+  return t(canFix ? CREDIT_REFUSAL_HEADLINE_KEYS[kind] : CREDIT_REFUSAL_ASK_OWNER_KEYS[kind]);
+}
+
+/** The credit-stop sentence for a refusal: own-key fee, API use, or no credit. */
+export function creditExhaustionText(
+  t: OpenGeniText,
+  ...texts: ReadonlyArray<string | null | undefined>
+): string {
+  const kind = creditRefusalKindFromText(...texts);
+  return kind ? t(CREDIT_REFUSAL_KEYS[kind]) : CREDIT_EXHAUSTION_MESSAGE(t);
+}
 
 /** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
 export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE = (t: OpenGeniText) =>
@@ -136,6 +234,20 @@ export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE = (t: OpenGeniText) =>
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.yourOrganizationDoesnTHave");
+
+const COMPOSER_CREDIT_REFUSAL_KEYS = {
+  byok_upgrade_required: "lib.format.composerByokUpgradeRequired",
+  subscription_upgrade_required: "lib.format.composerSubscriptionUpgradeRequired",
+  byok_paid_credit_required: "lib.format.composerByokPaidCreditRequired",
+  api_credits_required: "lib.format.composerApiCreditsRequired",
+} as const;
+
+const COMPOSER_CREDIT_REFUSAL_ASK_OWNER_KEYS = {
+  byok_upgrade_required: "lib.format.composerByokUpgradeRequiredAskOwner",
+  subscription_upgrade_required: "lib.format.composerSubscriptionUpgradeRequiredAskOwner",
+  byok_paid_credit_required: "lib.format.composerByokPaidCreditRequiredAskOwner",
+  api_credits_required: "lib.format.composerApiCreditsRequiredAskOwner",
+} as const;
 
 /** Trusted, composer-owned guidance; unlike remote diagnostic prose, this is UI copy. */
 export class ComposerStateError extends Error {}
@@ -161,23 +273,130 @@ export class ComposerWorkspaceControlUnavailableError extends Error {
  * another model, and the typed message stays recoverable via Edit message.
  */
 export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
   "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
 
 /** A rejected account is never silently replaced or retried with new authority. */
 export const COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
+  "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
   "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.";
+
+/**
+ * A model- or account-unavailable refusal in any wording it has had: its own
+ * next step, so a restored copy gets no support reference appended.
+ */
+export function isComposerSelectionRefusalMessage(message: string): boolean {
+  return (
+    message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE
+  );
+}
 
 export function isConnectionAccountSubmissionError(error: unknown): boolean {
   return (
     (error instanceof OpenGeniApiError &&
       !error.outcomeUnknown &&
       error.details?.code === "connection_account_selection_unavailable") ||
-    (error instanceof Error && error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE)
+    (error instanceof Error &&
+      (error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+        error.message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE))
   );
 }
 
 /** `details.code` the API sets on a 422 for a model missing from the live catalog. */
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
+
+/** `details.code` the API sets on a 422 for a model the workspace's policy refuses. */
+export const MODEL_POLICY_DETAIL_CODE = "model_policy";
+
+/** `details.code` the API sets on a 422 for GitHub repositories the workspace can no longer use. */
+export const GITHUB_REPOSITORY_UNAVAILABLE_DETAIL_CODE = "github_repository_unavailable";
+
+/**
+ * A Send refused because repositories it would use lost their GitHub access
+ * (the App was uninstalled, or the repository was taken out of it). Names
+ * them, so the person knows what to remove or restore; Retry then succeeds.
+ */
+export function repositoryUnavailableRefusalMessage(t: OpenGeniText, error: Error): string | null {
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.details?.code !== GITHUB_REPOSITORY_UNAVAILABLE_DETAIL_CODE
+  ) {
+    return null;
+  }
+  const listed = error.details.repositories;
+  const names = (Array.isArray(listed) ? listed : [])
+    .filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    .map((name) => name.trim().slice(0, 200));
+  if (names.length === 1) {
+    return t("lib.format.repositoryUnavailable", { repository: names[0]! });
+  }
+  if (names.length > 1) {
+    const shown = names.slice(0, 3).join(", ");
+    return t("lib.format.repositoriesUnavailable", {
+      repositories: names.length > 3 ? `${shown}, …` : shown,
+    });
+  }
+  return t("lib.format.someRepositoryUnavailable");
+}
+
+/**
+ * The server's own reason for a refused request, as a sentence, or null when
+ * the response carries none. Reads both the API envelope (`error.message`)
+ * and a route's own top-level `{ code, message }` body.
+ */
+function serverRefusalReason(error: OpenGeniApiError): string | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(error.body);
+  } catch {
+    return null;
+  }
+  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const envelope =
+    record?.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : record;
+  const message = envelope?.message;
+  if (typeof message !== "string") return null;
+  const text = message.trim().slice(0, 300);
+  if (!text) return null;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+/**
+ * The reason a refused new chat gives. The refusals a person can hit (a model
+ * that isn't available to them, the workspace's model policy, a speed the
+ * model can't run) are typed by `details.code` and worded here; any other
+ * session create refusal shows the server's own reason, which still says more
+ * than the generic "check your input".
+ */
+export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): string | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 422) return null;
+  const detailCode = error.details?.code;
+  if (detailCode === "UNSUPPORTED_LATENCY_MODE") {
+    return t("lib.format.speedUnavailable");
+  }
+  if (error.code !== "SESSION_CREATE_REJECTED") return null;
+  if (detailCode === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return t("lib.format.newChatModelUnavailable");
+  }
+  if (detailCode === MODEL_POLICY_DETAIL_CODE) {
+    return error.details?.reason === "credits"
+      ? t("lib.format.modelPolicyCredits")
+      : t("lib.format.modelPolicyRefused");
+  }
+  return serverRefusalReason(error);
+}
 
 /**
  * A fresh Send or Steer refused because the task's own usage limit is reached.
@@ -185,12 +404,13 @@ export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
  * recovery action (raise or remove the limit, resume a goal) belongs to the
  * composer's `SessionUsageLimitNotice`, so this line only says what happened.
  */
-export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Your message is saved.";
+export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE = "This task's usage limit is reached.";
 
-/** The earlier wording, still recognized in refusals restored from storage. */
-const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+/** Earlier wordings, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES: readonly string[] = [
+  "This task's usage limit is reached. Your message is saved.",
+  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.",
+];
 
 /**
  * Is this send refusal the task's usage limit? Reads the typed SDK error code
@@ -201,7 +421,7 @@ export function isSessionUsageLimitSubmissionError(error: Error): boolean {
   return (
     (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
     error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE ||
-    error.message === LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+    LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES.includes(error.message)
   );
 }
 
@@ -216,6 +436,7 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   }
   return (
     error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    error.message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
     /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
   );
 }
@@ -246,7 +467,16 @@ export function siteRefusalCode(error: Error): string | null {
   return typeof code === "string" && SITE_REFUSAL_CODES.has(code) ? code : null;
 }
 
-export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): string {
+/**
+ * The composer's message for a refused or failed send. `canFix` is whether the
+ * viewer can buy credits or upgrade; otherwise a credit refusal says to ask an
+ * organization owner.
+ */
+export function composerSubmissionErrorMessage(
+  t: OpenGeniText,
+  error: Error,
+  canFix = true,
+): string {
   if (error instanceof ComposerReconciliationRequiredError) {
     return t("lib.format.reconcileBeforeRetry");
   }
@@ -255,9 +485,16 @@ export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): s
   }
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
-  if (isModelUnavailableSubmissionError(error)) return t("lib.format.modelUnavailable");
+  if (isModelUnavailableSubmissionError(error)) {
+    // A refused new chat has no chat yet whose model is "no longer available".
+    return sessionCreateRefusalMessage(t, error) ?? t("lib.format.modelUnavailable");
+  }
   if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
+  const repositoryRefusal = repositoryUnavailableRefusalMessage(t, error);
+  if (repositoryRefusal) return repositoryRefusal;
+  const createRefusal = sessionCreateRefusalMessage(t, error);
+  if (createRefusal) return createRefusal;
   const siteRefusal = siteRefusalCode(error);
   if (siteRefusal) return COMPOSER_SITE_REFUSAL_MESSAGES(t)[siteRefusal]!;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
@@ -269,9 +506,22 @@ export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): s
         : COMPOSER_MEMBER_ALLOWANCE_MESSAGE(t);
     return composerErrorReference(t, error, message);
   }
-  return isComposerCreditRefusal(error)
-    ? composerErrorReference(t, error, COMPOSER_PAYMENT_REQUIRED_MESSAGE(t))
-    : formatErrorMessage(error);
+  if (!isComposerCreditRefusal(error)) {
+    // A refusal the server explains says why, never a generic "check your input".
+    if (error instanceof OpenGeniApiError && (error.status === 400 || error.status === 422)) {
+      return serverRefusalReason(error) ?? formatErrorMessage(error);
+    }
+    return formatErrorMessage(error);
+  }
+  // Own-key and API refusals name their one fix; no model choice helps.
+  const kind = creditRefusalKind(error) ?? creditRefusalKindFromText(error.message);
+  return composerErrorReference(
+    t,
+    error,
+    kind
+      ? t((canFix ? COMPOSER_CREDIT_REFUSAL_KEYS : COMPOSER_CREDIT_REFUSAL_ASK_OWNER_KEYS)[kind])
+      : COMPOSER_PAYMENT_REQUIRED_MESSAGE(t),
+  );
 }
 
 function composerErrorReference(t: OpenGeniText, error: Error, message: string): string {
@@ -285,6 +535,8 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    // The policy refuses the same model again until someone changes it.
+    (error instanceof OpenGeniApiError && error.details?.code === MODEL_POLICY_DETAIL_CODE) ||
     isConnectionAccountSubmissionError(error) ||
     isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") ||
@@ -309,10 +561,12 @@ function isComposerCreditRefusal(error: Error): boolean {
  * workspace ran out of credits? Matches the engine's "insufficient workspace
  * credits" text, and the older "insufficient Opengeni credits" wording in
  * existing history (case-insensitive, substring — it arrives both bare and
- * wrapped in "Activity task failed: …") and the
+ * wrapped in "Activity task failed: …"), the refusal of an API turn that has
+ * no credits or of an own-key turn that has no paid credit, and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
-const CREDIT_EXHAUSTION_TEXT = /insufficient (?:workspace|opengeni) credits/i;
+const CREDIT_EXHAUSTION_TEXT =
+  /insufficient (?:workspace|opengeni) credits|add credits to use your own key|upgrade to pro to use your own key|api usage uses credits, not your plan credit/i;
 
 export function isCreditExhaustion(
   input: { error?: string | null; detail?: string | null; segmentLimit?: string | null } | string,
@@ -346,7 +600,7 @@ export function humanizeFailureReason(t: OpenGeniText, reason: string | null): s
     return reason;
   }
   if (isCreditExhaustion(reason)) {
-    return CREDIT_EXHAUSTION_MESSAGE(t);
+    return creditExhaustionText(t, reason);
   }
   // A turn refused because the chat's model was retired or removed.
   if (
@@ -442,7 +696,12 @@ export function presentFailure(
     return typeof value === "string" && value.trim() ? value : null;
   };
   const message = text("error") ?? text("message");
-  const detail = text("lastRetryableError") ?? text("detail");
+  // Sandbox service failures record the service's own text (for example
+  // "compute control service POST /v1/sandboxes: …") only for diagnostics.
+  const detail =
+    typeof payload.code === "string" && AUTHORED_ONLY_FAILURE_CODES.has(payload.code)
+      ? null
+      : (text("lastRetryableError") ?? text("detail"));
   const safetyRefusal =
     payload.code === "provider_safety_refusal" ||
     [message, detail].some(
@@ -487,6 +746,15 @@ export function presentFailure(
 }
 
 const capacityRecoveryExhausted = (t: OpenGeniText) => t("lib.format.capacityRecoveryExhausted");
+
+/** Server failure codes whose `error` is complete person-facing copy; never append `detail`. */
+const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "sandbox_capacity_unavailable",
+  "sandbox_service_unavailable",
+  "sandbox_service_refused",
+  // The detail is the machine agent's own text (the program, the OS error).
+  "sandbox_process_start_failed",
+]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */
 const CODED_FAILURE_TEXT: Readonly<Record<string, ((t: OpenGeniText) => string) | undefined>> = {

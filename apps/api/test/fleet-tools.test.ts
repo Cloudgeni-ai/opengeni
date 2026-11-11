@@ -21,7 +21,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
-import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
+import {
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -573,7 +576,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       activeEpoch: before?.activeEpoch ?? 0,
       code: "personal_machine_permission_required",
     });
-    expect(refused.reason).toContain("its owner has not allowed this chat");
+    expect(refused.reason).toContain("its owner has not turned it on for agents in this workspace");
     expect(refused.reason).toContain("capability_authorization_request");
     expect(refused.reason).not.toContain("Failed query");
     const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
@@ -581,7 +584,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       cmd: "hostname",
     });
     expect(refusedRun.ok).toBe(false);
-    expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    expect(refusedRun.reason).toContain(
+      "its owner has not turned it on for agents in this workspace",
+    );
     expect(refusedRun.code).toBe("personal_machine_permission_required");
     await allowThisChat();
     const withoutAttempt: FleetContext = {
@@ -646,6 +651,68 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
   }, 60_000);
 
+  test("a computer enrolled both as its owner's own and shared with the workspace is listed once", async () => {
+    if (!available) return;
+    const { accountId, targetWorkspaceId, machine, connectionInstanceId, ctx, services } =
+      await seedPersonalMachineChat("none");
+    // The same running agent also serves the computer shared with this workspace.
+    const sharedEnrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    expect(
+      (
+        await claimEnrollmentConnection(db, {
+          workspaceId: targetWorkspaceId,
+          enrollmentId: sharedEnrollment.id,
+          credentialGeneration: sharedEnrollment.credentialGeneration,
+          connectionInstanceId,
+          leaseMs: 60_000,
+        })
+      ).claimed,
+    ).toBe(true);
+    await admin`update enrollments set last_seen_at = now() where id = ${sharedEnrollment.id}`;
+    const sharedSandbox = await createSandbox(db, {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      kind: "selfhosted",
+      name: "Personal laptop",
+      enrollmentId: sharedEnrollment.id,
+    });
+
+    // The shared enrollment needs no per-chat permission from its owner, so the
+    // chat sees that one.
+    const listed = await listFleet(services, ctx);
+    expect(listed.sandboxes.map((sandbox) => sandbox.id)).toEqual([sharedSandbox.id]);
+
+    // A chat already on the personal enrollment keeps seeing the one it is on.
+    await admin`
+      update sessions
+      set active_sandbox_id = ${machine.sandboxId}, active_epoch = active_epoch + 1
+      where id = ${ctx.sessionId}
+    `;
+    const onPersonal = await listFleet(services, ctx);
+    expect(onPersonal.sandboxes.map((sandbox) => sandbox.id)).toEqual([machine.sandboxId]);
+    expect(onPersonal.sandboxes[0]?.active).toBe(true);
+
+    // Different running agents are different computers, even with one name.
+    await admin`
+      update enrollments
+      set connection_instance_id = ${crypto.randomUUID()}
+      where id = ${sharedEnrollment.id}
+    `;
+    const separate = await listFleet(services, ctx);
+    expect(separate.sandboxes.map((sandbox) => sandbox.id).sort()).toEqual(
+      [machine.sandboxId, sharedSandbox.id].sort(),
+    );
+  }, 60_000);
+
   test("an agent's API requests reach the personal machine its chat may use, as its owner", async () => {
     if (!available) return;
     const {
@@ -700,6 +767,36 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     // Without the chat's permission the same request is refused.
     await revokeThisChat();
     await expect(agentRequest()).rejects.toThrow();
+  }, 60_000);
+
+  test("an agent moving onto a machine whose approval ended this turn gets machine access needed, not a raw error", async () => {
+    if (!available) return;
+    const { targetWorkspaceId, machine, ctx, services, allowThisChat, revokeThisChat } =
+      await seedPersonalMachineChat("none");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The owner withdraws this chat's approval while the turn runs. Admission
+    // already holds this turn's authorization for the machine, so only the
+    // check right before use can refuse the agent's next move onto it.
+    await revokeThisChat();
+    const before = await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId);
+    const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(refused).toMatchObject({
+      swapped: false,
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+      code: "machine_access_required",
+    });
+    expect(refused.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+    expect(refused.reason).not.toContain("Failed query");
+    expect(refused.reason).not.toContain("no longer live");
+    expect(await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId)).toEqual(before);
+    const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(refusedRun).toMatchObject({ ok: false, code: "machine_access_required" });
+    expect(refusedRun.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
   }, 60_000);
 
   // The interaction tools move the chat and list its machines through the
@@ -1030,6 +1127,61 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.operationAvailability).toBe("wakeable");
     expect(group.providerStatus).toBe("exists");
     expect(group.workspaceStatus).toBe("ready");
+  }, 60_000);
+
+  test("a warm compute home whose host is handing it off is recovering, not ready, until that ends", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    const ready = {
+      opengeniRecovery: {
+        provider: {
+          status: "exists",
+          instanceId: "compute-home",
+          observedAt: "2026-11-06T01:00:00.000Z",
+        },
+        archive: { status: "none", current: null, previous: null },
+        restore: {
+          status: "not_required",
+          rematerializationId: null,
+          selectedRevision: null,
+          startedAt: null,
+          completedAt: null,
+        },
+        workspace: {
+          status: "ready",
+          verifiedRevision: "compute-home-ready",
+          verifiedAt: "2026-11-06T01:00:00.000Z",
+        },
+      },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, instance_id, backend,
+        lease_epoch, workspace_generation, archive_generation, resume_state, expires_at,
+        compute_asleep_since, compute_handing_off_since
+      ) values (
+        ${accountId}, ${workspaceId}, ${ctx.sessionGroupId}, 'warm', 'compute-home', 'compute',
+        3, 5, 5, ${admin.json(ready)}::jsonb, now() + interval '15 minutes',
+        now(), now()
+      )
+    `;
+    const group = async () =>
+      (await listFleet(services, ctx)).sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    const busy = await group();
+    expect(busy.operationAvailability).toBe("recovering");
+    expect(busy.liveness).toBe("reconnecting");
+    expect(busy.attachable).toBe(false);
+    expect(busy.hostBusy).toBe("handing_off");
+    expect(busy.leaseLiveness).toBe("warm");
+
+    // A report older than a hand-off may refuse wakes counts for nothing.
+    await admin`
+      update sandbox_leases set compute_handing_off_since = now() - interval '10 minutes'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${ctx.sessionGroupId}`;
+    const settled = await group();
+    expect(settled.operationAvailability).toBe("ready");
+    expect(settled.liveness).toBe("online");
+    expect(settled.hostBusy).toBeUndefined();
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {

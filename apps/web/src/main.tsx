@@ -21,9 +21,11 @@ import {
   createClientSignalReporter,
   setClientSignalReporter,
 } from "@opengeni/react/app/lib/client-signals";
+import { reportMissingDesktopBridge } from "@opengeni/react/app/lib/desktop";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
 import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
+import { installFeedbackTrail } from "@opengeni/react/app/lib/feedback-trail";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
@@ -36,6 +38,8 @@ import { toast } from "sonner";
 retainIdentityLinkContinuation(window);
 // Errors the person was shown go with their next feedback report.
 recordErrorToasts(toast);
+// So do the latest requests, uncaught errors, failed loads and steps before it.
+installFeedbackTrail(window);
 // Before the first paint: slim scrollbars where the platform draws classic ones.
 markClassicScrollbars(document);
 // Error counter and diagnostics (scrubbed, bounded error text); see
@@ -59,6 +63,9 @@ if (reportClientSignals) {
       routePattern: appRoutePattern,
     }),
   );
+  // The desktop app's own window without the shell's bridge; see lib/desktop.tsx.
+  // The router has not resolved yet, so this names the route it is loading.
+  reportMissingDesktopBridge(appDestinationRoutePattern);
 }
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
 // Content-free count of analytics banner answers; see lib/analytics-consent.ts.

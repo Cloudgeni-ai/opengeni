@@ -10,30 +10,32 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuMeta,
   DropdownMenuNote,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { cn } from "../../lib/utils";
+import type { SubscriptionWindow } from "../../lib/subscription-accounts";
+import { SubscriptionUsageWindows } from "../models/subscription-usage";
 
 export type SubscriptionAccountMenuRow = {
   id: string;
+  /** The account's full name (label or email); wraps, never truncated. */
   label: string;
+  /** The email under a label that differs from it. */
+  email?: string | null | undefined;
+  /** The plan's own name, only when the listed accounts' plans differ. */
   plan?: string | null | undefined;
   status?: string | null;
+  /** `next_turn`: the chosen account. `in_use`: the account the chat runs on. */
+  mark?: "next_turn" | "in_use" | null | undefined;
+  /** Every reported window; null while hidden (the current account, a live check). */
+  windows?: SubscriptionWindow[] | null | undefined;
+  /** Words instead of windows: no reading yet, or a limit no window shows. */
+  usageMessage?: string | null | undefined;
   detail?: string;
   personal?: boolean;
   disabled?: boolean;
-  /** Per-window readings, not an aggregate capacity/eligibility estimate. */
-  usageSummary?: string | undefined;
-};
-
-export type SubscriptionAccountUsageWindow = {
-  label: string;
-  /** Null means unknown; values over 100 can represent overage. */
-  usedPercent: number | null;
-  detail?: string;
 };
 
 export type SubscriptionAccountMenuUsage = {
@@ -41,46 +43,10 @@ export type SubscriptionAccountMenuUsage = {
   unavailable?: boolean | undefined;
   message?: string | undefined;
   note?: string | undefined;
-  windows?: SubscriptionAccountUsageWindow[] | undefined;
+  windows?: SubscriptionWindow[] | undefined;
 };
 
-function UsageRow({ label, usedPercent, detail }: SubscriptionAccountUsageWindow) {
-  const known = typeof usedPercent === "number" && Number.isFinite(usedPercent);
-  const pct = known ? Math.min(100, Math.max(0, usedPercent)) : 0;
-  const text = known ? `${Math.round(usedPercent)}% used` : "Unknown";
-  return (
-    <div className="space-y-0.5 text-2xs text-fg-subtle">
-      <div className="flex items-center gap-2">
-        <span className="max-w-28 min-w-10 shrink-0 truncate" title={label}>
-          {label}
-        </span>
-        {known ? (
-          <span
-            className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2"
-            role="progressbar"
-            aria-label={`${label} used`}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={pct}
-            aria-valuetext={text}
-          >
-            <span
-              className={cn(
-                "block h-full rounded-full",
-                pct >= 90 ? "bg-status-waiting" : "bg-brand",
-              )}
-              style={{ width: `${pct}%` }}
-            />
-          </span>
-        ) : (
-          <span className="flex-1" />
-        )}
-        <span className="shrink-0 whitespace-nowrap text-right tabular-nums">{text}</span>
-      </div>
-      {detail ? <p>{detail}</p> : null}
-    </div>
-  );
-}
+const MARK_TEXT = { next_turn: "Next turn", in_use: "In use" } as const;
 
 export function SubscriptionAccountMenu({
   ariaLabel,
@@ -93,6 +59,7 @@ export function SubscriptionAccountMenu({
   tone = "ok",
   usage,
   accounts,
+  plan,
   selectedId,
   automaticSelected,
   choosing,
@@ -115,6 +82,8 @@ export function SubscriptionAccountMenu({
   tone?: "ok" | "warn" | "bad" | undefined;
   usage: SubscriptionAccountMenuUsage;
   accounts: SubscriptionAccountMenuRow[];
+  /** The plan every listed account shares, shown once beside the list. */
+  plan?: string | null | undefined;
   selectedId: string | null;
   automaticSelected: boolean;
   choosing: boolean;
@@ -132,28 +101,59 @@ export function SubscriptionAccountMenu({
       key={account.id}
       disabled={choosing || account.disabled}
       title={account.detail}
+      data-mark={account.mark ?? undefined}
       onSelect={(event) => {
         event.preventDefault();
         onChoose(account.id);
       }}
-      className="cursor-pointer"
+      className="cursor-pointer items-start"
     >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate">{account.label}</span>
-        {account.usageSummary ? (
-          <span className="block truncate text-2xs text-fg-subtle" title={account.usageSummary}>
-            {account.usageSummary}
+      <span className="min-w-0 flex-1 space-y-1">
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span
+            data-slot="subscription-account-name"
+            className={cn(
+              "min-w-0 flex-1 [overflow-wrap:anywhere]",
+              account.mark === "next_turn" && "font-medium",
+            )}
+          >
+            {account.label}
+          </span>
+          {account.plan ? (
+            <span className="shrink-0 text-xs text-fg-muted">{account.plan}</span>
+          ) : null}
+        </span>
+        {account.email ? (
+          <span className="block text-2xs leading-4 text-fg-subtle [overflow-wrap:anywhere]">
+            {account.email}
           </span>
         ) : null}
+        {account.mark || account.status ? (
+          <span className="flex flex-wrap items-center gap-x-2 text-2xs leading-4">
+            {account.mark ? (
+              <span
+                className={cn(
+                  "font-medium",
+                  account.mark === "next_turn" ? "text-brand" : "text-fg-muted",
+                )}
+              >
+                {MARK_TEXT[account.mark]}
+              </span>
+            ) : null}
+            {account.status ? <span className="text-status-waiting">{account.status}</span> : null}
+          </span>
+        ) : null}
+        {account.windows && account.windows.length > 0 ? (
+          <SubscriptionUsageWindows windows={account.windows} empty={null} />
+        ) : null}
+        {account.usageMessage ? (
+          <span className="block text-2xs leading-4 text-fg-subtle">{account.usageMessage}</span>
+        ) : null}
       </span>
-      {account.plan ? <DropdownMenuMeta>{account.plan}</DropdownMenuMeta> : null}
-      {account.status ? (
-        <span className="shrink-0 text-xs text-status-waiting">{account.status}</span>
-      ) : null}
       {choosingTarget === account.id ? (
-        <Loader2Icon className="size-4 shrink-0 animate-spin" />
+        <Loader2Icon className="mt-0.5 size-4 shrink-0 animate-spin" />
       ) : (
-        <DropdownMenuCheck checked={account.id === selectedId} className="ml-0" />
+        <DropdownMenuCheck checked={account.id === selectedId} className="mt-0.5 ml-0" />
       )}
     </DropdownMenuItem>
   );
@@ -195,7 +195,7 @@ export function SubscriptionAccountMenu({
         side="bottom"
         sideOffset={8}
         collisionPadding={12}
-        className="flex max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] w-72 flex-col overflow-hidden"
+        className="flex max-h-[min(40rem,var(--radix-dropdown-menu-content-available-height))] w-[min(24rem,calc(100vw-1.5rem))] flex-col overflow-hidden"
       >
         <div className="shrink-0 space-y-2 px-2.5 pt-1.5 pb-2">
           <div className="flex items-start gap-2">
@@ -204,34 +204,37 @@ export function SubscriptionAccountMenu({
             </span>
             <div className="min-w-0 flex-1">
               <p className="text-2xs text-fg-subtle">{selectionLabel}</p>
-              <p className="truncate text-sm font-medium text-fg">{displayName}</p>
+              <p className="text-sm font-medium text-fg [overflow-wrap:anywhere]">{displayName}</p>
               {identity ? (
-                <p className="truncate text-2xs text-fg-subtle" title={identity}>
-                  {identity}
-                </p>
+                <p className="text-2xs text-fg-subtle [overflow-wrap:anywhere]">{identity}</p>
               ) : null}
-              <p className="truncate text-2xs text-fg-subtle" title={metadata}>
-                {metadata}
-              </p>
+              <p className="text-2xs text-fg-subtle">{metadata}</p>
             </div>
           </div>
           {usage.checking ? (
             <p className="text-2xs text-fg-subtle">Checking usage…</p>
           ) : usage.unavailable ? (
             <p className="text-2xs text-fg-subtle">Usage unavailable</p>
-          ) : usage.message ? (
-            <p className="text-2xs text-fg-subtle">{usage.message}</p>
           ) : (
-            <div className="max-h-36 space-y-1.5 overflow-y-auto overscroll-contain">
-              {usage.windows?.map((window) => (
-                <UsageRow key={window.label} {...window} />
-              ))}
-            </div>
+            <>
+              {usage.windows && usage.windows.length > 0 ? (
+                <SubscriptionUsageWindows
+                  windows={usage.windows}
+                  layout="stack"
+                  empty={null}
+                  className="max-h-36 overflow-y-auto overscroll-contain text-xs leading-5"
+                />
+              ) : null}
+              {usage.message ? <p className="text-2xs text-fg-subtle">{usage.message}</p> : null}
+            </>
           )}
           {usage.note ? <p className="text-2xs text-fg-subtle">{usage.note}</p> : null}
         </div>
         <DropdownMenuSeparator className="shrink-0" />
-        <DropdownMenuLabel className="shrink-0">{actionLabel}</DropdownMenuLabel>
+        <DropdownMenuLabel className="flex shrink-0 items-baseline justify-between gap-3">
+          <span>{actionLabel}</span>
+          {plan ? <span className="font-normal text-fg-subtle">{plan}</span> : null}
+        </DropdownMenuLabel>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <DropdownMenuItem
             disabled={choosing}

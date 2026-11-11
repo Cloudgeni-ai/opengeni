@@ -1,10 +1,11 @@
 import type { CodexAccount, CodexAccountOverview } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 import { codexOverviewUsage } from "@/components/models/codex-overview-usage";
 
 export function useOrganizationCodexOverview(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   organizationId: string,
   account: CodexAccount,
   enabled = true,
@@ -22,7 +23,7 @@ export function useOrganizationCodexOverview(
 }
 
 export function useOrganizationCodexUsage(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   organizationId: string,
   account: CodexAccount,
   enabled = true,
@@ -42,7 +43,7 @@ export function OrganizationCodexDetailPrefetch({
   organizationId,
   account,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   account: CodexAccount;
 }) {

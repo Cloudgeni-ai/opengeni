@@ -1,10 +1,17 @@
 import { AlertTriangleIcon } from "lucide-react";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import { Link } from "../../lib/navigation";
-import { useEffect, useRef, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
-import { failedSessionCopy } from "../../lib/failed-session-copy";
+import { detailBeyondHeadline, failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
+import {
+  creditRefusalHeadline,
+  isUpgradeRefusal,
+  type CreditRefusalKind,
+} from "../../../lib/format";
+import { t } from "../../lib/console-text";
 import { analyticsAction } from "../../../ui/analytics-actions";
 import {
   noteTurnFailureAction,
@@ -13,6 +20,8 @@ import {
 } from "../../lib/turn-failure-analytics";
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
+import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
+import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -21,14 +30,23 @@ import {
 
 const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: false };
 
+/** Allow the chat's own machine for it and continue; see `FailedSessionBanner`'s `allowMachine`. */
+export type AllowMachineAction = {
+  machineName: string;
+  /** Resolves to an error to show, or null once the chat is allowed and continuing. */
+  onAllow: () => Promise<string | null>;
+};
+
 /** Presentation only: admission, billing and retry identity remain with their owners. */
 export function FailedSessionBanner({
   failure,
   creditExhausted,
+  creditRefusal: stopRefusal,
   freeCreditGap = null,
   onChooseModel,
   workspaceId,
   canBuyCredits = false,
+  onAddCredits,
   canConnectModel = false,
   modelChanged = false,
   canChooseModel = false,
@@ -39,17 +57,23 @@ export function FailedSessionBanner({
   sandboxRecovery,
   analyticsKey,
   shownInTimeline = false,
+  codexUsage,
+  allowMachine,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
   analyticsKey?: string | undefined;
   creditExhausted?: boolean | undefined;
+  /** The one-fix refusal the last turn ended on (`creditRefusalFromEvents`), if known. */
+  creditRefusal?: CreditRefusalKind | null | undefined;
   /** Free credit remains for other models but not this one. */
   freeCreditGap?: FreeCreditGap | null | undefined;
   /** Select a model in the composer; offered for a covered model after a free-credit gap. */
   onChooseModel?: ((modelId: string) => void) | undefined;
   workspaceId?: string | undefined;
   canBuyCredits?: boolean | undefined;
+  /** Opens the add-credits prompt in the chat; without it, Add credits opens billing. */
+  onAddCredits?: (() => void) | undefined;
   canConnectModel?: boolean | undefined;
   modelChanged?: boolean | undefined;
   canChooseModel?: boolean | undefined;
@@ -67,22 +91,43 @@ export function FailedSessionBanner({
     | Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children" | "retryActions">
     | undefined;
   /**
-   * The timeline above already shows this exact failure with its Details
-   * (see `timelineShowsFailure`). A compaction failure then keeps only its
-   * recovery actions here instead of a second headline and Details.
+   * The timeline above already shows this exact failure in its own row (see
+   * `timelineShowsFailure`: a compaction landmark or a usage-limit row). The
+   * banner then keeps only its recovery actions instead of a second headline.
    */
   shownInTimeline?: boolean | undefined;
+  /**
+   * When the ChatGPT/Codex plan is out of usage: say when it resets, with a
+   * "Continue at reset" switch in place of Retry.
+   */
+  codexUsage?: CodexUsageChoice | undefined;
+  /**
+   * The chat's own machine isn't allowed for it and the person viewing owns
+   * it: Allow approves it for this chat and continues. Resolves to an error
+   * to show, or null once allowed.
+   */
+  allowMachine?: AllowMachineAction | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
   const creditGap = billingFailure ? freeCreditGap : null;
-  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
-    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
-  // Offer the switch until the composer selects a model that can run.
+  const {
+    reason,
+    unavailableModel,
+    retryUnhelpful,
+    detail,
+    dailyLimit,
+    compaction,
+    creditRefusal,
+    machineAccess,
+  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
+  const machineAllow = machineAccess && !structuralFailure ? allowMachine : undefined;
+  // Offer the switch until the composer selects a model that can run. An
+  // own-key or API stop has one fix, never another model.
   const switchTo =
-    creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
+    !creditRefusal && creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
       ? creditGap.covered[0]
       : undefined;
   // The free model's daily allowance is deployment-wide: name it and offer the
@@ -90,15 +135,29 @@ export function FailedSessionBanner({
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
   const offerCredits = Boolean(workspaceId && canBuyCredits);
   const offerConnect = Boolean(workspaceId && canConnectModel);
-  const headline = freeModelLimit
-    ? freeModelDailyLimitReason({
-        modelChanged,
-        canBuyCredits: offerCredits,
-        canConnectModel: offerConnect,
-        subscriptions,
-        canChooseModel: hasModelPicker ?? canChooseModel,
-      })
-    : reason;
+  const codexUsageFailure =
+    codexUsage && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure
+      ? codexUsage
+      : null;
+  const headline = codexUsageFailure
+    ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
+    : machineAllow
+      ? machineAccessNeededMessage(machineAllow.machineName)
+      : freeModelLimit
+        ? freeModelDailyLimitReason({
+            modelChanged,
+            canBuyCredits: offerCredits,
+            canConnectModel: offerConnect,
+            subscriptions,
+            canChooseModel: hasModelPicker ?? canChooseModel,
+          })
+        : creditRefusal && !offerCredits
+          ? // Without billing access the one fix is asking an owner.
+            creditRefusalHeadline(t, creditRefusal, false)
+          : reason;
+  // The timeline leaves this failure's text to the banner: keep the recorded
+  // text reachable, including where the headline replaced it (Codex usage).
+  const shownDetail = detailBeyondHeadline(headline, detail ?? (codexUsageFailure ? reason : null));
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -109,14 +168,31 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
-  const retryActions =
-    trackedActions &&
+  // Retry would only hit the same limit: the switch runs the turn again
+  // once the limit resets. Another model from the picker continues at once.
+  const retryActions = machineAllow ? (
+    <AllowMachineButton action={machineAllow} />
+  ) : codexUsageFailure ? (
+    <>
+      <ContinueAtResetSwitch {...codexUsageFailure} />
+      {codexUsageFailure.error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {codexUsageFailure.error}
+        </p>
+      ) : null}
+    </>
+  ) : trackedActions &&
     !failure.safetyRefusal &&
     failure.failureCode !== "knowledge_learning_scope_changed" &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
-      <FailedSessionActions {...trackedActions} />
-    ) : null;
-  if (shownInTimeline && compaction && !structuralFailure) {
+    <FailedSessionActions {...trackedActions} />
+  ) : null;
+  // Only these failure kinds have a purpose-built timeline row to step back for.
+  if (
+    shownInTimeline &&
+    (compaction || failure.failureCode === "allowance_exhausted") &&
+    !structuralFailure
+  ) {
     const recovery = sandboxRecovery ? (
       <SandboxRecoveryActions
         {...sandboxRecovery}
@@ -151,20 +227,24 @@ export function FailedSessionBanner({
           />
           {headline}
         </span>
-        {detail ? (
+        {shownDetail ? (
           <details className="group min-w-0 max-w-full text-xs open:basis-full">
             <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
               Details
             </summary>
             <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs text-fg-muted">
-              {detail}
+              {shownDetail}
             </p>
           </details>
         ) : null}
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
             {offerCredits ? (
-              <BuyCreditsLink workspaceId={workspaceId} primary={!offerConnect} />
+              <BuyCreditsLink
+                workspaceId={workspaceId}
+                primary={!offerConnect}
+                onAddCredits={onAddCredits}
+              />
             ) : null}
             {offerConnect ? (
               <ConnectModelLink
@@ -175,7 +255,15 @@ export function FailedSessionBanner({
           </>
         ) : null}
         {billingFailure ? (
-          switchTo ? (
+          isUpgradeRefusal(creditRefusal) ? (
+            workspaceId && canBuyCredits ? (
+              <UpgradeLink workspaceId={workspaceId} />
+            ) : null
+          ) : creditRefusal ? (
+            workspaceId && canBuyCredits ? (
+              <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
+            ) : null
+          ) : switchTo ? (
             <>
               <Button
                 type="button"
@@ -186,13 +274,17 @@ export function FailedSessionBanner({
                 Use {switchTo.label}
               </Button>
               {workspaceId && canBuyCredits ? (
-                <BuyCreditsLink workspaceId={workspaceId} primary={false} />
+                <BuyCreditsLink
+                  workspaceId={workspaceId}
+                  primary={false}
+                  onAddCredits={onAddCredits}
+                />
               ) : null}
             </>
           ) : workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} primary />
+            <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
           ) : workspaceId && canConnectModel ? (
-            <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
+            <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
           <SandboxRecoveryActions
@@ -211,7 +303,31 @@ export function FailedSessionBanner({
 }
 
 /** The banner's one unblocking action is the primary; next to Connect it is the outline. */
-function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
+function BuyCreditsLink({
+  workspaceId,
+  primary,
+  onAddCredits,
+}: {
+  workspaceId: string;
+  primary: boolean;
+  onAddCredits?: (() => void) | undefined;
+}) {
+  if (onAddCredits) {
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant={primary ? "default" : "outline"}
+        onClick={() => {
+          noteTurnFailureAction("buy_credits");
+          onAddCredits();
+        }}
+        {...analyticsAction("buy_credits")}
+      >
+        Add credits
+      </Button>
+    );
+  }
   return (
     <Button asChild size="sm" variant={primary ? "default" : "outline"}>
       <Link
@@ -221,7 +337,65 @@ function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary
         onClick={() => noteTurnFailureAction("buy_credits")}
         {...analyticsAction("buy_credits")}
       >
-        Buy credits
+        Add credits
+      </Link>
+    </Button>
+  );
+}
+
+/** The one way forward when the chat's own machine isn't allowed for it. */
+function AllowMachineButton({ action }: { action: AllowMachineAction }) {
+  const pending = useRef(false);
+  const [allowing, setAllowing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function allow() {
+    if (pending.current) return;
+    pending.current = true;
+    setAllowing(true);
+    setError(null);
+    try {
+      setError(await action.onAllow());
+    } catch {
+      setError("Couldn’t allow the machine for this chat. Try again.");
+    } finally {
+      pending.current = false;
+      setAllowing(false);
+    }
+  }
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        disabled={allowing}
+        aria-busy={allowing}
+        onClick={() => {
+          noteTurnFailureAction("allow_machine");
+          void allow();
+        }}
+      >
+        {allowing ? "Allowing…" : "Allow for this chat"}
+      </Button>
+      {error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {error}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+function UpgradeLink({ workspaceId }: { workspaceId: string }) {
+  return (
+    <Button asChild size="sm">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        onClick={() => noteTurnFailureAction("upgrade_plan")}
+        {...analyticsAction("upgrade_plan")}
+      >
+        Upgrade to Pro
       </Link>
     </Button>
   );

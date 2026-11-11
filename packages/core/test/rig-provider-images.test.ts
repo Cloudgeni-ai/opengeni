@@ -15,7 +15,6 @@ const version: RigVersion = {
   setupScript: "apt-get update && apt-get install -y jq",
   checks: [{ name: "jq", command: "jq --version" }],
   credentialHooks: ["azure-cli-login"],
-  defaultVariableSetIds: ["33333333-3333-4333-8333-333333333333"],
   changelog: "initial",
   providerImages: {},
   createdBy: "user:test",

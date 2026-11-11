@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
@@ -75,6 +76,7 @@ import { formatBytes } from "../lib/format";
 import {
   isInteractionControlUnavailable,
   isSourcePlacementChangedError,
+  isSourcePlacementElsewhereError,
 } from "../lib/interaction-errors";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import {
@@ -108,7 +110,7 @@ export type BrowserViewerNotification = {
   message: string;
 };
 
-export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
+export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   /** The selected Opengeni agent/session. Peer BrowserSessions stay discoverable. */
   sessionId: string;
   enabled?: boolean | undefined;
@@ -1407,7 +1409,7 @@ function BrowserSessionGroup(props: {
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
             <span className="min-w-0 flex-1">
@@ -1489,7 +1491,7 @@ function BrowserLaunchMenu(props: {
             </p>
             {props.attachedDevices.map((device) => (
               <button
-                key={device.id}
+                key={`${device.workspaceId}:${device.id}`}
                 type="button"
                 onClick={() => choose({ kind: "attached", device })}
                 className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
@@ -1960,9 +1962,9 @@ function siteAuthHealth(
     case "needs_repair":
       return { label: t("browserViewer.signInNeedsAttention"), dotClass: "bg-og-status-waiting" };
     case "failed":
-      return { label: t("browserViewer.verificationFailed"), dotClass: "bg-og-status-error" };
+      return { label: t("browserViewer.verificationFailed"), dotClass: "bg-og-status-failed" };
     case "unknown":
-      return { label: t("browserViewer.notCheckedYet"), dotClass: "bg-og-muted" };
+      return { label: t("browserViewer.notCheckedYet"), dotClass: "bg-og-fg-subtle" };
   }
 }
 
@@ -2765,6 +2767,7 @@ function SemanticBrowserFallback(props: {
 }) {
   const t = useOpenGeniText();
   const controlFailure = interactionControlFailureFromError(props.error);
+  const elsewhere = isSourcePlacementElsewhereError(props.error, "browser_session");
   const { controlUnavailable } = props;
   const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
@@ -2798,7 +2801,10 @@ function SemanticBrowserFallback(props: {
         </div>
         {props.error || props.reconnectMessage ? (
           <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
-            {props.reconnectMessage ?? controlFailure?.message ?? props.error?.message}
+            {props.reconnectMessage ??
+              (elsewhere
+                ? t("browserViewer.chatIsOnAnotherComputer")
+                : (controlFailure?.message ?? props.error?.message))}
           </p>
         ) : null}
         {interactive.length > 0 && !controlUnavailable ? (
@@ -2868,7 +2874,7 @@ function BrowserStatusBar(props: {
           "size-1.5 rounded-full",
           props.connectionState === "live" || props.connectionState === "semantic"
             ? "bg-og-status-running"
-            : "bg-og-muted",
+            : "bg-og-fg-subtle",
         )}
       />
       <span>
@@ -3058,7 +3064,7 @@ function BrowserDiagnosticsDrawer(props: {
             />
           </dl>
           {session?.failureCode ? (
-            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-danger">
+            <p className="mt-2 rounded-og-sm border border-og-danger/30 bg-og-danger/5 px-2.5 py-2 text-og-xs text-og-danger">
               {t("browserViewer.browserStateFailurecode", { failureCode: session.failureCode })}
             </p>
           ) : null}

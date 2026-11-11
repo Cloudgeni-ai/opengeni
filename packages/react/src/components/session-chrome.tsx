@@ -94,6 +94,7 @@ import {
 } from "../queue-presentation-model";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
+import { StoredFileThumbnails } from "./stored-file-thumbnails";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
@@ -195,19 +196,19 @@ const GOAL_LABEL = (t: OpenGeniText): Record<GoalPillState, string> => ({
  * human decision. Unknown or legacy reasons keep the bare "Paused".
  */
 const GOAL_PAUSED_REASON_SUFFIX = (t: OpenGeniText): Record<string, string> => ({
-  max_auto_continuations: "cap",
-  limits: "limits",
-  model_unavailable: "model",
-  model_policy: "policy",
-  credits: "credits",
-  budget: "budget",
+  max_auto_continuations: t("sessionChrome.pausedReasonCap"),
+  limits: t("sessionChrome.pausedReasonLimits"),
+  model_unavailable: t("sessionChrome.pausedReasonModel"),
+  model_policy: t("sessionChrome.pausedReasonPolicy"),
+  credits: t("sessionChrome.pausedReasonCredits"),
+  budget: t("sessionChrome.pausedReasonBudget"),
   usage_limit: t("sessionChrome.usageLimit"),
-  usage_policy: "limits",
-  allowance: "allowance",
+  usage_policy: t("sessionChrome.pausedReasonLimits"),
+  allowance: t("sessionChrome.pausedReasonAllowance"),
   session_usage_limit: t("sessionChrome.usageLimit"),
-  user_pause: "manually",
-  api: "manually",
-  agent: "agent",
+  user_pause: t("sessionChrome.pausedReasonManually"),
+  api: t("sessionChrome.pausedReasonManually"),
+  agent: t("sessionChrome.pausedReasonAgent"),
 });
 
 const GOAL_PAUSED_REASON_EXPLANATION = (t: OpenGeniText): Record<string, string> => ({
@@ -689,6 +690,10 @@ function SessionChromeView({
         : "previous"
       : null);
   const stopping = stoppingKind !== null;
+  const stoppingLabel =
+    stoppingKind === "current"
+      ? t("sessionChrome.currentWorkStopping")
+      : t("sessionChrome.previousWorkStopping");
   const canMutateQueue = !readOnly && composer !== undefined;
   // One Send: nothing to choose, so waiting messages offer no Steer.
   const canSteerQueued = canMutateQueue && composer?.singleSend !== true;
@@ -1409,6 +1414,24 @@ function SessionChromeView({
                     </div>
                   );
                 })}
+              {stopping ? (
+                // Beside Activity at the rail's end, on one line. In a full rail
+                // its words give way first so other chips keep their size; the
+                // spinner always stays.
+                <span
+                  role="status"
+                  aria-live="polite"
+                  title={stoppingLabel}
+                  className="ml-auto inline-flex min-h-[var(--og-session-chrome-chip-min-height)] min-w-6 shrink-[9999] items-center gap-1.5 px-1.5 text-og-xs whitespace-nowrap text-og-fg-muted"
+                  data-testid="session-chrome-stopping"
+                >
+                  <Loader2Icon
+                    aria-hidden="true"
+                    className="size-3 shrink-0 animate-og-spin motion-reduce:animate-none"
+                  />
+                  <span className="min-w-0 truncate">{stoppingLabel}</span>
+                </span>
+              ) : null}
               {signals.some((signal) => ["incoming", "agents", "commands"].includes(signal.id)) ? (
                 <button
                   type="button"
@@ -1434,7 +1457,9 @@ function SessionChromeView({
                     );
                   }}
                   className={cn(
-                    "relative ml-auto inline-flex min-h-[var(--og-session-chrome-chip-min-height)] shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
+                    "relative inline-flex min-h-[var(--og-session-chrome-chip-min-height)] shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
+                    // A stopping status before it takes the free space instead.
+                    !stopping && "ml-auto",
                     // 44px coarse target without a taller row (see the signal chips).
                     "pointer-coarse:min-h-8 pointer-coarse:min-w-11 pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-1.5 pointer-coarse:before:content-['']",
                     activityOpen
@@ -1459,22 +1484,6 @@ function SessionChromeView({
                     <span className="size-1.5 rounded-full bg-og-accent" />
                   ) : null}
                 </button>
-              ) : null}
-              {stopping ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className="inline-flex min-h-[var(--og-session-chrome-chip-min-height)] items-center gap-1.5 px-1.5 text-og-xs text-og-fg-muted"
-                  data-testid="session-chrome-stopping"
-                >
-                  <Loader2Icon
-                    aria-hidden="true"
-                    className="size-3 animate-og-spin motion-reduce:animate-none"
-                  />
-                  {stoppingKind === "current"
-                    ? t("sessionChrome.currentWorkStopping")
-                    : t("sessionChrome.previousWorkStopping")}
-                </span>
               ) : null}
             </div>
           </div>
@@ -1899,6 +1908,12 @@ function QueuePanel({
                 </div>
               ) : null}
             </div>
+            <StoredFileThumbnails
+              className="pl-4"
+              workspaceId={turn.workspaceId}
+              sessionId={turn.sessionId}
+              resources={turn.resources}
+            />
             {confirmingReplace ? (
               <div className="rounded-og-sm border border-og-status-waiting/30 bg-og-status-waiting/10 p-2 text-og-xs text-og-fg">
                 <p>{QUEUE_REPLACE_DRAFT_COPY(t).title}</p>

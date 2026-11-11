@@ -36,12 +36,13 @@ import {
   getConnectionMetadata,
   listConnectionsMetadata,
   persistProviderOAuthConnection,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+  connectOwnerStateFields,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
 } from "../connection-ownership";
@@ -153,6 +154,26 @@ export async function listPersonalGitHubConnections(
   );
 }
 
+/** The one personal GitHub connection a person sees: active first, then newest. */
+export function canonicalPersonalGitHubConnection<
+  T extends { status: string; updatedAt: string; id: string },
+>(connections: T[]): T | null {
+  const statusRank: Record<string, number> = {
+    active: 0,
+    needs_reauth: 1,
+    error: 2,
+    revoked: 3,
+  };
+  return (
+    [...connections].sort((left, right) => {
+      const rank = (statusRank[left.status] ?? 4) - (statusRank[right.status] ?? 4);
+      if (rank !== 0) return rank;
+      const updated = right.updatedAt.localeCompare(left.updatedAt);
+      return updated !== 0 ? updated : right.id.localeCompare(left.id);
+    })[0] ?? null
+  );
+}
+
 export async function disconnectPersonalGitHub(
   deps: ApiRouteDeps,
   input: {
@@ -160,6 +181,8 @@ export async function disconnectPersonalGitHub(
     subjectId: string;
     connectionId: string;
     payload: PersonalGitHubDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const existing = await getConnectionMetadata(
@@ -190,6 +213,7 @@ export async function disconnectPersonalGitHub(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
   } catch (error) {
     if (error instanceof ConnectionDisconnectIdempotencyError) {
@@ -199,7 +223,7 @@ export async function disconnectPersonalGitHub(
     }
     if (error instanceof ConnectionDisconnectGenerationError) {
       throw new HTTPException(409, {
-        message: "personal GitHub connection changed; refresh before disconnecting",
+        message: "Your GitHub connection changed while disconnecting. Try again.",
       });
     }
     throw error;
@@ -238,9 +262,10 @@ export async function startPersonalGitHubOAuth(
   const verifier = randomBytes(48).toString("base64url");
   const returnPath = personalGitHubReturnPath(input.workspaceId, input.returnPath);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: grant.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: grant.subjectId,
+    ...connectOwnerStateFields(
+      { accountId: grant.accountId, workspaceId: input.workspaceId, subjectId: grant.subjectId },
+      true,
+    ),
     kind: PERSONAL_GITHUB_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(externalActorContinuationForAuthorization(input.access)
@@ -251,7 +276,6 @@ export async function startPersonalGitHubOAuth(
           ),
         }
       : {}),
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     canonicalManagedHumanSession: input.access.canonicalManagedHumanSession,
     returnPath,
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),

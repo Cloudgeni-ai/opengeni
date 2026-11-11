@@ -1,7 +1,7 @@
 /** Shared, side-effect-free migration phase contract for the runner and lint. */
 import { splitStatements, stripComments } from "./migration-sql";
 export type MigrationPhase = "pre" | "maintenance" | "post";
-export type MigrationDeploymentMode = "historical" | "rolling" | "maintenance" | "unclassified";
+export type MigrationDeploymentMode = "rolling" | "maintenance" | "unclassified";
 export type MigrationPhases = Record<MigrationPhase, string[]>;
 
 /** A conservative posture classification, not a general rolling-safety proof.
@@ -34,12 +34,11 @@ export function ordinaryMigrationIsPostureInert(sqlText: string): boolean {
   });
 }
 
-export function migrationDeploymentMode(file: string, sqlText: string): MigrationDeploymentMode {
+export function migrationDeploymentMode(sqlText: string): MigrationDeploymentMode {
   const firstLine = sqlText.replaceAll("\r\n", "\n").split("\n", 1)[0]?.trim();
   if (firstLine === "-- deployment-mode: rolling") return "rolling";
   if (firstLine === "-- deployment-mode: maintenance") return "maintenance";
-  const ordinal = /^(\d{4})_/.exec(file)?.[1];
-  return ordinal && Number(ordinal) < 63 ? "historical" : "unclassified";
+  return "unclassified";
 }
 
 export const RELEASE_DIRECTIVE = /^-- opengeni:(pre-release|post-release)$/;

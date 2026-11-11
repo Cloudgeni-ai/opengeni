@@ -1,6 +1,6 @@
 //! The store a fleet runs on: Postgres, through a pool of connections.
 //!
-//! Registrations and giving up on a host are transactions; everything else
+//! Registrations and declaring a host gone are transactions; everything else
 //! is one conditional statement. Host rows carry a change number from a
 //! sequence, which replicas read changes by.
 
@@ -9,7 +9,9 @@ use std::str::FromStr as _;
 use std::time::Duration;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
-use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
+use compute_protocol::fleet::{
+    Capacity, HostInfo, Register, Renew, Report, Ruling, Verdict as Wire,
+};
 use compute_protocol::host::{Id, ImageId};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde_json::Value;
@@ -17,14 +19,17 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked,
-    RequestRow, Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write,
-    admits, rule,
+    Admission, Admits, AgentRef, Collector, Counted, Forsaken, Found, Gone, HostRow, Import,
+    Imported, Inserted, LifecycleRow, Linked, LostCopy, PointerRow, RequestRow, Result, SandboxRow,
+    Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
 };
 
 mod connect;
 mod images;
 mod lifecycles;
+mod lost;
+mod pointers;
+mod renewals;
 mod schema;
 mod templates;
 
@@ -36,6 +41,11 @@ const LEADER_LOCK: i64 = 7_231_402;
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch";
+
+/// [`SANDBOX_COLUMNS`] and the loss only the store writes, as rows are read.
+const SANDBOX_READ: &str = "id, team, spec, metadata, owner, epoch, taken, \
+     unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
+     class, created_ms, version, whole_epoch, lost";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
@@ -103,6 +113,19 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
+}
+
+/// A `u64` kept bit for bit in a `bigint`, every value fitting, for a
+/// number Postgres stores and matches but never orders: an owner stamp,
+/// whose tombstone carries `u64::MAX` (as every pointer a host wrote, in
+/// the object store or here, may).
+const fn bits(value: u64) -> i64 {
+    value.cast_signed()
+}
+
+/// The `u64` a `bigint` keeps bit for bit (see [`bits`]).
+const fn unbits(value: i64) -> u64 {
+    value.cast_unsigned()
 }
 
 const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
@@ -209,8 +232,15 @@ fn sandbox_row(row: &Row) -> Result<SandboxRow> {
         sends: sends_of(row)?,
         class: row.try_get("class").map_err(corrupt)?,
         created_ms: small(row.try_get("created_ms").map_err(corrupt)?)?,
+        lost: lost_of(row)?,
         version: small(row.try_get("version").map_err(corrupt)?)?,
     })
+}
+
+/// The loss a sandbox row notes, if any.
+fn lost_of(row: &Row) -> Result<Option<LostCopy>> {
+    let lost: Option<Json<LostCopy>> = row.try_get("lost").map_err(corrupt)?;
+    Ok(lost.map(|Json(lost)| lost))
 }
 
 /// A sandbox row's fields as statement parameters, in
@@ -438,9 +468,9 @@ impl PostgresStore {
         let mut rows = BTreeMap::new();
         for row in tx
             .query(
-                "select id, owner, epoch, taken, whole_epoch from compute_sandboxes \
-                 where id = any($1) order by id for update",
-                &[&ids],
+                "select id, owner, epoch, taken, whole_epoch, lost from compute_sandboxes \
+                 where id = any($1) or owner = $2 order by id for update",
+                &[&ids, &id],
             )
             .await
             .map_err(database)?
@@ -452,28 +482,37 @@ impl PostgresStore {
                 taken: OwnerEpoch(small(row.get("taken"))?),
                 whole: optional(&row, "whole_epoch")?.map(OwnerEpoch),
             };
-            rows.insert(id, ownership);
+            rows.insert(id, (ownership, lost_of(&row)?));
         }
+        let sets_aside = register.capacity.sets_aside;
         let mut rulings: Vec<Ruling> = Vec::with_capacity(register.held.len());
         for (held, name) in register.held.iter().zip(&ids) {
-            let (ruling, change) = rule(host, *held, rows.get(name).copied());
-            if let Some(change) = change {
-                let owner = change.set.owner.map(|host| big(host.0)).transpose()?;
-                tx.execute(
-                    "update compute_sandboxes set owner = $2, epoch = $3, taken = $4, \
-                     whole_epoch = $5, version = version + 1 where id = $1",
-                    &[
-                        name,
-                        &owner,
-                        &big(change.set.epoch.0)?,
-                        &big(change.set.taken.0)?,
-                        &change.set.whole.map(|epoch| big(epoch.0)).transpose()?,
-                    ],
-                )
-                .await
-                .map_err(database)?;
+            let row = rows.remove(name);
+            let ruled = row
+                .as_ref()
+                .map(|(ownership, lost)| (*ownership, lost.as_ref()));
+            let (ruling, change) = rule(host, *held, ruled, sets_aside);
+            match (change, row, ruling.verdict) {
+                // A reclaim: nobody took it since, so nothing was lost.
+                (Some(change), _, _) => lost::write(tx, name, change.set, None).await?,
+                (None, Some((ownership, Some(mut lost))), Wire::SetAside) => {
+                    lost.set_aside_ms.get_or_insert(crate::service::now_ms());
+                    lost::write(tx, name, ownership, Some(&lost)).await?;
+                }
+                // Kept as it waited, under the same epoch: raised all the
+                // same, so a write read before this registration is refused.
+                (None, Some((ownership, lost)), _) if ownership.owner == Some(host) => {
+                    lost::write(tx, name, ownership, lost.as_ref()).await?;
+                }
+                _ => {}
             }
             rulings.push(ruling);
+        }
+        // What waited for it that it no longer has goes on from the store.
+        for (name, (ownership, lost)) in &rows {
+            if ownership.owner == Some(host) {
+                lost::write(tx, name, ownership.lose().set, lost.as_ref()).await?;
+            }
         }
         tx.execute(
             "insert into compute_hosts \
@@ -491,7 +530,7 @@ impl PostgresStore {
                 &epoch,
                 &nonce(register.attempt),
                 &Json(&rulings),
-                &Json(&register.capacity),
+                &Json(&register.capacity.split().0),
             ],
         )
         .await
@@ -510,6 +549,9 @@ impl Store for PostgresStore {
     async fn register(&self, register: &Register) -> Result<Admission> {
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(database)?;
+        if pointers::outdated(&tx, register.capacity.pointers_in_service).await? {
+            return Ok(Admission::Outdated);
+        }
         let found = tx
             .query_opt(
                 "select id, state, attempt, epoch, answer from compute_hosts \
@@ -548,44 +590,11 @@ impl Store for PostgresStore {
     }
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
-        // A renewal without a capacity keeps the one last heard.
-        let updated = self
-            .client()
-            .await?
-            .execute(
-                "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
-                 capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
-                 where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
-                &[
-                    &big(renew.host)?,
-                    &big(renew.epoch)?,
-                    &big(renew.seq)?,
-                    &renew.capacity.as_ref().map(Json),
-                    &names,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(updated == 1)
+        self.renew_now(renew, names).await
     }
 
     async fn report(&self, report: &Report, names: &[String]) -> Result<bool> {
-        let updated = self
-            .client()
-            .await?
-            .execute(
-                "update compute_hosts set capacity = $3, changed = nextval('compute_changes') \
-                 where id = $1 and epoch = $2 and state <> 'lost' and name = any($4)",
-                &[
-                    &big(report.host)?,
-                    &big(report.epoch)?,
-                    &Json(&report.capacity),
-                    &names,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(updated == 1)
+        self.report_now(report, names).await
     }
 
     async fn hosts_changed(&self, after: u64) -> Result<Vec<HostRow>> {
@@ -627,40 +636,23 @@ impl Store for PostgresStore {
     }
 
     async fn give_up(&self, host: HostId, renewals: u64, at_ms: u64) -> Result<Option<usize>> {
-        let mut client = self.client().await?;
-        let tx = client.transaction().await.map_err(database)?;
-        let id = big(host.0)?;
-        let lost = tx
-            .execute(
-                "update compute_hosts set state = 'lost', gone_ms = $3, \
-                 changed = nextval('compute_changes') \
-                 where id = $1 and renewals = $2 and state <> 'lost'",
-                &[&id, &big(renewals)?, &big(at_ms)?],
-            )
-            .await
-            .map_err(database)?;
-        if lost != 1 {
-            return Ok(None);
-        }
-        let cleared = tx
-            .execute(
-                "update compute_sandboxes set owner = null, epoch = epoch + 1, \
-                 version = version + 1 where owner = $1",
-                &[&id],
-            )
-            .await
-            .map_err(database)?;
-        tx.commit().await.map_err(database)?;
-        Ok(Some(usize::try_from(cleared).map_err(corrupt)?))
+        self.give_up_now(host, renewals, at_ms).await
+    }
+
+    async fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> Result<Option<Vec<Forsaken>>> {
+        self.declare_gone_now(host, why, at_ms).await
     }
 
     async fn prune_hosts(&self, before_ms: u64) -> Result<u64> {
         // A host given up on with no date (before the column, or by an
         // older build during a rollout) is dated now, by the database's
-        // clock, and forgotten a whole retention later. Giving up cleared
-        // every owner naming it, and no write names a host given up on, so
-        // none should still name it; one that did would be kept rather than
-        // stop the others from being forgotten.
+        // clock, and forgotten a whole retention later. One a sandbox still
+        // waits for is kept until it comes back or is declared gone.
         self.client()
             .await?
             .execute(
@@ -724,7 +716,7 @@ impl Store for PostgresStore {
         self.client()
             .await?
             .query_opt(
-                &format!("select {SANDBOX_COLUMNS} from compute_sandboxes where id = $1"),
+                &format!("select {SANDBOX_READ} from compute_sandboxes where id = $1"),
                 &[&id.to_string()],
             )
             .await
@@ -795,6 +787,32 @@ impl Store for PostgresStore {
         Ok(write_of(&written))
     }
 
+    async fn respec(&self, row: &SandboxRow) -> Result<bool> {
+        if row.ownership.owner.is_some() {
+            return Ok(false);
+        }
+        let fields = Fields::of(row)?;
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update compute_sandboxes set spec = $2, epoch = $3, taken = $4, \
+                 whole_epoch = $5, version = version + 1 \
+                 where id = $1 and version = $6 and owner is null",
+                &[
+                    &fields.id,
+                    &fields.spec,
+                    &fields.epoch,
+                    &fields.taken,
+                    &fields.whole,
+                    &big(row.version)?,
+                ],
+            )
+            .await
+            .map_err(database)?;
+        Ok(written == 1)
+    }
+
     async fn delete(&self, id: Id, version: u64) -> Result<bool> {
         let deleted = self
             .client()
@@ -843,7 +861,7 @@ impl Store for PostgresStore {
             .await?
             .query(
                 &format!(
-                    "select {SANDBOX_COLUMNS} from compute_sandboxes \
+                    "select {SANDBOX_READ} from compute_sandboxes \
                      where team = $1 and metadata @> $2 order by created_ms, id"
                 ),
                 &[&team, &Json(filter)],
@@ -858,7 +876,7 @@ impl Store for PostgresStore {
             .client()
             .await?
             .query(
-                &format!("select {SANDBOX_COLUMNS} from compute_sandboxes where owner = $1"),
+                &format!("select {SANDBOX_READ} from compute_sandboxes where owner = $1"),
                 &[&big(host.0)?],
             )
             .await
@@ -1048,6 +1066,50 @@ impl Store for PostgresStore {
 
     async fn collected(&self, image: ImageId, collector: &str) -> Result<()> {
         self.collected_now(image, collector).await
+    }
+
+    async fn registered(&self, epoch: u64, names: &[String]) -> Result<bool> {
+        self.registered_now(epoch, names).await
+    }
+
+    async fn pointer(&self, name: &str) -> Result<Option<PointerRow>> {
+        self.pointer_now(name).await
+    }
+
+    async fn write_pointer(
+        &self,
+        name: &str,
+        owner: compute_fleet::Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> Result<Option<i64>> {
+        self.write_pointer_now(name, owner, pointer, on).await
+    }
+
+    async fn pointer_names(&self) -> Result<Vec<String>> {
+        self.pointer_names_now().await
+    }
+
+    async fn pointers_imported(&self) -> Result<Option<Imported>> {
+        self.pointers_imported_now().await
+    }
+
+    async fn adopt_pointers(&self, found: &[Found]) -> Result<usize> {
+        self.adopt_pointers_now(found).await
+    }
+
+    async fn clock_ms(&self) -> Result<u64> {
+        self.clock_ms_now().await
+    }
+
+    async fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> Result<Import> {
+        self.import_pointers_now(found, from, at_ms, seen).await
     }
 }
 

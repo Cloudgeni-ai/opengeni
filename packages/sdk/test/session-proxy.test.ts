@@ -10,7 +10,11 @@ import {
   type SessionProxyMessageInput,
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
-import { OPENGENI_API_CONTRACT_REVISION, type ClientConfig } from "../src/types";
+import {
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+  type ClientConfig,
+} from "../src/types";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 /** The artifact-viewer capability, or undefined when the proxy reports none. */
@@ -131,6 +135,15 @@ function upstreamServer() {
           "X-OpenGeni-Has-More": "true",
           "X-OpenGeni-Next-Before": "1",
           "X-OpenGeni-Conversation-Filter": "2",
+          "X-OpenGeni-Covered-First": "1",
+          "X-OpenGeni-Covered-Last": "1",
+          "X-OpenGeni-Page-Bytes": "200",
+          "X-OpenGeni-Page-Max-Bytes": "1048576",
+          "X-OpenGeni-Page-Truncated": "true",
+          "X-OpenGeni-Event-Mode": "forensic",
+          "X-OpenGeni-Event-Direction": "before",
+          "X-OpenGeni-Payload-Mode": "full",
+          "X-OpenGeni-Forensic-Exact": "false",
           // Upstream's own revision header must stay behind the proxy.
           "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
         },
@@ -291,6 +304,23 @@ async function rejection(promise: Promise<unknown>): Promise<OpenGeniApiError> {
 }
 
 describe("createSessionProxyHandler", () => {
+  test("the relay enforces compact responses even when a browser requests legacy configuration", async () => {
+    const { upstream, handler } = setup();
+    for (const headers of [{}, { accept: "application/json" }]) {
+      const response = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(upstream.requests).toHaveLength(2);
+    for (const request of upstream.requests) {
+      expect(request.headers.get("accept")).toContain("application/json; opengeni-session=chat");
+    }
+  });
+
   test("old APIs keep conversation bootstrap while artifact capability fails closed", async () => {
     const upstream = upstreamServer();
     let supported = false;
@@ -478,9 +508,42 @@ describe("createSessionProxyHandler", () => {
       `${API}/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
     expect(request!.headers.get("authorization")).toBe("Bearer og_org_key");
+    expect(request!.headers.get("accept")).toContain("application/json; opengeni-session=chat");
     expect(
       JSON.parse(decodeURIComponent(request!.headers.get("x-opengeni-external-actor")!)),
     ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
+  });
+
+  test("forwards the resolved membership statement through asUser", async () => {
+    const { upstream, browser } = setup({
+      resolve: () => ({
+        workspaceId: WORKSPACE_ID,
+        user: "u_42",
+        source: "northwind",
+        membership: { permissions: ["workspace:read", "sessions:read", "sessions:read"] },
+      }),
+    });
+    await browser.getSession(WORKSPACE_ID, SESSION_ID);
+    const [request] = upstream.requests;
+    expect(
+      JSON.parse(decodeURIComponent(request!.headers.get("x-opengeni-external-actor")!)),
+    ).toEqual({
+      mode: "external",
+      identity: { externalId: "u_42", source: "northwind" },
+      membership: { permissions: ["workspace:read", "sessions:read"] },
+    });
+  });
+
+  test("an invalid resolved membership fails before any upstream request", async () => {
+    const { upstream, browser } = setup({
+      resolve: () => ({
+        workspaceId: WORKSPACE_ID,
+        user: "u_42",
+        membership: { permissions: [] },
+      }),
+    });
+    await expect(browser.getSession(WORKSPACE_ID, SESSION_ID)).rejects.toThrow();
+    expect(upstream.requests).toHaveLength(0);
   });
 
   test("session creation is server-controlled; the browser cannot smuggle configuration", async () => {
@@ -882,6 +945,55 @@ describe("createSessionProxyHandler", () => {
     expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
   });
 
+  test("uploads that name no scope follow the relay's chats: Only me unless chats are shared", async () => {
+    const begin = (
+      handler: (request: Request) => Promise<Response>,
+      body: Record<string, unknown>,
+    ) =>
+      handler(
+        new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/uploads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+            ...body,
+          }),
+        }),
+      );
+    const scopeSent = async (
+      options: Partial<SessionProxyHandlerOptions>,
+      body: Record<string, unknown> = {},
+    ) => {
+      const { upstream, handler } = setup(options);
+      expect((await begin(handler, body)).status).toBe(200);
+      const forwarded = upstream.requests.at(-1)!;
+      expect(forwarded.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/files/uploads`);
+      expect(forwarded.body).toMatchObject({ filename: "a.txt", sizeBytes: 1 });
+      return (forwarded.body as { scope?: unknown }).scope;
+    };
+    // Private chats (the default, and what isolated chats use): an unscoped
+    // upload, as older or custom browsers send, stays with its uploader.
+    expect(await scopeSent({})).toBe("personal");
+    expect(await scopeSent({ chats: "private" })).toBe("personal");
+    // A server-owned create keeps the same default.
+    expect(await scopeSent({ createSession: (input) => input })).toBe("personal");
+    // Shared chats keep Opengeni's own default (the workspace).
+    expect(await scopeSent({ chats: "shared" })).toBeUndefined();
+    // An explicit choice is the uploader's and passes through unchanged.
+    expect(await scopeSent({}, { scope: "workspace" })).toBe("workspace");
+    expect(await scopeSent({ chats: "shared" }, { scope: "personal" })).toBe("personal");
+    // The SDK browser client's own upload call gets the same default.
+    const { upstream, browser } = setup();
+    await browser.beginFileUpload(WORKSPACE_ID, {
+      filename: "b.txt",
+      contentType: "text/plain",
+      sizeBytes: 1,
+    });
+    expect(upstream.requests.at(-1)!.body).toMatchObject({ filename: "b.txt", scope: "personal" });
+  });
+
   test("beforeForwardMessage gates voice start and adds context to spoken messages", async () => {
     const inputs: unknown[] = [];
     let refuse = false;
@@ -1132,6 +1244,21 @@ describe("createSessionProxyHandler", () => {
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");
+  });
+
+  test("exposes the shared response header contract and keeps server-owned configuration closed", async () => {
+    const { handler, upstream } = setup({ createSession: (input) => input });
+    const base = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`;
+    for (const suffix of ["configuration", "model-context"]) {
+      for (const method of ["GET", "HEAD"]) {
+        expect((await handler(new Request(`${base}/${suffix}`, { method }))).status).toBe(404);
+      }
+    }
+    expect(upstream.requests).toHaveLength(0);
+    const response = await handler(new Request(`${base}/events`));
+    expect(response.headers.get("access-control-expose-headers")?.split(", ")).toEqual([
+      ...OPENGENI_BROWSER_RESPONSE_HEADERS,
+    ]);
   });
 
   test("passes unknown additive query parameters through on allowlisted reads", async () => {
@@ -1753,6 +1880,36 @@ describe("createSessionProxyHandler pass-through", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
+  test("the tools the browser's context is for travel only with that context", async () => {
+    let browserContext: string | null | undefined;
+    const { upstream, browser } = setup({
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+      beforeForwardMessage: () => (browserContext === undefined ? undefined : { browserContext }),
+    });
+    const body = {
+      initialMessage: "Sum column B",
+      idempotencyKey: "k1",
+      modelContext: "Workbook: Budget",
+      modelContextTools: ["excel_run"],
+    };
+    await browser.createSession(WORKSPACE_ID, body);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      modelContext: "Workbook: Budget",
+      modelContextTools: ["excel_run"],
+    });
+    // The host replaced or dropped the browser's context: its tools go too.
+    for (const decided of ["Verified workbook: Budget", null]) {
+      browserContext = decided;
+      upstream.requests.length = 0;
+      await browser.createSession(WORKSPACE_ID, { ...body, idempotencyKey: `k-${decided}` });
+      expect(upstream.requests[0]!.body).not.toHaveProperty("modelContextTools");
+    }
+    const invalid = await rejection(
+      browser.createSession(WORKSPACE_ID, { ...body, modelContextTools: [1] } as never),
+    );
+    expect(invalid.code).toBe("invalid_model_context_tools");
+  });
+
   test("creates a chat from the session app's own create body", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
@@ -2071,7 +2228,6 @@ describe("createSessionProxyHandler pass-through", () => {
       ["PUT", `${chat}/agent`],
       ["PUT", `${chat}/tool-policy`],
       ["PUT", `${chat}/skills`],
-      ["PUT", `${chat}/variable-sets`],
       ["PUT", `${chat}/usage-limit`],
       ["PUT", `${chat}/visibility`],
       ["POST", `${chat}/active-sandbox`],
@@ -2182,6 +2338,7 @@ describe("createSessionProxyHandler pass-through", () => {
       initialMessage: "Hello",
       visibility: "private",
       modelContext: "Browser context.",
+      modelContextTools: ["excel_run"],
       skills: ["s1"],
     } as never);
     expect(upstream.requests[0]!.body).toEqual({
@@ -2189,9 +2346,16 @@ describe("createSessionProxyHandler pass-through", () => {
       visibility: "private",
       agentAccess: "workspace",
       memoryScope: "workspace",
+      modelContextTools: ["excel_run"],
       skills: ["s1"],
       modelContext: "Server context.\n\nBrowser context.",
     });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Hello",
+      modelContextTools: ["excel_run"],
+    } as never);
+    // Without the browser's context, its tools are not forwarded.
+    expect(upstream.requests[1]!.body).not.toHaveProperty("modelContextTools");
     const smuggled = await rejection(
       browser.createSession(WORKSPACE_ID, {
         initialMessage: "Hello",
@@ -2199,7 +2363,7 @@ describe("createSessionProxyHandler pass-through", () => {
       } as never),
     );
     expect(smuggled.code).toBe("credential_update_not_allowed");
-    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests).toHaveLength(2);
   });
 
   test("the default mutation policy refuses cross-site requests and form encodings", async () => {

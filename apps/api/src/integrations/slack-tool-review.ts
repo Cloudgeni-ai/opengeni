@@ -1,5 +1,38 @@
-import type { ToolActionReview } from "@opengeni/contracts";
+import {
+  mcpElicitationKind,
+  type McpElicitationApprovalRequest,
+  type McpElicitationKind,
+  type ToolActionReview,
+} from "@opengeni/contracts";
 import type { SlackMessageBlock } from "./slack-bot";
+
+/**
+ * An MCP server's question, as plain text from the approval event itself so a
+ * replayed post has the same bytes. Slack answers a plain confirmation when it
+ * is short enough to show whole. Anything to fill in is answered in the
+ * session, because a Slack form needs a modal opened within three seconds of
+ * the click and decisions here go through the durable action queue.
+ */
+export function slackServerQuestion(question: McpElicitationApprovalRequest): {
+  block: SlackMessageBlock;
+  kind: McpElicitationKind;
+  answerableInSlack: boolean;
+} {
+  const text = [
+    `${question.server} asks:`,
+    ...question.requests.map((request) => request.message.trim()).filter(Boolean),
+  ].join("\n");
+  const fits = text.length <= 2800;
+  const kind = mcpElicitationKind(question);
+  return {
+    block: {
+      type: "section",
+      text: { type: "plain_text", text: fits ? text : `${text.slice(0, 2799)}…` },
+    },
+    kind,
+    answerableInSlack: fits && kind === "confirm",
+  };
+}
 
 /** Shared review facts, projected only into a proven private bot conversation. */
 export function slackToolReviewCanDecide(review: ToolActionReview): boolean {
@@ -49,17 +82,32 @@ export function slackToolReviewBlocks(
   return blocks;
 }
 
+/** Line breaks, other controls and invisible format characters (joiners kept) read as one space. */
+function oneLine(text: string): string {
+  return text.replace(/(?![\u200c\u200d])\p{Cf}/gu, "").replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ");
+}
+
 function reviewLines(review: ToolActionReview): string[] {
-  return [
-    review.title,
-    review.accountLabel,
-    review.consequence,
-    ...review.effects,
-    ...(review.samples ?? []).map((sample) =>
-      [sample.title, sample.subtitle].filter(Boolean).join(" — "),
-    ),
-    ...review.fields.map((field) => `${field.label}: ${field.preview}`),
-    review.moreFields ? `${review.moreFields} more fields in full details.` : null,
-    review.reason,
-  ].filter((line): line is string => Boolean(line));
+  const fields = review.fields.map((field) => `${field.label}: ${field.preview}`);
+  // An app action's fields are what the server found about its target; they
+  // come right under the question, before anything the agent sent.
+  const serverFacts = review.fields.some((field) => field.path.startsWith("/$target/"));
+  return (
+    [
+      review.title,
+      ...(serverFacts ? fields : []),
+      review.accountLabel,
+      review.consequence,
+      ...review.effects,
+      ...(review.samples ?? []).map((sample) =>
+        [sample.title, sample.subtitle].filter(Boolean).join(" — "),
+      ),
+      ...(serverFacts ? [] : fields),
+      review.moreFields ? `${review.moreFields} more fields in full details.` : null,
+      review.reason,
+    ]
+      .filter((line): line is string => Boolean(line))
+      // One line each, so no value or name can add a line that reads as another.
+      .map(oneLine)
+  );
 }

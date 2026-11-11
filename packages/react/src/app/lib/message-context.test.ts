@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { createMessageContextStore } from "./message-context";
+import {
+  createMessageContextStore,
+  createWithOpeningContext,
+  withOpeningContext,
+} from "./message-context";
 
 const workbook = { id: "workbook", text: "In Budget.xlsx." };
 const selection = (label: string) => ({
@@ -69,5 +73,66 @@ describe("createMessageContextStore", () => {
     expect(lazy.forSend()).toBe("read 1");
     expect(lazy.forSend()).toBe("read 2");
     expect(createMessageContextStore(undefined).forSend()).toBeUndefined();
+  });
+
+  test("names the tools of the context it sends, once each, without excluded items", () => {
+    const bound = { ...workbook, tools: ["excel_run"] };
+    const store = createMessageContextStore([
+      bound,
+      { ...selection("A1"), tools: ["excel_run", "files_read"] },
+    ]);
+    expect(store.toolsForSend()).toEqual(["excel_run", "files_read"]);
+    store.exclude("selection");
+    expect(store.toolsForSend()).toEqual(["excel_run"]);
+    expect(createMessageContextStore([workbook, selection("A1")]).toolsForSend()).toBeUndefined();
+    expect(createMessageContextStore("On the billing page.").toolsForSend()).toBeUndefined();
+    expect(createMessageContextStore(() => "lazy").toolsForSend()).toBeUndefined();
+  });
+
+  test("a new chat's create request carries the tools only with their context", () => {
+    const request = { initialMessage: "Sum column B" };
+    expect(withOpeningContext(request, "In Budget.xlsx.", ["excel_run"])).toEqual({
+      initialMessage: "Sum column B",
+      modelContext: "In Budget.xlsx.",
+      modelContextTools: ["excel_run"],
+    });
+    expect(withOpeningContext(request, "In Budget.xlsx.", undefined)).toEqual({
+      initialMessage: "Sum column B",
+      modelContext: "In Budget.xlsx.",
+    });
+    expect(withOpeningContext(request, undefined, ["excel_run"])).toBe(request);
+  });
+
+  test("an older session proxy that refuses the tools still creates the chat with its context", async () => {
+    const request = { initialMessage: "Sum column B" };
+    const sent: object[] = [];
+    const olderProxy = async (body: object) => {
+      sent.push(body);
+      if ("modelContextTools" in body)
+        throw Object.assign(new Error("refused"), {
+          status: 400,
+          code: "create_field_not_allowed",
+        });
+      return "created";
+    };
+    await expect(
+      createWithOpeningContext(olderProxy, request, "In Budget.xlsx.", ["excel_run"]),
+    ).resolves.toBe("created");
+    expect(sent).toEqual([
+      { ...request, modelContext: "In Budget.xlsx.", modelContextTools: ["excel_run"] },
+      { ...request, modelContext: "In Budget.xlsx." },
+    ]);
+    // Any other refusal, or one without tools, is the caller's to handle.
+    const failing = async () => {
+      throw Object.assign(new Error("denied"), { status: 403, code: "forbidden" });
+    };
+    await expect(
+      createWithOpeningContext(failing, request, "In Budget.xlsx.", ["excel_run"]),
+    ).rejects.toThrow("denied");
+    sent.length = 0;
+    await expect(
+      createWithOpeningContext(olderProxy, request, "In Budget.xlsx.", undefined),
+    ).resolves.toBe("created");
+    expect(sent).toHaveLength(1);
   });
 });

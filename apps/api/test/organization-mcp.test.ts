@@ -134,6 +134,15 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
+  test("compact UI configuration reads do not add a redundant agent action", () => {
+    const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
+    expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);
+    expect(isActionCatalogExempt(path)).toBe(false);
+    expect(isActionCatalogExempt(`${path}/skills`)).toBe(false);
+    expect(ACTION_CATALOG.find((entry) => entry.id === "getSession")?.path).toBe(path);
+    expect(ACTION_CATALOG.some((entry) => entry.path === `${path}/configuration`)).toBe(false);
+  });
+
   test("covers every registered route except the listed exemptions, and is current", () => {
     const registered = registeredApiRoutes();
     // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.
@@ -152,7 +161,6 @@ describe("organization MCP action catalog", () => {
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
       "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
-      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
     // An agent with the person's full access approves sign-ins and manages
@@ -266,6 +274,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         // Teams setup and account linking require the person's verified browser.
         "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
         "POST /v1/workspaces/:workspaceId/integrations/teams/link",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
@@ -716,7 +725,7 @@ describe("organization MCP browser-only actions", () => {
           for (const tool of ["opengeni_action_describe", "opengeni_action_call"]) {
             expect(await call(tool, { id })).toEqual({
               isError: true,
-              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the web app in a browser.`,
             });
           }
         }
@@ -748,6 +757,43 @@ describe("organization MCP action search", () => {
     expect(first("workspaces")).toBe("listWorkspaces");
     expect(first("create session")).toBe("createSession");
     expect(first("github repositories")).toBe("listGitHubRepositories");
+  });
+
+  test("finds invitations and chat share links by the words people use", () => {
+    const found = (query: string) =>
+      searchActions({ query, limit: 5, offset: 0 }).actions.map((action) => action.id);
+    // The tool's own example query.
+    expect(found("invite")).toEqual(expect.arrayContaining(["createOrganizationInvitation"]));
+    expect(found("invite people")).toEqual(
+      expect.arrayContaining(["createOrganizationInvitation"]),
+    );
+    expect(found("invitations")).toEqual(
+      expect.arrayContaining(["listOrganizationInvitationsForOrganization"]),
+    );
+    for (const query of ["share", "share chat", "share this chat", "share conversation"]) {
+      expect([query, found(query)]).toEqual([
+        query,
+        expect.arrayContaining(["createSessionShareLink"]),
+      ]);
+    }
+    // Short words keep their final "e", so they don't match other words'
+    // prefixes: "line" is not "link".
+    expect(found("line")).not.toContain("createSessionShareLink");
+    // Adding someone, inviting them or widening a chat's audience each point
+    // to the share link for letting one person read one chat.
+    for (const [query, id] of [
+      ["invite", "createOrganizationInvitation"],
+      ["add workspace member", "addWorkspaceMember"],
+      ["session visibility", "updateSessionVisibility"],
+    ] as const) {
+      const action = searchActions({ query, limit: 5, offset: 0 }).actions.find(
+        (candidate) => candidate.id === id,
+      );
+      expect([id, action?.description]).toEqual([
+        id,
+        expect.stringContaining("use createSessionShareLink"),
+      ]);
+    }
   });
 });
 
@@ -787,11 +833,6 @@ describe("organization MCP action inputs", () => {
         `async (c) => parseRequestBody(SaveWorkspaceSkillRequest, { id: c.req.param("id") })`,
       ]).body,
     ).toEqual([]);
-    expect(
-      routeInputs([
-        `async (c) => { throw routeRetired("POST /v1/workspaces/:workspaceId/knowledge/entries/search", "moved"); }`,
-      ]).retired,
-    ).toBe("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   });
 
   test("the route source reader names the permission a route checks before anything else", () => {
@@ -988,38 +1029,6 @@ describe("organization MCP action inputs", () => {
         queryParameters?: string[];
       };
       expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
-    } finally {
-      await client.close();
-    }
-  });
-});
-
-describe("organization MCP retired actions", () => {
-  const retiredEntries = ACTION_CATALOG.filter((entry) => entry.retired);
-
-  test("are the retired search routes, never found and never run", async () => {
-    expect(retiredEntries.map(routeKey).sort()).toEqual([
-      "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
-      "POST /v1/workspaces/:workspaceId/knowledge/search",
-    ]);
-    const { client, call, seen } = await connect(person(full));
-    try {
-      const page = searchActions({ query: "knowledge search", limit: 50, offset: 0 });
-      for (const entry of retiredEntries)
-        expect(page.actions.map((action) => action.id)).not.toContain(entry.id);
-      expect(page.actions.map((action) => action.id)).toContain("listKnowledgeEntries");
-      for (const entry of retiredEntries) {
-        for (const [tool, args] of [
-          ["opengeni_action_describe", { id: entry.id }],
-          ["opengeni_action_call", { id: entry.id, pathParameters: { workspaceId } }],
-        ] as const) {
-          expect(await call(tool, args)).toEqual({
-            isError: true,
-            value: `${entry.id} was removed. Use the listKnowledgeEntries action (POST /v1/workspaces/:workspaceId/knowledge/entries/search) instead; describe it for its input.`,
-          });
-        }
-      }
-      expect(seen).toHaveLength(0);
     } finally {
       await client.close();
     }

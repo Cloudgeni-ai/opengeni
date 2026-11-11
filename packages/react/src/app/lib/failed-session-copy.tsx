@@ -1,5 +1,18 @@
+import {
+  MACHINE_ACCESS_REQUIRED_CODE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts/machine-access";
+import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
 import { t } from "./console-text";
-import { isDiagnosticFailureCode } from "../../lib/format";
+import {
+  creditRefusalHeadline,
+  creditRefusalKindFromText,
+  isDiagnosticFailureCode,
+  type CreditRefusalKind,
+} from "../../lib/format";
 import { providerRecoverySubject } from "../../lib/provider-recovery";
 import type { SessionFailureSummary } from "./events";
 import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
@@ -35,7 +48,8 @@ export type KnownFailureKind =
   | "monthly_limit"
   | "provider_quota"
   | "rate_limited"
-  | "provider_error";
+  | "provider_error"
+  | "model_history";
 
 const CREDENTIALS: KnownFailure = {
   kind: "provider_credentials",
@@ -95,6 +109,30 @@ const PROVIDER_ERROR: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+/**
+ * The provider refused encrypted reasoning another model or account left in
+ * this chat. Retry stays: the worker resends that reasoning as readable text
+ * where it can, and failures recorded before it did succeed on Retry.
+ */
+const UNREADABLE_HISTORY: KnownFailure = {
+  kind: "model_history",
+  message: "This model can’t read earlier reasoning in this chat.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+
+/**
+ * The same HTTP 400 refusal the runtime recovers from
+ * (`classifyEncryptedArtifactRejection`). Recorded with no failure code: a coded
+ * failure keeps its own copy and retry decision.
+ */
+function isUnreadableHistory(recorded: string, status: string | null): boolean {
+  return (
+    status === "400" &&
+    (new RegExp(`\\b${ENCRYPTED_CONTENT_REJECTION_CODE}\\b`).test(recorded) ||
+      isEncryptedReasoningRefusalText(recorded))
+  );
+}
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
@@ -102,6 +140,9 @@ const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution e
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 const COMPACTION_FAILURE =
   "Couldn’t compact conversation history. If the next message fails too, start a new session.";
+/** The worker's code for a turn whose personal machine isn't allowed in this chat. */
+export { MACHINE_ACCESS_REQUIRED_CODE };
+const MACHINE_ACCESS_REQUIRED = machineAccessNeededMessage();
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -155,6 +196,7 @@ export function classifyProviderFailure(
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
   const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
+  if (!failureCode && isUnreadableHistory(recorded, status)) return UNREADABLE_HISTORY;
   if (
     status === "401" ||
     /\b(?:incorrect|invalid)[ _-]?(?:api[ _-]?key|x-api-key|subscription key)\b/.test(text) ||
@@ -202,6 +244,11 @@ export function failedSessionCopy(
   canChooseModel = false,
   /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
   freeCreditGap: FreeCreditGap | null = null,
+  /**
+   * The refusal the last turn ended on (`creditRefusalFromEvents`); null when
+   * it named none. Omitted, the recorded failure text decides.
+   */
+  stopRefusal?: CreditRefusalKind | null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -213,6 +260,10 @@ export function failedSessionCopy(
   dailyLimit?: true | undefined;
   /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
   compaction?: true | undefined;
+  /** A credit stop one action fixes (own-key fee or API use); no model choice helps. */
+  creditRefusal?: CreditRefusalKind | undefined;
+  /** The chat's personal machine isn't allowed for it; its owner can allow it here. */
+  machineAccess?: true | undefined;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -221,6 +272,17 @@ export function failedSessionCopy(
   // Retry stays, because an upgrade or another account clears the condition
   // and admission re-checks the plan without a model request.
   const code = failure.failureCode;
+  // The worker names the machine; the owner allows it for this chat. Retrying
+  // the same message can't, so Allow takes its place where it is offered.
+  if (code === MACHINE_ACCESS_REQUIRED_CODE) {
+    return {
+      reason: recorded || MACHINE_ACCESS_REQUIRED,
+      unavailableModel: false,
+      machineAccess: true,
+      // The owner's Allow headline names the machine instead of this text.
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
   if (code === "codex_request_rejected") {
     return {
       reason:
@@ -337,6 +399,20 @@ export function failedSessionCopy(
       ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
+  // An own-key or API stop names its one fix; free credit for another model
+  // can't pay for either.
+  const creditRefusal = creditExhausted
+    ? stopRefusal !== undefined
+      ? stopRefusal
+      : creditRefusalKindFromText(failure.recordedDetail, failure.reason)
+    : null;
+  if (creditRefusal) {
+    return {
+      reason: creditRefusalHeadline(t, creditRefusal),
+      unavailableModel: false,
+      creditRefusal,
+    };
+  }
   const reason = creditExhausted
     ? freeCreditGap
       ? freeCreditGapReason(freeCreditGap)
@@ -354,5 +430,72 @@ export function failedSessionCopy(
             ? `${recorded.slice(0, 157)}…`
             : recorded
           : "This session failed.";
-  return { reason, unavailableModel };
+  // The banner is where a current failure is shown (the timeline keeps only
+  // a quiet status), so recorded text the headline shortened or replaced stays
+  // reachable behind Details. A credit stop's recorded text adds nothing.
+  const detail = creditExhausted ? undefined : diagnostic?.trim();
+  return {
+    reason,
+    unavailableModel,
+    ...(detail && detail.replace(/\s+/g, " ") !== reason ? { detail } : {}),
+  };
+}
+
+/**
+ * The composer placeholder of a chat. "Send a message to revive" is a dead end
+ * without credits: the reply turn stops the same way. An own-key or API stop
+ * names its one fix; with free credit left for other models, a covered model
+ * revives it.
+ */
+export function chatComposerPlaceholder(input: {
+  /** Archived chats are read-only; their work continues in a new chat. */
+  archived?: boolean | undefined;
+  cancelled: boolean;
+  /** Out of credits, and the chat has stopped (failed or idle). */
+  creditStopped: boolean;
+  stopRefusal: CreditRefusalKind | null;
+  creditGap: FreeCreditGap | null;
+  canBuyCredits: boolean;
+}): string {
+  if (input.archived) return "This chat is archived.";
+  if (input.cancelled) return "This session was cancelled.";
+  if (!input.creditStopped) return "Send a follow-up…";
+  if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);
+  if (input.creditGap) {
+    return input.creditGap.selectionUsable
+      ? "Send a follow-up…"
+      : "Your free credits don't cover this model — choose another model or add credits.";
+  }
+  return "Out of Opengeni credits — add credits to continue.";
+}
+
+/**
+ * The recorded text to keep behind Details under a failure headline, or
+ * nothing when the headline already says exactly that. The timeline leaves a
+ * presented failure's text to the banner, so text the headline replaced must
+ * stay reachable here.
+ */
+export function detailBeyondHeadline(
+  headline: unknown,
+  detail: string | null | undefined,
+): string | undefined {
+  const text = detail?.trim();
+  if (!text) return undefined;
+  return typeof headline === "string" &&
+    text.replace(/\s+/g, " ") === headline.replace(/\s+/g, " ").trim()
+    ? undefined
+    : text;
+}
+
+/**
+ * The plain failure line shown while the banner loads or if it fails: the
+ * banner's headline, so a member is told to ask an owner there too.
+ */
+export function failureFallbackReason(
+  copy: { reason: string; creditRefusal?: CreditRefusalKind | null | undefined },
+  canBuyCredits: boolean,
+): string {
+  return copy.creditRefusal && !canBuyCredits
+    ? creditRefusalHeadline(t, copy.creditRefusal, false)
+    : copy.reason;
 }

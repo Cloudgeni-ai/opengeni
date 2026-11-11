@@ -19,8 +19,10 @@ import {
   ensureManagedAccessForUser,
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  issueSelfUserResourceGrant,
   persistProviderOAuthConnection,
   replacePersonalGitHubRepositorySelections,
+  revokeSelfUserResourceGrant,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
@@ -32,6 +34,7 @@ import {
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
   selectedPersonalConnectionServers,
+  turnOnOwnLoginHere,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
 import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
@@ -173,6 +176,65 @@ describe("personal MCP connection delegation", () => {
     expect(membershipChecks).toBe(0);
   });
 
+  test("resolves Your GitHub REST tools through the exact frozen GitHub connection", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const otherConnectionId = "22222222-2222-4222-8222-222222222222";
+    const delegation: McpPersonalConnectionDelegation = {
+      serverId: "github:personal",
+      connectionId,
+      ownerSubjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+      connectionType: "github_personal",
+    };
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      // Your GitHub is never an MCP server in settings.
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: [delegation],
+      ownerHasWorkspaceMembership: async () => true,
+      resolveCredential: async (request) => {
+        received.push(request);
+        return {
+          status: "ok",
+          headers: { authorization: "Bearer personal" },
+          connectionId: request.connectionRef.connectionId!,
+        } as unknown as Awaited<
+          ReturnType<
+            Parameters<typeof withFrozenPersonalConnectionDelegations>[0]["resolveCredential"]
+          >
+        >;
+      },
+    });
+    const request = (id: string): ResolveConnectionCredentialInput => ({
+      workspaceId: "workspace-1",
+      subjectId: "user:owner",
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/repos/octo/repo/pulls",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: id,
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "oauth2",
+        scopes: ["repo"],
+        subjectScope: "subject",
+      },
+    });
+
+    await expect(resolver(request(connectionId))).resolves.toMatchObject({ status: "ok" });
+    expect(received).toHaveLength(1);
+    expect(received[0]!.subjectId).toBe("user:owner");
+    expect(received[0]!.connectionRef.connectionId).toBe(connectionId);
+
+    // Another GitHub connection than the one frozen on the turn stays refused.
+    await expect(resolver(request(otherConnectionId))).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
+    expect(received).toHaveLength(1);
+  });
+
   test("admits an exact same-organization portable selection and membershipless personal owner", async () => {
     const blank = await acquireBlankTestDatabase("core-portable-connection-authority");
     if (!blank) return;
@@ -246,6 +308,9 @@ describe("personal MCP connection delegation", () => {
       );
       expect(settingsInventory.find((row) => row.id === inactive.id)?.status).toBe("needs_reauth");
       expect(settingsInventory.every((row) => row.workspaceId === origin!.id)).toBe(true);
+      // Added in the owner's Personal workspace, so it is listed in the shared
+      // workspace for reuse but not turned on there yet (D-54).
+      expect(settingsInventory.find((row) => row.id === connection.id)?.turnedOnHere).toBe(false);
       expect(
         await listOwnConnectionAccountsForGrant(
           client.db,
@@ -253,12 +318,31 @@ describe("personal MCP connection delegation", () => {
           { includeInactive: true },
         ),
       ).toEqual([]);
-      const frozen = await freezePersonalConnectionDelegations({
+      const sharedFreeze = {
         db: client.db,
         workspaceId: target!.id,
         settings: { mcpServers: [personalServer] },
-        tools: [{ kind: "mcp", id: "linear" }],
-        source: { kind: "subject", subjectId, accountId: account!.id },
+        tools: [{ kind: "mcp" as const, id: "linear" }],
+        source: { kind: "subject" as const, subjectId, accountId: account!.id },
+      };
+      // Off here: an explicit pick fails closed and the default binds nothing.
+      await expect(
+        freezePersonalConnectionDelegations({ ...sharedFreeze, authoritySelections: [selection] }),
+      ).rejects.toMatchObject({ diagnostic: { reason: "selected_account_unavailable" } });
+      expect(await freezePersonalConnectionDelegations(sharedFreeze)).toEqual([]);
+      await turnOnOwnLoginHere(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        authorityId: connection.authorityId,
+      });
+      const turnedOn = await listOwnConnectionAccountsForGrant(client.db, inventoryGrant);
+      expect(turnedOn.find((row) => row.id === connection.id)).toMatchObject({
+        turnedOnHere: true,
+        turnedOnHereGrantId: expect.any(String),
+      });
+      const frozen = await freezePersonalConnectionDelegations({
+        ...sharedFreeze,
         authoritySelections: [selection],
       });
       expect(frozen).toEqual([
@@ -271,6 +355,78 @@ describe("personal MCP connection delegation", () => {
           kind: "oauth2",
         },
       ]);
+      // Turning a login on is a standing choice for the workspace, never a
+      // per-chat approval.
+      await expect(
+        issueSelfUserResourceGrant(client.db, {
+          accountId: account!.id,
+          workspaceId: target!.id,
+          subjectId,
+          authorityId: connection.authorityId,
+          resourceKind: "connection",
+          mode: "session",
+          context: "workspace_shared",
+          workspaceSharedAcknowledged: true,
+        }),
+      ).rejects.toBeTruthy();
+      // A login added from a shared workspace starts on there.
+      const addedHere = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${account!.id}, ${target!.id}, ${subjectId}, 'notion.example.test', 'oauth2', 'ciphertext')
+          returning id
+        `;
+        return row!;
+      });
+      const addedHereListed = (
+        await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)
+      ).find((row) => row.id === addedHere.id);
+      expect(addedHereListed?.turnedOnHere).toBe(true);
+      // Stopping it here revokes that standing grant; it is off here again.
+      await revokeSelfUserResourceGrant(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        grantId: addedHereListed!.turnedOnHereGrantId!,
+      });
+      expect(
+        (await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)).find(
+          (row) => row.id === addedHere.id,
+        )?.turnedOnHere,
+      ).toBe(false);
+      // Every own login works in its owner's Personal workspace.
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: origin!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(true);
+      // It stays off in another shared workspace until its owner turns it on.
+      const [other] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'other shared')
+        returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${other!.id}, ${account!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${other!.id}, ${subjectId})
+      `;
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: other!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(false);
 
       const personalFrozen = await freezePersonalConnectionDelegations({
         db: client.db,
@@ -870,6 +1026,116 @@ describe("personal MCP connection delegation", () => {
         "personal GitHub repository resource is outside the selected authority",
       );
 
+      // All my repositories (read): every chat of the person gets Your
+      // GitHub, any repository can be attached for reading, and the saved
+      // per-repository list comes back when the mode is turned off.
+      const emptied = await getPersonalGitHubRepositorySelectionState(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      const allOn = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: emptied!.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: "read",
+      });
+      expect(allOn.allRepositoriesAccess).toBe("read");
+      expect(allOn.repositories.map((entry) => entry.repositoryId)).toEqual([
+        repository.repositoryId,
+      ]);
+      const freezeWith = (
+        resources: (typeof resource)[],
+        selections = [authoritySelection],
+        allRepositoriesEnabled = true,
+      ) =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: {
+            mcpServers: [],
+            githubPersonalOauthEnabled: true,
+            githubPersonalAllRepositoriesEnabled: allRepositoriesEnabled,
+          },
+          tools: [],
+          resources,
+          source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
+          authoritySelections: selections,
+        });
+      const allSnapshot = {
+        credentialBindingId,
+        connectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        selectionGeneration: allOn.selectionGeneration,
+        allRepositoriesAccess: "read",
+      };
+      expect(await freezeWith([], [])).toEqual([
+        expect.objectContaining({
+          connectionId: connection.id,
+          connectionType: "github_personal",
+          personalGitHubRepositorySelection: { ...allSnapshot, repositories: [] },
+        }),
+      ]);
+      const unlisted = {
+        ...resource,
+        uri: "https://github.com/someone/else",
+        repositoryId: "123",
+        access: "read" as const,
+      };
+      expect((await freezeWith([unlisted]))[0]?.personalGitHubRepositorySelection).toEqual({
+        ...allSnapshot,
+        repositories: [
+          {
+            repositoryId: "123",
+            fullName: "someone/else",
+            canonicalUrl: "https://github.com/someone/else",
+            ref: "main",
+            access: "read",
+            selectionGeneration: allOn.selectionGeneration,
+          },
+        ],
+      });
+      await expect(freezeWith([{ ...unlisted, access: "write" }])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Until the deployment allows the mode, a stored mode is ignored.
+      expect(await freezeWith([], [], false)).toEqual([]);
+      await expect(freezeWith([unlisted], [authoritySelection], false)).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Children keep All my repositories without attached repositories.
+      expect(
+        personalConnectionDelegationsFromParent({
+          servers: [],
+          parentDelegations: await freezeWith([], []),
+          personalGitHubResources: [],
+        })[0]?.personalGitHubRepositorySelection?.allRepositoriesAccess,
+      ).toBe("read");
+      // Turning it off keeps the saved list and leaves other chats without Your GitHub.
+      const allOff = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: allOn.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: null,
+      });
+      expect(allOff.allRepositoriesAccess).toBeNull();
+      expect(allOff.selectionGeneration).toBeGreaterThan(allOn.selectionGeneration);
+      expect(allOff.repositories).toHaveLength(1);
+      expect(await freezeWith([], [])).toEqual([]);
+      await expect(freezeWith([unlisted])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+
       await sql`
         delete from workspace_memberships
         where workspace_id = ${target!.id} and subject_id = ${subjectId}
@@ -994,6 +1260,50 @@ describe("personal MCP connection delegation", () => {
         },
       },
     ]);
+    // A parent listing the repository for reading, under All my repositories
+    // at write, still lets a child write there.
+    const allParent: McpPersonalConnectionDelegation = {
+      ...parent,
+      personalGitHubRepositorySelection: {
+        ...parent.personalGitHubRepositorySelection!,
+        allRepositoriesAccess: "write",
+        repositories: [
+          { ...parent.personalGitHubRepositorySelection!.repositories[0]!, access: "read" },
+        ],
+      },
+    };
+    const writeRequest = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId,
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [allParent],
+        personalGitHubResources: [writeRequest],
+      })[0]?.personalGitHubRepositorySelection?.repositories,
+    ).toEqual([expect.objectContaining({ repositoryId: "9007199254740993123", access: "write" })]);
+    expect(() =>
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [
+          {
+            ...allParent,
+            personalGitHubRepositorySelection: {
+              ...allParent.personalGitHubRepositorySelection!,
+              allRepositoriesAccess: "read",
+            },
+          },
+        ],
+        personalGitHubResources: [writeRequest],
+      }),
+    ).toThrow("exceeds parent authority");
   });
 
   test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {

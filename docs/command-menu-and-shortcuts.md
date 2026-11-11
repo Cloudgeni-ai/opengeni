@@ -28,7 +28,7 @@ An action is plain data plus two functions:
 type AppAction = {
   id: string; // "chat.copyLink"
   title: string; // "Copy link"
-  group: "navigate" | "chat" | "create" | "view" | "help";
+  group: "navigate" | "chat" | "meetings" | "view" | "help";
   keywords?: string[]; // extra words ⌘K matches, e.g. ["share", "url"]
   icon?: LucideIcon;
   chord?: Chord | { web?: Chord; desktop?: Chord }; // per-surface when the browser reserves a key
@@ -67,6 +67,7 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | --- | --- | --- | --- |
 | Command menu | ⌘K | Ctrl+K | Chats, Sites and actions in one list |
 | New chat | ⌘N on desktop, ⇧⌘O everywhere | Ctrl+N on desktop, Ctrl+Shift+O everywhere | Browsers reserve ⌘N |
+| Start recording (a meeting) | ⌃⌘N | Ctrl+Alt+N | Beside New chat's ⌘N, the same shape as Archive; see below |
 | Copy chat link | ⇧⌘, | Ctrl+Shift+, | Linear's key for copying an issue URL |
 | Pin or unpin chat | ⌥⌘P | Ctrl+Alt+P | Clear of the common browser shortcuts |
 | Archive or restore chat | ⌃⌘A | Ctrl+Alt+A | Apple Mail's Archive key; browsers on Windows and Linux use Ctrl+Shift+A for tab search |
@@ -81,6 +82,34 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | Shortcut cheat sheet | ⌘/ | Ctrl+/ | Slack's key |
 
 Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
+
+**Start recording** is the Meetings page's Start recording button, from
+anywhere: it shows Meetings and starts recording with that page's defaults
+and any title already typed there (otherwise the meeting is named after when
+it starts), asking for the microphone the same way. A recording started with
+the button meanwhile uses up the waiting start. While a recording is going it
+reads "Go to recording" and shows Meetings in the workspace on screen, where
+the recording bar is, instead of starting a second one, as a desktop call
+notification's Record does. "Stop recording" (⌘K and the desktop File menu,
+no key, so a stray press never ends a meeting) stops it and opens the meeting
+in the workspace it was recorded in. Where nothing records meetings (an
+embedded chat without the recorder) or the browser can't record (the page
+shows "This browser can't record" instead of the button), ⌘K and the cheat
+sheet leave both out and the desktop File menu greys them out; the menu also
+greys out Stop recording while nothing records.
+
+Why ⌃⌘N and Ctrl+Alt+N: N sits beside New chat's ⌘N, and the per-platform
+shape is Archive's (⌃⌘A, Ctrl+Alt+A). Neither macOS nor Safari, Chrome, Edge
+or Firefox uses ⌃⌘N, and Ctrl+Alt+N is free in those browsers and in the
+Windows, GNOME and KDE defaults. On Nordic and other Windows layouts AltGr
+reports as Ctrl+Alt, and AltGr+N types nothing on Norwegian, Swedish, Danish
+and Finnish layouts. Where a layout does type a character with AltGr+N (ń on
+Polish), the page ignores the key, as for every Ctrl+Alt chord; in the
+desktop app the menu bar owns the key, as for Archive. Turned down: ⌥⌘N
+(Safari's New Window when tabs are preferred), ⌥⌘R and Ctrl+Alt+R (Firefox
+Reader View, Safari's Reload from origin), ⇧⌘M and Ctrl+Shift+M (Chrome's
+profile menu, Firefox's responsive design mode), ⌥⌘M (macOS Minimize All) and
+Ctrl+Alt+M (AltGr+M types µ on Nordic Windows layouts).
 
 **Control+Tab** switches between recently viewed chats in the desktop app.
 Browsers keep Control+Tab for switching tabs, so on the web it never reaches
@@ -117,12 +146,18 @@ Opening it is instant: no request is made before it appears.
 - **Empty query:** recent chats you opened (most recent first, topped up from
   the top of the sidebar), then actions for the chat you are in (copy link,
   pin, rename, fork, mark unread, archive) with their keys, then general
-  actions (new chat, find, inbox, search messages, switch workspace, sidebar,
-  shortcuts). Recent chats include other workspaces, tagged with their
-  workspace. Between recent chats and the chat's actions, "Recent Sites"
-  lists at most three of this workspace's Sites, most recent activity first
-  (conversations, a new version, or the person opening it), from the Site
-  rows the sidebar has loaded; the Site on screen is left out.
+  actions (new chat, start recording, find, inbox, search messages, switch
+  workspace, sidebar, shortcuts). Recent chats include other workspaces,
+  tagged with their workspace. Between recent chats and the chat's actions,
+  "Recent Sites" lists at most three of this workspace's Sites, most recent
+  activity first (conversations, a new version, or the person opening it),
+  from the Site rows the sidebar has loaded; the Site on screen is left out.
+  Where the app has Meetings, "Recent meetings" follows with this workspace's
+  three newest meetings (the one on screen left out). The menu asks for them
+  each time it opens and shows the last answer at once, so it still opens
+  without waiting. On a meeting's page, "This meeting" offers "Ask about this
+  meeting" (the cursor goes to the meeting's Ask field) and "Copy meeting
+  link", and "Meetings" itself is among the general actions.
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
   title search runs alongside and merges in chats the sidebar has not loaded,
@@ -146,6 +181,29 @@ Opening it is instant: no request is made before it appears.
   refuses access is not asked again until the menu opens next. Enter opens the
   Site in the app's Site view, as its sidebar row does (the desktop app too);
   ⌘/Ctrl+Enter on the web opens it in a new tab.
+- **Meetings:** where the app has Meetings (the console and the desktop app,
+  also in a browser that can't record), a "Meetings" group (at most five)
+  follows the chats and Sites, or takes their place by match when there are
+  none. A meeting is found by its title (the newest meetings answer
+  instantly), and from two characters the meetings list
+  (`GET /v1/workspaces/:workspaceId/recordings`) is asked three ways at once:
+  `query` (every word in its title or current transcript), `person` (someone
+  who spoke, by part of their name) and, when the whole query is a date,
+  `startedFrom`/`startedTo`. Dates read English and Norwegian words: "today",
+  "yesterday", "i går", a weekday ("friday" is the latest Friday, today
+  included; "last friday" and "forrige fredag" the one before today), "this
+  week", "last week" (weeks start on Monday), a month written out ("october",
+  the latest one), and a day of a month ("30 oct", "oct 30", "30. oktober",
+  "30.10", "30.10.2026", "2026-10-30"; without a year, the latest one). Bare
+  abbreviations ("man", "jan") are not dates on their own, since they are
+  often words or names. A speaker match ranks above a date match ("August"
+  is a name and a month), a date above title words, and words found only in
+  the transcript last. The list's own access rules apply, so the menu shows
+  only meetings the person can already open. Enter opens the meeting's page;
+  ⌘/Ctrl+Enter on the web opens it in a new tab. On a meeting that takes
+  questions, the row above "Search messages for …" is "Ask about this
+  meeting: “…”", which asks the typed question as the meeting's Ask field
+  does (a new chat with the meeting attached).
 - **Fork chat:** forks the chat on screen from its latest message, the same as
   the fork button under a message, and opens the same confirmation.
 - **Ranking:** whole-title prefix, then a word in the title starting with the

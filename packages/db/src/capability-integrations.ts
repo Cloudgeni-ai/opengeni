@@ -11,6 +11,7 @@ import {
 import {
   assertOrganizationIntegrationAllowed,
   stableJson,
+  type ApiIntegrationAuthPreview,
   type IntegrationSourceInput,
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
@@ -32,6 +33,7 @@ import { connectionScopeKey } from "./connection-scopes";
 import { withOrganizationIntegrationPolicyFence } from "./organization-integration-policy";
 import {
   ensureIntegrationFacetDefinition,
+  IntegrationChangeRequiresAdminError,
   integrationBindingKey,
   integrationDefinitionHasBindingOwner,
   integrationRuntimeKey,
@@ -40,6 +42,10 @@ import {
   upsertIntegrationFacetBinding,
   type IntegrationFacetBindingOwner,
 } from "./integration-bindings";
+import {
+  organizationApiIntegrationDefinition,
+  organizationConnectorLogin,
+} from "./organization-connectors";
 import * as schema from "./schema";
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
@@ -48,7 +54,7 @@ export type ApiIntegrationApprovalMode = "never" | "ask";
 
 export type ApiIntegrationFacetDefinition = {
   readonly facetKey: string;
-  readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
+  readonly kind: "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 };
@@ -97,6 +103,8 @@ export type StoredOpenApiOperationBinding = {
     readonly schemas: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   };
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /** Reviewed Microsoft Search entity types a read-only search may request. */
+  readonly searchEntityTypes?: readonly string[];
 };
 
 export type StoredGraphqlOperationBinding = {
@@ -155,6 +163,12 @@ export type InstallApiIntegrationInput = {
   facetDefinitions?: readonly ApiIntegrationFacetDefinition[];
   revision: StoredApiIntegrationRevision;
   owner?: ApiIntegrationOwner;
+  /**
+   * A member's add (no integration management): create only. An instance that
+   * is already set up, or a new revision that would move the other instances,
+   * throws {@link IntegrationChangeRequiresAdminError} inside the transaction.
+   */
+  memberCreate?: boolean;
 };
 
 export type InstalledApiIntegration = {
@@ -205,7 +219,38 @@ export type ApiIntegrationRuntime = {
   allowedTools: string[];
   requireApproval: true | string[];
   revision: StoredApiIntegrationRevision;
+  /**
+   * Set when the organization serves it here (an organization connector of
+   * kind "api"), not an installation of this workspace's own.
+   */
+  organizationConnector?: {
+    id: string;
+    generation: number;
+    login: "each_person" | "organization_key" | "none";
+    /** How the API authenticates, as the organization reviewed it. */
+    auth: ApiIntegrationAuthPreview;
+  };
+  /**
+   * An organization key: where each credential goes and its encrypted value,
+   * decrypted only by the adapter that sends it.
+   */
+  organizationCredential?: {
+    placements: readonly OrganizationApiCredentialPlacement[];
+  };
+  /** Who added this instance (a member removes only their own); set by the installed list. */
+  instanceCreatedBySubjectId?: string;
 };
+
+/** One encrypted credential placement of an organization key for an API integration. */
+export type OrganizationApiCredentialPlacement = {
+  carrier: "header" | "query" | "cookie";
+  name: string;
+  prefix?: string;
+  valueEncrypted: string;
+};
+
+/** The instance key an organization's API integration runs under in every workspace it reaches. */
+export const ORGANIZATION_API_INTEGRATION_INSTANCE_KEY = "organization";
 
 /** Bound to an account that is signed in now; an expired or revoked one needs reconnecting. */
 export function apiIntegrationConnected(
@@ -283,11 +328,17 @@ export async function installApiIntegration(
     snapshot.definitionProvenance === "curated"
       ? snapshot.definitionId
       : `custom:${snapshot.protocol}`;
-  return withOrganizationIntegrationPolicyFence(db, snapshot, (tx, policy) =>
-    installApiIntegrationInScope(tx, snapshot, () =>
+  return withOrganizationIntegrationPolicyFence(db, snapshot, (tx, policy) => {
+    // Re-checked under the policy fence: the organization may have reserved
+    // turning integrations on for admins since the route checked.
+    if (snapshot.memberCreate && policy.personalIntegrationSetup !== "members")
+      throw new IntegrationChangeRequiresAdminError(
+        "Your organization lets only admins turn on integrations",
+      );
+    return installApiIntegrationInScope(tx, snapshot, () =>
       assertOrganizationIntegrationAllowed(policy, key),
-    ),
-  );
+    );
+  });
 }
 
 async function installApiIntegrationInScope(
@@ -521,6 +572,13 @@ async function installApiIntegrationInScope(
           .for("update")
           .limit(1);
         const existingPluginInstallation = pluginInstallation;
+        // A member never moves the instances already set up to a new revision.
+        if (
+          input.memberCreate &&
+          pluginInstallation?.status === "active" &&
+          pluginInstallation.pluginVersionId !== pluginVersion.id
+        )
+          throw new IntegrationChangeRequiresAdminError();
         const oldFacetInstallations = pluginInstallation
           ? await installedFacetRows(tx as unknown as Database, pluginInstallation.id)
           : [];
@@ -627,6 +685,7 @@ async function installApiIntegrationInScope(
             oldFacetInstallations,
             integrationFacetInstallationId: integrationFacetInstallation.id,
             apiFacetInstallationId: apiFacetInstallation.id,
+            integrationFacetId: integrationFacet.id,
             facetDefinitions,
             excludedRuntimeKey: runtimeServerId,
             revision: input.revision,
@@ -672,6 +731,19 @@ async function installApiIntegrationInScope(
         const bindingOwners = previousBinding
           ? await listIntegrationFacetBindingOwners(tx as unknown as Database, previousBinding.id)
           : [];
+        // A member never changes an instance that is already set up. The one
+        // exception is the same plugin installation resuming its own install.
+        if (
+          input.memberCreate &&
+          previousBinding?.status === "active" &&
+          !(
+            owner.kind === "plugin" &&
+            bindingOwners.some(
+              (candidate) => candidate.kind === owner.kind && candidate.id === owner.id,
+            )
+          )
+        )
+          throw new IntegrationChangeRequiresAdminError();
         const componentOwners = await tx
           .select()
           .from(schema.capabilityComponentOwners)
@@ -1035,6 +1107,26 @@ export async function listInstalledApiIntegrationServerIdsForDelegations(
       await listInstalledApiIntegrationServerAuthorityMetadataInRlsContext(scopedDb, workspaceId),
   );
   const byServerId = new Set(workspace.map((entry) => entry.serverId));
+  // The organization's API integrations here: an organization key or no
+  // sign-in runs for anyone; "each person signs in" only for a delegated
+  // person's own account to that provider.
+  const organization = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    (await organizationApiIntegrationRows(scopedDb, workspaceId)).flatMap(
+      organizationApiIntegrationRuntime,
+    ),
+  );
+  for (const integration of organization) {
+    if (byServerId.has(integration.serverId)) continue;
+    if (
+      !integration.connectionRef ||
+      delegations.some(
+        (delegation) =>
+          delegation.serverId === integration.serverId &&
+          delegation.providerDomain.toLowerCase() === integration.providerDomain.toLowerCase(),
+      )
+    )
+      byServerId.add(integration.serverId);
+  }
   const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
   for (const ownerSubjectId of owners) {
     const ownerEntries = await withWorkspaceSubjectRls(
@@ -1068,7 +1160,206 @@ export async function listInstalledApiIntegrationServerIdsForDelegations(
   return [...byServerId];
 }
 
+/**
+ * The API integrations that run in this workspace for the reading subject:
+ * the workspace's own installations it can see (shared ones, plus its own
+ * "Only me" ones), then the organization's API integrations that reach the
+ * workspace. A workspace's own setup of the same integration wins: an
+ * organization one is left out when the reader already has an instance of
+ * the same capability here, or when the workspace turned it off.
+ */
 export async function listInstalledApiIntegrationsInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string,
+  serverIds?: readonly string[],
+): Promise<ApiIntegrationRuntime[]> {
+  if (serverIds && serverIds.length === 0) return [];
+  const own = await listOwnApiIntegrationsInRlsContext(scopedDb, workspaceId, subjectId, serverIds);
+  const organization = (await organizationApiIntegrationRows(scopedDb, workspaceId))
+    .flatMap(organizationApiIntegrationRuntime)
+    .filter((integration) => !serverIds || serverIds.includes(integration.serverId));
+  if (organization.length === 0) return own;
+  const ownCapabilityIds = new Set(
+    (serverIds
+      ? await listOwnApiIntegrationsInRlsContext(scopedDb, workspaceId, subjectId)
+      : own
+    ).map((integration) => integration.capabilityId),
+  );
+  const served = organization.filter(
+    (integration) => !ownCapabilityIds.has(integration.capabilityId),
+  );
+  return served.length === 0 ? own : [...own, ...served];
+}
+
+/**
+ * The organization's active API integrations that reach this workspace (row
+ * security decides reach) and that this workspace has not turned off: a
+ * turned-off installation row of the same capability is how a workspace
+ * turns an organization connector off, for MCP servers and APIs alike.
+ */
+async function organizationApiIntegrationRows(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<(typeof schema.organizationConnectors.$inferSelect)[]> {
+  return await scopedDb
+    .select()
+    .from(schema.organizationConnectors)
+    .where(
+      and(
+        eq(schema.organizationConnectors.kind, "api"),
+        eq(schema.organizationConnectors.status, "active"),
+        sql`not exists (
+          select 1 from ${schema.capabilityInstallations} installation
+          where installation.workspace_id = ${workspaceId}::uuid
+            and installation.capability_id = ${schema.organizationConnectors.capabilityId}
+        )`,
+      ),
+    )
+    .orderBy(asc(schema.organizationConnectors.capabilityId));
+}
+
+/**
+ * The organization's active API integrations that reach this workspace and
+ * that this workspace turned off (its turned-off override installation, the
+ * `organizationOverride` marker of ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY),
+ * so the workspace can list each as off here and turn it back on.
+ */
+export async function listOrganizationApiIntegrationsTurnedOffHere(
+  db: Database,
+  workspaceId: string,
+): Promise<ApiIntegrationRuntime[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    (
+      await scopedDb
+        .select()
+        .from(schema.organizationConnectors)
+        .where(
+          and(
+            eq(schema.organizationConnectors.kind, "api"),
+            eq(schema.organizationConnectors.status, "active"),
+            sql`exists (
+              select 1 from ${schema.capabilityInstallations} installation
+              where installation.workspace_id = ${workspaceId}::uuid
+                and installation.capability_id = ${schema.organizationConnectors.capabilityId}
+                and installation.status = 'disabled'
+                and installation.metadata -> 'organizationOverride' = 'true'::jsonb
+            )`,
+          ),
+        )
+        .orderBy(asc(schema.organizationConnectors.capabilityId))
+    ).flatMap(organizationApiIntegrationRuntime),
+  );
+}
+
+/**
+ * An organization API integration as the runtime a workspace installation of
+ * it would be, under the "organization" instance key. "Each person signs in"
+ * is a per-person selector (no connection id): each turn attaches the
+ * initiating person's own account for that provider, exactly as for an
+ * organization MCP connector. An organization key carries its encrypted
+ * placements; "none" calls the API without credentials.
+ */
+export function organizationApiIntegrationRuntime(
+  row: typeof schema.organizationConnectors.$inferSelect,
+): ApiIntegrationRuntime[] {
+  const definition = organizationApiIntegrationDefinition(row);
+  if (!definition) return [];
+  let revision: StoredApiIntegrationRevision;
+  try {
+    revision = storedRevision(definition.revision as unknown as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+  if (revision.protocol !== definition.protocol) return [];
+  const login = organizationConnectorLogin(row.config);
+  const ref = objectValue(row.config.connectionRef);
+  const kind = stringValue(ref.kind);
+  const connectionRef: McpServerConnectionRef | null =
+    login === "each_person"
+      ? {
+          providerDomain: definition.providerDomain,
+          ...(definition.provider ? { provider: definition.provider } : {}),
+          ...(kind === "oauth2" || kind === "api_key" ? { kind } : {}),
+          ...(definition.requiredScopes.length > 0
+            ? { scopes: [...definition.requiredScopes] }
+            : {}),
+          subjectScope: "subject",
+        }
+      : null;
+  const placements = organizationApiCredentialPlacements(row.config);
+  const allowedTools =
+    stringArray(row.config.allowedTools) ?? revision.tools.map((tool) => tool.id);
+  return [
+    {
+      capabilityId: row.capabilityId,
+      pluginKey: definition.pluginKey,
+      pluginInstallationId: row.id,
+      installationVersion: row.generation,
+      instanceId: row.id,
+      instanceKey: ORGANIZATION_API_INTEGRATION_INSTANCE_KEY,
+      displayName: definition.name,
+      instanceVersion: row.generation,
+      serverId: integrationRuntimeKey(
+        definition.serverId,
+        ORGANIZATION_API_INTEGRATION_INSTANCE_KEY,
+      ),
+      name: definition.name,
+      description: definition.description,
+      protocol: revision.protocol,
+      definitionId: definition.definitionId,
+      definitionProvenance: definition.definitionProvenance,
+      baseUrl: definition.baseUrl,
+      sourceUrl: definition.sourceUrl,
+      providerDomain: definition.providerDomain,
+      authScheme: objectValue(definition.authScheme),
+      connectionRef,
+      connectionStatus: null,
+      connectionLastUsedAt: null,
+      connectionAuthorityGeneration: null,
+      allowedTools,
+      requireApproval: revision.tools
+        .filter((tool) => tool.approvalMode === "ask" && allowedTools.includes(tool.id))
+        .map((tool) => tool.id),
+      revision,
+      organizationConnector: {
+        id: row.id,
+        generation: row.generation,
+        // API connectors never connect people automatically.
+        login: login === "auto_connect" ? "each_person" : login,
+        auth: definition.auth,
+      },
+      ...(login === "organization_key" && placements.length > 0
+        ? { organizationCredential: { placements } }
+        : {}),
+    },
+  ];
+}
+
+/** The encrypted placements of an organization key, as stored on an API organization connector. */
+export function organizationApiCredentialPlacements(
+  config: Record<string, unknown>,
+): OrganizationApiCredentialPlacement[] {
+  const placements = config.placementsEncrypted;
+  if (!Array.isArray(placements)) return [];
+  return placements.flatMap((entry): OrganizationApiCredentialPlacement[] => {
+    const value = objectValue(entry);
+    const carrier = value.carrier;
+    const name = stringValue(value.name);
+    const valueEncrypted = stringValue(value.valueEncrypted);
+    if (
+      (carrier !== "header" && carrier !== "query" && carrier !== "cookie") ||
+      !name ||
+      !valueEncrypted
+    )
+      return [];
+    const prefix = stringValue(value.prefix);
+    return [{ carrier, name, valueEncrypted, ...(prefix ? { prefix } : {}) }];
+  });
+}
+
+/** This workspace's own installations the reader can see; never the organization's. */
+async function listOwnApiIntegrationsInRlsContext(
   scopedDb: Database,
   workspaceId: string,
   subjectId?: string,
@@ -1096,6 +1387,7 @@ export async function listInstalledApiIntegrationsInRlsContext(
       instanceVersion: schema.integrationFacetBindings.version,
       runtimeKey: schema.integrationFacetBindings.runtimeKey,
       bindingConfig: schema.integrationFacetBindings.config,
+      instanceCreatedBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
       connectionId: schema.integrationFacetBindings.connectionId,
       connectionAuthorityGeneration: schema.connections.authorityGeneration,
       connectionStatus: schema.connections.status,
@@ -1269,6 +1561,7 @@ export async function listInstalledApiIntegrationsInRlsContext(
         allowedTools,
         requireApproval,
         revision,
+        instanceCreatedBySubjectId: row.instanceCreatedBySubjectId,
       },
     ];
   });
@@ -1364,8 +1657,10 @@ export async function getApiIntegrationReconciliationSnapshot(
 } | null> {
   return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const instanceKey = integrationBindingKey(input.connectionId, input.instanceKey);
+    // Only this workspace's own installations can be reconciled: the
+    // organization's API integrations are never a stored installation here.
     const candidates = (
-      await listInstalledApiIntegrationsInRlsContext(tx, input.workspaceId, input.subjectId)
+      await listOwnApiIntegrationsInRlsContext(tx, input.workspaceId, input.subjectId)
     ).filter((runtime) => {
       if (
         runtime.instanceKey !== instanceKey ||
@@ -1478,6 +1773,11 @@ export async function uninstallApiIntegration(
     instanceKey: string;
     expectedInstallationVersion: number;
     expectedInstanceVersion: number;
+    /**
+     * A member's removal: only an instance this subject added. One an admin
+     * or another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<UninstallApiIntegrationResult> {
   return await withRlsContext(
@@ -1503,6 +1803,10 @@ export async function uninstallApiIntegration(
             definitionStatus: "retained",
           };
         }
+        if (input.memberRemoval && context.createdBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove an account someone else added.",
+          );
         if (context.installationVersion !== input.expectedInstallationVersion) {
           throw new ApiIntegrationInstallationVersionConflictError(
             input.capabilityId,
@@ -1848,6 +2152,8 @@ async function migrateApiIntegrationFacetInstallations(
     oldFacetInstallations: InstalledFacetRow[];
     integrationFacetInstallationId: string;
     apiFacetInstallationId: string;
+    /** The target revision's integration facet, which owns its facet definitions. */
+    integrationFacetId: string;
     facetDefinitions: ReadonlyMap<string, typeof schema.integrationFacetDefinitions.$inferSelect>;
     excludedRuntimeKey: string;
     revision: StoredApiIntegrationRevision;
@@ -2145,6 +2451,8 @@ type IntegrationInstanceContext = {
   displayName: string;
   pluginInstallationId: string;
   installationVersion: number;
+  /** Who added this instance; a member removes only their own. */
+  createdBySubjectId: string;
 };
 
 async function integrationInstanceContext(
@@ -2162,6 +2470,7 @@ async function integrationInstanceContext(
       displayName: schema.integrationFacetBindings.displayName,
       pluginInstallationId: schema.capabilityPluginInstallations.id,
       installationVersion: schema.capabilityPluginInstallations.version,
+      createdBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
     })
     .from(schema.integrationFacetBindings)
     .innerJoin(

@@ -2,8 +2,11 @@
  * Browser entry for the gateway shell page, bundled into
  * `shell-script.gen.ts` by `scripts/build-shell.ts`. Runs the shared bridge
  * host for the Site frame: allowed Site operations go to `/_og/api<suffix>`,
- * tool methods to `/_og/api/tools/<method>`, and `viewer`/`auth.signIn` are
- * answered here. Requests outside the allowlist never leave the page.
+ * tool methods to `/_og/api/tools/<method>`, and `viewer`/`auth.signIn` and
+ * `location`/`location.navigate` are answered here. The Site's location is
+ * this page's own address: navigation adds history entries to this page (the
+ * Site frame never reloads), and Back/Forward are passed on to the Site.
+ * Requests outside the allowlist never leave the page.
  */
 import {
   SITE_GATEWAY_API_PREFIX,
@@ -14,6 +17,10 @@ import {
 } from "@opengeni/contracts";
 import {
   SiteBridgeHost,
+  openGeniSiteLocationHref,
+  openGeniSitePath,
+  type OpenGeniSiteLocationValue,
+  type SiteBridgeLocationHandlers,
   type SiteBridgeToolHandlers,
   type SiteBridgeViewerHandlers,
   type SiteHttpRequest,
@@ -202,11 +209,20 @@ const viewerHandlers: SiteBridgeViewerHandlers = {
   signIn: async ({ signal }) => {
     const known = await currentViewer(signal).catch(() => null);
     if (known?.signedIn) return { started: false };
-    const back = `${location.pathname}${location.search}`;
+    const back = `${location.pathname}${location.search}${location.hash}`;
     location.assign(`${SITE_GATEWAY_LOGIN_PATH}?return=${encodeURIComponent(back)}`);
     return { started: true };
   },
 };
+
+/** This page's address as the Site's location; `//x` reads as `/x`, never as another origin. */
+function pageLocation(): OpenGeniSiteLocationValue {
+  return {
+    path: openGeniSitePath(location.pathname || "/"),
+    search: location.search,
+    hash: location.hash,
+  };
+}
 
 function loadTurnstile(): Promise<TurnstileApi> {
   const existing = (window as unknown as { turnstile?: TurnstileApi }).turnstile;
@@ -257,10 +273,29 @@ async function runHumanCheck(siteKey: string): Promise<void> {
 
 const frame = document.getElementById("og-site") as HTMLIFrameElement | null;
 if (frame) {
-  const host = new SiteBridgeHost({ tools: () => tools, viewer: () => viewerHandlers });
+  const locationHandlers: SiteBridgeLocationHandlers = {
+    get: pageLocation,
+    origin: location.origin,
+    // The bridge has already refused other origins and /_og addresses.
+    navigate: (to, { replace }) => {
+      const href = openGeniSiteLocationHref(to);
+      if (replace) history.replaceState(history.state, "", href);
+      else history.pushState(null, "", href);
+      const now = pageLocation();
+      host.notifyLocation(now);
+      return now;
+    },
+  };
+  const host = new SiteBridgeHost({
+    tools: () => tools,
+    viewer: () => viewerHandlers,
+    location: () => locationHandlers,
+  });
   frame.addEventListener("load", () => {
     const frameWindow = frame.contentWindow;
     if (frameWindow) host.load(frameWindow);
   });
+  // Back/Forward and edits to the #hash in the address bar.
+  window.addEventListener("popstate", () => host.notifyLocation(pageLocation()));
   window.addEventListener("pagehide", () => host.close());
 }

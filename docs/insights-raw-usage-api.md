@@ -185,15 +185,22 @@ The four rolling migration files deliberately use separate transactions:
 The migration's lock timeout is one second: contention fails safely instead
 of waiting behind a busy writer and creating a long insert queue. Resume the
 normal migration command after the contending transaction completes. Backfill
-duration depends on facts/hour, number of hours, storage and concurrent load;
-`scripts/bench-insights-hourly.ts` measures the exact response queries with
-4 million facts, 80 days and roughly 7,000 sessions on disposable local Postgres.
-It also prints trigger time separately from insert/index work. Rollup size is
+duration depends on facts/hour, number of hours, storage and concurrent load.
+Rollup size is
 proportional to distinct session/model/payer/hour tuples, not just hours: very
 high-cardinality workloads compress less. Existing SQL functions and binaries
 remain compatible throughout; use a forward migration for database rollback.
 Changes to payer classification or captured-measure formulas must rebuild the
 affected historical hours before activating the corresponding reader.
+
+A rollup row never stores a negative amount; readers reject one instead of
+reporting a wrong total. Since migration 1252 a fact delete subtracts from its
+group only when every measure stays non-negative. A missing or smaller group
+(for example rollup rows removed by hand before their facts) is queued in
+`opengeni_private.insights_usage_hourly_repairs`, and a deferred constraint
+trigger rebuilds that one group from its facts at commit, after every row
+trigger of the transaction. `insights_usage_hourly_repair_negative_hours()`
+rebuilds every hour that holds a negative row; the migration runs it once.
 
 ### Local scale evidence (2026-10-17)
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  thisComputerNeedsPermissions,
   thisComputerPermissionSteps,
   type ThisComputerHost,
   type ThisComputerPermissionId,
@@ -24,6 +25,13 @@ export interface UseThisComputerResult {
    * allowing it.
    */
   asking: ThisComputerPermissionId | null;
+  /**
+   * On, but still not usable (`status.reconnecting`) after waiting longer than
+   * turning on should take: screens stop the spinner and say what it waits
+   * for (`status.waitingOn`), with Try again. Clears once it is usable, or
+   * when it is turned on or off again.
+   */
+  stalled?: boolean;
   refresh(): void;
   connect(options: { screenControl: boolean }): Promise<ThisComputerStatus | null>;
   pause(): Promise<void>;
@@ -31,8 +39,9 @@ export interface UseThisComputerResult {
   disconnect(): Promise<void>;
   /**
    * Turns computer use on, doing whatever it takes: resumes a paused agent,
-   * registers this computer (again) when it never was or its registration is
-   * gone (e.g. removed from Machines), and starts the agent. Then it asks for
+   * restarts one that failed or is stuck connecting, registers this computer
+   * (again) when it never was, its registration is gone (e.g. removed from
+   * Machines) or the server needs it connected again, and starts the agent. Then it asks for
    * each missing permission in turn (see `asking`), so turning on is one step.
    * Resolves with the status before any permission is asked for.
    */
@@ -66,6 +75,8 @@ export function useThisComputer(
     pollMs?: number;
     /** How long asking waits in the app with no system window shown before it stops. */
     askQuietMs?: number;
+    /** How long on may stay unusable (`reconnecting`) before it counts as `stalled`. */
+    turnOnLimitMs?: number;
   } = {},
 ): UseThisComputerResult {
   const [status, setStatus] = useState<ThisComputerStatus | null>(null);
@@ -81,6 +92,10 @@ export function useThisComputer(
     timers: number[];
   } | null>(null);
   const askQuietMs = options.askQuietMs ?? ASK_QUIET_MS;
+  const turnOnLimitMs = options.turnOnLimitMs ?? TURN_ON_LIMIT_MS;
+  const [stalled, setStalled] = useState(false);
+  /** Counts actions from these screens: each one starts the wait afresh. */
+  const [attempt, setAttempt] = useState(0);
   const live = useRef(true);
   const stopAsking = useCallback(() => {
     for (const timer of askingRef.current?.timers ?? []) window.clearTimeout(timer);
@@ -163,12 +178,37 @@ export function useThisComputer(
     return () => window.clearInterval(timer);
   }, [host, pollMs, refresh]);
 
+  // Turning on never waits silently forever: once on has stayed unusable for
+  // the limit, `stalled` says so. Its clock starts when the waiting does (or
+  // after the last action from these screens) and isn't reset while it lasts.
+  const waiting =
+    status?.state === "connected" &&
+    status.reconnecting === true &&
+    !status.error &&
+    // Asking for a permission, or waiting on one, is the person's step, not a stall.
+    asking === null &&
+    !thisComputerNeedsPermissions(status) &&
+    pending === null &&
+    !acting;
+  useEffect(() => {
+    if (!waiting) {
+      setStalled(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setStalled(true), turnOnLimitMs);
+    return () => window.clearTimeout(timer);
+  }, [waiting, turnOnLimitMs, attempt]);
+  const stalledRef = useRef(stalled);
+  stalledRef.current = stalled;
+
   const act = useCallback(async <T>(action: () => Promise<T>): Promise<T | null> => {
     if (actionInFlight.current) return null;
     actionInFlight.current = true;
     const mine = generation.current;
     setActing(true);
     setActionError(null);
+    setStalled(false);
+    setAttempt((count) => count + 1);
     try {
       const result = await action();
       return live.current && mine === generation.current ? result : null;
@@ -267,12 +307,23 @@ export function useThisComputer(
   }, [act, host, workspaceId]);
   const turnOn = useCallback(async () => {
     if (!host || actionInFlight.current) return null;
+    // Read before the action starts the wait afresh.
+    const wasStalled = stalledRef.current;
     setPending("on");
     try {
       const next = await act(async () => {
         let current = await host.status(workspaceId);
-        // Off is paused, and a connection that failed is started again.
-        if (current.state === "paused" || (current.state === "connected" && current.error)) {
+        // The server needs this computer connected again: register it afresh.
+        if (current.state === "connected" && current.errorCode === "reconnect_required") {
+          return await host.connect(workspaceId, { screenControl: true });
+        }
+        // Off is paused, and a connection that failed, or has been connecting
+        // for too long, is started again (a running agent restarts, so it
+        // retries now). One still connecting normally is left to finish.
+        if (
+          current.state === "paused" ||
+          (current.state === "connected" && (current.error || (current.reconnecting && wasStalled)))
+        ) {
           await host.resume();
           current = await host.status(workspaceId);
         }
@@ -326,6 +377,7 @@ export function useThisComputer(
       canDisconnect,
       pending,
       asking,
+      stalled,
       refresh,
       connect,
       pause,
@@ -343,6 +395,7 @@ export function useThisComputer(
       canDisconnect,
       pending,
       asking,
+      stalled,
       refresh,
       connect,
       pause,
@@ -360,6 +413,12 @@ export function useThisComputer(
 const RETURN_GRACE_MS = 1_500;
 /** Asking for a permission with the app still in front this long: no system window came up. */
 const ASK_QUIET_MS = 8_000;
+/**
+ * On, but not yet usable, for this long: turning on has stalled. Starting an
+ * agent and the server seeing it online normally takes seconds; the agent
+ * retries a refused sign-in about once a minute.
+ */
+const TURN_ON_LIMIT_MS = 60_000;
 /** Asking stops after this long regardless (the host stops watching for grants then too). */
 const ASK_LIMIT_MS = 10 * 60_000;
 

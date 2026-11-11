@@ -8,6 +8,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/automations"
+  | "/workspaces/$workspaceId/agents"
   | "/workspaces/$workspaceId/meetings"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
@@ -22,6 +23,7 @@ export type WorkspaceConfigIcon =
   | "brain-circuit"
   | "plug"
   | "zap"
+  | "bot"
   | "audio-lines"
   | "panels-top-left"
   | "settings";
@@ -59,7 +61,13 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/automations",
     icon: "zap",
     label: "Automations",
-    description: "Run agents on a schedule or when something happens",
+    description: "Run tasks on a schedule or when something happens",
+  },
+  {
+    to: "/workspaces/$workspaceId/agents",
+    icon: "bot",
+    label: "Agents",
+    description: "Named agents you can chat with here and in Slack",
   },
   {
     to: "/workspaces/$workspaceId/meetings",

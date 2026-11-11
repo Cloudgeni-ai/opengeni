@@ -11,6 +11,7 @@ import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
   newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   resolveSessionAgentConfigForCreate,
 } from "../src/domain/agent-config-resolution";
 
@@ -108,6 +109,41 @@ describe("new-session Knowledge search selection", () => {
   });
 });
 
+describe("new-session tools named by the opening context", () => {
+  test("only selected first-party tools count; other names need another server; the session's tools are untouched", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["knowledge_search"] },
+      { kind: "mcp", id: "files" },
+    ];
+    const before = structuredClone(tools);
+    // A first-party name outside the selection never counts; any other name is
+    // left to the first turn, which loads it only if a selected server has it.
+    expect(
+      newSessionOpeningTools(
+        tools,
+        ["knowledge_search", "excel_run"],
+        ["excel_run", "session_create", "projects_search", "excel_run"],
+      ),
+    ).toEqual(["excel_run", "projects_search"]);
+    expect(tools).toEqual(before);
+  });
+
+  test("names nothing outside the opengeni ref's own selection", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionOpeningTools(tools, ["excel_run"], undefined)).toEqual([]);
+    expect(newSessionOpeningTools(tools, ["excel_run"], [])).toEqual([]);
+    expect(newSessionOpeningTools(tools, [], ["excel_run"])).toEqual([]);
+    expect(newSessionOpeningTools([], ["excel_run"], ["excel_run"])).toEqual([]);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: ["goal_set"] }];
+    expect(newSessionOpeningTools(narrowed, ["excel_run"], ["excel_run"])).toEqual([]);
+    // Without another selected server no application tool can answer a name.
+    expect(newSessionOpeningTools(tools, ["excel_run"], ["projects_search"])).toEqual([]);
+    expect(
+      newSessionOpeningTools([{ kind: "mcp", id: "app" }], [], ["excel_run", "projects_search"]),
+    ).toEqual(["projects_search"]);
+  });
+});
+
 function failure(fn: () => unknown): { status: number; code: string } | null {
   try {
     fn();
@@ -183,7 +219,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     );
   });
 
-  test("human-input deployment limits explain defaults and reject an explicit family request", () => {
+  test("notification deployment limits explain defaults and reject an explicit family request", () => {
     const restricted = testSettings({ allowedFirstPartyMcpTools: ["session_create"] });
     const config = resolveSessionAgentConfigForCreate({
       ...base,
@@ -192,9 +228,11 @@ describe("resolveSessionAgentConfigForCreate", () => {
       request: { capabilities: "all" },
     }).config!;
     expect(config).toHaveProperty(
-      "unavailableReasons.humanInput",
+      "unavailableReasons.notifications",
       expect.stringContaining("its tools are not allowed on this server: notify_user"),
     );
+    // Asking questions has no first-party tool, so the limit leaves it on.
+    expect(config.unavailable).not.toContain("humanInput");
     const unrestricted = resolveSessionAgentConfigForCreate({
       ...base,
       settings,
@@ -209,7 +247,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
           ...base,
           settings: restricted,
           creator: "api",
-          request: { capabilities: { from: "none", humanInput: true } },
+          request: { capabilities: { from: "none", humanInput: true, notifications: true } },
         }),
       ),
     ).toEqual({ status: 422, code: "agent_capability_unavailable" });

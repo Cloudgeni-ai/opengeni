@@ -3,6 +3,7 @@ import { expect, mock, test } from "bun:test";
 let permissions: string[] = [];
 let grantShape: Record<string, unknown> = {};
 let contextShape: Record<string, unknown> = {};
+let clientConfigShape: Record<string, unknown> | undefined;
 let machineEnabled: boolean | undefined;
 let rigsEnabled: boolean | undefined;
 const action = mock(async () => null);
@@ -20,6 +21,7 @@ mock.module("../app-context", () => ({
       workspaceGrants: [{ workspaceId: "workspace", permissions, ...grantShape }],
       ...contextShape,
     },
+    clientConfig: clientConfigShape,
   }),
 }));
 mock.module("../../session-context", () => ({
@@ -151,6 +153,41 @@ test("a signed-in Member connects and changes only their own Only me machines", 
     await machines.remove("own");
   }
   expect(action).toHaveBeenCalledTimes(2);
+  grantShape = {};
+  contextShape = {};
+  fleetMachines = [machine];
+});
+
+test("organization machines change only for the organization's owner or an admin", () => {
+  const organization = { sandboxId: "org", enrollmentId: "org", scope: "organization" };
+  const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
+  fleetMachines = [organization, shared];
+  permissions = ["enrollments:read", "enrollments:manage", "sessions:read"];
+  grantShape = { accountId: "acme", subjectId: "user:kari", principalKind: "human_session" };
+  clientConfigShape = { productAccessMode: "managed", auth: { mode: "managedSession" } };
+  const asRole = (role: string, accountId = "acme", grantPermissions: string[] = []) => {
+    contextShape = {
+      accountGrants: [{ accountId, subjectId: "user:kari", role, permissions: grantPermissions }],
+    };
+    return useWorkspaceMachines();
+  };
+  for (const role of ["owner", "admin"]) {
+    const machines = asRole(role);
+    expect(machines.canManageMachine(organization as never)).toBe(true);
+    expect(machines.canManageMachine(shared as never)).toBe(true);
+  }
+  // A member who manages the workspace's machines, and an admin of another
+  // organization, change workspace machines but not organization ones.
+  for (const machines of [asRole("member"), asRole("admin", "other")]) {
+    expect(machines.canManageMachine(organization as never)).toBe(false);
+    expect(machines.canManageMachine(shared as never)).toBe(true);
+  }
+  // Without a managed sign-in, only a literal account:admin grant counts.
+  clientConfigShape = undefined;
+  expect(asRole("admin").canManageMachine(organization as never)).toBe(false);
+  expect(asRole("member", "acme", ["account:admin"]).canManageMachine(organization as never)).toBe(
+    true,
+  );
   grantShape = {};
   contextShape = {};
   fleetMachines = [machine];

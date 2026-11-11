@@ -5,9 +5,12 @@ import { cn } from "../lib/cn";
 import { useOpenGeniText } from "../messages/runtime";
 import { useEntranceAnimation } from "../timeline/entrance";
 import type { AuthNeededItem } from "../timeline/types";
-
-const PRIMARY_ACTION_CLASS =
-  "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-menu font-medium sm:w-auto";
+import {
+  DecisionActions,
+  decisionButtonClass,
+  decisionCardClass,
+  decisionCardPad,
+} from "./decision-card";
 
 /**
  * The inline connection-recovery card: missing or lapsed access surfaces as a
@@ -65,72 +68,93 @@ export function AuthNeededRow({
     );
   }
 
+  const actionIcon = (
+    <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
+  );
+  const action = hostAuthorizationUrl ? (
+    <a
+      href={hostAuthorizationUrl}
+      rel="noreferrer"
+      target="_blank"
+      className={decisionButtonClass("primary")}
+    >
+      {actionIcon}
+      {actionLabel}
+    </a>
+  ) : item.authoritySource !== "host" && !unavailable && onReconnect ? (
+    <button
+      type="button"
+      onClick={() => void start()}
+      disabled={busy}
+      className={decisionButtonClass("primary")}
+    >
+      {actionIcon}
+      {busy ? t("messageTimeline.opening") : actionLabel}
+    </button>
+  ) : item.authoritySource !== "host" && !unavailable && item.authorizationUrl ? (
+    <a
+      href={item.authorizationUrl}
+      rel="noreferrer"
+      target="_blank"
+      className={decisionButtonClass("primary")}
+    >
+      {actionIcon}
+      {actionLabel}
+    </a>
+  ) : null;
+
   return (
-    <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
-      <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+    <div
+      className={cn(enter && "animate-og-enter", "flex w-full max-w-[540px] flex-col gap-2")}
+      role="status"
+    >
+      <div className={decisionCardClass}>
+        <div
+          className={cn(
+            "flex min-w-0 items-center gap-3 pt-4 @md/decision:pt-[18px]",
+            decisionCardPad,
+          )}
+        >
           <AuthProviderLogo
             src={resolveProviderLogo?.(item.providerDomain) ?? null}
             label={provider}
           />
-          <div className="min-w-0">
-            <p className="truncate text-og-md font-medium text-og-fg">{title}</p>
-            <p className="line-clamp-2 text-og-sm text-og-fg-subtle">{reasonLine}</p>
+          <div className="grid min-w-0 flex-1 gap-0.5">
+            <p className="text-og-md font-semibold [overflow-wrap:anywhere] text-og-fg">{title}</p>
             {presentation.providerLine ? (
-              <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                {presentation.providerLine}
-              </p>
-            ) : null}
-            {presentation.variablesLine ? (
-              <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                {presentation.variablesLine}
-              </p>
+              <p className="truncate text-og-sm text-og-fg-muted">{presentation.providerLine}</p>
             ) : null}
           </div>
         </div>
-        {hostAuthorizationUrl ? (
-          <a
-            href={hostAuthorizationUrl}
-            rel="noreferrer"
-            target="_blank"
+        <p
+          className={cn(
+            "line-clamp-2 pt-3 text-og-base text-og-fg [overflow-wrap:anywhere]",
+            decisionCardPad,
+            !action && !presentation.variablesLine && "pb-4",
+          )}
+          title={reasonLine}
+        >
+          {reasonLine}
+        </p>
+        {presentation.variablesLine ? (
+          <p
             className={cn(
-              PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-9",
+              "truncate pt-1.5 text-og-sm text-og-fg-muted",
+              decisionCardPad,
+              !action && "pb-4",
             )}
           >
-            <RefreshCwIcon className="size-3.5" aria-hidden />
-            {actionLabel}
-          </a>
-        ) : item.authoritySource !== "host" && !unavailable && onReconnect ? (
-          <button
-            type="button"
-            onClick={() => void start()}
-            disabled={busy}
-            className={cn(
-              PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-primary-hover disabled:opacity-50 pointer-coarse:min-h-9",
-            )}
-          >
-            <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? t("messageTimeline.opening") : actionLabel}
-          </button>
-        ) : item.authoritySource !== "host" && !unavailable && item.authorizationUrl ? (
-          <a
-            href={item.authorizationUrl}
-            rel="noreferrer"
-            target="_blank"
-            className={cn(
-              PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-9",
-            )}
-          >
-            <RefreshCwIcon className="size-3.5" aria-hidden />
-            {actionLabel}
-          </a>
+            {presentation.variablesLine}
+          </p>
+        ) : null}
+        {action ? (
+          <DecisionActions className={cn("pt-4 pb-4 @md/decision:pb-[18px]", decisionCardPad)}>
+            {action}
+          </DecisionActions>
         ) : null}
       </div>
       {presentation.footnote ? (
-        <p className="px-1 text-og-xs text-og-fg-subtle">{presentation.footnote}</p>
+        <p className="px-1 text-og-xs text-og-fg-muted">{presentation.footnote}</p>
       ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">{presentation.startFailed}</p>
@@ -154,7 +178,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
   const showImage = src && !failed;
   return (
     <span
-      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-og-menu font-semibold text-og-fg-muted"
+      className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 text-og-sm font-semibold text-og-fg-muted"
       aria-hidden
     >
       {showImage ? (

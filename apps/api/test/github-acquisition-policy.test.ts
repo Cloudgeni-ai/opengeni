@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { Hono } from "hono";
 import { OrganizationIntegrationDeniedError, type ConnectAttempt } from "@opengeni/contracts";
@@ -18,7 +18,6 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createSignedState } from "@opengeni/github";
 import { completeGitHubAppConnect } from "../src/integrations/github-app-connect";
 import { registerGitHubRoutes } from "../src/routes/github";
-import { registerPrReviewRoutes } from "../src/routes/pr-review";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -80,15 +79,8 @@ function deps(discover: () => Promise<unknown>): ApiRouteDeps {
       sandboxBackend: "none",
       environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
       productAccessMode: "managed",
-      prReviewGithubAppId: "54321",
-      prReviewGithubClientId: "fixture-client",
-      prReviewGithubClientSecret: "fixture-secret",
-      prReviewGithubAppSlug: "fixture-lens",
-      prReviewGithubAppPrivateKey: "fixture-key",
-      prReviewGithubWebhookSecret: "fixture-webhook",
     }),
     githubAppApi: { discoverInstallationBindingCandidates: discover },
-    prReviewGithubAppApi: { discoverInstallationBindingCandidates: discover },
   } as unknown as ApiRouteDeps;
 }
 
@@ -101,15 +93,15 @@ function routes(api: ApiRouteDeps) {
     throw error;
   });
   registerGitHubRoutes(app, api);
-  registerPrReviewRoutes(app, api);
   return app;
 }
 const headers = () => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
-for (const provider of ["github-app", "github-lens"] as const) {
+{
+  const provider = "github-app";
   for (const boundary of ["preflight", "late policy", "late actor"] as const)
     test(`${provider} native callback ${boundary}`, async () => {
       const late = boundary !== "preflight";
-      await allow(late ? [provider] : [provider === "github-app" ? "github-lens" : "github-app"]);
+      await allow(late ? [provider] : []);
       let calls = 0;
       const api = deps(async () => []);
       const installationId = Math.floor(Math.random() * 100_000_000) + 1;
@@ -146,17 +138,14 @@ for (const provider of ["github-app", "github-lens"] as const) {
         };
       };
       api.githubAppApi = { authorizeInstallationBinding: proof } as never;
-      api.prReviewGithubAppApi = { authorizeInstallationBinding: proof } as never;
       const state = createSignedState(secret, {
         ...scope,
         installationId,
-        intent:
-          provider === "github-app" ? "installation_authority_oauth" : "pr_review_github_oauth",
+        intent: "installation_authority_oauth",
       });
-      const cookie =
-        provider === "github-app" ? "opengeni_github_state" : "opengeni_pr_review_github_state";
+      const cookie = "opengeni_github_state";
       const response = await routes(api).request(
-        `/v1/${provider === "github-app" ? "github" : "pr-review/github"}/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+        `/v1/github/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
         {
           headers: { ...headers(), cookie: `${cookie}=${state}` },
         },
@@ -174,39 +163,9 @@ for (const provider of ["github-app", "github-lens"] as const) {
       expect(await listGitHubInstallationAccessForWorkspace(client.db, scope.workspaceId)).toEqual(
         [],
       );
-      const [registrations] =
-        await shared.admin`select count(*)::int as count from pr_review_app_registrations where workspace_id = ${scope.workspaceId}`;
-      expect(registrations!.count).toBe(0);
     });
 }
-for (const provider of ["github", "gitlab", "azure_devops"] as const)
-  test(`manual ${provider} PR review registration uses explicit provider classification`, async () => {
-    await allow(provider === "github" ? ["github-app"] : ["github-app", "github-lens"]);
-    const response = await routes(deps(async () => [])).request(
-      `/v1/workspaces/${scope.workspaceId}/pr-review/registrations`,
-      {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({
-          name: crypto.randomUUID(),
-          provider,
-          providerBaseUrl:
-            provider === "azure_devops" ? "https://dev.azure.com/fixture" : undefined,
-          credentialKind: provider === "github" ? "github_app" : "provider_token",
-          appId: provider === "github" ? "42" : undefined,
-          privateKey: provider === "github" ? "fixture-private-key" : undefined,
-          accessToken: provider === "github" ? undefined : "fixture-access-token",
-          webhookSecret: "fixture-webhook-secret",
-          webhookUsername: provider === "azure_devops" ? "fixture" : undefined,
-        }),
-      },
-    );
-    expect({
-      status: response.status,
-      body: response.status === 403 ? undefined : await response.text(),
-    }).toEqual({ status: 403, body: undefined });
-  });
-async function begin(providerId: "github-app" | "github-lens") {
+async function begin(providerId: "github-app") {
   const id = crypto.randomUUID();
   const state = createSignedState(secret, {
     kind: "github_app_connect",
@@ -241,16 +200,16 @@ async function begin(providerId: "github-app" | "github-lens") {
   return {
     id,
     state,
-    expectedProvider: providerId,
     code: "fixture-code",
     requestUrl: "https://api.example/callback",
   };
 }
-for (const provider of ["github-app", "github-lens"] as const) {
+{
+  const provider = "github-app";
   test(`${provider} denies before discovery and fences policy changed during provider work`, async () => {
     let calls = 0;
     const denied = await begin(provider);
-    await allow([provider === "github-app" ? "github-lens" : "github-app"]);
+    await allow([]);
     await completeGitHubAppConnect(
       deps(async () => {
         calls++;
@@ -322,134 +281,3 @@ for (const provider of ["github-app", "github-lens"] as const) {
     expect(calls).toBe(0);
   });
 }
-
-test("manual GitHub repository preflight, late policy fence, allowed commit and reductions", async () => {
-  const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
-    .privateKey.export({ type: "pkcs8", format: "pem" })
-    .toString();
-  await allow(["github-lens"]);
-  const app = routes(deps(async () => []));
-  const base = `/v1/workspaces/${scope.workspaceId}/pr-review`;
-  const created = await app.request(`${base}/registrations`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      name: crypto.randomUUID(),
-      provider: "github",
-      credentialKind: "github_app",
-      appId: "42",
-      privateKey,
-      webhookSecret: "fixture-webhook-secret",
-    }),
-  });
-  expect(created.status).toBe(201);
-  const registration = await created.json();
-  let calls = 0;
-  let restrict = false;
-  let revokeActor = false;
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    calls++;
-    const url = new URL(String(input));
-    expect(url.origin).toBe("https://api.github.com");
-    if (url.pathname === "/app/installations")
-      return Response.json([{ id: 42, account: { id: 7, login: "fixture", type: "User" } }]);
-    if (url.pathname === "/app/installations/42/access_tokens")
-      return Response.json({
-        token: "fixture-installation-token",
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-      });
-    if (url.pathname === "/installation/repositories") {
-      if (restrict) await allow([]);
-      if (revokeActor)
-        await shared.admin`update api_keys set revoked_at = now() where id = ${keyId}`;
-      return Response.json({
-        total_count: 1,
-        repositories: [
-          {
-            id: 43,
-            name: "repo",
-            full_name: "fixture/repo",
-            private: true,
-            html_url: "https://github.com/fixture/repo",
-            clone_url: "https://github.com/fixture/repo.git",
-            default_branch: "main",
-          },
-        ],
-      });
-    }
-    throw new Error(`Unexpected fixture request: ${url.pathname}`);
-  });
-  const bind = () =>
-    app.request(`${base}/repositories`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        registrationId: registration.id,
-        repositoryUri: "https://github.com/fixture/repo.git",
-        repositoryFullName: "fixture/repo",
-        providerRepositoryId: 43,
-        installationId: 42,
-      }),
-    });
-  try {
-    await allow(["github-app"]);
-    expect((await bind()).status).toBe(403);
-    expect(calls).toBe(0);
-    await allow(["github-lens"]);
-    restrict = true;
-    expect((await bind()).status).toBe(403);
-    expect(calls).toBe(3);
-    const [row] =
-      await shared.admin`select count(*)::int as count from pr_review_repository_bindings where registration_id = ${registration.id}`;
-    expect(row!.count).toBe(0);
-    await allow(["github-lens"]);
-    restrict = false;
-    revokeActor = true;
-    const revoked = await bind();
-    await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
-    revokeActor = false;
-    expect(revoked.status).toBe(403);
-    const [afterRevocation] =
-      await shared.admin`select count(*)::int as count from pr_review_repository_bindings where registration_id = ${registration.id}`;
-    expect(afterRevocation!.count).toBe(0);
-    const accepted = await bind();
-    expect({
-      status: accepted.status,
-      body: accepted.status === 201 ? undefined : await accepted.text(),
-    }).toEqual({ status: 201, body: undefined });
-    const binding = await accepted.json();
-    await allow([]);
-    const unchanged = await app.request(`${base}/repositories/${binding.id}`, {
-      method: "PATCH",
-      headers: headers(),
-      body: JSON.stringify({ status: binding.status }),
-    });
-    expect(unchanged.status).toBe(200);
-    const disabled = await app.request(`${base}/repositories/${binding.id}`, {
-      method: "PATCH",
-      headers: headers(),
-      body: JSON.stringify({ status: "disabled" }),
-    });
-    expect(disabled.status).toBe(200);
-    expect(
-      (
-        await app.request(`${base}/repositories/${binding.id}`, {
-          method: "DELETE",
-          headers: headers(),
-        })
-      ).status,
-    ).toBe(204);
-    expect(
-      (
-        await app.request(`${base}/registrations/${registration.id}`, {
-          method: "DELETE",
-          headers: headers(),
-        })
-      ).status,
-    ).toBe(204);
-    expect(calls).toBe(9);
-  } finally {
-    await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
-    fetch.mockRestore();
-  }
-});

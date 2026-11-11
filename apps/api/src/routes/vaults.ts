@@ -41,6 +41,8 @@ import {
   type VaultRequestActor,
   type VaultService,
   type VaultServiceDeps,
+  MissingPermissionRefusal,
+  authorizationHoldsOrganizationAdministration,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -53,7 +55,8 @@ const PREFIX = "/v1/workspaces/:workspaceId";
 function actorFor(authorization: AccessGrantAuthorization): VaultRequestActor {
   return {
     grant: authorization.grant,
-    accountAdmin: authorization.accountGrant?.permissions.includes("account:admin") === true,
+    // Organization vaults: the organization's owner or an admin.
+    accountAdmin: authorizationHoldsOrganizationAdministration(authorization),
     // An agent or personal key acting as the person resolves as their human
     // session too; only their own sign-in counts as the person here.
     personSignedIn:
@@ -184,15 +187,22 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
     }),
   );
 
+  // Every organization vault, wherever it works: the people who manage them
+  // see them all, not only the ones that reach this workspace.
+  app.get(`${PREFIX}/organization-vaults`, (c) =>
+    vaultRoute(c, async () => {
+      const { workspaceId, actor } = await authorize(c, "secrets:list");
+      if (!actor.accountAdmin) throw new MissingPermissionRefusal("account:admin");
+      return c.json(await vaults().listOrganization(actor, workspaceId));
+    }),
+  );
+
   app.post(`${PREFIX}/vaults`, (c) =>
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:write");
       const payload = await parseRequestJson(c, CreateVaultRequest);
       if (payload.ownerKind === "organization" && !actor.accountAdmin) {
-        throw new ApiHttpError(403, {
-          code: "forbidden",
-          message: "missing permission: account:admin",
-        });
+        throw new MissingPermissionRefusal("account:admin");
       }
       return c.json(await vaults().create(actor, workspaceId, payload), 201);
     }),

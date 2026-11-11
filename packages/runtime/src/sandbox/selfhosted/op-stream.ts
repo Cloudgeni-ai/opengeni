@@ -54,6 +54,7 @@ import {
   agentErrorToControlError,
   commandOutcomeUnknownAfterReplacementAgentError,
   isAgentNotAnswered,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
@@ -83,10 +84,20 @@ export const OP_STREAM_SILENCE_TIMEOUT_MS = 30_000;
  *  the client fails it typed (PROTOCOL liveness rule: hold ≤120s, then only a
  *  definitive answer fails the op). */
 export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
-/** A detached background consumer grants the runner the complete uint64 credit
- * range. Retention remains bounded by the runner's ring/spool quotas, so a noisy
- * command reaches the existing typed OP_OVERFLOW terminal instead of stalling
- * forever merely because the turn that launched it finished. */
+/** How long a command's start may go without any answer from the agent
+ *  before the client stops waiting for it and fails it typed
+ *  (`AGENT_UNRESPONSIVE_DETAIL_KEY`). Every answer, a DRAINING refusal included,
+ *  starts the wait again, so a busy agent is never cut off. It covers a compute
+ *  host's 120 s hold of a request to a waking or restarting sandbox, plus a
+ *  reply-recovery round, and stops the start's retries long before their
+ *  15-minute resend horizon. */
+export const OP_START_UNANSWERED_MS = 180_000;
+/** A consumer that stops following a retained op detaches it (`OpAck.detach`):
+ * the runner stops sending frames nobody receives and keeps draining the child
+ * into retention, bounded by its ring/spool quotas, so a noisy command reaches
+ * the existing typed OP_OVERFLOW terminal instead of stalling forever merely
+ * because the turn that launched it finished. Runners without the field read
+ * this complete uint64 credit range instead and keep draining by streaming. */
 const OP_STREAM_BACKGROUND_CREDIT_BYTES = "18446744073709551615";
 /** The out-of-order stash is a disposable replay optimization, never retained
  *  command output. Bound it in bytes to two live-flow windows per op: a gap that
@@ -148,6 +159,8 @@ export interface OpStreamExecClientDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** See `OP_START_UNANSWERED_MS`; overridable for tests. 0 turns it off. */
+  startUnansweredMs?: number;
   /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
    * identify an already-admitted operation and must not imply a policy change. */
   resourcePolicy?: OperationResourcePolicy;
@@ -211,8 +224,17 @@ export type OpStreamExecResult =
  * The caller must persist this under its exact command before releasing output. */
 export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string };
 
+/**
+ * The shortest foreground wait before an early yield (`yieldSignal`) returns a
+ * background handle, counted from when the op is running: about one model
+ * round trip of Steer latency, while a quick command still returns inline.
+ */
+export const OP_STREAM_EARLY_YIELD_GRACE_MS = 1_000;
+
 export type OpStreamYieldOptions = {
   yieldMs: number;
+  /** Ends the yield window early (a Steer is waiting); the op keeps running. */
+  yieldSignal?: AbortSignal;
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
@@ -628,6 +650,7 @@ export class OpStreamExecClient {
         creditBytes: "0",
         final: true,
         attachGeneration: generation,
+        detach: false,
       }).finish(),
     );
     return "published";
@@ -679,6 +702,7 @@ export class OpStreamExecClient {
         creditBytes: "0",
         final: true,
         attachGeneration: op.generation,
+        detach: false,
       }).finish();
       try {
         await this.deps.transport.publish(ackSubject, ack);
@@ -754,6 +778,7 @@ class OpConsumer {
   private lastFrameAt: number;
   private silenceSince: number | undefined;
   private attachInFlight = false;
+  private attachHealRequested = false;
   private subscription: OpStreamSubscription | undefined;
   private ackTimer: ReturnType<typeof setInterval> | undefined;
   private settleResolve: (() => void) | undefined;
@@ -770,6 +795,10 @@ class OpConsumer {
   /** An agent acknowledged this op: it accepted the start or reported the
    *  op's status, through this consumer or an earlier one of its client. */
   private startConfirmed: boolean;
+  /** When the agent last answered this run's start, or refused it as
+   *  DRAINING (or the run began): the start's unanswered wait counts from
+   *  here. */
+  private lastStartAnswerAt = Date.now();
   private readonly acknowledgement: OpAcknowledgement | undefined;
 
   constructor(
@@ -814,6 +843,24 @@ class OpConsumer {
     });
   }
 
+  /** The error of a start the agent left unanswered for `waitedMs`: the agent
+   *  is offline. Never-sent only when no OpStart can have reached an agent. */
+  private startUnansweredError(waitedMs: number): SelfhostedControlError {
+    const neverSent = !(this.startInFlight || this.startMaybeDelivered);
+    return new SelfhostedControlError({
+      message: `the agent did not answer for ${Math.round(waitedMs / 1000)}s`,
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: false,
+      agentOffline: true,
+      neverSent,
+      detail: {
+        [AGENT_UNRESPONSIVE_DETAIL_KEY]: String(waitedMs),
+        ...(neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {}),
+      },
+    });
+  }
+
   readCheckpoint(): OpReadCheckpoint {
     return {
       lastApplied: this.lastApplied,
@@ -831,6 +878,9 @@ class OpConsumer {
   }
   private get reconnectHoldMs(): number {
     return this.deps.reconnectHoldMs ?? OP_STREAM_RECONNECT_HOLD_MS;
+  }
+  private get startUnansweredMs(): number {
+    return this.deps.startUnansweredMs ?? OP_START_UNANSWERED_MS;
   }
 
   teardown(): void {
@@ -873,11 +923,19 @@ class OpConsumer {
     // timeout, never after it.
     const runStartedAt = Date.now();
     const deadlineAt = deadlineMs > 0 ? runStartedAt + deadlineMs : 0;
-    const startWall = this.startWall(wallMs);
+    // A new command's start, and its first attach, also end once its agent has
+    // answered nothing for the unanswered bound since the start's last answer,
+    // however long its own wall (none by default). Attach answers do not reset
+    // it: an agent that accepts a start and then answers nothing for the bound
+    // is unresponsive.
+    this.lastStartAnswerAt = runStartedAt;
+    const startWall = this.startWall(wallMs, exec === null ? 0 : this.startUnansweredMs);
     let startRetries: number;
     try {
       // Subscription BEFORE OpStart (protocol invariant): no frame can be
       // published before the consumer exists on a healthy path.
+      let attached = false;
+      let readyDuringStart = false;
       const subscribing = this.deps.transport.subscribe(
         opFrameSubject(
           this.deps.workspaceId,
@@ -886,6 +944,10 @@ class OpConsumer {
           this.deps.connectionInstanceId,
         ),
         (payload) => this.onFramePayload(payload),
+        () => {
+          if (attached) this.requestAttachHeal();
+          else readyDuringStart = true;
+        },
       );
       try {
         this.subscription = await startWall.race(subscribing);
@@ -905,6 +967,8 @@ class OpConsumer {
       await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
         throw startedOpError(error, this.startConfirmed);
       });
+      attached = true;
+      if (readyDuringStart) this.requestAttachHeal();
     } finally {
       startWall.clear();
     }
@@ -915,6 +979,7 @@ class OpConsumer {
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs, runStartedAt);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopYieldSignal: (() => void) | undefined;
     let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
@@ -923,6 +988,24 @@ class OpConsumer {
           liveness.wall,
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+            // An early yield takes the same path as the window ending. It waits
+            // out a short grace first, so a quick command started while a
+            // Steer waits still returns its result instead of a handle.
+            const signal = yieldOptions.yieldSignal;
+            if (!signal) return;
+            const raceStartedAt = Date.now();
+            let graceTimer: ReturnType<typeof setTimeout> | undefined;
+            const onYield = () => {
+              const remainingMs = OP_STREAM_EARLY_YIELD_GRACE_MS - (Date.now() - raceStartedAt);
+              if (remainingMs <= 0) return resolve("yield");
+              graceTimer = setTimeout(() => resolve("yield"), remainingMs);
+            };
+            stopYieldSignal = () => {
+              signal.removeEventListener("abort", onYield);
+              if (graceTimer) clearTimeout(graceTimer);
+            };
+            if (signal.aborted) onYield();
+            else signal.addEventListener("abort", onYield, { once: true });
           }),
         ]);
         if (phase === "yield" && this.exitSeq === undefined) {
@@ -946,7 +1029,7 @@ class OpConsumer {
             // The runner retains later output; do not accumulate it while the
             // database is slow. Foreground/adoption receipt behavior is unchanged.
             if (this.captureOnly) this.teardown();
-            await this.sendBackgroundCredit();
+            await this.sendDetach();
             const partial = this.snapshotOutput();
             await yieldOptions.captureOutput?.(this.outputFrames.splice(0));
             return {
@@ -967,6 +1050,7 @@ class OpConsumer {
       if (yieldTimer) {
         clearTimeout(yieldTimer);
       }
+      stopYieldSignal?.();
       liveness.stop();
     }
 
@@ -1057,13 +1141,18 @@ class OpConsumer {
     }
   }
 
-  private async sendBackgroundCredit(): Promise<void> {
+  /** Leave the op retained without a follower: nothing is listening on its
+   * frame subject once this consumer returns, so the runner must not spend the
+   * machine's shared bulk connection replaying or streaming output to nobody
+   * (that backlog delays every other command's frames and completion). */
+  private async sendDetach(): Promise<void> {
     const ack = OpAck.encode({
       opId: this.opId,
       ackedSeq: "0",
       creditBytes: OP_STREAM_BACKGROUND_CREDIT_BYTES,
       final: false,
       attachGeneration: this.generation,
+      detach: true,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -1154,6 +1243,7 @@ class OpConsumer {
         );
         this.startInFlight = false;
         this.startMaybeDelivered = true;
+        this.lastStartAnswerAt = Date.now();
         if (result.$case !== "opStart") {
           throw protocolError(`op-stream start: unexpected result ${result.$case}`);
         }
@@ -1201,6 +1291,8 @@ class OpConsumer {
             : agentReplacedOutcomeUnknownError(this.startConfirmed);
         }
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
+        // A DRAINING refusal is the agent's answer: it is there, only busy.
+        if (error.draining) this.lastStartAnswerAt = Date.now();
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(drainingRetries, this.deps.retryClock.jitter()),
@@ -1307,7 +1399,11 @@ class OpConsumer {
    *  as a heal (the observer's `healed` breadcrumb). Failures are left to the
    *  liveness watcher — a dead link fails typed there, not here. */
   private requestAttachHeal(): void {
-    if (this.attachInFlight || this.torn) {
+    if (this.torn) {
+      return;
+    }
+    if (this.attachInFlight) {
+      this.attachHealRequested = true;
       return;
     }
     this.attachInFlight = true;
@@ -1328,6 +1424,10 @@ class OpConsumer {
       })
       .finally(() => {
         this.attachInFlight = false;
+        if (this.attachHealRequested) {
+          this.attachHealRequested = false;
+          this.requestAttachHeal();
+        }
       });
   }
 
@@ -1448,6 +1548,7 @@ class OpConsumer {
       creditBytes: (this.receivedPayloadBytes + BigInt(this.windowBytes)).toString(),
       final: false,
       attachGeneration: this.generation,
+      detach: false,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -1519,23 +1620,47 @@ class OpConsumer {
     };
   }
 
-  /** The op's wall while its start and first attach are in flight. */
-  private startWall(wallMs: number): {
+  /** The op's wall while its start and first attach are in flight, and the
+   *  start's unanswered bound (`unansweredMs`, 0: none): once the agent has
+   *  answered nothing for that long, the start is abandoned as the wall
+   *  abandons it, and the call fails with the agent offline. */
+  private startWall(
+    wallMs: number,
+    unansweredMs: number,
+  ): {
     race: <T>(work: Promise<T>) => Promise<T>;
     clear: () => void;
   } {
-    if (wallMs <= 0) return { race: (work) => work, clear: () => {} };
+    if (wallMs <= 0 && unansweredMs <= 0) return { race: (work) => work, clear: () => {} };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let unansweredTimer: ReturnType<typeof setTimeout> | undefined;
     const wall = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        this.startAbandoned = true;
-        reject(this.startTimeoutError());
-      }, wallMs);
+      if (wallMs > 0) {
+        timer = setTimeout(() => {
+          this.startAbandoned = true;
+          reject(this.startTimeoutError());
+        }, wallMs);
+      }
+      if (unansweredMs > 0) {
+        const check = () => {
+          const waitedMs = Date.now() - this.lastStartAnswerAt;
+          if (waitedMs < unansweredMs) {
+            unansweredTimer = setTimeout(check, unansweredMs - waitedMs);
+            return;
+          }
+          this.startAbandoned = true;
+          reject(this.startUnansweredError(waitedMs));
+        };
+        unansweredTimer = setTimeout(check, unansweredMs);
+      }
     });
     void wall.catch(() => {});
     return {
       race: async (work) => await Promise.race([work, wall]),
-      clear: () => clearTimeout(timer),
+      clear: () => {
+        clearTimeout(timer);
+        clearTimeout(unansweredTimer);
+      },
     };
   }
 
@@ -1672,6 +1797,16 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
     retryable: false,
     detail: { lost_reason: String(status.lostReason) },
   });
+}
+
+/** Whether a read failed only because Opengeni already released the op's
+ *  output. A runner releases output only after Opengeni durably stored all of
+ *  it, so the stored command record holds the result, not the runner. */
+export function isReleasedOpError(error: unknown): boolean {
+  return (
+    error instanceof SelfhostedControlError &&
+    error.detail.lost_reason === String(OpLostReason.OP_LOST_REASON_RELEASED)
+  );
 }
 
 /** The runner's answer for op `opId` cancelled before it ever began (its

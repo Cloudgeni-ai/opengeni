@@ -463,31 +463,27 @@ async function refreshClaudeUsage(plan: {
   };
 }
 
-/** Claude catalog readiness on the core, by the legacy model id prefixes. */
+/**
+ * Claude catalog readiness on the core. One answer for every Claude
+ * subscription model id form (docs/design/subscription-model-ids-without-pools.md):
+ * the forms name the same models, served by the same connections, so each
+ * field below repeats the same rule under the name its callers read.
+ */
 export type SubscriptionCoreClaudeCatalogReadiness = {
-  /** `workspace-claude-subscription/` models: the workspace pool or an own personal connection. */
+  /** `workspace-claude-subscription/` models: some serving connection here. */
   workspace: boolean;
-  /** `organization-claude-subscription/` models: the organization inference pool. */
+  /** `organization-claude-subscription/` models: the same answer. */
   organization: boolean;
   /**
-   * Each prefix's model restriction: the union of its serving allowlists
-   * (null: every model).
+   * Each id form's model restriction: the union of the serving allowlists
+   * in every id form (null: every model), the same under every key.
    */
   restrictions: {
+    readonly "claude/": readonly string[] | null;
     readonly "organization-claude-subscription/": readonly string[] | null;
     readonly "workspace-claude-subscription/": readonly string[] | null;
   };
 };
-
-/** Whether a serving connection serves the organization inference pool here. */
-function servesOrganizationPool(connection: SubscriptionCoreServingConnection): boolean {
-  return connection.ownership === "shared" && connection.pools.includes("organization");
-}
-
-/** Whether a serving connection serves workspace-prefixed models here. */
-function servesWorkspacePool(connection: SubscriptionCoreServingConnection): boolean {
-  return connection.ownership === "personal" || connection.pools.includes("workspace");
-}
 
 function allowlistUnion(connections: readonly SubscriptionCoreServingConnection[]) {
   const allowlists = connections.map(subscriptionCoreConnectionAllowlist);
@@ -502,6 +498,7 @@ export const SUBSCRIPTION_CORE_CLAUDE_NOT_READY: SubscriptionCoreClaudeCatalogRe
     workspace: false,
     organization: false,
     restrictions: Object.freeze({
+      "claude/": Object.freeze([] as string[]),
       "organization-claude-subscription/": Object.freeze([] as string[]),
       "workspace-claude-subscription/": Object.freeze([] as string[]),
     }),
@@ -509,48 +506,55 @@ export const SUBSCRIPTION_CORE_CLAUDE_NOT_READY: SubscriptionCoreClaudeCatalogRe
 
 /**
  * Claude readiness for new work of `subjectId` in this workspace on the core:
- * the core eligibility projection (shared pools; the subject's own personal
- * connections only in their own Personal workspace) split by the legacy
- * prefixes. Frozen v1 Claude snapshots are not read.
+ * the core eligibility projection (shared connections reaching the
+ * workspace; the subject's own personal connections only in their own
+ * Personal workspace), the same connections placement considers. Every id
+ * form gets the same answer; who manages a connection is not read. Frozen
+ * v1 Claude snapshots are not read.
  */
 export async function readSubscriptionCoreClaudeCatalogReadiness(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string | null },
 ): Promise<SubscriptionCoreClaudeCatalogReadiness> {
   const serving = await listSubscriptionCoreServingConnections(db, claudeBinding(), input);
-  const organization = serving.filter(servesOrganizationPool);
-  const workspace = serving.filter(servesWorkspacePool);
+  const ready = serving.length > 0;
+  const restriction = ready ? allowlistUnion(serving) : [];
   return {
-    workspace: workspace.length > 0,
-    organization: organization.length > 0,
+    workspace: ready,
+    organization: ready,
     restrictions: {
-      "organization-claude-subscription/":
-        organization.length > 0 ? allowlistUnion(organization) : [],
-      "workspace-claude-subscription/": workspace.length > 0 ? allowlistUnion(workspace) : [],
+      "claude/": restriction,
+      "organization-claude-subscription/": restriction,
+      "workspace-claude-subscription/": restriction,
     },
   };
 }
 
 /**
- * Organization custom-model admission on the core: an active, allocatable
- * organization-pool shared connection reaching the workspace admits the
- * model. Shared
- * capacity only: no person (and no session creator) is read or inferred.
+ * Organization custom-model admission on the core: a connection that serves
+ * this workspace for the established subject (the same connections catalog
+ * readiness counts) and allows the model, in any id form, admits it. A
+ * subject without a Personal workspace here (a service actor, a borrowed
+ * subject) sees shared capacity only; no session creator is read or
+ * inferred.
  */
 export async function subscriptionCoreClaudeOrganizationModelAdmitted(
   db: Database,
-  input: { accountId: string; workspaceId: string; upstreamModelId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    upstreamModelId: string;
+    subjectId: string | null;
+  },
 ): Promise<boolean> {
   const productModelId = `${ORGANIZATION_PREFIX}/${input.upstreamModelId}`;
   const serving = await listSubscriptionCoreServingConnections(db, claudeBinding(), {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    subjectId: null,
+    subjectId: input.subjectId,
   });
-  return serving.some(
-    (connection) =>
-      servesOrganizationPool(connection) &&
-      subscriptionCoreConnectionAllowsModel(connection, productModelId),
+  return serving.some((connection) =>
+    subscriptionCoreConnectionAllowsModel(connection, productModelId),
   );
 }
 
@@ -580,7 +584,9 @@ export type SubscriptionCoreClaudeAdmissionCarrier =
  * model for it:
  *
  * - a compatibility record (a carrier accepted before the cutover) admits
- *   only when its shared pool is the organization's;
+ *   when it accepted shared capacity at all (`sharedPool` `workspace` or
+ *   `organization`): both pools are now the same shared connections that
+ *   reach the workspace, so the pool it named no longer narrows them;
  * - a carrier accepted after the cutover (`v2` or `none`: it has no record)
  *   follows the same source rule as new work;
  * - anything else (not visible, `missing`, `v1`, an unknown answer, or a
@@ -591,7 +597,8 @@ export function subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization(
 ): boolean {
   if (compat === null || typeof compat !== "object" || Array.isArray(compat)) return false;
   const value = compat as { authority?: unknown; sharedPool?: unknown };
-  if (value.authority === "record") return value.sharedPool === "organization";
+  if (value.authority === "record")
+    return value.sharedPool === "organization" || value.sharedPool === "workspace";
   return value.authority === "v2" || value.authority === "none";
 }
 
@@ -676,8 +683,10 @@ async function readSubscriptionCoreClaudeAcceptedAuthority(
  *   agent-submitted work, a scheduled task) first reads that accepted
  *   authority (`subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization`);
  *   without the reader nothing is admitted;
- * - then the workspace's effective Claude source must admit organization
- *   connections and a live organization-pool connection must admit the model.
+ * - then a connection serving this workspace for that subject must allow
+ *   the model (`subscriptionCoreClaudeOrganizationModelAdmitted`). Work with
+ *   a carrier keeps its own accepted personal authority, which this check
+ *   does not re-read, so it counts shared connections only, as before.
  */
 export async function subscriptionCoreClaudeCustomModelAdmitted(
   tx: Database,
@@ -703,5 +712,10 @@ export async function subscriptionCoreClaudeCustomModelAdmitted(
     )
   )
     return false;
-  return await subscriptionCoreClaudeOrganizationModelAdmitted(tx, input);
+  return await subscriptionCoreClaudeOrganizationModelAdmitted(tx, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    upstreamModelId: input.upstreamModelId,
+    subjectId: input.carrier === null ? scope.subjectId : null,
+  });
 }

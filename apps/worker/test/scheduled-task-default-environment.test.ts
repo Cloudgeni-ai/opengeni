@@ -344,7 +344,6 @@ describe("scheduled task default Sandbox Environment", () => {
       targetSessionId: target.id,
     });
     expect(task.rigId).toBeNull();
-    expect(task.variableSetId).toBeNull();
     const producerKey = `existing-message-${crypto.randomUUID()}`;
     const input = {
       workspaceId: workspace.workspaceId,

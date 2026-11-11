@@ -105,58 +105,12 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("a SuperGrok model off the core route is unfunded and keeps the credit gate", async () => {
-    const restoreBal = mockZeroBalance();
-    const restoreCred = mockCodexBilled(false);
-    // SuperGrok's legacy runtime is deleted: a route other than the core
-    // (no cutover receipt) fails closed exactly as maintenance does, so the
-    // static overlay no longer bypasses credits.
-    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
-      route: "legacy",
-    });
-    try {
-      const settings = billedSettings({ supergrokSubscriptionEnabled: true });
-      const decision = await checkLimit(deps(settings), {
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        action: "agent_run:create",
-        quantity: 1,
-        model: "supergrok/grok-4.7",
-      });
-      expect(decision.allowed).toBe(false);
-      await expect(
-        requireLimit(deps(settings), {
-          accountId: ACCOUNT,
-          workspaceId: WORKSPACE,
-          action: "agent_run:create",
-          quantity: 1,
-          model: "supergrok/grok-4.7",
-        }),
-      ).rejects.toMatchObject({ status: 402 });
-      expect(route).toHaveBeenCalledTimes(2);
-      expect(route.mock.calls[0]![1]).toEqual({
-        provider: "xai",
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        subjectId: null,
-        productModelId: "supergrok/grok-4.7",
-      });
-    } finally {
-      route.mockRestore();
-      restoreCred();
-      restoreBal();
-    }
-  });
-
   test.each([true, false])(
     "on SuperGrok's core route the core's funding answer (%p) replaces the overlay",
     async (funded) => {
       const restoreBal = mockZeroBalance();
       const restoreCred = mockCodexBilled(false);
-      const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
-        route: "core",
-        value: funded,
-      });
+      const route = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(funded);
       try {
         const settings = billedSettings({ supergrokSubscriptionEnabled: true });
         const decision = await checkLimit(deps(settings), {
@@ -186,7 +140,7 @@ describe("API edge credit gate — codex bypass", () => {
   );
 
   test("a subscription switched off on the deployment never reads its provider route", async () => {
-    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding");
+    const route = spyOn(opengeniDb, "readSubscriptionCoreFunding");
     try {
       // SuperGrok switched off on the deployment: no read, as its catalog readiness.
       expect(
@@ -225,10 +179,7 @@ describe("API edge credit gate — codex bypass", () => {
     async (model, funded) => {
       const restoreBal = mockZeroBalance();
       const restoreCred = mockCodexBilled(false);
-      const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
-        route: "core",
-        value: funded,
-      });
+      const route = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(funded);
       try {
         let settings = billedSettings({ claudeSubscriptionEnabled: true });
         for (const scope of ["organization", "workspace"] as const)
@@ -266,7 +217,7 @@ describe("API edge credit gate — codex bypass", () => {
   test("a Codex model never reads a provider route for core funding", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(true);
-    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding");
+    const route = spyOn(opengeniDb, "readSubscriptionCoreFunding");
     try {
       const decision = await checkLimit(deps(billedSettings()), {
         accountId: ACCOUNT,

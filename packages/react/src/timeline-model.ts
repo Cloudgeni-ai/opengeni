@@ -8,6 +8,7 @@ export {
   formatDurationFacet,
   formatElapsed,
   resolveTurnSummaryFacets,
+  turnSummaryLiveMarkState,
 } from "./timeline/turn-summary-model";
 export type {
   BuiltInTurnSummaryFacetId,
@@ -15,6 +16,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryStatus,
 } from "./timeline/turn-summary-model";
@@ -24,7 +26,9 @@ export {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
   rollingActivityItem,
@@ -32,6 +36,9 @@ export {
 export type { ActivityGroup, ReadableWorkOptions, TurnGroup } from "./timeline/work-presentation";
 export { timelineGroupContainsPresentedImage } from "./timeline/presented-image";
 export { mcpToolLeaf, toolDisplayName } from "./timeline/tool-display-name";
+export { commandStepTitle } from "./timeline/command-step";
+export { redactPayload, redactSignedUrls } from "./timeline/credential-redaction";
+export type { CredentialContext } from "./timeline/credential-redaction";
 export {
   connectorLogo,
   connectorLogoIndex,
@@ -107,8 +114,10 @@ export { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./timeline/genie
 export {
   answersFromDrafts,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   formatDeadline,
+  humanInputAgentMayDecide,
   humanInputHeading,
   initialDrafts,
   resolveSecretSaveTo,
@@ -136,8 +145,11 @@ export { isActionableHumanInputRequest } from "./human-input";
 export {
   SESSION_STATUS_BADGE,
   SESSION_STATUS_PRESENTATION,
+  promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
+  sessionStatusItemDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus, SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
@@ -167,6 +179,7 @@ export {
   annotationDisplayOrdinal,
   annotationFromSelection,
   annotationHasNote,
+  annotationQuoteText,
   bestQuoteOccurrence,
   matchingQuoteInSource,
   occurrenceOffsets,
@@ -178,3 +191,4 @@ export {
   agentWorkHumanInputSummary,
   isAgentWorkHumanInput,
 } from "./timeline/agent-work-human-input";
+export { automationRunLine, isAutomationRunBatch } from "./components/machine-input-display";

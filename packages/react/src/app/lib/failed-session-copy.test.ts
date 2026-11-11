@@ -1,7 +1,22 @@
 import { expect, test } from "bun:test";
-import { failedSessionCopy } from "./failed-session-copy";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
+import {
+  chatComposerPlaceholder,
+  detailBeyondHeadline,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "./failed-session-copy";
 
 const summary = { failedAt: null, consecutiveRecoveryCount: null };
+test("Details never repeats the headline it sits under", () => {
+  expect(detailBeyondHeadline("Machine access needed.", " Machine  access needed.\n")).toBe(
+    undefined,
+  );
+  expect(detailBeyondHeadline("This model isn’t available.", "HTTP 404 model_not_found")).toBe(
+    "HTTP 404 model_not_found",
+  );
+  expect(detailBeyondHeadline("Anything", undefined)).toBe(undefined);
+});
 test("only explicit model availability evidence suggests another model", () => {
   for (const reason of [
     "The model is not supported with this account.",
@@ -12,6 +27,7 @@ test("only explicit model availability evidence suggests another model", () => {
     expect(failedSessionCopy({ ...summary, reason }, false, false, true)).toEqual({
       reason: "This model isn’t available. Choose another below.",
       unavailableModel: true,
+      detail: reason,
     });
   }
   for (const reason of [
@@ -101,6 +117,49 @@ test("known provider failures get plain copy with the exact recorded text as det
       ).reason,
     ).toBe(`${reason} Choose another model below.`);
   }
+});
+
+test("encrypted reasoning another model or account left in the chat points at the model picker", () => {
+  // Recorded in production when a chat moved from a Codex subscription to Azure OpenAI.
+  const azure =
+    "400 The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+  const openAi =
+    "400 Could not decrypt the provided encrypted_content. Ensure the value is the unmodified encrypted_content from a previous response.";
+  for (const recorded of [
+    azure,
+    openAi,
+    "400 Failed to parse encrypted_content.",
+    "400 The reasoning artifact could not be decrypted.",
+    "400 {'code': 'invalid_encrypted_content'}",
+  ]) {
+    // Retry stays: the worker resends the reasoning as readable text where it can.
+    expect(failedSessionCopy({ ...summary, reason: recorded }, false, false, true)).toEqual({
+      reason: "This model can’t read earlier reasoning in this chat. Choose another model below.",
+      unavailableModel: false,
+      retryUnhelpful: false,
+      detail: recorded,
+    });
+  }
+  // Once another model is selected, the headline stands alone.
+  expect(failedSessionCopy({ ...summary, reason: azure }, false, true, true).reason).toBe(
+    "This model can’t read earlier reasoning in this chat.",
+  );
+  // Request-shape errors that only mention the field, other statuses, and
+  // coded failures keep their own copy.
+  for (const failure of [
+    { reason: "400 Unsupported parameter: encrypted_content could not be parsed." },
+    { reason: "400 Unknown parameter: 'include[0]' (reasoning.encrypted_content)." },
+    { reason: "500 encrypted_content decryption failed upstream." },
+    { reason: "400 Encrypted content could not be decrypted.", failureCode: "codex_unavailable" },
+  ])
+    expect(failedSessionCopy({ ...summary, ...failure }).reason).not.toContain("earlier reasoning");
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: "400 Encrypted content could not be decrypted.",
+      failureCode: "provider_unavailable",
+    }).reason,
+  ).toBe("This model is temporarily unavailable. Try again in a few minutes.");
 });
 
 test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
@@ -316,7 +375,11 @@ test("authored worker copy and Opengeni credit failures keep their own wording",
       recordedDetail: `${codex}\n429 You exceeded your current quota`,
       failureCode: "codex_usage_limit_reached",
     }),
-  ).toEqual({ reason: codex, unavailableModel: false });
+  ).toEqual({
+    reason: codex,
+    unavailableModel: false,
+    detail: `${codex}\n429 You exceeded your current quota`,
+  });
   const credits = "Insufficient Opengeni credits for this turn";
   expect(failedSessionCopy({ ...summary, reason: credits, recordedDetail: credits })).toEqual({
     reason: credits,
@@ -431,7 +494,7 @@ test("preclaim presentation preserves existing authored database and structural 
       failureCode: "db_failure",
       recordedDetail: "synthetic diagnostic",
     }),
-  ).toEqual({ reason: database, unavailableModel: false });
+  ).toEqual({ reason: database, unavailableModel: false, detail: "synthetic diagnostic" });
   expect(
     failedSessionCopy({
       ...summary,
@@ -467,4 +530,131 @@ test("codes that record operator text get the plain headline, like unclassified 
       failedSessionCopy({ ...summary, reason: detail, recordedDetail: detail, failureCode }),
     ).toEqual({ reason: "The session stopped unexpectedly.", unavailableModel: false, detail });
   }
+});
+
+test("own-key and API credit stops name their one fix, never another model's free credit", () => {
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [{ id: "free-model", label: "Free model" }],
+    selectionUsable: false,
+  } as never;
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Add credits to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toEqual({
+    reason: "Add credits to use your own key.",
+    unavailableModel: false,
+    creditRefusal: "byok_paid_credit_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Upgrade to Pro to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toMatchObject({
+    reason: "Upgrade to Pro to use your own key.",
+    creditRefusal: "byok_upgrade_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "API usage uses credits, not your plan credit." },
+      true,
+    ),
+  ).toMatchObject({
+    // The short sentence names its fix too: it is the whole message where no button shows.
+    reason: "API usage uses credits, not your plan credit. Add credits to continue.",
+    creditRefusal: "api_credits_required",
+  });
+});
+
+test("a stopped chat's composer names the refusal's one fix, or who can fix it", () => {
+  const stopped = {
+    cancelled: false,
+    creditStopped: true,
+    stopRefusal: null,
+    creditGap: null,
+    canBuyCredits: true,
+  } as const;
+  const gap = {
+    modelLabel: "Claude",
+    covered: [{ id: "m", label: "Free" }],
+    selectionUsable: false,
+  };
+  expect(chatComposerPlaceholder({ ...stopped, cancelled: true })).toBe(
+    "This session was cancelled.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, creditStopped: false })).toBe("Send a follow-up…");
+  expect(chatComposerPlaceholder(stopped)).toBe(
+    "Out of Opengeni credits — add credits to continue.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, creditGap: gap })).toBe(
+    "Your free credits don't cover this model — choose another model or add credits.",
+  );
+  expect(
+    chatComposerPlaceholder({ ...stopped, creditGap: { ...gap, selectionUsable: true } }),
+  ).toBe("Send a follow-up…");
+  // An own-key or API stop never suggests another model, even with free credit left.
+  expect(
+    chatComposerPlaceholder({ ...stopped, creditGap: gap, stopRefusal: "byok_upgrade_required" }),
+  ).toBe("Upgrade to Pro to use your own key.");
+  expect(chatComposerPlaceholder({ ...stopped, stopRefusal: "byok_paid_credit_required" })).toBe(
+    "Add credits to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, stopRefusal: "api_credits_required" })).toBe(
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  );
+  const member = { ...stopped, canBuyCredits: false };
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "byok_upgrade_required" })).toBe(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "byok_paid_credit_required" })).toBe(
+    "Ask an organization owner to add credits to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "api_credits_required" })).toBe(
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  );
+});
+
+test("the plain failure line tells a member who can't fix a refusal to ask an owner", () => {
+  const copy = failedSessionCopy(
+    { ...summary, reason: null },
+    true,
+    false,
+    true,
+    null,
+    "byok_upgrade_required",
+  );
+  expect(failureFallbackReason(copy, true)).toBe("Upgrade to Pro to use your own key.");
+  expect(failureFallbackReason(copy, false)).toBe(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  const generic = failedSessionCopy({ ...summary, reason: null }, true, false, true, null, null);
+  expect(failureFallbackReason(generic, false)).toBe(generic.reason);
+});
+
+test("a turn refused for machine access says so, never a database error", () => {
+  const recorded = "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.";
+  expect(
+    failedSessionCopy({ ...summary, reason: recorded, failureCode: "machine_access_required" }),
+  ).toEqual({ reason: recorded, unavailableModel: false, machineAccess: true, detail: recorded });
+  expect(
+    failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }),
+  ).toEqual({
+    reason: "Machine access needed: this chat isn’t allowed to use its machine right now.",
+    unavailableModel: false,
+    machineAccess: true,
+  });
+  // The banner, this fallback and the worker's recorded reason share one sentence.
+  expect(machineAccessNeededMessage("Studio Mac")).toBe(recorded);
+  expect(
+    failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }).reason,
+  ).toBe(machineAccessNeededMessage());
 });

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Site permissions · {{name}}</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="page">
+    <main>
+      <header>
+        <img class="brand-mark" src="icons/brand-mark.svg" alt="" width="28" height="22" />
+        <div>
+          <h1>{{heading}}</h1>
+        </div>
+      </header>
+      <!-- First, so turning it off never needs scrolling past the explanation. -->
+      <section class="manage" data-manage hidden>
+        <p class="status" data-status role="status"></p>
+        <button type="button" class="secondary" data-turn-off>
+          Turn off and remove all changes
+        </button>
+        <h3>Changes agents made</h3>
+        <ul class="entries" data-entries></ul>
+        <p class="empty" data-empty>None yet.</p>
+      </section>
+      <h2>
+        Let {{product}} agents allow your camera, microphone, location and notifications on a site
+      </h2>
+      <p>
+        When an agent works in a tab in this Chrome profile, a site sometimes needs your camera,
+        microphone, location or notifications, for example to test a video call. If you allow this,
+        the agent can turn them on or off for the site open in a tab it opened itself, without
+        asking you each time.
+      </p>
+      <ul class="points">
+        <li>
+          Only these four, and only for the exact site (for example https://meet.example.com) open
+          in a tab the agent opened itself. Never for all sites, and never from your own tabs.
+        </li>
+        <li>
+          Every change is listed here and in the {{product}} extension menu, where you can remove
+          it. Chrome's own site settings show it as set by an extension.
+        </li>
+        <li>You can turn this off here at any time, which removes every change it made.</li>
+      </ul>
+      <div class="ask" data-ask hidden>
+        <p class="request" data-request hidden></p>
+        <p class="note">
+          Chrome asks you to confirm. Its wording covers more than {{product}} uses: {{product}}
+          only ever changes the four permissions above, for the site in a tab an agent opened.
+        </p>
+        <div class="actions">
+          <button type="button" data-allow>Allow</button>
+          <button type="button" class="secondary" data-not-now>Not now</button>
+        </div>
+        <p class="note">
+          If you choose Not now, agents are told to ask you instead. You can allow it later from the
+          {{product}} extension menu.
+        </p>
+      </div>
+    </main>
+    <script type="module" src="site-permissions-page.js"></script>
+  </body>
+</html>

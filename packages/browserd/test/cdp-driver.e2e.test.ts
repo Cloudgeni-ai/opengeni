@@ -1102,9 +1102,10 @@ e2e(
         ],
       });
       const receipt = await controller.run(operation);
-      expect(receipt.state).toBe("outcome_unknown");
-      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
-      expect(receipt.error?.message).toContain("invalid_action");
+      // Only the driver's own scroll ran before the refusal. That scroll is
+      // not input, so the refusal is definite, though the page saw it scroll.
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
       await waitForScroll(0);
       expect(effects.pointer).toBe(0);
       expect(effects.later).toBe(0);
@@ -1530,10 +1531,10 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
+      // A container is read around what it protects, never through it.
       expect(privateContainer).toMatchObject({
-        text: null,
+        text: "Public intro",
         value: null,
-        attributes: {},
         redacted: "private",
       });
       expect(JSON.stringify(privateContainer)).not.toContain("fixture-private-secret");
@@ -1544,8 +1545,10 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentContainer).toMatchObject({ text: null, redacted: "payment" });
-      expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
+      // Only standard markup marks a field private: an element merely named
+      // like a card field (`id="card-number"`) is page text and is read.
+      expect(paymentContainer).toMatchObject({ redacted: null });
+      expect(paymentContainer.text).toContain("fixture-card-text-secret");
       const paymentChild = await driver.readDom(authPage.target.id, {
         kind: "element",
         locator: { kind: "css", selector: "#card-child" },
@@ -1553,8 +1556,7 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentChild).toMatchObject({ text: null, redacted: "payment" });
-      expect(JSON.stringify(paymentChild)).not.toContain("fixture-card-text-secret");
+      expect(paymentChild).toMatchObject({ text: "fixture-card-text-secret", redacted: null });
       const spoofedPage = await driver.openTarget(
         dataUrl(`<!doctype html><title>Spoofed DOM</title>
           <input id="spoofed-password" type="password" value="fixture-spoofed-password">
@@ -1584,7 +1586,7 @@ e2e(
         locator: { kind: "css", selector: "#spoofed-container" },
         ...spoofedFences,
       });
-      expect(spoofedContainer).toMatchObject({ text: null, redacted: "private" });
+      expect(spoofedContainer).toMatchObject({ text: "", redacted: "private" });
       expect(JSON.stringify(spoofedContainer)).not.toContain("fixture-spoofed-private");
       await driver.closeTarget(spoofedPage.target.id);
       await expect(
@@ -1830,8 +1832,23 @@ async function popupCloseTest(closeDuringFrameInspection: boolean) {
     closingInput = true;
     const receipt = await controller.run(close);
     if (closeDuringFrameInspection) expect(nativeInvalidSession).toBe(true);
-    expect(receipt.state).toBe("outcome_unknown");
-    expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    if (closeDuringFrameInspection) {
+      // The input was delivered and the page then closed its own tab: the
+      // click completed, and only the closed tab's outline is missing.
+      expect(receipt.state).toBe("completed");
+      expect(receipt.error).toBeNull();
+      expect(receipt.observation).toBeNull();
+      expect(receipt.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "observation_unavailable",
+          message: expect.stringContaining("this tab closed"),
+        },
+      ]);
+    } else {
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    }
     expect(await controller.run(close)).toEqual(receipt);
     expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
     const retained = await driver.observe(parent.target.id);
@@ -1921,7 +1938,7 @@ function authFixture(): string {
     </form>
     <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">
     <section id="private-container">Public intro <span data-private>fixture-private-secret</span></section>
-    <section id="payment-container">Public intro <span id="card-number"><span id="card-child">fixture-card-text-secret</span></span></section>`;
+    <section id="payment-container">Public intro <span id="card-number" contenteditable><span id="card-child">fixture-card-text-secret</span></span></section>`;
 }
 
 function dataUrl(html: string): string {

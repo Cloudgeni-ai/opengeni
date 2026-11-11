@@ -1,7 +1,12 @@
 import type { Settings } from "@opengeni/config";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordForm,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 
 import {
   CompactionNeededError,
@@ -104,14 +109,18 @@ export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ mod
 };
 
 /**
- * Canonical Codex-style tool-result bound at the final model-input seam. The
- * identical pure normalizer also runs before conversation rows are persisted,
- * so this is a live-turn defense rather than a request-only alternate history.
+ * Canonical history form at the final model-input seam: output-only fields
+ * such as `status` removed and tool results bounded. It is the same pure
+ * normalizer that runs before conversation rows are persisted, so an item is
+ * sent byte for byte the same in the step that produced it and in every later
+ * request that replays it from stored history. Without it, a call and its
+ * result went out with `"status":"completed"` within their own turn and
+ * without it from the next turn on.
  */
 export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
   return memoizedInputItemProjectionFilter(
     (item) =>
-      boundModelToolOutputItem(
+      canonicalizePersistedHistoryItem(
         item as unknown as Record<string, unknown>,
         settings.modelToolOutputTruncationTokens,
       ) as unknown as AgentInputItem,
@@ -539,18 +548,26 @@ export function incrementalModelInputProjectionFilter(
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
-  options: ContextRobustnessFilterOptions = {},
+  options: ContextRobustnessFilterOptions & { searchRecordForm?: SearchRecordForm } = {},
 ): CallModelInputFilter | undefined {
   return composeCallModelInputFilters([
-    baseModelInputFilterForSettings(settings),
+    baseModelInputFilterForSettings(settings, { searchRecordForm: options.searchRecordForm }),
     boundModelToolOutputsFilterForSettings(settings),
     contextRobustnessFilterForSettings(settings, options),
   ]);
 }
 
-/** Rules that normalize history but do not impose final bounds/accounting. */
-export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
+/**
+ * Rules that normalize history but do not impose final bounds/accounting.
+ * `searchRecordForm` is the session's {@link SearchRecordForm}; callers that
+ * know no session get the original `assistant` form.
+ */
+export function baseModelInputFilterForSettings(
+  settings: Settings,
+  options: { searchRecordForm?: SearchRecordForm | undefined } = {},
+): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
+  const form = options.searchRecordForm ?? "assistant";
   const projectItems = memoizedInputItemProjectionFilter(
     (source) => {
       let item = restoreGenericDispatchHistoryItem(source);
@@ -559,10 +576,14 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
       ) as unknown as AgentInputItem;
       // Claude's own searches stay native here: every model transport then
       // calls projectHistoryForProvider, which replays them verbatim to Claude
-      // and projects their readable facts for any other provider.
+      // and projects their readable facts for any other provider, in the
+      // session's form marked on them here.
       item = projectHostedSearchEvidence(item as unknown as Record<string, unknown>, {
         preserveAnthropicNative: true,
+        form,
       }) as AgentInputItem;
+      if (isAnthropicWebSearchItem(item as unknown as Record<string, unknown>))
+        item = withSearchRecordForm(item, form);
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.

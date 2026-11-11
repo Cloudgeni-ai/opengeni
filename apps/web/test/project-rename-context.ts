@@ -121,11 +121,14 @@ const context = {
   client,
   session: null,
   // Rows read the viewer's workspace grants to label their archive action.
-  accessContext: { subjectId: "rename-qa", workspaceGrants: [] },
+  accessContext: { subjectId: "rename-qa", accountGrants: [], workspaceGrants: [] },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
   setSession: () => {},
   resetSessionView: () => {},
 } as unknown as AppContextValue;
 export const useAppContext = () => context;
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({ workspaceId, setDrawerOpen: () => {} });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;

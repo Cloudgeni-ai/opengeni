@@ -51,7 +51,7 @@ test("live voice pricing: strict JSON, margin rounds up, every started minute", 
   expect(realtimeVoiceStartedMinutes(start, at(-5_000))).toBe(1);
 });
 
-test("only deployment-funded voice is gated; enabled without pricing is unavailable", () => {
+test("only deployment-funded voice is credit-gated; enabled without pricing is unavailable", () => {
   const settings = testSettings({
     billingMode: "stripe",
     vercelAiGatewayApiKey: "key",
@@ -92,6 +92,54 @@ test("only deployment-funded voice is gated; enabled without pricing is unavaila
   expect(malformed.pricing).toBeNull();
   expect(realtimeVoiceOfferProblem(settings, malformed)?.code).toBe("pricing_unconfigured");
 });
+
+test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+  "%s requires paid app admission even with no fee, and cannot use API funding",
+  async (model) => {
+    const standing = spyOn(db, "getOrganizationPlanStanding");
+    const settings = testSettings({
+      billingMode: "stripe",
+      subscriptionPlansEnabled: true,
+      byokPlatformFeeBps: 0,
+    });
+    const billing = createRealtimeVoiceBilling({
+      db: {} as db.Database,
+      settings,
+      isEuOnly: async () => false,
+    });
+    const input = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      model: model as never,
+      attribution: { kind: "service", billingOrigin: "app" } as const,
+    };
+    try {
+      for (const [key, status, price, allowed] of [
+        [null, null, null, false],
+        ["free", "active", 0, false],
+        ["pro", "past_due", 20_000_000, false],
+        ["pro", "active", 20_000_000, true],
+        ["max", "active", 100_000_000, true],
+      ] as const) {
+        standing.mockResolvedValue({
+          plan: key ? { key, status } : null,
+          monthlyPriceMicros: price,
+        } as never);
+        if (allowed) await expect(billing.admit(input)).resolves.toBeUndefined();
+        else
+          await expect(billing.admit(input)).rejects.toMatchObject({
+            status: 402,
+            cause: { code: "subscription_plan_required" },
+          });
+        await expect(
+          billing.admit({ ...input, attribution: { kind: "service", billingOrigin: "api" } }),
+        ).rejects.toMatchObject({ status: 403, cause: { code: "subscription_api_unavailable" } });
+      }
+    } finally {
+      standing.mockRestore();
+    }
+  },
+);
 
 test("promotional chat-only credits are named, not reported as no credits", () => {
   expect(voiceCreditStanding({ balanceMicros: 1 })).toBe("spendable");
@@ -150,9 +198,7 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
     allowedModels: null,
     allowCreditModels: false,
   });
-  const reconcile = spyOn(db, "reconcileUnsettledVoiceInputCharges").mockResolvedValue(
-    undefined as never,
-  );
+  const euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
   try {
     const settings = testSettings({
       billingMode: "stripe",
@@ -179,7 +225,35 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
       attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
     });
     await expect(refused).rejects.toBeInstanceOf(TranscriptionServiceError);
-    await expect(refused).rejects.toMatchObject({ code: "policy_blocked", fallbackSafe: true });
+    await expect(refused).rejects.toMatchObject({
+      code: "policy_blocked",
+      fallbackSafe: true,
+      message: "Credits are turned off in this workspace.",
+    });
+    // A meeting's live transcript says what's refused and how to fix it.
+    await expect(
+      dictation.admit({
+        accountId: "account-a",
+        workspaceId: "workspace-a",
+        attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+        feature: "live_transcript",
+      }),
+    ).rejects.toMatchObject({
+      code: "policy_blocked",
+      message:
+        "Live transcripts use credits, which are turned off in this workspace. A workspace admin can turn them on.",
+    });
+    await expect(
+      dictation.admit({
+        accountId: "account-a",
+        workspaceId: "workspace-a",
+        attribution: { kind: "unknown" },
+        feature: "live_transcript",
+      }),
+    ).rejects.toMatchObject({
+      code: "policy_blocked",
+      message: "This sign-in can't be charged for a live transcript.",
+    });
 
     // Without credit billing nothing is charged, so the switch has nothing to block.
     const selfHosted = createRealtimeVoiceBilling({
@@ -189,6 +263,6 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
     expect(await selfHosted.creditsDisabled("workspace-a")).toBe(false);
   } finally {
     policy.mockRestore();
-    reconcile.mockRestore();
+    euOnly.mockRestore();
   }
 });

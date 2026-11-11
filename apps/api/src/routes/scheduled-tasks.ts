@@ -1,7 +1,3 @@
-import {
-  clearsLegacyVariableSet,
-  rejectLegacyVariableSetFields,
-} from "../http/variable-sets-removed";
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
@@ -61,6 +57,7 @@ import {
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
@@ -236,10 +233,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
-    if ("response" in legacy) return legacy.response;
     // An agent's schedule without a zone uses the zone of the message that asked for it.
-    const { input: rawPayload } = await withAgentScheduleTimeZone(db, grant, legacy.payload);
+    const { input: rawPayload } = await withAgentScheduleTimeZone(
+      db,
+      grant,
+      await readRequestJson(c),
+    );
     const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
       status: 400,
       message: "invalid scheduled task create request",
@@ -268,6 +267,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
       eventSourceFetch: deps.eventSourceFetch,
+      githubPersonalFetch: deps.githubPersonalFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     const [created] = await withScheduledTaskEvents(db, [task]);
@@ -413,24 +413,16 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const taskId = c.req.param("taskId");
     const existing = await requireVisibleScheduledTask(db, grant, taskId);
     const previous: ScheduledTaskRestoreState = { task: existing };
-    const body = await readRequestJson(c);
-    const legacy = rejectLegacyVariableSetFields(c, body);
-    if ("response" in legacy) return legacy.response;
     const { input: rawPayload } = await withAgentScheduleTimeZone(
       db,
       grant,
-      legacy.payload,
+      await readRequestJson(c),
       existing.schedule,
     );
-    const parsedPayload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
+    const payload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
       status: 400,
       message: "invalid scheduled task update request",
     });
-    // `variableSetId: null` / `variableSetIds: []` still clear an old link, so a
-    // task tied to a set that is gone can be fixed without recreating it.
-    const payload = clearsLegacyVariableSet(body)
-      ? { ...parsedPayload, variableSetId: null }
-      : parsedPayload;
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -438,6 +430,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -499,6 +492,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -535,7 +529,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         grant,
         targetSessionId: task.targetSessionId,
         runMode: task.runMode,
-        variableSetId: task.variableSetId,
         rigId: task.rigId,
         agentConfig: task.agentConfig,
         missingTargetStatus: 404,
@@ -547,7 +540,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         runMode: task.runMode,
         reusableSessionId: task.reusableSessionId,
         agentConfig: task.agentConfig,
-        audience: task.visibility === "private" ? "user_private" : "workspace_shared",
         requireOnline: true,
       });
       const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(db, {
@@ -568,6 +560,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
             taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
           action: "agent_run:create",
           quantity: 1,
+          // The run is API use when the caller or the task is.
+          billingOrigin: await manualScheduledTaskTriggerBillingOrigin(db, grant, task.id),
           // A model-less task is checked against the model its occurrence
           // will run (a connected subscription, the credits default, or the
           // deployment default), not always the deployment default.
@@ -580,10 +574,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const body = await c.req.json().catch(() => ({}));
     const { triggerId } = parseRequestBody(TriggerScheduledTaskRequest, body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
-    const agentRunUsageIdempotencyKey =
-      task.action.kind === "agent_turn"
-        ? manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken)
-        : `knowledge-source-sync:manual:${workspaceId}:${task.id}:${triggerToken}`;
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+      workspaceId,
+      task.id,
+      triggerToken,
+    );
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
     await triggerScheduledTaskForGrant(db, grant, workflowClient, {
       task,

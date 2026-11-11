@@ -3,6 +3,7 @@ import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
@@ -39,6 +40,7 @@ import {
   getSessionAuthorityEpoch,
   acquireLease,
   activateComputerSession,
+  AttachedBrowserDeviceNotFoundError,
   completeComputerSessionEnd,
   ComputerSessionNotFoundError,
   ComputerSessionOperationConflictError,
@@ -59,7 +61,6 @@ import {
   readLease,
   recordLeaseControllerDataPlaneUrl,
   readActiveSandbox,
-  terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
   type EnrollmentRecord,
@@ -110,6 +111,7 @@ import {
 } from "../browser-controller-authority";
 import {
   recordSourcePlacementMove,
+  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -138,6 +140,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
 import {
@@ -303,17 +307,28 @@ export function registerComputerSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/computer-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const listed = await listComputerSessions(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      ...parseInteractionSessionListQuery(context.req.query()),
-    });
-    return context.json(
-      ComputerSessionListResponse.parse({
+    const list = async () => {
+      const listed = await listComputerSessions(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        ...parseInteractionSessionListQuery(context.req.query()),
+      });
+      return {
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      }),
-    );
+      };
+    };
+    let listed = await list();
+    // A Desktop left behind by its task's move is retired, not reusable.
+    if (
+      await reconcileListedSourcePlacementMoves(channelServices, {
+        grant,
+        sessions: listed.sessions,
+      })
+    ) {
+      listed = await list();
+    }
+    return context.json(ComputerSessionListResponse.parse(listed));
   });
 
   app.get("/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId", async (context) => {
@@ -463,6 +478,7 @@ export function registerComputerSessionRoutes(
                   async (client) =>
                     await client.createComputerSession({
                       computerSessionId: preparedSession.id,
+                      cursorIdentity: await computerCursorIdentity(deps, grant, sourceSession),
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
                       ...tokens,
@@ -543,7 +559,7 @@ export function registerComputerSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw computerRouteError(error);
+      throw computerRouteError(error, "open");
     }
   });
 
@@ -930,7 +946,7 @@ export function registerComputerSessionRoutes(
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
-            const publicFailure = interactionControlApiError(error, "computer");
+            const publicFailure = interactionControlApiError(error, "computer", "live_view");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
@@ -1483,9 +1499,8 @@ export function registerComputerSessionRoutes(
                   message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
                 });
               }
-              return await throwComputerSourcePlacementChanged(
-                grant,
-                sourceSession.id,
+              throw sourcePlacementElsewhereApiError(
+                "computer_session",
                 expectedPlacement.sandboxId,
               );
             }
@@ -1777,9 +1792,8 @@ export function registerComputerSessionRoutes(
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
         if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
-          return await throwComputerSourcePlacementChanged(
-            grant,
-            record.sourceSessionId,
+          throw sourcePlacementElsewhereApiError(
+            "computer_session",
             record.session.placement.sandboxId,
           );
         }
@@ -1832,6 +1846,12 @@ export function registerComputerSessionRoutes(
           if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
           await client.createComputerSession({
             computerSessionId,
+            cursorIdentity: await computerCursorIdentity(
+              deps,
+              grant,
+              sourceSession ??
+                (await requireSourceSession(deps, workspaceId, record.sourceSessionId)),
+            ),
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
             ...tokens,
@@ -1882,35 +1902,8 @@ export function registerComputerSessionRoutes(
           ),
       );
     } catch (error) {
-      throw computerRouteError(error);
+      throw computerRouteError(error, interactionControlRequestFor(channelOperation));
     }
-  }
-
-  async function throwComputerSourcePlacementChanged(
-    grant: AccessGrant,
-    sourceSessionId: string,
-    connectedSandboxId: string,
-  ): Promise<never> {
-    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sourceSessionId,
-      connectedSandboxId,
-    });
-    if (reconciliation.sourcePlacementChanged) {
-      // End what the move left running on its former machines without making
-      // this request wait for it. Earlier failed retirements of this task's
-      // resources are retried too; a failure leaves the binding for later.
-      void retireSourceFormerPlacements(channelServices, {
-        grant,
-        sourceSessionId,
-        origin: null,
-      });
-      throw sourcePlacementChangedApiError("computer_session");
-    }
-    throw new ComputerSessionStateError(
-      "ComputerSession source placement changed during the request; retry",
-    );
   }
 
   async function ensureInteractionHolder(
@@ -2101,17 +2094,19 @@ export function registerComputerSessionRoutes(
   }
 }
 
-function sourcePlacementChangedApiError(interactionResource: "computer_session"): ApiHttpError {
+function sourcePlacementElsewhereApiError(
+  interactionResource: "computer_session",
+  connectedSandboxId: string,
+): ApiHttpError {
   return new ApiHttpError(409, {
     code: "conflict",
-    message:
-      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+    message: `This Desktop runs on Connected Machine ${connectedSandboxId}, and this task now runs on another machine. It is kept running there: move this task back to that machine to use it, or open a Desktop here.`,
     retryable: false,
     outcomeUnknown: false,
     details: {
       interactionResource,
-      interactionFailureCode: "source_placement_changed",
-      interactionLifecycle: "lost",
+      interactionFailureCode: "source_placement_elsewhere",
+      connectedSandboxId,
     },
   });
 }
@@ -2397,10 +2392,13 @@ function interactionFailure(error: unknown) {
   };
 }
 
-function computerRouteError(error: unknown): HTTPException {
+export function computerRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
-  const connectedMachineError = interactionControlApiError(error, "computer");
+  const connectedMachineError = interactionControlApiError(error, "computer", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;
@@ -2409,6 +2407,13 @@ function computerRouteError(error: unknown): HTTPException {
     return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof AttachedBrowserDeviceNotFoundError) {
+    return new HTTPException(404, {
+      message:
+        "No attached device has this ID. To use a connected machine's screen, use placement kind connected_machine with its sandboxId.",
+      cause: error,
+    });
   }
   if (
     error instanceof ComputerSessionOperationConflictError ||

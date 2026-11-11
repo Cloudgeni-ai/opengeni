@@ -1,13 +1,17 @@
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
+import { capabilityLogoFallback } from "../capability-logo-fallback";
 import { browserConnectWindowHost } from "../connect-window-host";
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { capabilityPresentation } from "../integration-presentation";
 import { useOpenGeniText } from "../messages/runtime";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
-import { showsMcpServerLabel } from "./mcp-server-label";
+import { connectionCardSubtitle, showsMcpServerLabel } from "./mcp-server-label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
 export type SessionMcpCapabilityCardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
@@ -22,6 +26,11 @@ export type SessionMcpCapabilityCardProps = {
    * may only connect their own account. No ownership choice.
    */
   personalOnly?: boolean;
+  /**
+   * A connection of this person's that stopped working, which the agent asked
+   * to reconnect: the card says Reconnect and signs in to that same account.
+   */
+  reconnectConnectionId?: string | undefined;
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
@@ -79,6 +88,7 @@ function ScopedCard({
   description: hostDescription,
   logoSrc,
   ownershipCopy,
+  reconnectConnectionId,
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
@@ -93,8 +103,20 @@ function ScopedCard({
     dialogOnly,
     onClose,
     personalOnly: configuredPersonalOnly,
+    reconnectConnectionId,
   });
-  const { item, personalOnly, busy, waiting, reconciling, connected, ownership } = flow;
+  const reconnecting = Boolean(reconnectConnectionId);
+  const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
+  // Your own login, added in another workspace: one click turns it on here.
+  const useOwnLoginHere = offHere !== null && !connected && item !== null;
+  const ownLoginQuestion = useOwnLoginHere
+    ? `${t("sessionMcpCapabilityCard.useYourLoginHereToo", {
+        account: connectionAccountIdentityLabel(
+          offHere.metadata,
+          t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
+        ),
+      })} ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
+    : null;
   const [logo, setLogo] = useState<string | null>(null);
 
   useEffect(() => {
@@ -122,31 +144,77 @@ function ScopedCard({
     };
   }, [client, item?.logoAssetPath]);
 
+  // Reviewed catalog copy says, in a person's words, what the service is and
+  // what the agent can do with it. The host, the full catalog description and
+  // the connection type stay one click away under Details.
+  const presentation = item ? capabilityPresentation(item.metadata) : undefined;
+  const technical = item ? showsMcpServerLabel(item) : false;
+  const introduction = hostDescription || presentation?.introduction || "";
+  const abilities = hostDescription ? [] : (presentation?.capabilities ?? []);
+  const lead = introduction || item?.description || rationale;
+  const address = item?.mcpUrl ?? item?.providerDomain ?? "";
+  const detailRows = item
+    ? [
+        item.description && item.description !== lead
+          ? {
+              key: "about",
+              label: t("sessionMcpCapabilityCard.detailsAbout"),
+              value: item.description,
+            }
+          : null,
+        presentation?.permissionSummary
+          ? {
+              key: "access",
+              label: t("sessionMcpCapabilityCard.detailsAccess"),
+              value: presentation.permissionSummary,
+            }
+          : null,
+        address
+          ? { key: "address", label: t("sessionMcpCapabilityCard.detailsAddress"), value: address }
+          : null,
+        item.kind === "mcp"
+          ? {
+              key: "type",
+              label: t("sessionMcpCapabilityCard.detailsType"),
+              value: t("sessionMcpCapabilityCard.mcpServer"),
+            }
+          : null,
+      ].filter((row): row is { key: string; label: string; value: string } => row !== null)
+    : [];
+
   return (
     <SessionCapabilityFrame
       name={item?.name ?? name}
-      subtitle={dialogSubtitle !== undefined ? "" : (item?.providerDomain ?? "")}
-      logo={logo ?? logoSrc ?? null}
-      typeLabel={
-        dialogSubtitle ?? (showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : "")
-      }
-      description={hostDescription || item?.description || rationale}
+      subtitle={dialogSubtitle !== undefined ? "" : connectionCardSubtitle(item)}
+      logo={logo ?? logoSrc ?? (item ? capabilityLogoFallback(item) : null)}
+      icon={presentation?.icon}
+      typeLabel={dialogSubtitle ?? (technical ? t("sessionMcpCapabilityCard.mcpServer") : "")}
+      badge={technical ? t("sessionMcpCapabilityCard.mcpServer") : undefined}
+      description={hostDescription || rationale || introduction || item?.description || ""}
+      clampDescription={!hostDescription && Boolean(rationale)}
       skill={false}
       expanded={flow.expanded}
       complete={flow.complete}
       actionLabel={
-        connected
-          ? sessionId
-            ? t("sessionMcpCapabilityCard.useInThisConversation")
-            : t("sessionMcpCapabilityCard.connected")
-          : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
+        useOwnLoginHere
+          ? t("sessionMcpCapabilityCard.useItHere")
+          : connected
+            ? sessionId
+              ? t("sessionMcpCapabilityCard.useInThisConversation")
+              : t("sessionMcpCapabilityCard.connected")
+            : reconnecting
+              ? t("sessionMcpCapabilityCard.reconnectName", { name: item?.name ?? name })
+              : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
       }
       note={
-        sessionId
+        ownLoginQuestion ??
+        (sessionId
           ? t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")
-          : t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn2")
+          : t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn2"))
       }
-      onOpen={flow.open}
+      onOpen={useOwnLoginHere ? flow.useHere : flow.open}
+      opensDialog={!useOwnLoginHere}
+      busy={useOwnLoginHere && busy}
       onClose={flow.close}
       dialogOnly={dialogOnly}
     >
@@ -170,10 +238,21 @@ function ScopedCard({
           </>
         ) : (
           <>
-            <p>{hostDescription || item.description || rationale}</p>
+            <p>{lead}</p>
+            {abilities.length > 0 ? (
+              <div className="og-session-capability-abilities">
+                <p>{t("sessionMcpCapabilityCard.onceConnectedTheAgentCan")}</p>
+                <ul>
+                  {abilities.map((ability) => (
+                    <li key={ability.title}>{ability.title}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {busy ? (
-              <>
-                <p role="status" className="og-session-capability-progress">
+              <div className="og-session-capability-waiting">
+                <span aria-hidden className="og-session-capability-spinner" />
+                <p role="status">
                   {waiting
                     ? t("sessionMcpCapabilityCard.finishSigningInWithName", { name: item.name })
                     : reconciling
@@ -189,10 +268,24 @@ function ScopedCard({
                     {t("sessionMcpCapabilityCard.stopWaiting")}
                   </button>
                 ) : null}
+              </div>
+            ) : ownLoginQuestion ? (
+              <>
+                <p className="og-session-capability-scope">{ownLoginQuestion}</p>
+                <button
+                  className="og-session-capability-primary"
+                  disabled={busy || flow.view.busy}
+                  onClick={flow.useHere}
+                >
+                  {t("sessionMcpCapabilityCard.useItHere")}
+                </button>
+                <button type="button" disabled={busy} onClick={flow.signIn}>
+                  {t("sessionMcpCapabilityCard.connectADifferentAccount")}
+                </button>
               </>
             ) : !connected ? (
               <>
-                {!item.connectionRef && !personalOnly ? (
+                {!item.connectionRef && !personalOnly && !reconnecting ? (
                   <fieldset disabled={busy}>
                     <legend>
                       {ownershipCopy?.legend ??
@@ -219,17 +312,19 @@ function ScopedCard({
                   </fieldset>
                 ) : null}
                 <p className="og-session-capability-scope">
-                  {personalOnly && ownership === "personal"
-                    ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
-                    : ownershipCopy
-                      ? ownership === "workspace"
-                        ? ownershipCopy.workspace
-                        : ownershipCopy.personal
-                      : ownership === "workspace"
-                        ? sessionId
-                          ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
-                          : t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable2")
-                        : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
+                  {reconnecting
+                    ? t("sessionMcpCapabilityCard.reconnectsTheSameAccount")
+                    : personalOnly && ownership === "personal"
+                      ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
+                      : ownershipCopy
+                        ? ownership === "workspace"
+                          ? ownershipCopy.workspace
+                          : ownershipCopy.personal
+                        : ownership === "workspace"
+                          ? sessionId
+                            ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
+                            : t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable2")
+                          : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
                 </p>
                 <button className="og-session-capability-primary" onClick={flow.signIn}>
                   {flow.retrySignIn
@@ -256,6 +351,19 @@ function ScopedCard({
                     : t("sessionMcpCapabilityCard.done")}
                 </button>
               </>
+            ) : null}
+            {detailRows.length > 0 ? (
+              <details className="og-session-capability-details">
+                <summary>{t("sessionMcpCapabilityCard.details")}</summary>
+                <dl>
+                  {detailRows.map((row) => (
+                    <div key={row.key}>
+                      <dt>{row.label}</dt>
+                      <dd>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </details>
             ) : null}
           </>
         )}

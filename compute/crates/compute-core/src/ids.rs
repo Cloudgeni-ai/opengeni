@@ -26,3 +26,15 @@ pub struct OpId(pub u64);
 /// as one made of an earlier VM of the same sandbox, changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BalloonRequest(pub u64);
+
+/// One shrink asked of a guest. The core assigns these, unique across the
+/// host, and expects them back in [`crate::Input::Shrunk`] or
+/// [`crate::Input::ShrinkFailed`]: a reply to any other changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShrinkRequest(pub u64);
+
+/// Something the host keeps on local disk only to go faster, such as a
+/// template or a cached image (see [`crate::Input::Cache`]). Callers choose
+/// these, one per thing kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CacheId(pub u64);

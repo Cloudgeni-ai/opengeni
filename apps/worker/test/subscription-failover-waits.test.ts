@@ -156,12 +156,10 @@ test("missing mapping leaves capacity wait for claim's one actionable failure, n
   expect(refresh).not.toHaveBeenCalled();
 });
 
-test.each(["not_visible", "cutover_not_enabled"] as const)("%s never resumes", async (kind) => {
+test("not_visible never resumes", async () => {
   const { evaluate, refresh } = setup();
-  evaluate.mockResolvedValue({ kind });
-  expect(await evaluateCoreCodexBlockedTurn(services, scope)).toEqual({
-    kind: kind === "not_visible" ? "revoked" : "paused",
-  });
+  evaluate.mockResolvedValue({ kind: "not_visible" });
+  expect(await evaluateCoreCodexBlockedTurn(services, scope)).toEqual({ kind: "revoked" });
   expect(refresh).not.toHaveBeenCalled();
 });
 

@@ -19,7 +19,7 @@ type Reading = {
   resetsAt: number | null;
   observedAt: number;
 };
-type Call = { connectionId: string; at: number; units: number };
+type Call = { connectionId: string; at: number; units: number; count?: number };
 
 /** Provider wire ids are normalized only at the presentation boundary. */
 function windowId(provider: Provider, id: string): Window | null {
@@ -130,7 +130,9 @@ export async function readSubscriptionUsagePool(
       const [data] =
         ids.length === 0
           ? []
-          : await rawRows<{ history: { readings: Reading[]; calls: Call[] } }>(
+          : await rawRows<{
+              history: { readings: Reading[]; calls: Call[]; start?: number | null };
+            }>(
               tx,
               sql`select opengeni_private.read_subscription_usage_history(${input.accountId}::uuid,
         ${input.workspaceId}::uuid, ${input.subjectId}, ${input.provider},
@@ -185,13 +187,17 @@ export async function readSubscriptionUsagePool(
           reading.usedPercent === null ? [] : [{ ...reading, usedPercent: reading.usedPercent }],
         ),
         calls,
+        // The read returns each call total at its last call, so it reports
+        // when the retained history starts.
         historyStart:
-          readings.length || calls.length
-            ? readings.reduce(
-                (at, r) => Math.min(at, r.observedAt),
-                calls.reduce((at, c) => Math.min(at, c.at), now),
-              )
-            : null,
+          data?.history.start !== undefined
+            ? data.history.start
+            : readings.length || calls.length
+              ? readings.reduce(
+                  (at, r) => Math.min(at, r.observedAt),
+                  calls.reduce((at, c) => Math.min(at, c.at), now),
+                )
+              : null,
       });
       return {
         ...result,

@@ -57,8 +57,6 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     executionDigest: "0".repeat(64),
     reusableSessionId: null,
     targetSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: "2026-09-26T10:00:00.000Z",

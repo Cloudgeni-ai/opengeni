@@ -2,12 +2,19 @@
 // (30 s, faster while the page is open, and on focus) keeps both in step;
 // any action refreshes immediately.
 import { accessContextHasInbox } from "@opengeni/contracts";
-import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  BillingCreditNotification,
+  InboxItem,
+  ListInboxResponse,
+  OpenGeniClient,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { toast } from "./toast";
 
-import { useAppContext } from "../app-context";
-import { errorMessage } from "@opengeni/contracts/values";
+import { useAppContext, type AppContextValue } from "../app-context";
+import { userErrorText } from "../../ui/api-error";
+import { inboxBillingAccountIds } from "./inbox-billing";
 
 type InboxState = {
   data: ListInboxResponse | null;
@@ -15,7 +22,8 @@ type InboxState = {
   loading: boolean;
 };
 
-type InboxClient = Pick<OpenGeniClient, "listInbox">;
+type InboxClient = Pick<ChatClient<OpenGeniClient>, "listInbox"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "markBillingCreditNotificationRead">>;
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };
@@ -34,6 +42,9 @@ export class InboxStore {
   private listeners = new Set<() => void>();
   private inFlight: Promise<void> | null = null;
   private generation = 0;
+  private active = true;
+  private billingReads = new Map<string, Promise<void>>();
+  private readBillingIds = new Set<string>();
 
   constructor(private readonly client: InboxClient) {}
 
@@ -52,6 +63,7 @@ export class InboxStore {
   }
 
   refresh = async (): Promise<void> => {
+    if (!this.active) return;
     if (this.inFlight) return await this.inFlight;
     const request = ++this.generation;
     this.inFlight = this.client
@@ -64,7 +76,7 @@ export class InboxStore {
           this.set({ error: new Error("The inbox response had no items."), loading: false });
           return;
         }
-        this.set({ data, error: null, loading: false });
+        this.set({ data: this.withBillingReads(data), error: null, loading: false });
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
@@ -76,10 +88,48 @@ export class InboxStore {
     return await this.inFlight;
   };
 
+  /** Retire the old viewer's cache and pending responses before exposing a new viewer. */
+  retire() {
+    this.active = false;
+    this.generation++;
+    this.state = EMPTY;
+  }
+
+  private withBillingReads(data: ListInboxResponse): ListInboxResponse {
+    if (!data.billingNotifications) return data;
+    return {
+      ...data,
+      billingNotifications: data.billingNotifications.map((notice) =>
+        this.readBillingIds.has(notice.id) ? { ...notice, read: true } : notice,
+      ),
+    };
+  }
+
+  /** A billing read is recipient/account scoped, never an inbox-item update. */
+  markBillingRead = async (notice: BillingCreditNotification): Promise<void> => {
+    if (!this.active || notice.read) return;
+    const pending = this.billingReads.get(notice.id);
+    if (pending) return pending;
+    const client = this.client;
+    if (!client.markBillingCreditNotificationRead)
+      throw new Error("Billing notifications are unavailable.");
+    const request = client
+      .markBillingCreditNotificationRead(notice.id, { accountId: notice.accountId })
+      .then((result) => {
+        if (!result.ok) throw new Error("The notification could not be marked read.");
+        if (!this.active) return;
+        this.readBillingIds.add(notice.id);
+        if (this.state.data) this.set({ data: this.withBillingReads(this.state.data) });
+      })
+      .finally(() => this.billingReads.delete(notice.id));
+    this.billingReads.set(notice.id, request);
+    return request;
+  };
+
   /** Apply a local change at once (an answered item leaves) before the server confirms. */
   patchItems(update: (items: InboxItem[]) => InboxItem[]) {
     const data = this.state.data;
-    if (!data) return;
+    if (!this.active || !data) return;
     const items = update(data.items);
     const now = Date.now();
     const awake = items.filter(
@@ -87,6 +137,7 @@ export class InboxStore {
     );
     this.set({
       data: {
+        ...data,
         items,
         needsYouCount: awake.filter((item) => isNeedsYouKind(item.kind)).length,
         unreadCount: awake.filter((item) => item.unread).length,
@@ -95,23 +146,35 @@ export class InboxStore {
   }
 }
 
-const stores = new WeakMap<InboxClient, InboxStore>();
+const stores = new WeakMap<InboxClient, { identity: string; store: InboxStore }>();
 
-function storeFor(client: InboxClient): InboxStore {
-  let store = stores.get(client);
-  if (!store) {
-    store = new InboxStore(client);
-    stores.set(client, store);
+export function inboxStoreFor(
+  context: Pick<AppContextValue, "client" | "accessContext" | "accessKeyVersion" | "authSession">,
+): InboxStore {
+  const { client, accessContext, accessKeyVersion, authSession } = context;
+  // The SDK client can outlive a cookie/key change. Include live grants so a
+  // demotion cannot keep showing the previous owner's billing information.
+  const identity = JSON.stringify([accessKeyVersion, authSession?.user.id, accessContext]);
+  let current = stores.get(client);
+  if (!current || current.identity !== identity) {
+    current?.store.retire();
+    current = { identity, store: new InboxStore(client) };
+    stores.set(client, current);
   }
-  return store;
+  return current.store;
 }
 
 /** The inbox, polled while mounted. `pollMs` is shortened while the Inbox page is open. */
 export function useInbox(
-  options: { pollMs?: number | undefined; enabled?: boolean | undefined } = {},
+  options: {
+    pollMs?: number | undefined;
+    enabled?: boolean | undefined;
+    workspaceId?: string | undefined;
+  } = {},
 ) {
-  const { client, accessContext } = useAppContext();
-  const store = storeFor(client);
+  const context = useAppContext();
+  const { accessContext, workspaces } = context;
+  const store = inboxStoreFor(context);
   const person = hasInbox(accessContext);
   const enabled = (options.enabled ?? true) && person;
   const pollMs = options.pollMs ?? 30_000;
@@ -142,7 +205,25 @@ export function useInbox(
     (update: (items: InboxItem[]) => InboxItem[]) => store.patchItems(update),
     [store],
   );
-  return { ...(person ? state : NO_INBOX), refresh, patchItems };
+  const accountId = workspaces.find((workspace) => workspace.id === options.workspaceId)?.accountId;
+  const billingAllowed = accountId && inboxBillingAccountIds(accessContext).includes(accountId);
+  // The personal inbox remains cross-workspace. Billing is shown only for the
+  // active organization, never inferred from a workspace viewer's grants.
+  const data = state.data
+    ? {
+        ...state.data,
+        billingNotifications: billingAllowed
+          ? (state.data.billingNotifications?.filter((notice) => notice.accountId === accountId) ??
+            [])
+          : [],
+      }
+    : null;
+  return {
+    ...(person ? { ...state, data } : NO_INBOX),
+    refresh,
+    patchItems,
+    markBillingRead: store.markBillingRead,
+  };
 }
 
 /** Questions, approvals and paused goals wait on the person; notes and replies don't. */
@@ -150,15 +231,17 @@ export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
   return kind === "question" || kind === "approval" || kind === "goal_paused";
 }
 
-/** What waits on the person: needs-you items plus unread notes and replies, unsnoozed. */
+/** Rail attention only; API chat counts keep their historical meaning. */
 export function inboxAttentionCount(data: ListInboxResponse | null): number {
   if (!data) return 0;
   const now = Date.now();
-  return data.items.filter(
-    (item) =>
-      (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now) &&
-      (isNeedsYouKind(item.kind) || item.unread),
-  ).length;
+  return (
+    data.items.filter(
+      (item) =>
+        (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now) &&
+        (isNeedsYouKind(item.kind) || item.unread),
+    ).length + (data.billingNotifications?.filter((notice) => !notice.read).length ?? 0)
+  );
 }
 
 /**
@@ -170,9 +253,9 @@ export function useReadSessionInbox(sessionId: string) {
   const context = useAppContext();
   const personal = hasInbox(context.accessContext);
   const client = context.client;
+  const store = inboxStoreFor(context);
   useEffect(() => {
     if (!personal) return;
-    const store = storeFor(client);
     const read = async () => {
       const data = await client.listInbox().catch(() => null);
       const unread = (data?.items ?? []).filter(
@@ -195,7 +278,7 @@ export function useReadSessionInbox(sessionId: string) {
     };
     void read();
     return () => void read();
-  }, [client, personal, sessionId]);
+  }, [client, personal, sessionId, store]);
 }
 
 /**
@@ -231,6 +314,7 @@ export function useSessionRepliesMute(session: {
 }): SessionRepliesMute | null {
   const context = useAppContext();
   const client = context.client;
+  const store = inboxStoreFor(context);
   const applies = hasInbox(context.accessContext) && session.parentSessionId === null;
   const [muted, setMuted] = useState<boolean | null>(null);
   const [scope, setScope] = useState<SessionRepliesMuteScope>("session");
@@ -262,7 +346,7 @@ export function useSessionRepliesMute(session: {
         setMuted(value.repliesMuted);
         const nextScope = value.scope ?? "session";
         setScope(nextScope);
-        void storeFor(client).refresh();
+        void store.refresh();
         const subject = nextScope === "schedule" ? "Replies from this automation" : "Replies";
         toast.success(
           value.repliesMuted
@@ -273,10 +357,10 @@ export function useSessionRepliesMute(session: {
       .catch((error: unknown) => {
         const what = scope === "schedule" ? "this automation's replies" : "replies";
         toast.error(next ? `Couldn't mute ${what}.` : `Couldn't unmute ${what}.`, {
-          description: errorMessage(error),
+          description: userErrorText(error),
         });
       })
       .finally(() => setBusy(false));
-  }, [busy, client, muted, scope, session.id, session.workspaceId]);
+  }, [busy, client, muted, scope, session.id, session.workspaceId, store]);
   return applies && muted !== null ? { muted, busy, toggle, scope } : null;
 }

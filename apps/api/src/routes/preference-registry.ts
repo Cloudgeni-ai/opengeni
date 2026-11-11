@@ -16,11 +16,13 @@ import {
   type PreferenceRegistryScope,
 } from "@opengeni/contracts";
 import {
+  authorizationHoldsOrganizationAdministration,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   changePreferenceRegistryScope,
@@ -145,16 +147,17 @@ export function authorizePreferenceRegistryScopeMutation(
   requireHumanMutation(access);
   if (scope === "organization") {
     // Deliberately do not use hasPermission: workspace:admin must not expand to
-    // account:admin for an organization-wide preference. Account authority is
-    // carried separately from the authenticated context and must match this
+    // organization authority for an organization-wide preference. The
+    // organization's owner or admins qualify, through the account grant and
+    // role carried separately from the authenticated context, matching this
     // exact workspace grant's account and subject.
-    if (!access.accountGrant?.permissions.includes("account:admin")) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    if (!authorizationHoldsOrganizationAdministration(access)) {
+      throw new MissingPermissionRefusal("account:admin");
     }
     return;
   }
   if (scope === "workspace" && !hasPermission(grant.permissions, workspacePermission)) {
-    throw new HTTPException(403, { message: `missing permission: ${workspacePermission}` });
+    throw new MissingPermissionRefusal(workspacePermission);
   }
   // User scope is always self-only: the route derives the target from the
   // authenticated actor and never accepts a subject selector.

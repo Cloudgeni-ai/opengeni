@@ -30,11 +30,14 @@ const {
   MeetingRecorderProvider,
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
+  useMeetingRecorderControls,
 } = await import("./recorder-context");
-const { createMeetingsFixture, FAILED_RECORDING_ID } = await import("../testing/meetings-fixture");
+const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
+  await import("../testing/meetings-fixture");
 
-async function render(node: React.ReactNode) {
+async function render(node: React.ReactNode, host?: (container: HTMLElement) => void) {
   const container = document.createElement("div");
+  host?.(container);
   document.body.append(container);
   const root = createRoot(container);
   const store = createMeetingRecorderStore();
@@ -113,6 +116,45 @@ async function typeInto(field: HTMLInputElement | HTMLTextAreaElement, value: st
 }
 
 describe("Meetings list", () => {
+  test("takes its surfaces from the host page, as the embedded chat does", async () => {
+    const fixture = createMeetingsFixture();
+    const page = (
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />
+    );
+    // A dark host page darker than Opengeni's own page grey: the sticky bars
+    // and the page background become the host's color, not grey boxes.
+    const hosted = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(26, 26, 25)";
+    });
+    // Inside Opengeni's own content pane, whose page background is already
+    // its own canvas, nothing is restyled.
+    const inApp = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(32, 32, 32)";
+      container.style.setProperty("--og-color-bg", "#202020");
+    });
+    try {
+      await settle();
+      const hostedRoot = hosted.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(hostedRoot?.classList.contains("og-root")).toBe(true);
+      expect(hostedRoot?.style.getPropertyValue("--og-color-bg")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.style.getPropertyValue("--og-color-canvas")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.querySelectorAll("[data-og-host-theme]")).toHaveLength(0);
+      const inAppRoot = inApp.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(inAppRoot?.style.getPropertyValue("--og-color-bg")).toBe("");
+      expect(inAppRoot?.getAttribute("data-og-theme")).toBeNull();
+    } finally {
+      await hosted.unmount();
+      await inApp.unmount();
+    }
+  });
+
   test("lists meetings with their state and opens one", async () => {
     const fixture = createMeetingsFixture();
     const opened: string[] = [];
@@ -141,6 +183,144 @@ describe("Meetings list", () => {
         row!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       expect(opened).toEqual([fixture.readyId]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the person's own Only me meetings from other workspaces are listed here and open in place", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const opened: string[] = [];
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={(id) => opened.push(id)}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Pipeline review");
+      const text = view.container.textContent ?? "";
+      // In the normal list, not a separate section, labelled with where they are stored.
+      expect(text).not.toContain("From other workspaces");
+      expect(text).toContain("Only me, recorded in Sales");
+      const row = [...view.container.querySelectorAll<HTMLAnchorElement>("a[href]")].find(
+        (element) => element.textContent?.includes("Pipeline review"),
+      )!;
+      expect(row.getAttribute("href")).toBe(`/meetings/${ELSEWHERE_RECORDING_ID}`);
+      await act(async () => {
+        row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      expect(opened).toEqual([ELSEWHERE_RECORDING_ID]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an Only me meeting from another workspace opens here, says where it lives and can't be shared here", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "recorded in Sales");
+      expect(view.container.textContent).toContain("Only me · recorded in Sales");
+      // Sharing it with a workspace happens where it is stored.
+      expect(view.container.querySelector('[aria-label^="Who can see this"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the owner chooses where their Only me meeting works, and leaves a workspace they turn it off in", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const personal = "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f";
+    const left: string[] = [];
+    const page = (reachWorkspaces?: { id: string; name: string; personal?: boolean }[]) => (
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        reachWorkspaces={reachWorkspaces}
+        organizationName="Acme"
+        onBack={() => left.push("back")}
+      />
+    );
+    const openMenu = async (container: HTMLElement) => {
+      const trigger = container.querySelector<HTMLElement>(
+        '[aria-label="More actions for Pipeline review"]',
+      );
+      await act(async () => {
+        trigger!.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+        );
+      });
+      await settle(50);
+      return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    };
+    // Without the person's workspaces, the page doesn't offer the choice.
+    const bare = await render(page());
+    try {
+      await waitForText(bare.container, "recorded in Sales");
+      const items = await openMenu(bare.container);
+      expect(items.map((item) => item.textContent?.trim())).not.toContain("Available in…");
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await settle(50);
+    } finally {
+      await bare.unmount();
+    }
+
+    const view = await render(
+      page([
+        { id: fixture.workspaceId, name: "Design" },
+        { id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", name: "Sales" },
+        { id: personal, name: "Ingrid", personal: true },
+      ]),
+    );
+    try {
+      await waitForText(view.container, "recorded in Sales");
+      const item = (await openMenu(view.container)).find(
+        (candidate) => candidate.textContent?.trim() === "Available in…",
+      );
+      expect(item).toBeDefined();
+      await act(async () => item!.click());
+      await settle(100);
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      const text = dialog.textContent ?? "";
+      expect(text).toContain("It stays Only me");
+      expect(text).toContain("Belongs to you. Only you manage it.");
+      // The workspace storing it is always ticked; Personal always has it, so no row.
+      const box = (label: string) => {
+        const element = [...dialog.querySelectorAll("label")].find(
+          (each) => each.textContent === label,
+        );
+        return element ? (document.getElementById(element.htmlFor) as HTMLInputElement) : null;
+      };
+      expect(box("Sales")?.disabled).toBe(true);
+      expect(box("Sales")?.checked).toBe(true);
+      expect(box("Your Personal workspace")).toBeNull();
+      expect(text).not.toContain("will no longer show");
+      // Turning it off where it was opened says it will leave, then leaves.
+      await act(async () => box("Design (this workspace)")!.click());
+      expect(dialog.textContent).toContain("It will no longer show in this workspace");
+      const save = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      await act(async () => save.click());
+      await waitFor(() => left.length > 0);
+      expect(left).toEqual(["back"]);
+      const saved = await fixture.client.getRecording(fixture.workspaceId, ELSEWHERE_RECORDING_ID);
+      expect(saved.reachWorkspaceIds).toEqual([]);
     } finally {
       await view.unmount();
     }
@@ -206,6 +386,28 @@ describe("Meetings list", () => {
     try {
       await settle();
       expect(view.container.textContent).toContain("No meetings yet");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an EU-only workspace without an EU route says Not supported in EU instead of recording", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        recordingOff="Not supported in EU"
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const notice = view.container.querySelector('[data-tone="info"]');
+      expect(notice?.textContent).toBe("Not supported in EU");
+      const buttons = [...view.container.querySelectorAll("button")];
+      expect(buttons.some((button) => button.textContent?.includes("Start recording"))).toBe(false);
     } finally {
       await view.unmount();
     }
@@ -325,6 +527,8 @@ describe("Recorder provider", () => {
       systemAudioKind: null,
       upload: { created: true },
       recovered: [],
+      uploads: {},
+      retryUpload: () => false,
       live: null,
       error: null,
       stop: async () => {
@@ -363,6 +567,298 @@ describe("Recorder provider", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("Start recording from the app's actions starts what the button starts, after a stopped recording too", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "stopped" | "recording" = "stopped";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-earlier",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const page = (
+      <MeetingRecorderStoreProvider value={store}>
+        <Controls />
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />
+      </MeetingRecorderStoreProvider>
+    );
+    try {
+      await act(async () => root.render(page));
+      await waitForText(container, "Start recording");
+      expect(controls).not.toBeNull();
+      expect(controls!.state).toBe("stopped");
+      expect(controls!.supported).toBe(true);
+
+      // The button's start...
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      await waitFor(() => starts.length === 1);
+
+      // ...and the action's, through the same panel, with the same options.
+      await act(async () => controls!.requestStart());
+      await waitFor(() => starts.length === 2);
+      expect(store.pendingStart()).toBeNull();
+      expect(starts[1]).toEqual(starts[0]!);
+      // Neither makes up a name: Opengeni names the meeting, from the
+      // calendar or the conversation, so a made-up one never hides it.
+      expect(starts[0]!.title).toBeUndefined();
+      expect(starts[0]!.titleSource).toBeUndefined();
+
+      // While one records, the action asks for no second start.
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await act(async () => controls!.requestStart());
+      expect(store.pendingStart()).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Stop recording from the app's actions stops and opens the meeting in its workspace", async () => {
+    const opened: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        opened.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let stops = 0;
+    const recorder = {
+      state: "paused",
+      recordingId: "recording-now",
+      supported: true,
+      stop: async () => {
+        stops += 1;
+      },
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-recorded");
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      // Without a recorder provider there is nothing to control.
+      await act(async () => root.render(<Controls />));
+      expect(controls).toBeNull();
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      await act(async () => controls!.stop());
+      expect(stops).toBe(1);
+      expect(opened).toEqual(["workspace-recorded/recording-now"]);
+
+      // A host without a way to open meetings hears which one to open itself.
+      const bare = createMeetingRecorderStore();
+      bare.set({ ...recorder!, state: "recording" } as typeof recorder, "workspace-bare");
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={bare}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      const result: { stopped: unknown } = { stopped: undefined };
+      await act(async () => {
+        result.stopped = await controls!.stop();
+      });
+      expect(result.stopped).toEqual({
+        recordingId: "recording-now",
+        workspaceId: "workspace-bare",
+        opened: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a start that is still waiting never begins a second recording after the button's recording stops", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "idle" | "recording" | "stopped" = "idle";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-now",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      // The key asks for a start while the page still loads its models...
+      act(() => store.requestStart({ title: "" }));
+      // ...and the person clicks Start before it happens.
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      expect(starts).toHaveLength(1);
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      expect(store.pendingStart()).toBeNull();
+      state = "stopped";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await settle(500);
+      expect(starts).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the key's start keeps a title already typed, as the button does", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      state: "idle",
+      recordingId: null,
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const view = await (async () => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      return { container, root };
+    })();
+    try {
+      await waitForText(view.container, "Start recording");
+      const field = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Name this meeting, or it\'s named for you"]',
+      );
+      expect(field).not.toBeNull();
+      // A call app's name, with nothing typed, is sent as the app's guess.
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Zoom meeting", titleSource: "app" });
+      expect(field!.value).toBe("");
+      starts.length = 0;
+      await typeInto(field!, "Design review");
+      await act(async () => store.requestStart({ title: "" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]!.title).toBe("Design review");
+      expect(starts[0]!.titleSource).toBeUndefined();
+      // A call app's guess never replaces a name someone typed.
+      starts.length = 0;
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Design review" });
+      expect(starts[0]!.titleSource).toBeUndefined();
+    } finally {
+      await act(async () => view.root.unmount());
+      view.container.remove();
     }
   });
 });
@@ -423,6 +919,52 @@ describe("Meeting page", () => {
       ).toBeGreaterThan(0);
       // The owner controls who can see it.
       expect(view.container.querySelector('[aria-label^="Who can see this"]')).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the transcript says where a track recorded nothing, between the turns around it", async () => {
+    const fixture = createMeetingsFixture();
+    const getRecording: typeof fixture.client.getRecording = async (workspaceId, id) => {
+      const recording = await fixture.client.getRecording(workspaceId, id);
+      return {
+        ...recording,
+        tracks: recording.tracks.map((track) => ({
+          ...track,
+          unrecorded:
+            track.source === "microphone"
+              ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+              : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+        })),
+      };
+    };
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={{ ...fixture.client, getRecording }}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "4 speakers");
+      await openTab(view.container, "Transcript");
+      const items = [...view.container.querySelectorAll("ol > li")];
+      const lines = items.filter((item) => item.hasAttribute("data-unrecorded"));
+      expect(lines.map((line) => line.textContent)).toEqual([
+        "Ingrid Solberg's microphone wasn't recording from 0:46 to 1:08. Everyone else was still recorded.",
+        "Other people weren't recorded from 2:28 to 2:32.",
+      ]);
+      // Each sits where its stretch starts: after the turn at 0:38, before
+      // the one at 0:47; the one running to the end closes the transcript,
+      // ending where the meeting does.
+      const before = items[items.indexOf(lines[0]!) - 1]!;
+      const after = items[items.indexOf(lines[0]!) + 1]!;
+      expect(before.textContent).toContain("0:38");
+      expect(after.textContent).toContain("0:47");
+      expect(items.at(-1)).toBe(lines[1]);
     } finally {
       await view.unmount();
     }
@@ -892,6 +1434,52 @@ describe("Meeting page", () => {
     }
   });
 
+  test("while a meeting is processed, the player waits until every recorded track can play", async () => {
+    const fixture = createMeetingsFixture();
+    const listed = await fixture.client.listRecordings(fixture.workspaceId);
+    const processing = listed.recordings.find((entry) => entry.state === "processing")!;
+    // The microphone is ready to play; the computer audio isn't yet.
+    let playable = new Set([0]);
+    let reads = 0;
+    const recordings = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const found = await fixture.client.getRecording(workspaceId, id);
+        if (id !== processing.id) return found;
+        reads += 1;
+        return {
+          ...found,
+          tracks: found.tracks.map((track) => ({
+            ...track,
+            playable: playable.has(track.trackNumber),
+          })),
+        };
+      },
+    };
+    const player = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Position"]') !== null;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={processing.id}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={recordings}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitFor(() => reads > 0);
+      await settle(600);
+      // The microphone alone would sound as if the call was never recorded.
+      expect(player(view.container)).toBe(false);
+      playable = new Set([0, 1]);
+      // The page reads the meeting again while it's processed.
+      await waitFor(() => player(view.container), 6_000);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -912,6 +1500,290 @@ describe("Meeting page", () => {
       );
       expect(again.length).toBeGreaterThan(0);
       for (const button of again) expect(button.disabled).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a wrong speaker count is fixed by telling it how many people spoke", async () => {
+    const fixture = createMeetingsFixture();
+    const asked: unknown[] = [];
+    const client = {
+      ...fixture.client,
+      createRecordingTranscript: async (
+        workspaceId: string,
+        id: string,
+        request: { transcription?: unknown },
+      ) => {
+        asked.push(request.transcription);
+        return await fixture.client.createRecordingTranscript(workspaceId, id);
+      },
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Wrong number of speakers?");
+      const wrong = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Wrong number of speakers?",
+      )!;
+      await act(async () => wrong.click());
+      await waitForText(document.body, "Number of speakers");
+      const field = document.body.querySelector<HTMLInputElement>('input[inputmode="numeric"]')!;
+      await typeInto(field, "4");
+      const submit = [...document.body.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Transcribe",
+      )!;
+      await act(async () => submit.click());
+      await waitFor(() => asked.length === 1);
+      expect(asked[0]).toMatchObject({ speakers: 4 });
+      expect(asked[0]).not.toHaveProperty("maxSpeakers");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a delayed subscription plan refusal offers upgrading, not adding credits", async () => {
+    const fixture = createMeetingsFixture();
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const recording = await fixture.client.getRecording(workspaceId, id);
+        return {
+          ...recording,
+          transcript: { ...recording.transcript!, errorCode: "subscription_plan_required" },
+        };
+      },
+    } as typeof fixture.client;
+    let opened = 0;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {
+          opened++;
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Upgrade to Pro to use your own subscription.");
+      const buttons = [...view.container.querySelectorAll("button")];
+      expect(buttons.some((button) => button.textContent?.trim() === "Add credits")).toBe(false);
+      const upgrade = buttons.find((button) => button.textContent?.trim() === "Upgrade to Pro")!;
+      expect(upgrade).toBeDefined();
+      await act(async () => upgrade.click());
+      expect(opened).toBe(1);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  /** The fixture's failed meeting, refused for credits on the deployment's model. */
+  async function creditRefusal(withSubscription: boolean) {
+    const fixture = createMeetingsFixture();
+    const base = await fixture.client.listRecordingModels(fixture.workspaceId);
+    const scribe = base.models.find((model) => model.model === "scribe_v2")!;
+    const mai = {
+      ...scribe,
+      providerId: "azure-speech",
+      providerName: "Azure Speech",
+      model: "MAI-Transcribe-2",
+      name: "MAI-Transcribe-2",
+      funding: "deployment" as const,
+      usdPerHour: 0.36,
+    };
+    const chatgpt = {
+      ...scribe,
+      providerId: "codex-subscription",
+      providerName: "ChatGPT",
+      model: "chatgpt-dictation",
+      name: "ChatGPT dictation",
+      funding: "workspace_subscription" as const,
+      usdPerHour: null,
+    };
+    const asked: unknown[] = [];
+    const client = {
+      ...fixture.client,
+      listRecordingModels: async () => ({
+        ...base,
+        models: withSubscription ? [mai, chatgpt] : [mai],
+        default: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+      }),
+      getRecording: async (workspaceId: string, id: string) => {
+        const recording = await fixture.client.getRecording(workspaceId, id);
+        return {
+          ...recording,
+          transcript: {
+            ...recording.transcript!,
+            providerId: "azure-speech",
+            model: "MAI-Transcribe-2",
+            errorCode: "insufficient_credits",
+          },
+        };
+      },
+      createRecordingTranscript: async (
+        workspaceId: string,
+        id: string,
+        request: Parameters<typeof fixture.client.createRecordingTranscript>[2],
+      ) => {
+        asked.push(request);
+        return await fixture.client.createRecordingTranscript(workspaceId, id, request);
+      },
+    } as typeof fixture.client;
+    return { fixture, client, asked };
+  }
+
+  test("a transcript refused for credits says so and transcribes with a model that needs none", async () => {
+    const { fixture, client, asked } = await creditRefusal(true);
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Transcribe with ChatGPT dictation");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "MAI-Transcribe-2 uses credits, and this organization is out of them.",
+      );
+      // One direct fix: the free model, not a purchase as well.
+      const labels = [...view.container.querySelectorAll("button")].map((button) =>
+        button.textContent?.trim(),
+      );
+      expect(labels).not.toContain("Add credits");
+      const fix = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Transcribe with ChatGPT dictation",
+      )!;
+      await act(async () => fix.click());
+      await waitFor(() => asked.length === 1);
+      expect(asked[0]).toMatchObject({
+        transcription: { providerId: "codex-subscription", model: "chatgpt-dictation" },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("with no model that needs no credits, the fix is adding them", async () => {
+    const { fixture, client } = await creditRefusal(false);
+    let opened = 0;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {
+          opened += 1;
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Add credits");
+      const add = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Add credits",
+      )!;
+      await act(async () => add.click());
+      expect(opened).toBe(1);
+      expect(view.container.textContent).toContain("Transcribe again");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a refused upload this device finished in the background says why and tries again", async () => {
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
+    const fixture = createMeetingsFixture();
+    const retried: string[] = [];
+    const failedUpload = {
+      recordingId: LIVE_RECORDING_ID,
+      created: true,
+      pendingChunks: 0,
+      pendingBytes: 0,
+      uploading: false,
+      retryingAfterError: null,
+      failed: { code: "insufficient_credits", message: "No credits." },
+      finalized: false,
+      discarded: false,
+    };
+    // The recorder is idle: the meeting was recorded before a reload, and the
+    // upload that finishes it in the background was refused.
+    const recorder = {
+      state: "idle",
+      recordingId: null,
+      title: null,
+      elapsedMilliseconds: 0,
+      tracks: [],
+      upload: null,
+      error: null,
+      live: null,
+      supported: true,
+      systemAudioSupported: false,
+      systemAudioKind: null,
+      recovered: [],
+      uploads: { [LIVE_RECORDING_ID]: failedUpload },
+      retryUpload: (id: string) => {
+        retried.push(id);
+        return true;
+      },
+      start: async () => {},
+      pause: () => {},
+      resume: () => {},
+      stop: async () => {},
+      discard: async () => {},
+      rename: async () => {},
+      levels: () => ({}),
+    } as unknown as NonNullable<ReturnType<typeof useMeetingRecorder>["recorder"]>;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={LIVE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "The upload didn't finish");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("out of credits");
+      expect(text).toContain("The audio is kept on this device");
+      const again = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Try again",
+      )!;
+      await act(async () => again.click());
+      expect(retried).toEqual([LIVE_RECORDING_ID]);
+      // Finishing it in the background reads Uploading from this device, with no action.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          uploads: {
+            [LIVE_RECORDING_ID]: {
+              ...failedUpload,
+              failed: null,
+              uploading: true,
+              pendingChunks: 3,
+            },
+          },
+        }),
+      );
+      expect(view.container.textContent).toContain("Uploading the audio from this device.");
     } finally {
       await view.unmount();
     }
@@ -975,6 +1847,43 @@ describe("Transcription model picker", () => {
     expect(transcriptionModelUnavailableReason(azure)).toBe(
       "Azure Speech isn't available here right now",
     );
+  });
+
+  test("transcribing again prices every recorded track, since each is billed on its own", async () => {
+    const { transcribeAgainEstimate } = await import("./meeting-detail-page");
+    const hour = 3_600_000;
+    const track = (trackNumber: number, durationMilliseconds: number, chunkCount = 10) => ({
+      trackNumber,
+      kind: "audio" as const,
+      source: trackNumber === 0 ? ("microphone" as const) : ("system" as const),
+      mimeType: "audio/webm",
+      chunkCount,
+      totalBytes: 1_000,
+      durationMilliseconds,
+      unrecorded: [],
+      playable: true,
+      video: null,
+      live: null,
+    });
+    // A microphone beside computer audio: two hours of audio for a one-hour meeting.
+    const both = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, hour)] },
+      0.22,
+    );
+    expect(both?.tracks).toBe(2);
+    expect(both?.usd).toBeCloseTo(0.44, 6);
+    // A track that never got audio costs nothing.
+    const micOnly = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, 0, 0)] },
+      0.22,
+    );
+    expect(micOnly).toEqual({ usd: 0.22, tracks: 1 });
+    // Without track details the meeting's length is the audio.
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour / 2, tracks: [] }, 0.22)).toEqual({
+      usd: 0.11,
+      tracks: 1,
+    });
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour, tracks: [] }, null)).toBeNull();
   });
 });
 
@@ -1060,6 +1969,8 @@ describe("Live transcript", () => {
       systemAudioSupported: false,
       systemAudioKind: null,
       recovered: [],
+      uploads: {},
+      retryUpload: () => false,
       start: async () => {},
       pause: () => calls.push("pause"),
       resume: () => calls.push("resume"),
@@ -1230,6 +2141,8 @@ describe("Live transcript", () => {
       systemAudioSupported: false,
       systemAudioKind: null,
       recovered: [],
+      uploads: {},
+      retryUpload: () => false,
       start: async () => {},
       pause: () => {},
       resume: () => {},
@@ -1242,7 +2155,7 @@ describe("Live transcript", () => {
     } as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
     const view = await render(<RecorderPanel recorder={recorder} />);
     try {
-      expect(view.container.textContent).toContain("No name yet");
+      expect(view.container.textContent).toContain("Named for you");
       const nameIt = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Name it",
       )!;
@@ -1263,6 +2176,144 @@ describe("Live transcript", () => {
       await act(async () => save.click());
       await settle(50);
       expect(renamed).toEqual(["Customer call"]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a track whose source went away says so, what still records, and how to bring it back", async () => {
+    const { RecorderPanel } = await import("./recorder-panel");
+    const reconnected: number[] = [];
+    const panel = (tracks: unknown[], systemAudioKind: string | null = "display") =>
+      ({
+        state: "recording",
+        recordingId: "r1",
+        title: "Weekly",
+        elapsedMilliseconds: 61_000,
+        tracks,
+        upload: null,
+        error: null,
+        live: null,
+        supported: true,
+        systemAudioSupported: true,
+        systemAudioKind,
+        recovered: [],
+        uploads: {},
+        retryUpload: () => false,
+        start: async () => {},
+        pause: () => {},
+        resume: () => {},
+        stop: async () => {},
+        discard: async () => {},
+        rename: async () => {},
+        reconnectTrack: async (trackNumber: number) => {
+          reconnected.push(trackNumber);
+        },
+        levels: () => ({}),
+      }) as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
+    const microphone = { trackNumber: 0, source: "microphone", label: "MacBook Microphone" };
+    const tab = { trackNumber: 1, source: "system", label: "Tab" };
+    const buttons = (container: HTMLElement) =>
+      [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+
+    // Unplugged: it comes back by itself, so there is nothing to click.
+    let view = await render(
+      <RecorderPanel recorder={panel([{ ...microphone, lost: "reconnecting" }, tab])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Disconnected");
+      expect(text).toContain(
+        "Your voice isn't being recorded: no microphone is connected. Recording picks up again as soon as one is. Tab audio is still recording.",
+      );
+      expect(text).toContain("Recording");
+      expect(text).not.toContain("Recording your microphone and the tab's audio.");
+      expect(buttons(view.container)).not.toContain("Allow microphone");
+      // Plugged back in: it says so, briefly.
+      await view.rerender(<RecorderPanel recorder={panel([{ ...microphone }, tab])} />);
+      expect(view.container.textContent).toContain("Microphone is recording again.");
+      expect(view.container.textContent).not.toContain("Your voice isn't being recorded");
+    } finally {
+      await view.unmount();
+    }
+
+    // Sharing ended: only the person can share again.
+    view = await render(
+      <RecorderPanel recorder={panel([microphone, { ...tab, lost: "stopped" }])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Sharing ended");
+      expect(text).toContain(
+        "Tab sharing ended, so the call isn't being recorded. Microphone is still recording.",
+      );
+      const share = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Share tab again",
+      )!;
+      await act(async () => share.click());
+      expect(reconnected).toEqual([1]);
+    } finally {
+      await view.unmount();
+    }
+
+    // A microphone alone, gone: nothing is being recorded, and the header says so.
+    view = await render(
+      <RecorderPanel recorder={panel([{ ...microphone, lost: "stopped" }], "desktop")} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Not recording");
+      expect(text).toContain("Access off");
+      expect(text).toContain("Nothing is being recorded. Microphone access is off.");
+      expect(text).not.toContain("still recording");
+      expect(buttons(view.container)).toContain("Allow microphone");
+    } finally {
+      await view.unmount();
+    }
+
+    // Both gone: what needs the person comes first, beside its button.
+    view = await render(
+      <RecorderPanel
+        recorder={panel([
+          { ...microphone, lost: "reconnecting" },
+          { ...tab, lost: "stopped" },
+        ])}
+      />,
+    );
+    try {
+      expect(view.container.textContent).toContain(
+        "Nothing is being recorded. Tab sharing ended, and no microphone is connected (it comes back by itself when one is).",
+      );
+      expect(buttons(view.container)).toContain("Share tab again");
+    } finally {
+      await view.unmount();
+    }
+
+    // Paused, nothing records: it says what resuming will record.
+    const paused = (tracks: unknown[]) =>
+      ({ ...panel(tracks), state: "paused" }) as unknown as Parameters<
+        typeof RecorderPanel
+      >[0]["recorder"];
+    view = await render(
+      <RecorderPanel recorder={paused([{ ...microphone, lost: "reconnecting" }, tab])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Paused. No microphone is connected. Connect one before you resume, or only tab audio will be recorded.",
+      );
+      expect(text).not.toContain("still recording");
+    } finally {
+      await view.unmount();
+    }
+    view = await render(
+      <RecorderPanel recorder={paused([microphone, { ...tab, lost: "stopped" }])} />,
+    );
+    try {
+      expect(view.container.textContent).toContain(
+        "Paused. Tab sharing ended, so after you resume only your microphone will be recorded.",
+      );
+      expect(buttons(view.container)).toContain("Share tab again");
     } finally {
       await view.unmount();
     }

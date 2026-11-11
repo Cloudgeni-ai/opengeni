@@ -3,10 +3,13 @@ import {
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
+  paidHostedToolsChargeCredits,
   webSearchToolPlan,
+  hostedWebSearchAllowed,
   type Settings,
 } from "@opengeni/config";
 import {
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   bundledSkillSelectionForAgentConfig,
@@ -35,12 +38,15 @@ import {
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
   getSandbox,
+  isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
+  sessionsWithGoal,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
+import { inferenceFeatureRegionAllowed } from "../side-feature-availability";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
@@ -284,14 +290,30 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   settings: Settings,
   subjectId?: string,
 ): Promise<string[]> {
+  return (await workspaceSessionToolPolicyDefaultServers(db, workspaceId, settings, subjectId)).map(
+    (server) => server.id,
+  );
+}
+
+/**
+ * The same defaults with each connector's display name, so a turn can name a
+ * default connector that is missing from its own registry.
+ */
+export async function workspaceSessionToolPolicyDefaultServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  subjectId?: string,
+): Promise<{ id: string; name: string | undefined }[]> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
   const workspace = await requireWorkspace(db, workspaceId);
+  const names = new Map(runtimeSettings.mcpServers.map((server) => [server.id, server.name]));
   return workspaceSessionToolPolicyDefaultServerIdsFor(
     runtimeSettings.mcpServers,
     workspace.settings,
-  );
+  ).map((id) => ({ id, name: names.get(id) ?? undefined }));
 }
 
 /**
@@ -328,6 +350,12 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /**
+   * The sessions in this response page that have a goal, in any state. When
+   * present, a configured session missing from it projects no `goal_resume`,
+   * as the worker omits it for a turn whose frozen goal is none.
+   */
+  goalSessionIds?: ReadonlySet<string>;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -352,44 +380,48 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory] = await Promise.all([
-    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
-    resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      retainedProductModelIds: configured.map((session) => session.model),
-    }),
-    configured.some((session) => session.agent?.capabilities.skills === "read")
-      ? hasWorkspaceManagedSkill(deps.db, {
-          accountId: configured[0]!.accountId,
-          workspaceId,
-          subjectId,
-        })
-      : Promise.resolve(false),
-    deps.settings.sandboxSelfhostedEnabled
-      ? Promise.all(
-          sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
-            async (id) =>
-              [
-                id,
-                await getSandbox(
-                  deps.db,
-                  { accountId: configured[0]!.accountId, workspaceId, subjectId },
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly, goalSessions] =
+    await Promise.all([
+      workspaceRead ?? requireWorkspace(deps.db, workspaceId),
+      resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: configured[0]!.accountId,
+        workspaceId,
+        retainedProductModelIds: configured.map((session) => session.model),
+      }),
+      configured.some((session) => session.agent?.capabilities.skills === "read")
+        ? hasWorkspaceManagedSkill(deps.db, {
+            accountId: configured[0]!.accountId,
+            workspaceId,
+            subjectId,
+          })
+        : Promise.resolve(false),
+      deps.settings.sandboxSelfhostedEnabled
+        ? Promise.all(
+            sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
+              async (id) =>
+                [
                   id,
-                ),
-              ] as const,
-          ),
-        )
-      : Promise.resolve([]),
-    sessionsWithToolRouterHistory(deps.db, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      sessionIds: [...new Set(configured.map((session) => session.id))],
-    }),
-  ]);
+                  await getSandbox(
+                    deps.db,
+                    { accountId: configured[0]!.accountId, workspaceId, subjectId },
+                    id,
+                  ),
+                ] as const,
+            ),
+          )
+        : Promise.resolve([]),
+      sessionsWithToolRouterHistory(deps.db, {
+        accountId: configured[0]!.accountId,
+        workspaceId,
+        sessionIds: [...new Set(configured.map((session) => session.id))],
+      }),
+      // EU-only: the projection lists only tools the worker would attach.
+      isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+      sessionsWithGoal(deps.db, workspaceId, [...new Set(configured.map((session) => session.id))]),
+    ]);
   return {
     ...baseline,
-    settings: catalog.settings,
+    settings: euOnly ? { ...catalog.settings, requiredModelGeography: "eu" } : catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
     hasWorkspaceSkills,
@@ -399,6 +431,7 @@ export async function workspaceSessionEffectiveToolsContext(
       ),
     ),
     routerHistorySessionIds: routerHistory,
+    goalSessionIds: goalSessions,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -440,6 +473,8 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
   });
 }
 
+const HARNESS_CONTROL_TOOLS: ReadonlySet<string> = new Set(HARNESS_CONTROL_FIRST_PARTY_TOOLS);
+
 /** The server can prove attachment policy, not successful future provider calls. */
 export function sessionEffectiveToolProjectionInput(
   session: Session & { agent: NonNullable<Session["agent"]> },
@@ -460,29 +495,48 @@ export function sessionEffectiveToolProjectionInput(
     model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
   const hostedToolNames: AgentFunctionToolName[] = [];
   // Same plan the worker applies: provider web_search/web_fetch where the
-  // model has no hosted search (or the operator chose `replace`).
+  // model has no hosted search (or the operator chose `replace`, or paid
+  // hosted tools would run on Opengeni's bill).
   const webSearchPlan = context
     ? webSearchToolPlan(context.settings, {
         hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
         transportHostedSearch: model?.provider.kind === "xai-subscription",
         creditsDisabled: !workspaceSettingsAllowCreditModels(context.workspaceSettings),
+        hostedToolsBillCredits: paidHostedToolsChargeCredits(context.settings, {
+          accountId: session.accountId,
+          chargesOpenGeniCredits: model?.model.cost === "credits",
+        }),
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
-    if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
+    if (context?.settings.webSearchEnabled && hostedWebSearchAllowed(context.settings))
+      hostedToolNames.push("web_search", "x_search");
   } else if (model?.model.hostedWebSearch && webSearchPlan.hostedWebSearch)
     hostedToolNames.push("web_search");
-  const mediaAttachment =
+  const attachment =
     context?.mediaAttachments?.get(session.id) ??
     (context?.objectStorageAvailable === false
       ? ({ image: null, video: false } as const)
       : undefined);
+  // EU-only: a media tool with no EU route is never attached.
+  const imageRestricted =
+    context !== undefined && !inferenceFeatureRegionAllowed(context.settings, "image_generation");
+  const videoRestricted =
+    context !== undefined && !inferenceFeatureRegionAllowed(context.settings, "video_generation");
+  const mediaAttachment =
+    imageRestricted || videoRestricted
+      ? ({
+          image: imageRestricted ? null : (attachment?.image ?? null),
+          video: !videoRestricted && attachment?.video === true,
+        } as const)
+      : attachment;
   const media = resolveAgentMediaToolSurface(session.agent, mediaAttachment);
   hostedToolNames.push(...media.hosted);
   const runtimeToolNames: AgentFunctionToolName[] = context
     ? [
         "request_human_input",
         "list_models",
+        "privacy_facts",
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
         ...media.runtime,
@@ -515,7 +569,12 @@ export function sessionEffectiveToolProjectionInput(
     : [];
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
-      ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
+      ? resolveAgentToolFamilies(session.agent, {
+          sandboxAttached: sandboxAvailable,
+          ...(context.goalSessionIds
+            ? { sessionGoal: context.goalSessionIds.has(session.id) }
+            : {}),
+        })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
       : [];
@@ -588,10 +647,13 @@ export function sessionEffectiveToolProjectionInput(
     "skill_read",
     "request_human_input",
     "list_models",
+    "privacy_facts",
     ...webSearchPlan.providerTools,
     // Interaction entry tools stay visible even with progressive disclosure;
     // the remaining authorized family tools are disclosed after opening.
     ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
+    // The harness control tools are in the first request on every path.
+    ...firstPartyMcpTools.filter((name) => HARNESS_CONTROL_TOOLS.has(name)),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
@@ -618,16 +680,48 @@ export function sessionEffectiveToolProjectionInput(
     ...(context ? { sandboxAttached: sandboxAvailable } : {}),
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
-  environment.hasDeferredTools =
+  // Same rule as the worker's `turnToolRouterExpected`: an eager server the
+  // runtime prepares best effort may list its tools after the first request.
+  const registry = [...session.mcpServers, ...(context?.settings.mcpServers ?? [])];
+  const eagerPreparesLate = (ref: ToolRef): boolean => {
+    const eager = ref.eager === true || (Array.isArray(ref.eager) && ref.eager.length > 0);
+    if (!eager || !families.allowsMcpServer(ref.id)) return false;
+    if (ref.optional === true || ref.id === "codex_apps") return true;
+    const server = registry.find((candidate) => candidate.id === ref.id);
+    return Boolean(server?.connectionRef);
+  };
+  // The worker predicts the router from the media capability, before any media
+  // provider is attached, so the projection does too.
+  const mediaCapability = resolveAgentToolFamilies(session.agent, {
+    ...environment,
+    media: undefined,
+  }).media;
+  const deferredBesidesTitle =
     (nativeComputerTools && progressiveDisclosure) ||
+    mediaCapability ||
+    toolRefs.some(eagerPreparesLate) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
     ) ||
     firstPartyMcpTools.some(
-      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
+      (name) =>
+        name !== "set_session_title" &&
+        families.allowsFirstPartyTool(name) &&
+        !upfrontToolNames.has(name),
     ) ||
     runtimeToolNames.some(
       (name) => families.allowsFunctionTool(name) && !upfrontToolNames.has(name),
+    );
+  // The worker leaves the title tool out when it alone would bring the router
+  // back; Opengeni titles the session itself.
+  if (progressiveDisclosure && !retainedRouter && !deferredBesidesTitle) {
+    const index = firstPartyMcpTools.indexOf("set_session_title");
+    if (index >= 0) firstPartyMcpTools.splice(index, 1);
+  }
+  environment.hasDeferredTools =
+    deferredBesidesTitle ||
+    firstPartyMcpTools.some(
+      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
     );
   const provider = model?.provider;
   const native =

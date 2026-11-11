@@ -4,6 +4,7 @@ import {
   CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
   catalogImportFingerprint,
+  catalogMcpUrlRejection,
   catalogRowToDbInput,
   normalizeCatalogSnapshot,
   readSnapshotFile,
@@ -92,6 +93,17 @@ describe("integrations.sh catalog import normalization", () => {
     expect(changedSemantics.completedBatch).toBeNull();
     expect(changedLogos.snapshotRef).not.toBe(first.snapshotRef);
     expect(changedSemantics.snapshotRef).not.toBe(first.snapshotRef);
+  });
+
+  test("allows a query string only on an exact reviewed MCP URL", () => {
+    expect(catalogMcpUrlRejection("https://mcp.atlassian.com/v2/mcp?tools=all")).toBeNull();
+    for (const url of [
+      "https://mcp.atlassian.com/v2/mcp?tools=all&token=secret",
+      "https://mcp.atlassian.com/v2/mcp?tools=some",
+      "https://mcp.atlassian.com/v1/mcp?tools=all",
+      "https://other.example.test/v2/mcp?tools=all",
+    ])
+      expect(catalogMcpUrlRejection(url)).toBe("credential_query_parameter");
   });
 
   test("quarantines Figma remote access while allowing other reviewed servers", () => {
@@ -282,11 +294,8 @@ describe("integrations.sh catalog import normalization", () => {
       tier: "verified",
       provenance: "first-party:opengeni-gmail-rest",
       authKind: "oauth2",
-      scopesHint: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify",
-      ],
+      // A first connection asks only to read; more is asked for in the chat.
+      scopesHint: ["https://www.googleapis.com/auth/gmail.readonly"],
       allowedTools: [
         "create_draft",
         "send_message",
@@ -402,7 +411,7 @@ describe("integrations.sh catalog import normalization", () => {
       credentialFacts: [],
       tier: "verified",
       provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
-      logoSourceUrl: null,
+      logoSourceUrl: "https://integrations.sh/logo/mobbin.com",
       homepageUrl: "https://mobbin.com/mcp",
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       documentationUrl: "https://docs.mobbin.com/mcp/introduction",
@@ -433,8 +442,8 @@ describe("integrations.sh catalog import normalization", () => {
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       logoAssetPath: null,
       metadata: {
-        logoSource: "generic_monogram",
-        originalLogoUrl: null,
+        logoSource: "integrations.sh",
+        originalLogoUrl: "https://integrations.sh/logo/mobbin.com",
         documentationUrl: "https://docs.mobbin.com/mcp/introduction",
         officialMcpRegistry: {
           name: "com.mobbin/mobbin",

@@ -784,7 +784,9 @@ describe("P4.4 Channel-A route discipline", () => {
     const credentialAt = channelASeam.indexOf("withRunCredentialsSession(");
     const deriveAt = channelASeam.indexOf("codemodeTokenFileFromEnvironment(");
     const decorateAt = channelASeam.indexOf("withCodemodeTokenSession(");
-    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(");
+    // The command seam's service, built from the credential session. Other
+    // seams (such as file operations on a run_on machine) run no commands.
+    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(", credentialAt);
 
     expect(credentialAt).toBeGreaterThanOrEqual(0);
     expect(deriveAt).toBeGreaterThan(credentialAt);
@@ -850,7 +852,7 @@ describe("ephemeral controller callback replay fence", () => {
     const route = readFileSync(resolve(here, "..", "src", "routes", "browser-sessions.ts"), "utf8");
     const active = route.slice(
       route.indexOf("async function withActiveBrowserController"),
-      route.indexOf("async function throwBrowserSourcePlacementChanged"),
+      route.indexOf("async function browserControllerGone"),
     );
     const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
     expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');

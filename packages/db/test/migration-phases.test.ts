@@ -24,11 +24,11 @@ ${marker ? `-- opengeni:${marker}\n` : ""}WITH batch AS (SELECT id FROM records 
 UPDATE records SET value = 1 FROM batch WHERE records.id = batch.id RETURNING records.id;`;
 
 describe("posture-inert pre eligibility", () => {
-  test("specialized indexes and backfills are inert; historical and unknown modes are not", () => {
+  test("specialized indexes and backfills are inert; unclassified modes are not", () => {
     for (const source of [index(), index(true), index(false, "pre-release"), backfill()]) {
       expect(isPreReleaseEligible(file, source)).toBe(true);
     }
-    expect(isPreReleaseEligible("0010_historical.sql", "SELECT 1;")).toBe(false);
+    expect(isPreReleaseEligible("0010_unclassified.sql", "SELECT 1;")).toBe(false);
     expect(isPreReleaseEligible(file, index().replace("rolling", "maintenance"))).toBe(false);
   });
   test("ordinary posture-changing and uncertain statements stop pre, despite rolling headers", () => {
@@ -79,14 +79,11 @@ describe("posture-inert pre eligibility", () => {
   test("real production migrations cannot run pre until old-binary readiness tolerates their posture", () => {
     const directory = join(import.meta.dir, "../drizzle");
     for (const [ordinal, expected] of [
-      ["0842", false],
-      ["0846", false],
-      ["0847", false],
-      ["0866", true],
-      ["0867", true],
-      ["0874", true],
-      ["0875", true],
-      ["0879", true],
+      ["0978", false],
+      ["0986", false],
+      ["0987", true],
+      ["0995", false],
+      ["0996", false],
     ] as const) {
       const name = readdirSync(directory).find((candidate) => candidate.startsWith(`${ordinal}_`))!;
       expect(isPreReleaseEligible(name, readFileSync(join(directory, name), "utf8"))).toBe(
@@ -126,7 +123,7 @@ describe("post-release eligibility", () => {
       );
     }
   });
-  test("never defers maintenance, historical, unclassified, ordinary DDL or malformed special files", () => {
+  test("never defers maintenance, unclassified, ordinary DDL or malformed special files", () => {
     for (const source of [
       index().replace("rolling", "maintenance"),
       index().replace("-- deployment-mode: rolling\n", ""),
@@ -174,7 +171,7 @@ describe("pending migration partition", () => {
     [["rolling", "post"], ["0"], [], ["1"]],
     [["post", "rolling", "post"], ["0", "1"], [], ["2"]],
     [
-      ["historical", "rolling", "maintenance", "rolling", "post", "post"],
+      ["unclassified", "rolling", "maintenance", "rolling", "post", "post"],
       [],
       ["0", "1", "2", "3"],
       ["4", "5"],
@@ -183,7 +180,7 @@ describe("pending migration partition", () => {
     [["rolling", "unclassified", "post"], ["0"], ["1"], ["2"]],
     [["maintenance", "maintenance"], [], ["0", "1"], []],
     [["post", "maintenance"], ["0"], ["1"], []],
-    [["historical"], [], ["0"], []],
+    [["unclassified"], [], ["0"], []],
     [["rolling", "posture", "rolling", "post"], ["0"], ["1", "2"], ["3"]],
   ])("partitions %j", (modes, pre, maintenance, post) => {
     expect(partition(modes)).toEqual({ pre, maintenance, post });
@@ -208,11 +205,11 @@ describe("pending migration partition", () => {
       maintenance: [],
       post: ["0003.sql"],
     });
-    for (let encoded = 0; encoded < 3125; encoded++) {
+    for (let encoded = 0; encoded < 1024; encoded++) {
       let n = encoded;
       const modes = Array.from({ length: 5 }, () => {
-        const mode = ["rolling", "historical", "maintenance", "unclassified", "post"][n % 5]!;
-        n = Math.floor(n / 5);
+        const mode = ["rolling", "maintenance", "unclassified", "post"][n % 4]!;
+        n = Math.floor(n / 4);
         return mode;
       });
       const phases = partition(modes);
@@ -228,9 +225,7 @@ describe("pending migration partition", () => {
       );
       expect(phases.post.every((name) => modes[Number(name)] === "post")).toBe(true);
       if (phases.maintenance.length)
-        expect(["maintenance", "unclassified", "historical"]).toContain(
-          modes[Number(phases.maintenance[0])]!,
-        );
+        expect(["maintenance", "unclassified"]).toContain(modes[Number(phases.maintenance[0])]!);
       const beforePost = [...phases.pre, ...phases.maintenance].at(-1);
       if (beforePost !== undefined) expect(modes[Number(beforePost)]).not.toBe("post");
     }

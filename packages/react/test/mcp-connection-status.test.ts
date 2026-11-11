@@ -36,7 +36,8 @@ test("workspace connections and other endpoints are not personal reconnect candi
     connection("live-a"),
     connection("live-b"),
   ];
-  expect(
-    reconnectablePersonalMcpConnections(connections, GMAIL).map((entry) => entry.id),
-  ).toEqual(["live-a", "live-b"]);
+  expect(reconnectablePersonalMcpConnections(connections, GMAIL).map((entry) => entry.id)).toEqual([
+    "live-a",
+    "live-b",
+  ]);
 });

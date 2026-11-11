@@ -1,4 +1,6 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useRef, useState } from "react";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import type {
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
@@ -92,7 +94,7 @@ export type MachinesClientLike = {
   attachMachine?: (workspaceId: string, sessionId: string, sandboxId: string) => Promise<unknown>;
 };
 
-export type UseMachinesOptions = ClientOverride & {
+export type UseMachinesOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
   /** Scope the list to a session (adds the synthetic Modal group box + pointer). */
@@ -107,6 +109,11 @@ export type UseMachinesOptions = ClientOverride & {
 
 export type UseMachinesResult = {
   sessionMachineAccess?: MachinesResponse["sessionMachineAccess"];
+  /**
+   * False when the organization lets only its owners and admins connect new
+   * machines of their own here. True until the server says otherwise.
+   */
+  canConnectOwnMachine: boolean;
   machines: MachineView[];
   activeSandboxId: string | null;
   activeEpoch: number;
@@ -172,6 +179,9 @@ function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse):
       return t("hooks.useMachines.theMachineSOwnerHas");
     case "personal_machine_not_permitted":
       return t("hooks.useMachines.onlyTheMachineSOwner");
+    // Trying again won't help while the chat isn't allowed to use the machine.
+    case "machine_access_required":
+      return machineAccessNeededMessage();
     // Neither is fixed by trying again: say what to do instead.
     case "workspace_root_unavailable":
       return t("hooks.useMachines.thatMachineHasntReported");
@@ -362,6 +372,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
     sessionMachineAccess: data.sessionMachineAccess ?? null,
+    canConnectOwnMachine: data.canConnectOwnMachine !== false,
     activeEpoch: data.activeEpoch,
     loading,
     error,

@@ -3,6 +3,7 @@ import { act } from "react";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   type StreamConnectionState,
+  type WorkspaceDraftsChangedEvent,
   type WorkspaceLiveEvent,
 } from "@opengeni/sdk";
 import { useOpenGeni } from "../src/session-context";
@@ -14,6 +15,58 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 
 describe("OpenGeniProvider deployment contract", () => {
+  test("draft hints that arrive together are all delivered, and a later one stands alone", async () => {
+    let deliver: ((event: WorkspaceLiveEvent) => void) | undefined;
+    const seen: (ReturnType<typeof useOpenGeni>["workspaceDraftsEvent"] | undefined)[] = [];
+    function Observe() {
+      seen.push(useOpenGeni().workspaceDraftsEvent);
+      return null;
+    }
+    const drafts = (sessionIds: string[], newSession: boolean): WorkspaceDraftsChangedEvent => ({
+      type: "workspace.drafts.changed",
+      workspaceId: WORKSPACE_ID,
+      sessionIds,
+      newSession,
+    });
+    const client = fakeClient({
+      getWorkspace: async () => ({ inferenceControl: { revision: 0 } }) as never,
+      streamWorkspaceLiveEvents: (_workspaceId, options) =>
+        (async function* () {
+          // Read in one go, before React renders either of them.
+          yield drafts(["chat-a"], true);
+          yield drafts(["chat-b"], false);
+          while (!options?.signal?.aborted) {
+            const event = await new Promise<WorkspaceLiveEvent | null>((resolve) => {
+              deliver = resolve;
+              options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            });
+            if (event) yield event;
+          }
+        })(),
+    });
+    const rendered = await renderComponent(
+      <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+        <Observe />
+      </OpenGeniProvider>,
+    );
+    try {
+      await flush(20);
+      expect(seen.at(-1)).toEqual({
+        type: "workspace.drafts.changed",
+        workspaceId: WORKSPACE_ID,
+        sessionIds: ["chat-a", "chat-b"],
+        newSession: true,
+      });
+      await act(async () => {
+        deliver?.(drafts(["chat-c"], false));
+      });
+      await flush(20);
+      expect(seen.at(-1)).toEqual(drafts(["chat-c"], false));
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("commit hints expose capability only while the workspace stream is live", async () => {
     let deliver: ((event: WorkspaceLiveEvent) => void) | undefined;
     let state: ((state: StreamConnectionState) => void) | undefined;

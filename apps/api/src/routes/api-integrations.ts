@@ -14,14 +14,23 @@ import {
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
   ListApiIntegrationsResponse,
+  OrganizationApiIntegrationHere,
   PreviewApiIntegrationRequest,
+  SetOrganizationApiIntegrationHereRequest,
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  canRemoveIntegration,
+  hasIntegrationAdminPermission,
+  MissingPermissionRefusal,
   requireAccessGrant,
+  requireIntegrationSetupAuthorization,
+  requireMemberIntegrationSetupAllowed,
   integrationSourceForOrganizationPolicy,
+  listApiIntegrationsWithPersonalExtension,
+  setOrganizationApiIntegrationHere,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
@@ -33,11 +42,13 @@ import {
   getConnectionMetadata,
   getApiIntegrationReconciliationSnapshot,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
   apiIntegrationConnected,
-  listInstalledApiIntegrations,
+  listOrganizationApiIntegrationsTurnedOffHere,
+  ORGANIZATION_API_INTEGRATION_INSTANCE_KEY,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
 } from "@opengeni/db";
@@ -60,14 +71,24 @@ export function apiIntegrationRequiresConnection(authScheme: Record<string, unkn
   return typeof authKind === "string" && authKind !== "none";
 }
 
+/** The organization's setup runs under this instance name; no workspace installation takes it. */
+function refuseOrganizationInstance(instanceKey: string | undefined): void {
+  if (instanceKey?.trim().toLowerCase() === ORGANIZATION_API_INTEGRATION_INSTANCE_KEY)
+    throw new HTTPException(409, {
+      message:
+        "Your organization manages this integration in its settings. A workspace manager can turn it off here instead.",
+    });
+}
+
 /** Shared native/embedded install validation. The caller must still authorize
  * capabilities:manage and commit under its own live-authority boundary. */
 export function validatedIntegrationInstallInput(
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions" | "permissionMode">,
   workspaceId: string,
   payload: InstallApiIntegrationRequest,
   resolved: ResolvedApiIntegrationPreview,
 ): Parameters<typeof installApiIntegration>[1] {
+  refuseOrganizationInstance(payload.instanceKey);
   if (
     resolved.preview.revisionId !== payload.expectedRevisionId ||
     resolved.preview.contentSha256 !== payload.expectedContentSha256
@@ -92,6 +113,13 @@ export function validatedIntegrationInstallInput(
   if (payload.ownership === "personal" && !resolved.preview.connectionOwnership)
     throw new HTTPException(422, {
       message: "Choose a Personal Connection before installing for yourself.",
+    });
+  // Members install and update integrations; which tools run without asking
+  // is approval policy and stays with integration admins. Omitting the list
+  // keeps the current choice (never widening it), so members simply omit it.
+  if (payload.autoApprovedTools !== undefined && !hasIntegrationAdminPermission(grant))
+    throw new MissingPermissionRefusal("capabilities:manage", {
+      message: "Only an admin can choose which tools run without asking.",
     });
   if (payload.autoApprovedTools?.length) {
     const selected = new Set(payload.allowedTools ?? resolved.preview.tools.map((tool) => tool.id));
@@ -231,7 +259,25 @@ export function registerApiIntegrationRoutes(
   app.get("/v1/workspaces/:workspaceId/integrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const integrations = await listInstalledApiIntegrations(deps.db, workspaceId, grant.subjectId);
+    // A Personal workspace also lists the instances its owner's "Only me"
+    // connections carry in from the organization's other workspaces.
+    const served = await listApiIntegrationsWithPersonalExtension(deps.db, {
+      workspaceId,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+      deploymentMcpServerIds: deps.settings.mcpServers.map((server) => server.id),
+    });
+    // The organization's API integrations this workspace turned off are
+    // listed as off here, so a workspace manager can turn them back on. One
+    // the reader runs an own instance of is that instance instead.
+    const servedCapabilityIds = new Set(served.map((integration) => integration.capabilityId));
+    const turnedOff = (await listOrganizationApiIntegrationsTurnedOffHere(deps.db, workspaceId))
+      .filter((integration) => !servedCapabilityIds.has(integration.capabilityId))
+      .map((integration) => ({ ...integration, turnedOffHere: true }));
+    const integrations: ((typeof served)[number] & { turnedOffHere?: boolean })[] = [
+      ...served,
+      ...turnedOff,
+    ];
     return c.json(
       ListApiIntegrationsResponse.parse({
         integrations: integrations.map((integration) => {
@@ -272,6 +318,30 @@ export function registerApiIntegrationRoutes(
                 : integration.requireApproval.length,
             revisionId: integration.revision.id,
             contentSha256: integration.revision.contentSha256,
+            ...(integration.personalExtension
+              ? {
+                  personalExtension: {
+                    originWorkspaceId: integration.personalExtension.originWorkspaceId,
+                    originWorkspaceName: integration.personalExtension.originWorkspaceName,
+                  },
+                }
+              : {}),
+            ...(integration.organizationConnector
+              ? {
+                  organizationConnector: {
+                    connectorId: integration.organizationConnector.id,
+                    login: integration.organizationConnector.login,
+                    auth: integration.organizationConnector.auth,
+                    enabledHere: !integration.turnedOffHere,
+                  },
+                }
+              : {}),
+            // An instance carried in from another workspace is removed there,
+            // and one the organization serves here in the organization's settings.
+            canRemove:
+              !integration.personalExtension &&
+              !integration.organizationConnector &&
+              canRemoveIntegration(grant, integration.instanceCreatedBySubjectId),
           };
         }),
       }),
@@ -306,8 +376,13 @@ export function registerApiIntegrationRoutes(
 
   app.post("/v1/workspaces/:workspaceId/integrations/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const payload = await parseRequestJson(c, InstallApiIntegrationRequest);
+    if (!hasIntegrationAdminPermission(grant))
+      await requireMemberIntegrationSetupAllowed(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      });
     const resolved = await resolveForRoute({
       deps,
       transport,
@@ -316,13 +391,19 @@ export function registerApiIntegrationRoutes(
       subjectId: grant.subjectId,
       payload,
     });
-    const installation = validatedIntegrationInstallInput(grant, workspaceId, payload, resolved);
+    const installation = {
+      ...validatedIntegrationInstallInput(grant, workspaceId, payload, resolved),
+      // Members only add: an instance already set up stays with admins.
+      ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: true }),
+    };
     try {
       return c.json(
         InstalledApiIntegration.parse(await installApiIntegration(deps.db, installation)),
         payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       if (error instanceof ApiIntegrationConnectionReferenceError) {
         throw new HTTPException(error.reason === "not_found" ? 404 : 422, {
           message: error.reason === "not_found" ? "connection not found" : error.message,
@@ -342,11 +423,31 @@ export function registerApiIntegrationRoutes(
     }
   });
 
+  // An organization's API integration is managed in the organization's
+  // settings; a workspace manager only turns it off here, or back on.
+  app.put("/v1/workspaces/:workspaceId/integrations/:capabilityId/organization", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const payload = await parseRequestJson(c, SetOrganizationApiIntegrationHereRequest);
+    return c.json(
+      OrganizationApiIntegrationHere.parse(
+        await setOrganizationApiIntegrationHere({
+          db: deps.db,
+          accountId: grant.accountId,
+          workspaceId,
+          capabilityId: decodeURIComponent(c.req.param("capabilityId")),
+          enabledHere: payload.enabledHere,
+        }),
+      ),
+    );
+  });
+
   app.get(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+      refuseOrganizationInstance(decodeURIComponent(c.req.param("instanceKey")));
       return c.json(
         ApiIntegrationUninstallPreview.parse(
           await getApiIntegrationUninstallPreview(
@@ -365,9 +466,10 @@ export function registerApiIntegrationRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+      const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
       const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
       const instanceKey = decodeURIComponent(c.req.param("instanceKey"));
+      refuseOrganizationInstance(instanceKey);
       const payload = await parseRequestJson(c, UninstallApiIntegrationRequest);
       try {
         return c.json(
@@ -380,10 +482,14 @@ export function registerApiIntegrationRoutes(
               instanceKey,
               expectedInstallationVersion: payload.expectedInstallationVersion,
               expectedInstanceVersion: payload.expectedInstanceVersion,
+              // Members remove only accounts they added (decided in the transaction).
+              ...(hasIntegrationAdminPermission(grant) ? {} : { memberRemoval: true }),
             }),
           ),
         );
       } catch (error) {
+        if (error instanceof IntegrationChangeRequiresAdminError)
+          throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
         if (
           error instanceof ApiIntegrationInstallationVersionConflictError ||
           error instanceof IntegrationFacetBindingVersionConflictError

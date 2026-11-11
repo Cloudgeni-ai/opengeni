@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  sideFeatureRouteAllowed,
+  type SideFeatureResidencySettings,
+  type SideFeatureTarget,
+} from "./side-feature-residency";
 
 /**
  * Provider-agnostic web search: the deployment-funded `web_search` and
@@ -10,7 +15,9 @@ import { z } from "zod";
  * Search and page reading are separate slots; each slot holds an ordered
  * list of providers, and a call moves to the next provider when one fails.
  * By default the provider tools are offered only where the turn has no
- * hosted search (`OPENGENI_WEB_SEARCH_PREFER=native`).
+ * hosted search (`OPENGENI_WEB_SEARCH_PREFER=native`), except on turns whose
+ * model Opengeni pays for while credit billing is active: those always get
+ * the billed provider tools instead of hosted search.
  *
  * Adding a provider means one catalog entry here plus one adapter in
  * `@opengeni/runtime/web-search`.
@@ -41,7 +48,9 @@ export type WebSearchProviderToolName = typeof WEB_SEARCH_TOOL_NAME | typeof WEB
  * `native` (default): offer provider tools only to turns without hosted
  * search. `provider`: offer them to every turn and withhold the SDK-hosted
  * `web_search` tool. SuperGrok keeps its transport-level native search either
- * way because Opengeni does not attach it as an agent tool.
+ * way because Opengeni does not attach it as an agent tool. A credit-billed
+ * turn while billing is active behaves as `provider` either way, so its
+ * searches go through Opengeni's metered provider tools.
  */
 export const WebSearchPreference = z.enum(["native", "provider"]);
 export type WebSearchPreference = z.infer<typeof WebSearchPreference>;
@@ -259,6 +268,34 @@ const WebSearchPricingSchema = z
 
 const DEFAULT_MARGIN_BPS = 500;
 
+/**
+ * List price of one search run by a model provider's own hosted search tool,
+ * in USD micros: OpenAI `web_search` is $10 per 1,000 calls and Anthropic
+ * `web_search` $10 per 1,000 searches (checked 2026-10). The search content
+ * the model reads is billed as model tokens with the response.
+ */
+export const HOSTED_WEB_SEARCH_LIST_PRICE_MICROS = 10_000;
+
+/**
+ * Credit charge for the hosted searches one model response reported: the
+ * list price per search plus the web-search margin (default +5%).
+ */
+export function hostedWebSearchCharge(
+  settings: Pick<WebSearchSettings, "creditMarginBpsOverride">,
+  requests: number,
+): { providerMicros: number; creditMicros: number; marginBps: number } {
+  if (!Number.isSafeInteger(requests) || requests < 0) {
+    throw new Error("hosted web search request count must be a non-negative safe integer");
+  }
+  const marginBps = settings.creditMarginBpsOverride ?? DEFAULT_MARGIN_BPS;
+  const providerMicros = requests * HOSTED_WEB_SEARCH_LIST_PRICE_MICROS;
+  return {
+    providerMicros,
+    creditMicros: webSearchCreditMicros(providerMicros, marginBps),
+    marginBps,
+  };
+}
+
 /** Tavily's pay-as-you-go price of one credit, used for reported usage. */
 export const TAVILY_CREDIT_MICROS = 8_000;
 
@@ -300,7 +337,7 @@ export type WebSearchSettings = {
   billingMode?: string | undefined;
   usageLimitsMode?: string | undefined;
   creditMarginBpsOverride?: number | undefined;
-};
+} & SideFeatureResidencySettings;
 
 export type WebSearchProviderResolution =
   | { status: "off" }
@@ -503,12 +540,45 @@ export function resolveWebSearchProvider(settings: WebSearchSettings): WebSearch
   }
 }
 
-/** The configured provider, or null when off or invalid. */
+/**
+ * The configured provider, or null when off or invalid. Under EU-only
+ * inference only providers whose residency record is EU remain, in their
+ * configured order, so failover never leaves the EU; with no EU search
+ * provider the provider tools are off.
+ */
 export function webSearchProviderConfig(
   settings: WebSearchSettings,
 ): WebSearchProviderConfig | null {
   const resolution = resolveWebSearchProvider(settings);
-  return resolution.status === "configured" ? resolution.config : null;
+  if (resolution.status !== "configured") return null;
+  if (settings.requiredModelGeography !== "eu") return resolution.config;
+  const allowed = (operation: "search" | "fetch") => (endpoint: WebSearchProviderEndpoint) =>
+    sideFeatureRouteAllowed(settings, webSearchEndpointTarget(endpoint, operation));
+  const search = resolution.config.search.filter(allowed("search"));
+  if (search.length === 0) return null;
+  return { ...resolution.config, search, fetch: resolution.config.fetch.filter(allowed("fetch")) };
+}
+
+/**
+ * The route a search provider sends over, with the endpoint it calls: its
+ * configured base URL, else the provider's default host for the operation.
+ */
+export function webSearchEndpointTarget(
+  endpoint: WebSearchProviderEndpoint,
+  operation: "search" | "fetch",
+): SideFeatureTarget {
+  return {
+    route: `web_search.${endpoint.provider}`,
+    endpoint:
+      endpoint.baseUrl ??
+      WEB_SEARCH_PROVIDER_CATALOG[endpoint.provider][operation]?.defaultBaseUrl ??
+      null,
+  };
+}
+
+/** Hosted provider search runs on the provider's search backend: never EU. */
+export function hostedWebSearchAllowed(settings: SideFeatureResidencySettings): boolean {
+  return sideFeatureRouteAllowed(settings, "web_search.hosted");
 }
 
 /**
@@ -530,13 +600,28 @@ export function webSearchToolPlan(
      * calls if the switch flips mid-turn).
      */
     creditsDisabled?: boolean;
+    /**
+     * Paid hosted tools would run on Opengeni's bill this turn
+     * ({@link paidHostedToolsChargeCredits}). The provider tools then replace
+     * hosted search whenever the turn gets them, as with `provider`; searches
+     * go through Opengeni's per-call admission and metering. Without a
+     * provider tool hosted search stays, and model settlement charges the
+     * searches the provider reports.
+     */
+    hostedToolsBillCredits?: boolean;
   },
 ): { hostedWebSearch: boolean; providerTools: WebSearchProviderToolName[] } {
+  if (!hostedWebSearchAllowed(settings)) {
+    // EU-only: hosted search (including SuperGrok's transport search) is
+    // never offered; only EU provider tools may be.
+    turn = { ...turn, hostedWebSearch: false, transportHostedSearch: false };
+  }
   const config = webSearchProviderConfig(settings);
   if (!config || turn.transportHostedSearch) {
     return { hostedWebSearch: turn.hostedWebSearch, providerTools: [] };
   }
-  if (config.preference === "native" && turn.hostedWebSearch) {
+  const preferProvider = config.preference === "provider" || turn.hostedToolsBillCredits === true;
+  if (!preferProvider && turn.hostedWebSearch) {
     return { hostedWebSearch: true, providerTools: [] };
   }
   const offered: WebSearchProviderToolName[] =
@@ -545,8 +630,8 @@ export function webSearchToolPlan(
     ? offered.filter((tool) => !webSearchToolSpendsCredits(settings, config, tool))
     : offered;
   return {
-    // `provider` withholds hosted search only in favour of a provider tool the
-    // turn actually gets.
+    // Hosted search is withheld only in favour of a provider tool the turn
+    // actually gets.
     hostedWebSearch: turn.hostedWebSearch && !providerTools.includes(WEB_SEARCH_TOOL_NAME),
     providerTools,
   };

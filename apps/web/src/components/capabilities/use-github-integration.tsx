@@ -16,17 +16,36 @@ import type {
   IntegrationChip,
   IntegrationFooter,
   IntegrationOption,
+  IntegrationSection,
   IntegrationViewModel,
 } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import {
+  markPersonalGitHubRepositoryChooser,
+  personalGitHubSetupLink,
+  takePersonalGitHubRepositoryChooser,
+} from "@/lib/personal-github-oauth";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { PersonalGitHubDialog } from "@/components/capabilities/personal-github-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { openGitHubInstallationSettings } from "@opengeni/react/app/lib/github-app-connect";
+import { openBlankTab } from "@opengeni/react/app/lib/navigation";
+import { markGitHubAccessChanged } from "@opengeni/react/app/lib/github-access-return";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { GitHubAppInfo } from "@opengeni/react/app/types";
 
 export const GITHUB_APP_DESCRIPTION =
-  "Work on repositories, issues, and pull requests. Automation uses the workspace GitHub App; reviews and merges can use your own GitHub identity.";
+  "Work on repositories, issues, and pull requests through the Opengeni app.";
+/** With personal sign-in enabled, GitHub connects two ways. */
+export const GITHUB_DESCRIPTION = "Work on repositories, issues, and pull requests.";
+export const PERSONAL_GITHUB_SECTION = {
+  title: "Your GitHub",
+  description: "Work appears under your name. Only in chats you start, on repos you choose.",
+} as const;
+export const GITHUB_APP_SECTION = {
+  title: "Opengeni app",
+  description: "Work appears as the Opengeni bot, shared with the workspace.",
+} as const;
 // Use the same bundled mark as the conversation card. The workspace App row
 // does not have a registry logo path, and a remote favicon is not reliable.
 export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
@@ -65,7 +84,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const completeConnect = useCallback(() => {
     setConnectRequest(null);
-    void context.refreshGitHub(workspaceId);
+    // The connect flow just changed the binding: read GitHub's list fresh.
+    void context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
   }, [context, workspaceId]);
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
   const canManagePersonal = hasWorkspacePermission(
@@ -76,6 +96,14 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const status = context.githubStatus;
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  // The account name is kept from the click, so the title stays right even if
+  // the installation drops out of the status while the dialog is open.
+  const [unlinkTarget, setUnlinkTarget] = useState<{
+    installationId: number;
+    account: string;
+  } | null>(null);
+  const [openingInstallationId, setOpeningInstallationId] = useState<number | null>(null);
+  const openingInstallation = useRef<number | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
@@ -88,23 +116,76 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const busy = context.githubAppBusy || disconnecting;
 
   // A failed status fetch with no prior snapshot is unknown, not unbound: show a
-  // visible failure with a retry instead of pinning the tile at Loading.
+  // visible failure with a retry instead of pinning the tile at Loading. The
+  // same goes for a repository list that never loaded.
   const statusFailed = status === null && !context.repoBusy && context.githubStatusFailed;
+  const repositoriesFailed =
+    status !== null &&
+    !context.repoBusy &&
+    context.githubStatusFailed &&
+    !context.githubCatalogReady;
+  const loadFailed = statusFailed || repositoriesFailed;
   const catalogLoading = context.repoBusy || !context.githubCatalogReady;
   const personalConnection = context.personalGitHubStatus?.connection ?? null;
   const personalConnected = personalConnection?.status === "active";
+  // A disconnected (revoked) row offers Connect, not Reconnect.
   const personalNeedsAttention = Boolean(
-    personalConnection && personalConnection.status !== "active",
+    personalConnection &&
+    personalConnection.status !== "active" &&
+    personalConnection.status !== "revoked",
   );
   const bound = status?.status === "bound" && installations.length > 0;
+  // Stored installations stay unlinkable even when none is active (suspended,
+  // deleted or unverified leave the workspace "unbound" but still linked).
+  const linked = status !== null && installations.length > 0;
   const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
-    personalNeedsAttention || broken || statusFailed
+    personalNeedsAttention || broken || loadFailed
       ? ({ label: "Needs attention", tone: "warn" } as const)
       : personalConnected
         ? ({ label: "Connected", tone: "ok" } as const)
         : githubChip(status, canManage, statusFailed);
   const connectUrl = status?.installUrl ?? status?.linkUrl ?? null;
+  const personalCatalogReady = context.personalGitHubCatalogReady;
+  const personalStatusLoaded = context.personalGitHubStatus !== null;
+
+  // Back from connecting on GitHub: go straight to choosing repositories.
+  useEffect(() => {
+    if (
+      personalConnected &&
+      personalCatalogReady &&
+      takePersonalGitHubRepositoryChooser(workspaceId)
+    )
+      setPersonalOpen(true);
+  }, [personalConnected, personalCatalogReady, workspaceId]);
+
+  // `github=personal` (the agent's "connect my GitHub" link) lands on the
+  // personal action: the chooser when connected, else the Connect button.
+  const setupLinkHandled = useRef(false);
+  useEffect(() => {
+    if (setupLinkHandled.current || !personalStatusLoaded) return;
+    const link = personalGitHubSetupLink(window.location.search);
+    if (!link) return;
+    setupLinkHandled.current = true;
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${link.cleanedSearch}${window.location.hash}`,
+    );
+    // The chooser saves the allowlist, which needs connections:write.
+    if (personalConnected && canManagePersonal) {
+      setPersonalOpen(true);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>(
+        '[data-integration-section-action="github-personal"]',
+      );
+      target?.scrollIntoView?.({ block: "center" });
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [personalStatusLoaded, personalConnected, canManagePersonal]);
   const actionPolicyActorKey = [
     ...installations.map((installation) => `app:${installation.installationId}`),
     personalConnection ? `personal:${personalConnection.id}` : "",
@@ -201,12 +282,6 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       value: "Not set up on this server yet. Connecting creates it first.",
     });
   }
-  if (personalConnection) {
-    facts.push({
-      label: "Your GitHub identity",
-      value: `@${String(personalConnection.metadata.githubLogin ?? "connected")}`,
-    });
-  }
 
   function reconnect() {
     if (status?.configured && canManage) {
@@ -263,88 +338,184 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
               connectUrl === null && !(status.setupMode === "operator" && !status.configured),
             busy,
           };
-  const footer: IntegrationFooter =
-    context.personalGitHubStatus?.enabled && canManage
-      ? status === null
-        ? {
-            kind: "actions",
-            primary: {
-              label: "Loading workspace App…",
-              onClick: () => {},
-              disabled: true,
-            },
-          }
-        : bound
-          ? {
-              kind: "actions",
-              primary: {
-                label: broken ? "Repair workspace App" : "Connect another account",
-                onClick: reconnect,
-                disabled: connectUrl === null,
-              },
-              secondary: {
-                label: "Disconnect workspace App",
-                onClick: () => setDisconnectOpen(true),
-                destructive: true,
-              },
-              busy,
-            }
-          : {
-              kind: "actions",
-              primary: {
-                label: "Set up workspace App",
-                onClick: reconnect,
-                disabled:
-                  connectUrl === null && !(status.setupMode === "operator" && !status.configured),
-              },
-              busy,
-            }
-      : appFooter;
+  // With personal sign-in, GitHub connects two ways: each named section owns
+  // its one action, and the header keeps only Disconnect for the App.
+  const sectioned = context.personalGitHubStatus?.enabled === true;
+  const footer: IntegrationFooter = sectioned
+    ? linked && canManage
+      ? {
+          kind: "actions",
+          secondary: {
+            label: "Disconnect Opengeni app",
+            onClick: () => setDisconnectOpen(true),
+            destructive: true,
+          },
+          busy,
+        }
+      : { kind: "actions" }
+    : appFooter;
 
   const configurableInstallations = installations.filter(
     (installation) => installation.configureUrl,
   );
   const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
+  // Installation settings links carry ten-minute signed state, so the copy in
+  // the loaded status may be stale: open the tab inside the click, then mint a
+  // fresh link for it. One at a time, so a double-click opens one tab.
+  function openInstallationRepositories(installationId: number) {
+    if (openingInstallation.current !== null) return;
+    const tab = openBlankTab();
+    // Back from GitHub, the composer's repository menu refreshes and syncs.
+    markGitHubAccessChanged(workspaceId);
+    openingInstallation.current = installationId;
+    setOpeningInstallationId(installationId);
+    openGitHubInstallationSettings(context.client, workspaceId, installationId, (url) => {
+      if (tab) tab.location.replace(url);
+      else window.location.assign(url);
+    })
+      .catch((error: unknown) => {
+        tab?.close();
+        toast.error("Couldn't open GitHub", { description: userErrorText(error, "Try again.") });
+      })
+      .finally(() => {
+        openingInstallation.current = null;
+        setOpeningInstallationId(null);
+      });
+  }
 
   // With several installations, one shared "Change repositories" link would
   // silently open only the first installation's GitHub settings; emit one
-  // action per installation instead.
+  // action per installation instead, each with its own Unlink. (One
+  // active installation unlinks with "Disconnect Opengeni app"; installations
+  // that are no longer active are always listed so they stay unlinkable.)
   const installationOptions: IntegrationOption[] =
-    bound && canManage && configurableInstallations.length > 1
-      ? configurableInstallations.map((installation) => ({
-          kind: "link" as const,
-          id: `github-repositories-${installation.installationId}`,
-          label: installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
-          description: "Choose which repositories this installation shares.",
-          action: {
-            label: "Change repositories",
-            onClick: () => window.open(installation.configureUrl!, "_blank", "noopener,noreferrer"),
-          },
-        }))
+    linked && canManage && (installations.length > 1 || !bound)
+      ? installations.map((installation) => {
+          const account =
+            installation.accountLogin ?? `GitHub installation ${installation.installationId}`;
+          const unlink = {
+            label: "Unlink",
+            ariaLabel: `Unlink ${account}`,
+            onClick: () =>
+              setUnlinkTarget({ installationId: installation.installationId, account }),
+            destructive: true,
+          };
+          return {
+            kind: "link" as const,
+            id: `github-repositories-${installation.installationId}`,
+            label: account,
+            disabled: busy || openingInstallationId !== null,
+            ...(installation.lifecycle !== "active"
+              ? { description: "Not active. Unlink it to remove it from this workspace." }
+              : installation.configureUrl
+                ? { description: "Choose which repositories this installation shares." }
+                : {}),
+            ...(installation.configureUrl
+              ? {
+                  action: {
+                    label: "Change repositories",
+                    ariaLabel: `Change repositories for ${account}`,
+                    onClick: () => openInstallationRepositories(installation.installationId),
+                  },
+                  secondaryAction: unlink,
+                }
+              : {
+                  action: {
+                    label: unlink.label,
+                    ariaLabel: unlink.ariaLabel,
+                    onClick: unlink.onClick,
+                  },
+                }),
+          };
+        })
       : [];
-  const personalOption: IntegrationOption[] = context.personalGitHubStatus?.enabled
-    ? [
-        {
-          kind: "link" as const,
-          id: "github-personal-identity",
-          label: "Your GitHub identity",
-          description: personalConnected
-            ? `${context.personalGitHubSelection?.repositories.length ?? 0} allowed repositories. Reviews and merges appear as you.`
-            : personalNeedsAttention
-              ? "Reconnect to keep reviewing and merging as yourself."
-              : "Approve, review, and merge as yourself.",
-          action: {
-            label: personalConnected ? "Manage" : personalNeedsAttention ? "Reconnect" : "Connect",
-            onClick: () => {
-              if (personalConnected) setPersonalOpen(true);
-              else if (personalNeedsAttention) void context.reconnectPersonalGitHub(workspaceId);
-              else void context.connectPersonalGitHub(workspaceId);
+  const personalLogin = personalConnection
+    ? String(personalConnection.metadata.githubLogin ?? "connected")
+    : null;
+  // Unknown until the selection loads: a failed read is not "0 repos".
+  const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
+  const personalAllRepositories =
+    Boolean(context.personalGitHubSelection?.allRepositoriesAccess) &&
+    context.personalGitHubStatus?.allRepositoriesAvailable !== false;
+  const startPersonalConnect = (reconnecting: boolean) => {
+    // Return from GitHub straight into the repository chooser.
+    markPersonalGitHubRepositoryChooser(workspaceId);
+    if (reconnecting) void context.reconnectPersonalGitHub(workspaceId);
+    else void context.connectPersonalGitHub(workspaceId);
+  };
+  const personalSection: IntegrationSection = {
+    id: "github-personal",
+    ...PERSONAL_GITHUB_SECTION,
+    ...(personalConnected
+      ? {
+          status:
+            personalRepositoryCount === null
+              ? `Connected as @${personalLogin}`
+              : personalAllRepositories
+                ? `Connected as @${personalLogin} · All repos`
+                : `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
+        }
+      : personalNeedsAttention
+        ? { status: `@${personalLogin} needs to reconnect.` }
+        : {}),
+    ...(!canManagePersonal
+      ? { note: "Your access doesn't allow connecting accounts in this workspace." }
+      : {
+          action: personalConnected
+            ? {
+                label: "Choose repos",
+                onClick: () => setPersonalOpen(true),
+                primary: personalRepositoryCount === 0 && !personalAllRepositories,
+                disabled: context.personalGitHubBusy,
+              }
+            : {
+                label: personalNeedsAttention ? "Reconnect" : "Connect",
+                onClick: () => startPersonalConnect(personalNeedsAttention),
+                primary: true,
+                busy: context.personalGitHubBusy,
+                connectProviderId: "github-personal",
+              },
+        }),
+  };
+  const installedOn = installations.map(
+    (installation) => installation.accountLogin ?? `installation ${installation.installationId}`,
+  );
+  const operatorUnconfigured =
+    status !== null && status.setupMode === "operator" && !status.configured;
+  const appSection: IntegrationSection = {
+    id: "github-app",
+    ...GITHUB_APP_SECTION,
+    ...(status === null
+      ? { status: "Loading…" }
+      : bound
+        ? {
+            status: broken
+              ? `Installed on ${installedOn.join(", ")}. Needs attention.`
+              : `Installed on ${installedOn.join(", ")}`,
+          }
+        : {}),
+    ...(!canManage
+      ? {
+          note: bound
+            ? "A workspace admin manages the Opengeni app."
+            : "Ask a workspace admin to install the Opengeni app.",
+        }
+      : status === null
+        ? {}
+        : {
+            ...(operatorUnconfigured
+              ? { note: "Not set up on this server yet. Installing creates it first." }
+              : {}),
+            action: {
+              label: broken ? "Repair" : bound ? "Install on another account" : "Install app",
+              onClick: reconnect,
+              primary: broken,
+              busy,
+              disabled: connectUrl === null && !operatorUnconfigured,
+              ...(operatorUnconfigured ? {} : { connectProviderId: "github-app" }),
             },
-          },
-          disabled: context.personalGitHubBusy,
-        },
-      ]
-    : [];
+          }),
+  };
   const actionPolicyOptions: IntegrationOption[] = actionPolicyFailed
     ? [
         {
@@ -385,19 +556,20 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           }),
         )
       : [];
-  const options = [...personalOption, ...installationOptions, ...actionPolicyOptions];
+  const options = [...installationOptions, ...actionPolicyOptions];
 
   const model: IntegrationViewModel = {
     id: "github",
     name: "GitHub",
-    description: GITHUB_APP_DESCRIPTION,
+    description: sectioned ? GITHUB_DESCRIPTION : GITHUB_APP_DESCRIPTION,
     mark: { logoSrc: GITHUB_LOGO_URL, monogram: "G" },
     chip,
-    connection: facts,
-    ...(bound
+    connection: sectioned ? [] : facts,
+    ...(sectioned ? { sections: [personalSection, appSection] } : {}),
+    ...(bound && !repositoriesFailed
       ? {
           access: {
-            title: "Repositories",
+            title: sectioned ? "Opengeni app repositories" : "Repositories",
             items: repositories.map((repository) => ({
               name: repository.fullName,
               meta: repository.private ? "private" : "public",
@@ -405,10 +577,12 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             emptyMessage: catalogLoading
               ? "Loading repositories…"
               : githubEmptyRepositoriesMessage(installations),
-            ...(canManage && configureUrl && configurableInstallations.length === 1
+            // Several installations each get their own row instead.
+            ...(canManage && configureUrl && installations.length === 1
               ? {
                   editLabel: "Change repositories",
-                  onEdit: () => window.open(configureUrl, "_blank", "noopener,noreferrer"),
+                  onEdit: () =>
+                    openInstallationRepositories(configurableInstallations[0]!.installationId),
                 }
               : {}),
           },
@@ -416,15 +590,20 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       : {}),
     options,
     footer,
-    ...(statusFailed
+    ...(loadFailed
       ? {
           notice: {
             tone: "failed" as const,
-            title: "GitHub status could not be loaded.",
-            description: "The GitHub App binding is unknown until the status loads.",
+            title: statusFailed
+              ? "GitHub status could not be loaded."
+              : "Repositories could not be loaded.",
+            ...(statusFailed
+              ? { description: "The GitHub App binding is unknown until the status loads." }
+              : {}),
             action: {
               label: "Retry",
-              onClick: () => void context.refreshGitHub(workspaceId),
+              onClick: () =>
+                void context.refreshGitHub(workspaceId, undefined, { userInitiated: true }),
             },
           },
         }
@@ -452,15 +631,37 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       <ConfirmDialog
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}
-        title="Disconnect GitHub?"
+        title={sectioned ? "Disconnect the Opengeni app?" : "Disconnect GitHub?"}
         description={
           installations.length > 1
             ? `This unlinks all ${installations.length} GitHub installations from this workspace. Sessions lose access to their repositories, and the app stays installed on GitHub until you remove it there.`
             : "This unlinks the GitHub installation from this workspace. Sessions lose access to its repositories, and the app stays installed on GitHub until you remove it there."
         }
-        confirmLabel="Disconnect GitHub"
+        confirmLabel={sectioned ? "Disconnect" : "Disconnect GitHub"}
         cancelAutoFocus
         onConfirm={disconnectAll}
+      />
+      <ConfirmDialog
+        open={unlinkTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setUnlinkTarget(null);
+        }}
+        title={`Unlink ${unlinkTarget?.account ?? "this installation"}?`}
+        description="Sessions lose access to its repositories. The app stays installed on GitHub until you remove it there."
+        confirmLabel="Unlink"
+        cancelAutoFocus
+        onConfirm={async () => {
+          if (unlinkTarget === null) return true;
+          setDisconnecting(true);
+          try {
+            return await context.disconnectGitHubInstallation(
+              workspaceId,
+              unlinkTarget.installationId,
+            );
+          } finally {
+            setDisconnecting(false);
+          }
+        }}
       />
       {personalConnection ? (
         <PersonalGitHubDialog
@@ -468,8 +669,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           onOpenChange={setPersonalOpen}
           login={String(personalConnection.metadata.githubLogin ?? "connected")}
           repositories={context.personalGitHubRepositories}
+          savedRepositories={context.personalGitHubSelection?.repositories}
+          allRepositoriesAccess={context.personalGitHubSelection?.allRepositoriesAccess ?? null}
+          allRepositoriesAvailable={context.personalGitHubStatus?.allRepositoriesAvailable === true}
+          loading={!personalCatalogReady}
           busy={context.personalGitHubBusy}
-          onSave={(selections) => context.savePersonalGitHubRepositories(workspaceId, selections)}
+          onSave={(selections, allRepositoriesAccess) =>
+            context.savePersonalGitHubRepositories(workspaceId, selections, allRepositoriesAccess)
+          }
+          onSearch={(query) => context.searchPersonalGitHubRepositories(workspaceId, query)}
           onReconnect={() => void context.reconnectPersonalGitHub(workspaceId)}
           onDisconnect={() => setPersonalDisconnectOpen(true)}
         />
@@ -477,8 +685,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       <ConfirmDialog
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}
-        title="Disconnect your GitHub identity?"
-        description="Opengeni will stop acting as you. The workspace GitHub App is unaffected."
+        title="Disconnect your GitHub?"
+        description="Opengeni will stop acting as you. The Opengeni app is unaffected."
         confirmLabel="Disconnect"
         cancelAutoFocus
         onConfirm={async () => {

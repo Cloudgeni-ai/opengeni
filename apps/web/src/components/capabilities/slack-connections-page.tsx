@@ -25,6 +25,7 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { CapabilityPage, CapabilityMark } from "./capability-page";
 import { SlackChannelRoutingDialogBody } from "./slack-channel-routing-dialog";
 import { SlackBotAccessSection } from "./slack-bot-access-section";
+import { SlackAgentUpdatesSection } from "./slack-agent-updates-section";
 import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { IntegrationPage, OptionRow } from "./integration-page";
@@ -34,6 +35,12 @@ import {
 } from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { useSlackInstallationDiscovery } from "./use-slack-installation-discovery";
 import { useSlackIntegration, SLACK_LOGO_URL } from "./use-slack-integration";
+import { useNavigate } from "@opengeni/react/app/lib/navigation";
+import { useAgents } from "@opengeni/react/app/lib/agents";
+import { useDismissedNotice } from "@opengeni/react/app/components/agents/agent-notices";
+
+/** Slack agents became agents; this page says so once and points to them. */
+export const SLACK_AGENTS_MOVED_HERE = "Slack agents are now agents. Nothing changes in Slack.";
 
 /** One inventory in every workspace. Selecting a connection does not navigate
  * away or grant access to its storage workspace; every request keeps its real scope. */
@@ -41,6 +48,8 @@ export function SlackConnectionsPage(props: {
   workspaceId: string;
   items: CapabilityCatalogItem[];
   connections: ConnectionMetadata[] | null;
+  /** This workspace's connections couldn't load; `connections` may stay null. */
+  connectionsLoadFailed?: boolean | undefined;
   bindings: SlackInstallationBinding[];
   refresh: () => Promise<void>;
   onRuntimeChanged: () => void;
@@ -60,6 +69,11 @@ export function SlackConnectionsPage(props: {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [request, setRequest] = useState<NativeConnectRequest | null>(null);
   const [remove, setRemove] = useState<ConnectionMetadata | null>(null);
+  const navigate = useNavigate();
+  const agents = useAgents(props.workspaceId);
+  const agentsMoved = useDismissedNotice("slack.agentsMoved");
+  const showAgentsMoved =
+    !agentsMoved.dismissed && (agents.agents ?? []).some((agent) => agent.slack.length > 0);
   const transport = useMemo(() => client.connectTransport(), [client]);
   useEffect(() => {
     let live = true;
@@ -102,6 +116,15 @@ export function SlackConnectionsPage(props: {
   );
   const selectedPersonal = personal.find((row) => row.id === selectedId);
   const personalCapability = personalSlackCapability(props.items);
+  const connectionsLoadFailed = props.connectionsLoadFailed === true;
+  const connectionsError =
+    loadError ??
+    (discovery.failed || connectionsLoadFailed ? "Some connections could not be checked." : null);
+  function retryConnections() {
+    if (connectionsLoadFailed) void props.refresh();
+    discovery.retry();
+    setRevision((value) => value + 1);
+  }
   async function refresh() {
     await props.refresh();
     discovery.retry();
@@ -211,24 +234,17 @@ export function SlackConnectionsPage(props: {
               {installFailure.description}
             </Notice>
           ) : null}
-          {loadError || discovery.failed ? (
+          {connectionsError ? (
             <Notice
               tone="failed"
               title="Couldn't load all Slack connections"
               action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    discovery.retry();
-                    setRevision((value) => value + 1);
-                  }}
-                >
+                <Button variant="outline" size="sm" onClick={retryConnections}>
                   Retry
                 </Button>
               }
             >
-              {loadError ?? "Some connections could not be checked."}
+              {connectionsError}
             </Notice>
           ) : null}
           <DetailSection
@@ -245,7 +261,7 @@ export function SlackConnectionsPage(props: {
             <RowList
               label="Slack bot workspaces"
               flush
-              busy={props.connections === null || discovery.loading}
+              busy={(props.connections === null && !connectionsLoadFailed) || discovery.loading}
             >
               {bots.map((bot) => {
                 const metadata = openGeniSlackBotUiMetadata(bot)!;
@@ -292,6 +308,29 @@ export function SlackConnectionsPage(props: {
               <p className="text-sm text-fg-muted">No Slack workspaces connected.</p>
             ) : null}
           </DetailSection>
+          {showAgentsMoved ? (
+            <Notice
+              tone="info"
+              className="mb-6"
+              onDismiss={agentsMoved.dismiss}
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/agents",
+                      params: { workspaceId: props.workspaceId },
+                    })
+                  }
+                >
+                  Open Agents
+                </Button>
+              }
+            >
+              {SLACK_AGENTS_MOVED_HERE}
+            </Notice>
+          ) : null}
           <DetailSection
             title="Your accounts"
             description="Reads and sends messages as you."
@@ -447,6 +486,7 @@ function SlackBotDetails(props: {
     <>
       <IntegrationPage model={model} onBack={props.onBack} backLabel="Slack" compactSettings>
         <SlackBotAccessSection connection={props.connection} onSaved={props.refresh} />
+        <SlackAgentUpdatesSection connection={props.connection} />
       </IntegrationPage>
       {adapter.dialogs}
     </>

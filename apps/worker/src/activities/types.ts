@@ -3,7 +3,6 @@ import type {
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
-  KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
@@ -75,6 +74,19 @@ export type StartRecordingWorkflow = (input: {
   ownerSubjectId: string;
 }) => Promise<"started" | "already_running">;
 
+/**
+ * Start the clean-replay verification that rebuilds a sandbox environment
+ * version's provider image for the deployment's current base image. The
+ * start is deduplicated per version, expected content and UTC day, so every
+ * turn that meets the stale image may ask without starting more than one
+ * rebuild a day.
+ */
+export type StartRigProviderImageRefresh = (input: {
+  workspaceId: string;
+  versionId: string;
+  contentHash: string;
+}) => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -124,6 +136,7 @@ export type SharedActivityServices = {
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
   startRecordingWorkflow?: StartRecordingWorkflow | null;
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -171,8 +184,9 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   /** Host-owned containment: stop polling and checkpoint peer turns before exit.
-   * Bare activity embedders must provide their own worker lifecycle edge. */
-  requestWorkerDrain: () => void;
+   * Bare activity embedders must provide their own worker lifecycle edge. It may
+   * return a release that the caller invokes if its stalled cleanup recovers. */
+  requestWorkerDrain: () => void | (() => void);
   /** Deterministic test clock for the cleanup-only monitor. */
   turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
@@ -248,12 +262,6 @@ export type SettleSessionInterruptionsInput = {
   sessionId: string;
   attemptId: string;
   workflowId: string;
-  /**
-   * Replay-only compatibility for session workflow histories created before
-   * the receipt-gated cancellation v2 patch. New histories never send this
-   * phase; the exact activity writes the authoritative receipt itself.
-   */
-  phase?: "logical" | "attempt_quiesced";
 };
 
 export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
@@ -304,6 +312,8 @@ export type FailSessionAttemptInput = {
    * attempt instead of terminally failing it. */
   preClaimFailure?: PreClaimFailureDetail;
   admissionFence?: SessionAdmissionFence;
+  /** Wake revision observed with `admissionFence`; omitted by older histories. */
+  admissionWakeRevision?: number;
   /** Added in v4. A claimed attempt that lost operational database access
    * before turn-start completion carries its exact immutable turn identity so
    * the DB-only control lane can recover it instead of terminally failing it. */
@@ -550,13 +560,8 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_authority_unavailable"
         | "machine_target_unavailable"
         | "machine_enrollment_inactive"
-        | "variable_set_unavailable"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
-        | "knowledge_source_paused"
-        | "legacy_source_schedule_requires_migration"
-        | "atlassian_native_retired"
-        | "google_drive_native_retired"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -569,56 +574,7 @@ export type DispatchScheduledTaskRunResult =
       triggerEventId: string;
       workflowId: string;
       workflowWakeRevision: number | null;
-    }
-  | {
-      action: "knowledge_source_sync";
-      accountId: string;
-      workspaceId: string;
-      taskId: string;
-      scheduledTaskRunId: string;
-      sourceId: string;
-      overlapPolicy: "skip" | "buffer_one";
     };
-
-export type RunKnowledgeSourceSyncBatchInput = {
-  /** Host-bound attempt only. Legacy control workflow inputs have none and cannot fetch. */
-  agent?: Extract<import("@opengeni/db").KnowledgeActor, { kind: "agent" }>;
-
-  accountId: string;
-  workspaceId: string;
-  taskId: string;
-  scheduledTaskRunId: string;
-  sourceId: string;
-  overlapPolicy: "skip" | "buffer_one";
-};
-
-export type DispatchAutomationRunInput = {
-  accountId: string;
-  workspaceId: string;
-  runId: string;
-};
-
-export type DispatchAutomationRunResult =
-  | { action: "started"; sessionId: string }
-  | { action: "already_dispatched"; sessionId: string }
-  | { action: "skipped"; reason: string }
-  | { action: "failed"; reason: string }
-  | { action: "not_found" };
-
-export type RunKnowledgeSourceSyncBatchResult = (
-  | { action: "continue" }
-  | {
-      action: "complete";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-  | { action: "skipped" | "buffered" }
-  | {
-      action: "failed";
-      bufferedWake: boolean;
-      bufferedScheduledTaskRunId?: string | null;
-    }
-) & { summary?: KnowledgeSourceSyncRunSummary; errorCode?: string };
 
 type DocumentIndexIdentity = {
   accountId: string;

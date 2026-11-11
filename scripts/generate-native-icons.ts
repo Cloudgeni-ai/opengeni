@@ -38,6 +38,8 @@ const ICONS: Record<string, string> = {
   "file-diff": "FileDiffIcon",
   "file-search": "FileSearchIcon",
   "file-text": "FileTextIcon",
+  "layout-grid": "LayoutGridIcon",
+  "table-2": "Table2Icon",
   image: "ImageIcon",
   folder: "FolderIcon",
   "folder-git": "FolderGitIcon",
@@ -98,6 +100,7 @@ const ICONS: Record<string, string> = {
   "phone-off": "PhoneOffIcon",
   "mic-off": "MicOffIcon",
   "volume-2": "Volume2Icon",
+  "volume-x": "VolumeXIcon",
   "maximize-2": "Maximize2Icon",
   "rotate-ccw": "RotateCcwIcon",
   "shield-check": "ShieldCheckIcon",
@@ -128,6 +131,21 @@ const ICONS: Record<string, string> = {
   // Secret ask card: show / hide the value.
   eye: "EyeIcon",
   "eye-off": "EyeOffIcon",
+  // Chat and agent avatars (SESSION_AVATAR_ICONS) not already listed above.
+  bug: "BugIcon",
+  mail: "MailIcon",
+  "git-pull-request": "GitPullRequestIcon",
+  telescope: "TelescopeIcon",
+  "chart-line": "ChartLineIcon",
+  megaphone: "MegaphoneIcon",
+  rocket: "RocketIcon",
+  database: "DatabaseIcon",
+  briefcase: "BriefcaseIcon",
+  "book-open": "BookOpenIcon",
+  "flask-conical": "FlaskConicalIcon",
+  headset: "HeadsetIcon",
+  "pen-tool": "PenToolIcon",
+  users: "UsersIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};
@@ -137,6 +155,25 @@ for (const [name, exportName] of Object.entries(ICONS)) {
   if (!node) throw new Error(`lucide-react has no ${exportName}`);
   out[name] = node.map(([tag, attrs]) => {
     const { key: _key, ...rest } = attrs;
+    // The native Icon draws path, circle, rect, line and polyline; an ellipse
+    // becomes the same shape as a path of two arcs.
+    if (tag === "ellipse") {
+      const [cx, cy, rx, ry] = [rest.cx, rest.cy, rest.rx, rest.ry].map(Number) as [
+        number,
+        number,
+        number,
+        number,
+      ];
+      return [
+        "path",
+        {
+          d: `M ${cx - rx} ${cy}a${rx} ${ry} 0 1 0 ${2 * rx} 0a${rx} ${ry} 0 1 0 ${-2 * rx} 0`,
+        },
+      ];
+    }
+    if (!["path", "circle", "rect", "line", "polyline"].includes(tag)) {
+      throw new Error(`${exportName} uses <${tag}>, which the native Icon does not draw`);
+    }
     // A space between a moveto and its first coordinate draws the same path and
     // keeps generated path data clear of the public-repository label guard.
     if (typeof rest.d === "string") rest.d = rest.d.replace(/\b([Mm])(12)\b/g, "$1 $2");

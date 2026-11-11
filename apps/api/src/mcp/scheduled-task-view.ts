@@ -391,7 +391,6 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
           },
     targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
-    variableSetId: task.variableSetId,
     rigId: task.rigId,
     ...(task.events ? { events: scheduledTaskEventsMcp(task.events) } : {}),
     createdAt: createdAt.value,

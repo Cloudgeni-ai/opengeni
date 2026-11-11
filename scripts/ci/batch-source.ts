@@ -34,7 +34,5 @@ await run([
   "--exclude",
   "publish-closure",
   "--exclude",
-  "sdk-compat",
-  "--exclude",
   "example-builds",
 ]);

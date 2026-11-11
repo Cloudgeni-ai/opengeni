@@ -306,8 +306,10 @@ test("a saved Allow makes a connection's recommended-Ask tool callable from a Si
         ),
     });
     const catalog = await bridge.catalog({ signal: new AbortController().signal });
-    // The shared account keeps the recommended Ask, which a Site cannot approve.
+    // The shared account keeps the recommended Ask: it stays listed, and the
+    // Opengeni frame asks the viewer before it runs. The saved Allow runs at once.
     expect(catalog.entries.map((entry) => [entry.identity, entry.approval])).toEqual([
+      [f.identity(f.shared), "human"],
       [f.identity(f.personal), "policy"],
     ]);
     const result = await bridge.call(

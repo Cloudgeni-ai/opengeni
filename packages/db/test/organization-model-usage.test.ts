@@ -46,19 +46,6 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("0589 is additive and reuses the audited fact capability instead of widening a policy", async () => {
-  const candidate = await Bun.file(
-    new URL("../drizzle/0589_organization_model_usage.sql", import.meta.url),
-  ).text();
-  expect(candidate).toStartWith("-- deployment-mode: rolling");
-  expect(candidate.match(/CREATE FUNCTION/g)).toHaveLength(1);
-  expect(candidate).not.toContain("POLICY");
-  expect(candidate).not.toContain("ALTER TABLE");
-  expect(candidate).not.toContain("CREATE OR REPLACE");
-  expect(candidate).toContain("'model_call_facts',");
-  expect(candidate).toContain("list_organization_workspace_ids");
-});
-
 test("organization model usage splits billing paths and aggregates Personal workspaces without naming them", async () => {
   if (!shared || !client) throw new Error("PostgreSQL test database unavailable");
   const userId = `org-model-usage-${crypto.randomUUID()}`;

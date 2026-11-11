@@ -1,6 +1,7 @@
 import type { AccessGrant } from "@opengeni/contracts";
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
+  EDITABLE_ARTIFACT_READ_BATCH_LIMIT,
   EditableArtifactCompatibilityError,
   EditableArtifactDurableExportError,
   EditableArtifactDomainError,
@@ -35,6 +36,19 @@ import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import {
+  editableArtifactAudienceViewer,
+  EditableArtifactAudienceRefusedError,
+  postgresEditableArtifactAudiences,
+  projectEditableArtifactAudience,
+  type EditableArtifactAudiencePort,
+} from "../editable-artifact-audience";
+import {
+  EditableArtifactAudienceOwnerRequiredError,
+  EditableArtifactPersistenceError,
+  type PersistedEditableArtifactAudience,
+} from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
 
 export const EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES = 4 * 1024;
 export const EDITABLE_ARTIFACT_EXPORT_REQUEST_MAX_BYTES = 260 * 1024;
@@ -43,6 +57,8 @@ export const EDITABLE_ARTIFACT_LIVE_TICKET_REQUEST_MAX_BYTES =
 
 const portableId = /^[0-9a-f]+$/;
 const liveTicketToken = /^[A-Za-z0-9._~-]+$/;
+/** The audience change only reads the artifact; it never writes as a replica. */
+const AUDIENCE_READ_REPLICA_ID = "0000000000000001";
 
 const ArtifactId = z
   .string()
@@ -73,6 +89,8 @@ const VersionName = z
 const AttemptId = z.string().uuid();
 const SessionId = z.string().uuid();
 const AttemptGeneration = z.number().int().positive().max(2_147_483_647);
+/** Who can open it: only its owner ("private", Only me), or the workspace. */
+const Visibility = z.enum(["private", "workspace"]);
 const ListEditableArtifactsQuery = z
   .object({
     sourceSessionId: SessionId,
@@ -104,6 +122,7 @@ const CreateEditableArtifactRequest = z
       .regex(/^[A-Za-z0-9._:-]+$/u),
     modality: z.enum(["document", "spreadsheet", "presentation"]),
     title: z.string().refine(isValidArtifactTitle),
+    visibility: Visibility.optional(),
   })
   .strict();
 
@@ -121,8 +140,11 @@ const ImportEditableArtifactRequest = z
       .string()
       .uuid()
       .refine((value) => value === value.toLowerCase()),
+    visibility: Visibility.optional(),
   })
   .strict();
+
+const UpdateEditableArtifactVisibilityRequest = z.object({ visibility: Visibility }).strict();
 
 const PinEditableArtifactVersionRequest = z
   .object({
@@ -180,6 +202,9 @@ const EditableArtifactResult = z
     stateHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
+    visibility: Visibility,
+    /** The viewer owns it, so they can share it or limit it to themselves. */
+    ownedByViewer: z.boolean(),
   })
   .strict();
 
@@ -302,6 +327,8 @@ export type EditableArtifactRouteDependencies = AccessDeps &
       sourceSessionId: string,
       limit: number,
     ) => Promise<readonly string[]>;
+    /** Test/embedding seam for audiences; production reads and writes Postgres. */
+    editableArtifactAudiences?: EditableArtifactAudiencePort;
   }>;
 
 export type EditableArtifactApplicationErrorCode =
@@ -326,6 +353,26 @@ export function registerEditableArtifactRoutes(
 ): void {
   const collection = "/v1/workspaces/:workspaceId/editable-artifacts";
   const item = `${collection}/:artifactId`;
+  const audiences = deps.editableArtifactAudiences ?? postgresEditableArtifactAudiences(deps);
+  /** Each artifact with who can open it, as this caller sees it. */
+  const projectWithAudiences = async (
+    grant: AccessGrant,
+    scope: EditableArtifactRouteScope,
+    artifacts: readonly EditableArtifact[],
+  ): Promise<z.infer<typeof EditableArtifactResult>[]> => {
+    const stored = await audiences.read(
+      scope,
+      artifacts.map((artifact) => artifact.id),
+    );
+    const viewer = editableArtifactAudienceViewer(grant);
+    return artifacts.map((artifact) =>
+      projectArtifact(
+        artifact,
+        scope,
+        projectEditableArtifactAudience(stored.get(artifact.id), viewer),
+      ),
+    );
+  };
 
   app.get(collection, async (context) => {
     const workspaceId = context.req.param("workspaceId");
@@ -348,21 +395,49 @@ export function registerEditableArtifactRoutes(
       : listEditableArtifactIdsForSession(deps.db, scope, query.data.sourceSessionId, 64));
     const artifactIds = normalizeArtifactIdList(candidateIds);
     const application = requireEditableArtifactApplication(deps);
-    const artifacts: z.infer<typeof EditableArtifactResult>[] = [];
-    for (const artifactId of artifactIds) {
-      try {
-        const artifact = await application.readArtifact({
-          scope,
-          actor,
-          artifactId: editableArtifactId(artifactId),
-        });
-        artifacts.push(projectArtifact(artifact, scope));
-      } catch (error) {
-        if (isInvisibleListCandidate(error)) continue;
-        throw editableArtifactHttpError(error);
+    const readable: EditableArtifact[] = [];
+    for (
+      let offset = 0;
+      offset < artifactIds.length;
+      offset += EDITABLE_ARTIFACT_READ_BATCH_LIMIT
+    ) {
+      const batch = artifactIds.slice(offset, offset + EDITABLE_ARTIFACT_READ_BATCH_LIMIT);
+      let outcomes: readonly PromiseSettledResult<EditableArtifact>[] | null = null;
+      if (application.readArtifacts) {
+        try {
+          outcomes = await application.readArtifacts({
+            scope,
+            actor,
+            artifactIds: batch.map(editableArtifactId),
+          });
+          if (outcomes.length !== batch.length) {
+            throw new Error("Artifact application returned mismatched batch results");
+          }
+        } catch (error) {
+          throw editableArtifactHttpError(error);
+        }
+      }
+      for (const [index, artifactId] of batch.entries()) {
+        try {
+          const outcome = outcomes?.[index];
+          if (outcome?.status === "rejected") throw outcome.reason;
+          const artifact = outcome
+            ? outcome.value
+            : await application.readArtifact({
+                scope,
+                actor,
+                artifactId: editableArtifactId(artifactId),
+              });
+          readable.push(artifact);
+        } catch (error) {
+          if (isInvisibleListCandidate(error)) continue;
+          throw editableArtifactHttpError(error);
+        }
       }
     }
-    const result = EditableArtifactListResult.parse({ artifacts });
+    const result = EditableArtifactListResult.parse({
+      artifacts: await projectWithAudiences(grant, scope, readable),
+    });
     context.header("cache-control", "private, no-store");
     return context.json(result, 200);
   });
@@ -379,18 +454,24 @@ export function registerEditableArtifactRoutes(
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
     let artifact: EditableArtifact;
     try {
+      const audience = await audiences.resolveNew(grant, { requested: body.visibility })({
+        modality: body.modality as EditableArtifactModality,
+        sourcePrivate: false,
+      });
       artifact = await application.createArtifact({
         scope,
         actor,
         idempotencyKey: editableArtifactClientTransactionId(body.idempotencyKey),
         modality: body.modality as EditableArtifactModality,
         title: body.title,
+        audience,
         signal: context.req.raw.signal,
       });
     } catch (error) {
+      if (error instanceof HTTPException) throw error;
       throw editableArtifactHttpError(error);
     }
-    const result = projectArtifact(artifact, scope);
+    const [result] = await projectWithAudiences(grant, scope, [artifact]);
     context.header("cache-control", "private, no-store");
     return context.json(result, 201);
   });
@@ -412,6 +493,10 @@ export function registerEditableArtifactRoutes(
         modality: body.modality,
         signal: context.req.raw.signal,
       });
+      const audience = await audiences.resolveNew(grant, { requested: body.visibility })({
+        modality: body.modality,
+        sourcePrivate: prepared.sourcePrivate === true,
+      });
       const artifact = await requireEditableArtifactApplication(deps).importArtifact({
         scope,
         actor,
@@ -420,11 +505,14 @@ export function registerEditableArtifactRoutes(
         title: body.title,
         originalImport: prepared.originalImport,
         snapshot: prepared.snapshot,
+        audience,
         signal: context.req.raw.signal,
       });
       context.header("cache-control", "private, no-store");
-      return context.json(projectArtifact(artifact, scope), 201);
+      const [result] = await projectWithAudiences(grant, scope, [artifact]);
+      return context.json(result, 201);
     } catch (error) {
+      if (error instanceof HTTPException) throw error;
       if (error instanceof EditableArtifactOfficeImportError) {
         throw new ApiHttpError(error.code === "source_changed" ? 409 : 422, {
           code: error.code === "source_changed" ? "conflict" : "validation_failed",
@@ -458,7 +546,73 @@ export function registerEditableArtifactRoutes(
       throw editableArtifactHttpError(error);
     }
     context.header("cache-control", "private, no-store");
-    return context.json(projectArtifact(artifact, scope), 200);
+    const [result] = await projectWithAudiences(grant, scope, [artifact]);
+    return context.json(result, 200);
+  });
+
+  // Who can open it: the whole workspace, or only its owner. Only the owner
+  // changes it, from the app, like a chat's, a Site's or a file's audience.
+  app.put(`${item}/visibility`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
+    const body = UpdateEditableArtifactVisibilityRequest.safeParse(
+      await context.req.json().catch(() => null),
+    );
+    if (!body.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Choose who can open it: private or workspace.",
+      });
+    }
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    const application = requireEditableArtifactApplication(deps);
+    const read = async () => {
+      try {
+        return await application.readArtifact({
+          scope,
+          actor: editableArtifactActorForGrant(grant, AUDIENCE_READ_REPLICA_ID),
+          artifactId,
+        });
+      } catch (error) {
+        // Someone else's Only me artifact reads exactly like a missing one.
+        if (isInvisibleListCandidate(error)) throw applicationHttpError("not_found");
+        throw editableArtifactHttpError(error);
+      }
+    };
+    const artifact = await read();
+    let changed: PersistedEditableArtifactAudience;
+    try {
+      changed = await audiences.change(grant, {
+        artifactId,
+        modality: artifact.modality,
+        requested: body.data.visibility,
+      });
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      if (
+        error instanceof EditableArtifactAudienceOwnerRequiredError ||
+        error instanceof EditableArtifactAudienceRefusedError
+      ) {
+        throw new ApiHttpError(403, { code: "forbidden", message: error.message });
+      }
+      if (error instanceof EditableArtifactPersistenceError && error.code === "not_found") {
+        throw applicationHttpError("not_found");
+      }
+      if (error instanceof EditableArtifactPersistenceError && error.code === "conflict") {
+        throw applicationHttpError("conflict");
+      }
+      throw error;
+    }
+    context.header("cache-control", "private, no-store");
+    return context.json(
+      projectArtifact(
+        artifact,
+        scope,
+        projectEditableArtifactAudience(changed, editableArtifactAudienceViewer(grant)),
+      ),
+      200,
+    );
   });
 
   app.post(`${item}/live-ticket`, async (context) => {
@@ -740,6 +894,7 @@ function requireEditableArtifactOfficeImports(
 function projectArtifact(
   artifact: EditableArtifact,
   expectedScope: EditableArtifactRouteScope,
+  audience: Readonly<{ visibility: "private" | "workspace"; ownedByViewer: boolean }>,
 ): z.infer<typeof EditableArtifactResult> {
   if (
     artifact.scope.accountId !== expectedScope.accountId ||
@@ -756,6 +911,8 @@ function projectArtifact(
     stateHash: artifact.stateHash,
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
+    visibility: audience.visibility,
+    ownedByViewer: audience.ownedByViewer,
   });
   if (!parsed.success) throw new Error("Editable artifact application returned invalid metadata");
   return parsed.data;

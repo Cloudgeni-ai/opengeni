@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FileAsset, ResourceRef, SendMessageInput } from "@opengeni/sdk";
-import type { FileAttachmentClientLike } from "@opengeni/react/session";
+import type { FileAttachmentClientLike, StoredFileSource } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -43,6 +43,8 @@ export interface NativeFileAttachmentsResult {
   clearError(): void;
   /** Show already-uploaded files (a restored draft) as ready attachments. */
   restoreReady(files: Iterable<FileAsset>): void;
+  /** Where this chat's stored files are read from, so attached images show their picture. */
+  fileSource: StoredFileSource;
 }
 
 export interface NativeAttachmentScope {
@@ -199,6 +201,8 @@ export function useNativeFileAttachments(input: {
   client: FileAttachmentClientLike;
   workspaceId: string;
   sessionId: string;
+  /** `personal` keeps uploads Only me; omitted, the server (or a session proxy) decides. */
+  scope?: "workspace" | "personal" | undefined;
   files: NativeFileAdapter;
   crypto: NativeCryptoAdapter;
 }): NativeFileAttachmentsResult {
@@ -273,6 +277,7 @@ export function useNativeFileAttachments(input: {
           contentType: source.contentType,
           data,
           sha256,
+          ...(input.scope ? { scope: input.scope } : {}),
         });
         if (
           scopeGeneration.current !== generation ||
@@ -309,7 +314,7 @@ export function useNativeFileAttachments(input: {
         );
       }
     },
-    [input.client, input.crypto, input.files, input.workspaceId, t],
+    [input.client, input.crypto, input.files, input.scope, input.workspaceId, t],
   );
 
   const addFilesForGeneration = useCallback(
@@ -436,6 +441,10 @@ export function useNativeFileAttachments(input: {
       ),
     [visibleAttachments],
   );
+  const fileSource = useMemo<StoredFileSource>(
+    () => ({ client: input.client, workspaceId: input.workspaceId, sessionId: input.sessionId }),
+    [input.client, input.workspaceId, input.sessionId],
+  );
 
   return {
     attachments: visibleAttachments,
@@ -455,5 +464,6 @@ export function useNativeFileAttachments(input: {
     clear,
     clearError,
     restoreReady,
+    fileSource,
   };
 }

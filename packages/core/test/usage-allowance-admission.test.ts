@@ -34,7 +34,7 @@ describe("core usage allowance admission", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getSpendableCreditBalance">>;
   let codex: ReturnType<typeof spyOn<typeof opengeniDb, "isCodexBilledTurn">>;
-  let route: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
+  let route: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreFunding">>;
 
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
@@ -45,11 +45,8 @@ describe("core usage allowance admission", () => {
       updatedAt: "2026-09-30T00:00:00.000Z",
     });
     codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
-    // A provider still on its legacy route keeps its legacy funding (Claude);
-    // SuperGrok's tests answer from the core, its only route.
-    route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
-      route: "legacy",
-    });
+    // Connected subscriptions are unfunded unless a case says otherwise.
+    route = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(false);
   });
 
   afterEach(() => {
@@ -71,7 +68,14 @@ describe("core usage allowance admission", () => {
       };
       allowance.mockResolvedValue(refusal);
       expect(await checkLimit(deps, input)).toEqual({ allowed: false, ...refusal });
-      expect(balance).toHaveBeenCalledWith(deps.db, ACCOUNT, input.model);
+      expect(balance).toHaveBeenCalledWith(
+        deps.db,
+        ACCOUNT,
+        input.model,
+        undefined,
+        undefined,
+        "app",
+      );
       try {
         await requireLimit(deps, input);
         throw new Error("expected allowance refusal");
@@ -171,6 +175,8 @@ describe("core usage allowance admission", () => {
         originalHuman,
       );
       const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
+      // A retry is billed as the failed turn was.
+      const origin = spyOn(opengeniDb, "readTurnBillingOrigin").mockResolvedValue("app");
       allowance.mockResolvedValue({
         code: "allowance_exhausted",
         scope: originalHuman ? "member" : "workspace",
@@ -212,6 +218,7 @@ describe("core usage allowance admission", () => {
         turn.mockRestore();
         human.mockRestore();
         policy.mockRestore();
+        origin.mockRestore();
       }
     },
   );
@@ -236,7 +243,7 @@ describe("core usage allowance admission", () => {
     "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, codexBilled, overrides }) => {
       codex.mockResolvedValue(codexBilled);
-      if (model.startsWith("supergrok/")) route.mockResolvedValue({ route: "core", value: true });
+      if (model.startsWith("supergrok/")) route.mockResolvedValue(true);
       // The real check admits credit-free work unless the allowance opts into
       // counting unbilled usage.
       allowance.mockImplementation(async (_db, check) =>

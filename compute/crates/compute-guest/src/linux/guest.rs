@@ -11,12 +11,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::supervise::Children;
 use super::vsock::Stream;
-use super::{agent, log, sys, system};
+use super::{agent, disk, log, shrink, sys, system};
 use crate::ENVD_PORT;
 use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
 use crate::given::{self, GIVEN_FILE, Given};
-use crate::notice::{self, Notice, Orders};
+use crate::notice::{self, Notice, Orders, Shrink};
 
 /// Longest a notice or an `init` waits for envd to be up.
 const ENVD_WAIT: Duration = Duration::from_secs(10);
@@ -78,6 +78,9 @@ struct Agent {
     wanted: Option<(AgentInit, CommandEnv)>,
     /// The running agent's pid and what it started with.
     running: Option<(i32, AgentInit)>,
+    /// The pid of an agent the guest asked to stop, to start again with
+    /// other settings: its end is no fault of its program.
+    stopping: Option<i32>,
     /// The epoch its connections to its link port open in; see
     /// [`Guest::agent_link_gone`].
     link_epoch: crate::agent::LinkEpoch,
@@ -194,7 +197,7 @@ impl Guest {
         let Some(wanted) = &given.agent else {
             return;
         };
-        if !Path::new(crate::agent::AGENT_PATH).exists() {
+        if !super::program::Program::agent().available() {
             log("the init names an agent, but the image has none");
             return;
         }
@@ -206,6 +209,9 @@ impl Guest {
             .filter(|(_, running)| running != wanted)
             .map(|(pid, _)| *pid);
         agent.wanted = Some((wanted.clone(), env));
+        if stale.is_some() {
+            agent.stopping = stale;
+        }
         drop(agent);
         self.agent_changed.notify_all();
         if let Some(pid) = stale
@@ -238,8 +244,8 @@ impl Guest {
         self.agent().running = Some((pid, init));
     }
 
-    /// The agent `pid` ended.
-    pub fn agent_stopped(&self, pid: i32) {
+    /// The agent `pid` ended. Whether the guest had asked it to stop.
+    pub fn agent_stopped(&self, pid: i32) -> bool {
         let mut agent = self.agent();
         if agent
             .running
@@ -248,6 +254,11 @@ impl Guest {
         {
             agent.running = None;
         }
+        let asked = agent.stopping == Some(pid);
+        if asked {
+            agent.stopping = None;
+        }
+        asked
     }
 
     /// The agent's link epoch, which a connection to its link port opens
@@ -342,7 +353,7 @@ impl Guest {
     /// at a time, on the listener's thread, and so is the host's
     /// `activity` question. Its `sync` request gets a thread of its own:
     /// a flush and trim can take a while, and must not hold up the notices
-    /// after them, such as a restore's clock.
+    /// after them, such as a restore's clock; so does its `shrink`.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
@@ -361,6 +372,17 @@ impl Guest {
                 sys::sync();
                 trim_root();
                 let _ = stream.write_all(notice::SYNCED);
+            });
+            return;
+        }
+        if let Some(Shrink { free, keep }) = Shrink::parse(&line) {
+            // What PID 1 supervises keeps the sandbox reachable, and a
+            // runner able to report its job: never ended.
+            let protected = self.children.pids();
+            super::spawn("shrink", move || {
+                let shrunk = shrink::shrink(free, keep, &protected);
+                let answer = notice::shrunk_answer(shrunk.freed, shrunk.spent, &shrunk.ended);
+                let _ = stream.write_all(answer.as_bytes());
             });
             return;
         }
@@ -395,6 +417,12 @@ impl Guest {
             return;
         }
         let seeded = notice.seed().is_some_and(|seed| system::reseed(&seed));
+        // A claim or a create from a template may have lengthened the disk
+        // past what this memory knew: the sandbox gets the room it asked
+        // for before anything uses it.
+        if let Some(length) = notice.disk {
+            disk::grow_to(length, disk::LENGTH_WAIT);
+        }
         // envd learns of the restore before the host may use the sandbox;
         // with no answer, the host tries again.
         if !self.wait_envd(ENVD_WAIT) {

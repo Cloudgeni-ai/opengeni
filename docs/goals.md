@@ -32,6 +32,26 @@ updates coalesced into that turn are attached as ordinary message context. It ne
 agent-instruction prefix or exists only in activity memory, so later requests
 extend the same prompt-cache prefix and recovery replays identical authority.
 
+## Unattended single requests
+
+A top-level API create with `unattended: true` and an `initialMessage` that
+names no `goal` gets one from the create itself: "Complete the request in this
+session's first message.", with success criteria that everything that message
+asks for is done and checked where practical, leaving only steps that need a
+person, and that the goal already stands for the whole request, so it needs no
+`goal_update` to restate it. The goal names the request instead of copying it, because the goal
+snapshot travels with the first message and every continuation. It is an
+ordinary `api`-created goal: a `goal.set` event, the first turn's
+`goal_snapshot`, continuation when the agent stops without completing or
+pausing (within the deployment's continuation and budget limits), and
+`goal_update` for refinement. Compaction keeps that first message: goal
+continuations never crowd it out of the retained messages. Because the text is fixed, a keyed
+create retry resolves the same goal. Interactive sessions, child sessions,
+Slack chats, scheduled and event-started runs, sessions without the `goals`
+capability and creates passing `goal: null` get none. When the resulting
+first-party grant cannot carry a goal (no `goals:manage` or no goal tools), the
+session is created without it instead of failing.
+
 ## Report delivery
 
 Agents answer in chat by default, including summaries, reports, briefs, letters
@@ -174,24 +194,43 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal for the goal, not the current turn.
-  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
-  has an explicit 8192-character limit and is a short ledger proof, not the
-  deliverable. The agent must still send the requested final answer (or summary
-  and retained artifact link) in the same turn. The tool receipt reminds it to
-  do so. Late child results remain context to integrate and deliver, not a
-  command to stay silent or restart completed work.
+- `goal_complete { evidence, reply? }` is terminal for the goal. Only a new
+  `goal_set` can replace a completed goal. Its agent-facing evidence has an
+  explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The optional `reply` is the requested final answer (or summary
+  and retained artifact link). Once the completion succeeds, the runtime ends
+  the turn at that tool batch with the reply as the turn's final output, the
+  same tool-boundary mechanic `wait_for_input` uses: one `agent.message.completed`
+  (`final_answer` phase, message id `goal_complete:reply:<attemptId>`) and
+  `turn.completed.output` equal to the reply, which is also what a parent
+  receives as the child's `payload.finalAnswer`. The ledger never stores the
+  reply. A failed completion (for example a missing report delivery) never ends
+  the turn. A `reply` passed in the same model response as other client tool
+  calls is refused before anything is completed, at most twice per attempt, so
+  the model sees those results first. Without `reply`, the turn continues and
+  the agent must still send the final answer in the same turn; the tool receipt
+  reminds it to. Completion is never inferred from final text. Late child
+  results remain context to integrate and deliver, not a command to stay silent
+  or restart completed work.
   If one same-turn reply reminder still produces an empty final, the turn
   completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
   The goal is untouched: active goals can continue, and later child results
   remain deliverable. The marker records missing answer delivery, not success
   of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
-  replaced.
+  replaced. A missing permission or required human decision justifies an
+  immediate pause. A task that seems infeasible, missing data or a result the
+  agent cannot verify is not by itself a reason to pause: the agent tries the
+  plausible in-scope alternatives and, if it still pauses, names the ones it
+  tried in the rationale.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  A session with an agent configuration receives it once it has a goal, in
+  any state, as frozen with the turn: before that the tool could only fail, so
+  neither it nor its prompt sentence is sent. Pausing or resuming a goal never
+  changes the tool list, so the cached prompt stays the same across both.
   The agent is told to resume only when the user asks it to continue or the
   blocker it paused for has cleared. A user's question alone is not a reason:
   the agent answers it and leaves the goal paused. An active goal still
@@ -554,7 +593,7 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset - no cap)_ | Optional hard ceiling on consecutive no-input continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower; reaching it pauses the goal until new external input resumes it. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
-| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
+| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `true` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity` for a long capacity wait, `child_progress`) for parent sessions. Set it to false only while a fleet still runs an image from before August 2026, which does not understand the kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
 
 
 ### Interpreting wake delivery

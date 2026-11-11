@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import {
   CreateSessionRequest,
   ScheduledTaskAgentConfig,
-  AutomationSessionTemplate,
   BundledSkillSelection,
   bundledSkillSelectionForAgentConfig,
   resolveBundledSkillSelection,
@@ -29,9 +28,6 @@ for (const help of [
     expect(
       ScheduledTaskAgentConfig.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
     ).toEqual([help]);
-    expect(
-      AutomationSessionTemplate.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
-    ).toEqual([help]);
     expect(resolveBundledSkillSelection(undefined, [])).toEqual([]);
     expect(() => resolveBundledSkillSelection([help], [])).toThrow("cannot widen");
   });
@@ -43,10 +39,6 @@ test("Projects uses the ordinary bundle selection and inheritance contract", () 
   ).toEqual([projects]);
   expect(
     ScheduledTaskAgentConfig.parse({ prompt: "Organize", bundledSkillIds: [projects] })
-      .bundledSkillIds,
-  ).toEqual([projects]);
-  expect(
-    AutomationSessionTemplate.parse({ prompt: "Organize", bundledSkillIds: [projects] })
       .bundledSkillIds,
   ).toEqual([projects]);
   expect(resolveBundledSkillSelection(undefined, [projects])).toEqual([projects]);
@@ -62,10 +54,6 @@ test("bundle selection preserves omitted versus empty across public creation con
   expect(
     ScheduledTaskAgentConfig.parse({ prompt: "Run", bundledSkillIds: [] }).bundledSkillIds,
   ).toEqual([]);
-  expect(
-    AutomationSessionTemplate.parse({ prompt: "Run", bundledSkillIds: [documents] })
-      .bundledSkillIds,
-  ).toEqual([documents]);
   expect(BundledSkillSelection.safeParse(["builtin:unknown"]).success).toBe(false);
   expect(BundledSkillSelection.safeParse([documents, documents]).success).toBe(false);
 });

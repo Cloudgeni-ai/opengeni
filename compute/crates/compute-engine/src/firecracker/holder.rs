@@ -60,6 +60,9 @@ fn program_path(program: &str, path: &str) -> io::Result<PathBuf> {
 async fn start(cgroup: &Cgroup, path: &str, file: OwnedFd) -> io::Result<u32> {
     /// How long a holder may take to join its group and start.
     const LIMIT: Duration = Duration::from_secs(5);
+    // The shell finds the program on the same path; looked for here, a
+    // path without it says so rather than the shell exiting with 127.
+    program_path(PROGRAM, path)?;
     // Named by its full path, so the agent spawns it without a fork that
     // would copy its page tables and take every allocator lock.
     let mut child = Command::new(program_path("sh", path)?)
@@ -177,6 +180,17 @@ mod tests {
         assert!(sh.is_absolute() && sh.ends_with("sh"), "{}", sh.display());
         let missing = program_path("no-such-program", "/usr/bin:/bin").unwrap_err();
         assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// The path the engine starts holders with finds both programs a
+    /// holder runs, on whichever Linux runs the tests: on NixOS `/bin` has
+    /// only `sh`, and a holder that finds no `sleep` holds nothing.
+    #[test]
+    fn a_holders_programs_are_on_the_engines_path() {
+        for program in ["sh", super::PROGRAM] {
+            program_path(program, super::super::SYSTEM_PATH)
+                .unwrap_or_else(|error| panic!("{program}: {error}"));
+        }
     }
 
     /// Holds the write end of a pipe: the read end sees its end only once

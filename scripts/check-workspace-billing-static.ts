@@ -127,14 +127,32 @@ function normalizeFileList(stdout: string): string[] {
 // Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
 const organizationMcpSurfaceFiles = new Set([
   "apps/api/src/mcp-oauth.ts",
+  // EU-only: the calling-workspace check covers the organization MCP endpoint too.
+  "apps/api/src/mcp/workspace-content-flow.ts",
   "apps/api/src/organization-mcp.ts",
+  // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
+  "apps/api/test/disconnect-audit-postgres.test.ts",
+  // Organization admins list and disconnect agents connected to the organization MCP endpoint.
+  "apps/api/test/organization-admin-connected-agents.test.ts",
+  // Organization admins disconnect a member's agent connected to the endpoint.
+  "apps/api/test/organization-admin-integration-administration.test.ts",
+  // Auto-connect: Claude or an identity provider connects members to the endpoint.
+  "apps/api/test/mcp-auto-connect.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
+  "apps/api/test/workspace-content-flow-e2e.test.ts",
+  "apps/api/test/workspace-content-flow-mcp.test.ts",
   "apps/web/src/App.tsx",
+  "apps/web/src/components/organization-access/auto-connect.test.tsx",
+  "apps/web/src/components/organization-access/connected-agents.test.tsx",
   "apps/web/src/components/organization-access/organization-connected-agents.tsx",
   "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
+  // The auto-connect resource and audience name the organization MCP endpoint.
+  "packages/contracts/src/mcp-auto-connect.ts",
   "packages/sdk/src/client.ts",
   "packages/sdk/src/site-browser-runtime.gen.ts",
+  // Opengeni's organization MCP endpoint added as a remote MCP server.
+  "packages/runtime/test/calling-workspace-prepare.test.ts",
   "scripts/public-api/surface.gen.json",
 ]);
 
@@ -209,6 +227,12 @@ export async function checkForbiddenProviderImports(
         "apps/api/src/routes/billing.ts",
         "apps/api/src/billing-stripe-customer.ts",
         "apps/api/src/billing-subscriptions.ts",
+        "apps/api/src/billing-auto-top-up.ts",
+        "apps/api/src/routes/billing-auto-top-up.ts",
+        "apps/api/test/billing-auto-top-up.test.ts",
+        "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+        "apps/api/test/billing-auto-top-up-integration-postgres.test.ts",
+        "apps/api/test/billing-auto-top-up.stripe-proof.ts",
         "apps/api/test/billing-subscriptions.test.ts",
         "apps/api/test/billing-subscriptions-review-postgres.test.ts",
         "apps/api/test/scoped-credit-checkout.test.ts",
@@ -253,6 +277,9 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Published-SDK route inventory: records the routes a published SDK calls,
+  // never serves them.
+  "scripts/public-api/published-sdk.gen.json",
   // Generated organization MCP action metadata likewise records, never serves,
   // the billing route; calls dispatch through the canonical route's own guards.
   "packages/contracts/src/app-action-catalog.gen.ts",
@@ -334,6 +361,11 @@ export function checkMcpDefaults(file: string, text: string, out: Finding[]): vo
 }
 
 function isSourceLike(file: string): boolean {
+  // Historical release notes describe removed routes; they are not live defaults
+  // or current usage guidance. Keep other Markdown, source and config checked.
+  if (/(^|\/)CHANGELOG\.md$/.test(file.replace(/\\/g, "/"))) {
+    return false;
+  }
   return /\.(ts|tsx|js|jsx|yaml|yml|json|md|example)$/.test(file);
 }
 

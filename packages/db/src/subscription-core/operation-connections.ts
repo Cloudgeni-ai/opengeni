@@ -46,7 +46,6 @@ import {
 } from "./provider";
 import {
   decodeSubscriptionQuota,
-  readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   type SubscriptionOperationKind,
 } from "../subscription-core-repository";
@@ -152,21 +151,13 @@ export const subscriptionCoreOperationConnections = memoByProvider(
      * operation in this workspace, in placement order: the session's explicit
      * choice (session scope only), then the effective primary, then pool
      * order. Only active, allocatable connections that reach the workspace
-     * qualify, exactly as for its chat turns. Empty when the cutover is not
-     * enabled.
+     * qualify, exactly as for its chat turns.
      */
     async function listSubscriptionCoreOperationCandidates(
       db: Database,
       scope: Exclude<SubscriptionCoreOperationScope, { kind: "turn" }>,
     ): Promise<SubscriptionCoreOperationCandidate[]> {
       const access = await operations().withOperationScope(db, scope, async (tx) => {
-        if (
-          (await readSubscriptionProviderCutoverState(tx, {
-            accountId: scope.accountId,
-            provider: providerId,
-          })) !== "enabled"
-        )
-          return [];
         const pool = await readSubscriptionCoreWorkspacePool(tx, provider, scope);
         if (pool.source.effectiveSource === "disabled") return [];
         const eligible = pool.connections.filter(
@@ -208,8 +199,8 @@ export const subscriptionCoreOperationConnections = memoByProvider(
     /**
      * The workspace's shared pool of this provider as a status probe sees it
      * (no credential material): its connections in the effective pool and
-     * the effective primary, if it is one of them. Empty without an enabled
-     * cutover. Personal connections are never listed.
+     * the effective primary, if it is one of them. Personal connections are
+     * never listed.
      */
     async function readSubscriptionCoreWorkspaceConnections(
       db: Database,
@@ -225,13 +216,6 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       primaryConnectionId: string | null;
     }> {
       const access = await operations().withOperationScope(db, scope, async (tx) => {
-        if (
-          (await readSubscriptionProviderCutoverState(tx, {
-            accountId: scope.accountId,
-            provider: providerId,
-          })) !== "enabled"
-        )
-          return { connections: [], primaryConnectionId: null };
         const pool = await readSubscriptionCoreWorkspacePool(tx, provider, scope);
         const connections = pool.connections.map((entry) => ({
           connectionId: entry.row.id,

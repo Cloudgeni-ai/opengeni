@@ -14,12 +14,15 @@
  * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { regionRestrictedText } from "../inference-region";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
+  CreditCardIcon,
   GlobeIcon,
+  LayersIcon,
   LoaderCircleIcon,
   LockIcon,
   PencilIcon,
@@ -27,11 +30,13 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 import type {
   Recording,
   RecordingNote,
   RecordingPerson,
   RecordingTranscriptVersion,
+  RecordingTranscriptionModel,
   RecordingVisibility,
 } from "@opengeni/contracts";
 import {
@@ -41,12 +46,16 @@ import {
   languageName,
   meetingHereStatus,
   meetingPhase,
+  meetingUploadFailure,
   ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
   meetingTitle,
+  transcribingText,
   transcriptErrorText,
+  transcriptFixModel,
+  transcriptNeedsCredits,
   useRecording,
   useRecordingModels,
   useRecordingNotes,
@@ -57,6 +66,7 @@ import {
   type MeetingHereStatus,
   type RecordingsClientOverride,
 } from "../recordings";
+import { isKeepingRecordingAudio } from "../hooks/use-recordings";
 
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
@@ -87,6 +97,11 @@ import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
 import { cn } from "../app/lib/utils";
+import {
+  WorkspaceReachFields,
+  type ReachWorkspace,
+  type WorkspaceReach,
+} from "../app/components/workspace-reach";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -103,42 +118,48 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import {
-  liveSpeakerName,
-  RecordingBar,
-  recorderLiveLines,
-  uploadLine,
-  useOnline,
-} from "./recorder-panel";
+import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
-import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
+import { MeetingAsk, type MeetingAskRequest, type MeetingAskResult } from "./meeting-ask";
 import { meetingMentionResolver } from "./meeting-mentions";
+import { useAnnounceMeetingOnScreen } from "./meeting-on-screen";
+import { useUiEventTarget } from "../app/lib/ui-events";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
+import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 
 const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
-  return error instanceof Error ? error.message : undefined;
+  return error instanceof Error ? userErrorText(error) : undefined;
 }
 
 function isNotFound(error: Error | null): boolean {
   return Boolean(error && /not found|404/iu.test(error.message));
 }
 
-/** Fresh playback links for every prepared track. Links expire, so a failed one refetches. */
+/**
+ * Fresh playback links for every prepared track. Links expire, so a failed one refetches.
+ * While the meeting is processed, the player waits until every recorded track can
+ * play: the first track alone sounds as if the rest (the call's side) was never recorded.
+ */
 function useTrackSources(
   recording: Recording | null,
   getAudio: (trackNumber: number) => Promise<{ url: string }>,
 ): { sources: MeetingPlayerSource[]; reload: () => void } {
   const [sources, setSources] = useState<MeetingPlayerSource[]>([]);
   const [generation, setGeneration] = useState(0);
-  const playable = useMemo(
-    () =>
-      (recording?.tracks ?? []).filter((track) => track.playable).map((track) => track.trackNumber),
-    [recording?.tracks],
-  );
+  const state = recording?.state;
+  const playable = useMemo(() => {
+    const tracks = recording?.tracks ?? [];
+    const partial =
+      (state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable)) ||
+      isKeepingRecordingAudio(recording);
+    return partial
+      ? []
+      : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
+  }, [recording, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;
@@ -225,6 +246,159 @@ function RenameDialog({
   );
 }
 
+/**
+ * Where the owner's own Only me meeting works: the workspace that stores it
+ * and their Personal workspace always, plus the ones they pick, or all of
+ * their workspaces in the organization. Only they, and agent turns they
+ * start, see it in any of them.
+ */
+function MeetingReachDialog({
+  open,
+  recording,
+  hereId,
+  workspaces,
+  organizationName,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  recording: Recording;
+  /** The workspace the page was opened from. */
+  hereId: string;
+  workspaces: readonly ReachWorkspace[];
+  organizationName: string;
+  onClose: () => void;
+  /** Saves the other workspaces it works in (null for all), and says whether it still works here. */
+  onSave: (reachWorkspaceIds: string[] | null, leavesHere: boolean) => Promise<void>;
+}) {
+  const msg = useOpenGeniText();
+  const saved = recording.reachWorkspaceIds ?? null;
+  const savedKey = saved === null ? null : saved.join(",");
+  const [value, setValue] = useState<WorkspaceReach>({
+    workspaceIds: saved,
+    personalWorkspaces: true,
+  });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) {
+      setValue({
+        workspaceIds: savedKey === null ? null : savedKey.split(",").filter(Boolean),
+        personalWorkspaces: true,
+      });
+      setError(null);
+    }
+  }, [open, savedKey]);
+  const home = recording.workspaceId;
+  const here = workspaces.find((workspace) => workspace.id === hereId);
+  const chosen =
+    value.workspaceIds === null ? null : value.workspaceIds.filter((id) => id !== home).sort();
+  // Opened from another workspace it was turned on in, which it would leave.
+  const leavesHere =
+    hereId !== home && here?.personal !== true && chosen !== null && !chosen.includes(hereId);
+  const unchanged =
+    chosen === null
+      ? saved === null
+      : saved !== null && [...saved].sort().join(",") === chosen.join(",");
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+      title={msg("meetings.detailPage.availableIn")}
+      description={msg("meetings.detailPage.onlyYouSeeItInThese")}
+      submitLabel={msg("meetings.detailPage.save")}
+      pendingLabel={msg("meetings.detailPage.saving")}
+      submitDisabled={unchanged}
+      error={error}
+      onSubmit={async () => {
+        try {
+          await onSave(chosen, leavesHere);
+        } catch (cause) {
+          setError(errorText(cause) ?? msg("meetings.detailPage.couldnTChangeWhereItWorks"));
+          return false;
+        }
+      }}
+      onSubmitted={onClose}
+    >
+      <div className="flex min-w-0 flex-col gap-4">
+        <WorkspaceReachFields
+          owner={{ kind: "person" }}
+          organizationName={organizationName}
+          label={msg("meetings.detailPage.availableIn")}
+          labelHidden
+          value={value}
+          onChange={setValue}
+          workspaces={workspaces}
+          hereId={hereId}
+          alwaysIncluded={{ [home]: msg("meetings.detailPage.recordedThereAlwaysIncluded") }}
+          // Switching from All keeps the workspace it was opened from.
+          seedSelected={() => (hereId !== home && here?.personal !== true ? [hereId] : [])}
+          personalWorkspaces="always"
+        />
+        {leavesHere ? (
+          <Notice tone="info" live="polite">
+            {msg("meetings.detailPage.itWillNoLongerShowHere")}
+          </Notice>
+        ) : null}
+      </div>
+    </FormDialog>
+  );
+}
+
+/**
+ * The models "Transcribe again" offers. One that can't be used says why:
+ * "Not supported in EU" when EU-only switched it off, otherwise what to connect.
+ */
+export function transcribeAgainModelOptions(
+  models: readonly Pick<
+    RecordingTranscriptionModel,
+    | "providerId"
+    | "providerName"
+    | "model"
+    | "name"
+    | "available"
+    | "unavailableReason"
+    | "usdPerHour"
+  >[],
+  msg: OpenGeniText = defaultText,
+): SelectOption[] {
+  return models.map((entry) => ({
+    value: `${entry.providerId}/${entry.model}`,
+    label: entry.name,
+    meta:
+      entry.usdPerHour !== null
+        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
+        : entry.providerName,
+    disabled: !entry.available,
+    disabledReason: entry.available
+      ? undefined
+      : (regionRestrictedText(msg, entry.unavailableReason) ??
+        msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName })),
+  }));
+}
+
+/**
+ * What transcribing a meeting again costs at a model's hourly price. Each
+ * recorded track (a microphone beside computer audio, say) is transcribed and
+ * billed on its own, so a two-track hour costs two hours.
+ */
+export function transcribeAgainEstimate(
+  recording: Pick<Recording, "durationMilliseconds" | "tracks">,
+  usdPerHour: number | null | undefined,
+): { usd: number; tracks: number } | null {
+  if (usdPerHour == null) return null;
+  const recorded = recording.tracks.filter(
+    (track) => track.chunkCount > 0 && track.durationMilliseconds > 0,
+  );
+  const milliseconds =
+    recorded.length > 0
+      ? recorded.reduce((total, track) => total + track.durationMilliseconds, 0)
+      : recording.durationMilliseconds;
+  if (milliseconds <= 0) return null;
+  return { usd: (usdPerHour * milliseconds) / 3_600_000, tracks: Math.max(1, recorded.length) };
+}
+
 function TranscribeAgainDialog({
   open,
   recording,
@@ -243,7 +417,8 @@ function TranscribeAgainDialog({
     model: string;
     /** Null detects it, even when the workspace names a meeting language. */
     language: string | null;
-    maxSpeakers?: number;
+    /** How many people speak; speaker detection finds that many. */
+    speakers?: number;
   }) => Promise<void>;
 }) {
   const msg = useOpenGeniText();
@@ -257,9 +432,8 @@ function TranscribeAgainDialog({
   const [language, setLanguage] = useState<string>(
     recording.transcription.language ?? DETECT_LANGUAGE,
   );
-  const [speakers, setSpeakers] = useState(
-    recording.transcription.maxSpeakers ? String(recording.transcription.maxSpeakers) : "",
-  );
+  const initialSpeakers = recording.transcription.speakers ?? recording.transcription.maxSpeakers;
+  const [speakers, setSpeakers] = useState(initialSpeakers ? String(initialSpeakers) : "");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (open) {
@@ -267,28 +441,19 @@ function TranscribeAgainDialog({
       setError(null);
     }
   }, [open, initialModel]);
-  const modelOptions: SelectOption[] = models.map((entry) => ({
-    value: `${entry.providerId}/${entry.model}`,
-    label: entry.name,
-    meta:
-      entry.usdPerHour !== null
-        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
-        : entry.providerName,
-    disabled: !entry.available,
-    disabledReason: entry.available
-      ? undefined
-      : msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName }),
-  }));
+  const modelOptions = transcribeAgainModelOptions(models, msg);
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
-  const estimate =
-    selected?.usdPerHour != null && recording.durationMilliseconds > 0
-      ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
-      : null;
+  const estimate = transcribeAgainEstimate(recording, selected?.usdPerHour);
+  const duration = formatDuration(recording.durationMilliseconds, msg);
   const languageOptions = meetingLanguageOptions(language, undefined, msg);
   const speakerCount = speakers.trim() ? Number(speakers) : undefined;
   const speakersInvalid =
     speakerCount !== undefined &&
     (!Number.isInteger(speakerCount) || speakerCount < 1 || speakerCount > 32);
+  // Speakers come from the model, or from Opengeni's own speaker detection
+  // when this deployment has it (it made the current transcript's).
+  const tellsSpeakersApart =
+    selected?.capabilities.diarization === true || current?.diarization === "ours";
   return (
     <FormDialog
       open={open}
@@ -296,7 +461,7 @@ function TranscribeAgainDialog({
         if (!next) onClose();
       }}
       title={msg("meetings.detailPage.transcribeAgain")}
-      description={msg("meetings.detailPage.makesANewVersionFrom")}
+      description={msg("meetings.detailPage.makesANewTranscriptNotesToo")}
       submitLabel={msg("meetings.detailPage.transcribe")}
       pendingLabel={msg("meetings.detailPage.starting")}
       submitDisabled={!selected || !selected.available || speakersInvalid}
@@ -308,7 +473,7 @@ function TranscribeAgainDialog({
             providerId: selected.providerId,
             model: selected.model,
             language: language === DETECT_LANGUAGE ? null : language,
-            ...(speakerCount !== undefined ? { maxSpeakers: speakerCount } : {}),
+            ...(speakerCount !== undefined && tellsSpeakersApart ? { speakers: speakerCount } : {}),
           });
         } catch (cause) {
           setError(errorText(cause) ?? msg("meetings.detailPage.couldnTStartTranscribing"));
@@ -322,14 +487,18 @@ function TranscribeAgainDialog({
           label={msg("meetings.detailPage.model")}
           hint={
             estimate !== null
-              ? estimate < 0.01
-                ? msg("meetings.detailPage.aboutLessThan001", {
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
-                : msg("meetings.detailPage.aboutEstimateForThisDuration", {
-                    estimate: estimate.toFixed(2),
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
+              ? estimate.usd < 0.01
+                ? msg("meetings.detailPage.aboutLessThan001", { duration })
+                : estimate.tracks > 1
+                  ? msg("meetings.detailPage.aboutEstimateForTracks", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                      count: estimate.tracks,
+                    })
+                  : msg("meetings.detailPage.aboutEstimateForThisDuration", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                    })
               : undefined
           }
         >
@@ -341,9 +510,9 @@ function TranscribeAgainDialog({
         >
           <NativeSelect options={languageOptions} value={language} onValueChange={setLanguage} />
         </Field>
-        {selected?.capabilities.diarization ? (
+        {tellsSpeakersApart ? (
           <Field
-            label={msg("meetings.detailPage.maximumNumberOfSpeakers")}
+            label={msg("meetings.detailPage.numberOfSpeakers")}
             optional
             hint={msg("meetings.detailPage.leaveEmptyToLetThe")}
             error={speakersInvalid ? msg("meetings.detailPage.enterAWholeNumberFrom") : undefined}
@@ -444,12 +613,107 @@ const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
 );
 
+/** What fixes a failed transcript, besides transcribing it again from the dialog. */
+type TranscriptFixes = {
+  /** The models this workspace can transcribe with, to pick the direct fix from. */
+  models: readonly RecordingTranscriptionModel[];
+  /** Transcribe it now with another model, the one-click fix. */
+  onTranscribeWith: (model: RecordingTranscriptionModel) => Promise<void>;
+  /** Opens where credits are bought; absent when this person can't buy them. */
+  onOpenBilling?: (() => void) | undefined;
+  /** Opens where models are connected; absent when this person can't connect them. */
+  onConnectModels?: (() => void) | undefined;
+};
+
+/**
+ * A failed transcript's actions: one direct fix (another model that works
+ * here, else adding credits or connecting a model), then Transcribe again,
+ * which tries once more with any model once the cause is fixed.
+ */
+function FailedTranscriptActions({
+  version,
+  about,
+  fixes,
+  onRetry,
+}: {
+  version: RecordingTranscriptVersion | null;
+  about: ModelAbout | null;
+  fixes: TranscriptFixes;
+  onRetry: () => void;
+}) {
+  const msg = useOpenGeniText();
+  const [running, setRunning] = useState(false);
+  const code = version?.errorCode ?? null;
+  const switchTo = transcriptFixModel(code, version, fixes.models);
+  const connect =
+    !switchTo &&
+    (code === "missing_provider_key" || code === "provider_unauthorized") &&
+    about?.funding !== "deployment"
+      ? fixes.onConnectModels
+      : undefined;
+  const upgrade = code === "subscription_plan_required";
+  const billing =
+    !switchTo && (transcriptNeedsCredits(code) || upgrade) ? fixes.onOpenBilling : undefined;
+  return (
+    <span className="flex flex-wrap gap-2">
+      {switchTo ? (
+        <Button
+          type="button"
+          size="sm"
+          disabled={running}
+          onClick={() => {
+            setRunning(true);
+            void fixes
+              .onTranscribeWith(switchTo)
+              .catch((error: unknown) => {
+                toast.error(msg("meetings.detailPage.couldnTStartTranscribing"), {
+                  description: errorText(error),
+                });
+              })
+              .finally(() => setRunning(false));
+          }}
+        >
+          {running ? SPINNER : null}
+          {msg("meetings.detailPage.transcribeWithModel", { modelName: switchTo.name })}
+        </Button>
+      ) : billing ? (
+        <Button type="button" size="sm" onClick={billing}>
+          <CreditCardIcon aria-hidden="true" />
+          {msg(upgrade ? "meetings.detailPage.upgradeToPro" : "meetings.detailPage.addCredits")}
+        </Button>
+      ) : connect ? (
+        <Button type="button" size="sm" onClick={connect}>
+          {msg("meetings.detailPage.connectAModel")}
+        </Button>
+      ) : null}
+      <Button type="button" size="sm" variant="outline" disabled={running} onClick={onRetry}>
+        {msg("meetings.detailPage.transcribeAgain")}
+      </Button>
+    </span>
+  );
+}
+
+/** Why an upload failed, in the words of a transcript failure when it has the same cause. */
+function uploadFailureText(
+  failure: { code: string; message: string } | null,
+  msg: OpenGeniText,
+): string {
+  if (!failure) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
+  if (transcriptNeedsCredits(failure.code)) return transcriptErrorText(failure.code, msg);
+  // The notice's title already says the upload failed; the server's reason
+  // reads as the first sentence of its text.
+  const reason = failure.message.trim();
+  if (!reason) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
+  return /[.!?]$/.test(reason) ? reason : `${reason}.`;
+}
+
 function PhaseNotice({
   recording,
   recorder,
   here,
   recordingElsewhere,
   modelOf,
+  fixes,
   onRetry,
 }: {
   recording: Recording;
@@ -460,6 +724,7 @@ function PhaseNotice({
   recordingElsewhere: boolean;
   /** The version's model and its provider, when the workspace's list has it. */
   modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
+  fixes: TranscriptFixes;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -475,49 +740,83 @@ function PhaseNotice({
     );
   }
   if (phase.kind === "uploading" && recorder && here === "upload_failed") {
+    // The audio stays on this device: once the cause is fixed, the same upload carries on.
     return (
-      <Notice tone="failed" live="polite">
-        {uploadLine(recorder, true, msg)}
+      <Notice
+        tone="failed"
+        title={msg("meetings.detailPage.theUploadDidnTFinish")}
+        live="polite"
+        actionLayout="responsive"
+        action={
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              // The uploader holding it was closed: reloading starts a new one.
+              if (!recorder.retryUpload(recording.id)) {
+                toast.error(msg("meetings.detailPage.couldnTTryAgainReload"));
+              }
+            }}
+          >
+            {msg("meetings.detailPage.tryAgain")}
+          </Button>
+        }
+      >
+        {msg("meetings.detailPage.uploadFailureKeptHere", {
+          reason: uploadFailureText(meetingUploadFailure(recorder, recording.id), msg),
+        })}
+      </Notice>
+    );
+  }
+  if (phase.kind === "uploading" && here === "uploading") {
+    return (
+      <Notice tone="waiting" icon={SPINNER} live="polite">
+        {msg("meetings.detailPage.uploadingFromThisDevice")}
       </Notice>
     );
   }
   if (phase.kind === "uploading" && here !== "transcribing") {
-    return (
+    // Nothing on this device can move it along: say where the audio is and what finishes it.
+    return recordingElsewhere ? (
       <Notice
         tone="waiting"
         icon={SPINNER}
         title={msg("meetings.detailPage.notFinishedYet")}
         live="polite"
       >
-        {recordingElsewhere
-          ? msg("meetings.detailPage.itSStillBeingRecorded")
-          : msg("meetings.detailPage.theAudioIsOnThe")}
+        {msg("meetings.detailPage.itSStillBeingRecorded")}
+      </Notice>
+    ) : (
+      <Notice tone="waiting" title={msg("meetings.detailPage.notFinishedYet")} live="polite">
+        {msg("meetings.detailPage.theAudioIsOnThe")}
       </Notice>
     );
   }
   if (phase.kind === "transcribing" || phase.kind === "uploading") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
-        {msg("meetings.detailPage.transcribingThisUsuallyTakesA")}
+        {transcribingText(recording.durationMilliseconds, msg)}
       </Notice>
     );
   }
   if (phase.kind === "failed") {
+    const about = phase.version ? modelOf(phase.version) : null;
     return (
       <Notice
         tone="failed"
         title={msg("meetings.detailPage.theTranscriptFailed")}
+        actionLayout="responsive"
         action={
-          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            {msg("meetings.detailPage.transcribeAgain")}
-          </Button>
+          <FailedTranscriptActions
+            version={phase.version}
+            about={about}
+            fixes={fixes}
+            onRetry={onRetry}
+          />
         }
       >
-        {transcriptErrorText(
-          phase.version?.errorCode ?? null,
-          msg,
-          phase.version ? modelOf(phase.version) : null,
-        )}
+        {transcriptErrorText(phase.version?.errorCode ?? null, msg, about)}
       </Notice>
     );
   }
@@ -551,12 +850,14 @@ function RerunNotice({
   shownVersionNumber,
   modelName,
   modelOf,
+  fixes,
   onRetry,
 }: {
   versions: readonly RecordingTranscriptVersion[];
   shownVersionNumber: number;
   modelName: (version: RecordingTranscriptVersion) => string;
   modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
+  fixes: TranscriptFixes;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -579,10 +880,14 @@ function RerunNotice({
       <Notice
         tone="failed"
         title={msg("meetings.detailPage.transcribingAgainFailed")}
+        actionLayout="responsive"
         action={
-          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            {msg("meetings.detailPage.transcribeAgain")}
-          </Button>
+          <FailedTranscriptActions
+            version={newest}
+            about={modelOf(newest)}
+            fixes={fixes}
+            onRetry={onRetry}
+          />
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
@@ -619,10 +924,29 @@ type MeetingDetailPageProps = {
   /** Opens Meetings settings, where voice recognition is turned on. */
   onOpenSettings?: (() => void) | undefined;
   /**
+   * Opens where this person adds credits, the fix a transcript refused for
+   * credits offers when no other model works here. Omit it for someone who
+   * can't buy credits.
+   */
+  onOpenBilling?: (() => void) | undefined;
+  /**
+   * Opens where models are connected, the fix for a transcript whose
+   * provider isn't connected. Omit it for someone who can't connect one.
+   */
+  onConnectModels?: (() => void) | undefined;
+  /**
    * The host's own lines about this meeting, shown first beside the
    * transcript, such as the project it belongs to.
    */
   details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
+  /**
+   * The viewer's workspaces in this organization, their Personal workspace
+   * marked, so they can choose where their own Only me meetings work
+   * ("Available in"). Without it the page doesn't offer that choice.
+   */
+  reachWorkspaces?: readonly ReachWorkspace[] | undefined;
+  /** The organization's name, for "Available in". */
+  organizationName?: string | undefined;
   /** Opens a chat, such as the one whose agent wrote the notes. */
   onOpenChat?: ((sessionId: string) => void) | undefined;
   /**
@@ -657,7 +981,11 @@ function MeetingDetailPageForRecording({
   recordings: recordingsClient,
   onBack,
   onOpenSettings,
+  onOpenBilling,
+  onConnectModels,
   details,
+  reachWorkspaces,
+  organizationName,
   onOpenChat,
   onAsk,
 }: MeetingDetailPageProps) {
@@ -677,8 +1005,11 @@ function MeetingDetailPageForRecording({
     refreshKey: transcriptVersionId ?? null,
     enabled: Boolean(transcriptVersionId),
   });
-  const people = useRecordingPeople(override);
-  const models = useRecordingModels(override);
+  // A person's own Only me meeting from another workspace of the organization
+  // keeps its people and transcribers in the workspace that stores it.
+  const home = { ...override, workspaceId: recording?.workspaceId ?? workspaceId };
+  const people = useRecordingPeople(home);
+  const models = useRecordingModels(home);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
   const online = useOnline();
@@ -695,13 +1026,33 @@ function MeetingDetailPageForRecording({
     enabled: previewing && !recordingHere,
   });
   const player = useRef<MeetingPlayerHandle>(null);
+  // The player's bar pins to the top while the page scrolls; pinned, it covers
+  // the host scroller's top padding too (sticky-bar-edge.tsx).
+  const [playerBar, setPlayerBar] = useState<HTMLDivElement | null>(null);
+  const playerPinned = useStuckToTop(playerBar);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
+  const [choosingReach, setChoosingReach] = useState(false);
   const [rerunning, setRerunning] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
   const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
   const notes = useRecordingNotes(recordingId, override);
+  // The notes name a meeting nobody named: show that name once they arrive.
+  // The name is written just after the notes, so it is read again shortly.
+  const notesRevision = notes.notes?.revision ?? 0;
+  const refreshMeeting = meeting.refresh;
+  const awaitingName = Boolean(recording && recording.titleSource !== "person");
+  const seenNotesRevision = useRef<number | null>(null);
+  useEffect(() => {
+    if (notes.loading) return;
+    const seen = seenNotesRevision.current;
+    seenNotesRevision.current = notesRevision;
+    if (seen === null || seen === notesRevision || !awaitingName) return;
+    void refreshMeeting();
+    const again = window.setTimeout(() => void refreshMeeting(), 3_000);
+    return () => window.clearTimeout(again);
+  }, [notes.loading, notesRevision, awaitingName, refreshMeeting]);
   // Summary when the meeting has written notes, else Transcript: decided once
   // the notes load, so notes written later don't move the reader.
   const [openingTab, setOpeningTab] = useState<MeetingTab | null>(null);
@@ -710,6 +1061,23 @@ function MeetingDetailPageForRecording({
     setOpeningTab(openingMeetingTab(notes.notes));
   }
   const tab = chosenTab ?? openingTab;
+  // The ⌘K menu's "Ask about this meeting": the Ask field shows on Summary and
+  // Transcript, so a question from the Notepad tab moves to Summary first.
+  const [askRequest, setAskRequest] = useState<MeetingAskRequest | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const askFromMenu = useCallback((question: string | null) => {
+    if (tabRef.current === "notepad") setChosenTab("summary");
+    setAskRequest((current) => ({ question, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  const recordingOnScreenHere =
+    recording?.state === "capturing" &&
+    ["recording", "paused"].includes(meetingHereStatus(recorder, recordingId, online) ?? "");
+  useAnnounceMeetingOnScreen(
+    useUiEventTarget("document"),
+    recordingId,
+    onAsk && recording && !recordingOnScreenHere ? askFromMenu : null,
+  );
   const slots = useMemo(() => speakerColorSlots(transcript.segments), [transcript.segments]);
   const mentionTracks = recording?.tracks;
   const mentions = useMemo(
@@ -751,6 +1119,24 @@ function MeetingDetailPageForRecording({
     },
     [models.models, models.pinned],
   );
+  // A failed transcript's direct fix runs another model with this meeting's
+  // own options; null language detects it, as Transcribe again does.
+  const rerunMeeting = meeting.rerun;
+  const shownTranscription = recording?.transcription;
+  const fixes: TranscriptFixes = {
+    models: models.models,
+    onTranscribeWith: async (model) => {
+      const { providerId: _provider, model: _model, ...options } = shownTranscription ?? {};
+      await rerunMeeting({
+        ...options,
+        providerId: model.providerId,
+        model: model.model,
+        language: options.language ?? null,
+      });
+    },
+    onOpenBilling,
+    onConnectModels,
+  };
 
   const createPerson = people.create;
   const { rememberVoice, forgetVoice } = people;
@@ -996,6 +1382,13 @@ function MeetingDetailPageForRecording({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The owner's own Only me meeting, on a server that keeps where it works.
+  const reachable =
+    owner &&
+    recording.visibility === "private" &&
+    recording.purpose === "meeting" &&
+    recording.reachWorkspaceIds !== undefined &&
+    reachWorkspaces !== undefined;
   // The person recording, as the transcript will name their microphone.
   const ownerName =
     peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
@@ -1203,11 +1596,16 @@ function MeetingDetailPageForRecording({
           {!owner && recording.visibility === "workspace"
             ? msg("meetings.detailPage.sharedWithTheWorkspace")
             : null}
+          {recording.sourceWorkspace
+            ? msg("meetings.detailPage.onlyMeRecordedIn", {
+                workspace: recording.sourceWorkspace.name,
+              })
+            : null}
         </DetailMeta>
       }
       actions={
         <>
-          {owner ? (
+          {owner && !recording.sourceWorkspace ? (
             <VisibilityMenu
               visibility={recording.visibility}
               onChange={(visibility) =>
@@ -1228,6 +1626,12 @@ function MeetingDetailPageForRecording({
               <PencilIcon aria-hidden="true" />
               {msg("meetings.detailPage.rename")}
             </DropdownMenuItem>
+            {reachable ? (
+              <DropdownMenuItem onSelect={() => setChoosingReach(true)}>
+                <LayersIcon aria-hidden="true" />
+                {msg("meetings.detailPage.availableInMenu")}
+              </DropdownMenuItem>
+            ) : null}
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
@@ -1262,7 +1666,20 @@ function MeetingDetailPageForRecording({
         ))}
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label={msg("meetings.detailPage.speakers")}>
-            <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+            <div className="grid w-full min-w-0 gap-1">
+              <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+              {canRerun ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => setRerunning(true)}
+                  className="h-auto w-fit px-0 text-fg-muted pointer-coarse:h-11"
+                >
+                  {msg("meetings.detailPage.wrongNumberOfSpeakers")}
+                </Button>
+              ) : null}
+            </div>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (
@@ -1437,6 +1854,7 @@ function MeetingDetailPageForRecording({
           segments={segments}
           speakers={transcript.speakers}
           tracks={recording.tracks}
+          durationMilliseconds={recording.durationMilliseconds}
           people={people.people}
           activeSegment={activeSegment}
           actions={actions}
@@ -1456,6 +1874,7 @@ function MeetingDetailPageForRecording({
           here={here}
           recordingElsewhere={previewing && !recordingHere}
           modelOf={modelOf}
+          fixes={fixes}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -1464,6 +1883,7 @@ function MeetingDetailPageForRecording({
             shownVersionNumber={phase.version.versionNumber}
             modelName={modelName}
             modelOf={modelOf}
+            fixes={fixes}
             onRetry={() => setRerunning(true)}
           />
         ) : null}
@@ -1479,7 +1899,8 @@ function MeetingDetailPageForRecording({
       </div>
       {sources.length > 0 && !recording.audioDeletedAt ? (
         // A direct child of the page, so it stays in view through the whole transcript.
-        <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+        <div ref={setPlayerBar} className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+          {playerPinned ? <StickyBarEdge edge="top" /> : null}
           <MeetingPlayer
             ref={player}
             sources={sources}
@@ -1522,7 +1943,11 @@ function MeetingDetailPageForRecording({
               </>
             )}
             {askable && onAsk && tab !== "notepad" ? (
-              <MeetingAsk onAsk={(question) => onAsk(recording.id, question)} />
+              <MeetingAsk
+                onAsk={(question) => onAsk(recording.id, question)}
+                request={askRequest}
+                onRequestTaken={() => setAskRequest(null)}
+              />
             ) : null}
           </div>
         ) : (
@@ -1548,6 +1973,26 @@ function MeetingDetailPageForRecording({
           await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
         }
       />
+      {reachable ? (
+        <MeetingReachDialog
+          open={choosingReach}
+          recording={recording}
+          hereId={workspaceId}
+          workspaces={reachWorkspaces ?? []}
+          organizationName={organizationName ?? msg("meetings.detailPage.thisOrganization")}
+          onClose={() => setChoosingReach(false)}
+          onSave={async (reachWorkspaceIds, leavesHere) => {
+            if (!leavesHere) {
+              await meeting.update({ reachWorkspaceIds });
+              return;
+            }
+            // It no longer works here: save without reading it back, then leave.
+            await client.updateRecording(workspaceId, recording.id, { reachWorkspaceIds });
+            toast.success(msg("meetings.detailPage.itNoLongerShowsHere"));
+            onBack();
+          }}
+        />
+      ) : null}
       <TranscribeAgainDialog
         open={rerunning}
         recording={recording}

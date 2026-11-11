@@ -4,10 +4,11 @@ import {
   type PersonalResourceAttachmentIntent,
   type Rig,
   type ResourceAuthorityScope,
-  type Session,
+  type ChatSession as Session,
   type UserResourceAuthoritySummary,
   type Workspace,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import type { AuthSession } from "../types";
@@ -101,7 +102,7 @@ export function resolvePersonalResourceOwnerScope(input: {
 }
 
 async function listAuthorityPages(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   resourceKind: "rig" | "connected_machine",
 ): Promise<{
@@ -125,7 +126,7 @@ async function listAuthorityPages(
 
 /** Bounded metadata-only load. Resource values and grant credentials never enter web state. */
 export async function loadPersonalResourceCatalog(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   scope: PersonalResourceOwnerScope,
   permissions: PersonalResourceReadPermissions,
 ): Promise<PersonalResourceCatalog> {
@@ -242,16 +243,21 @@ export function buildPersonalResourceAttachmentIntent(input: {
  * machine from the chat's active pointer and checks the owner and the chat's
  * authority epoch. Without it a chat moved mid-session has no grant for the
  * machine, and every turn after the move is refused at admission.
+ *
+ * `always` is for an explicit move: the person choosing their own machine for
+ * a chat turns it on for their own work in this workspace, so their other
+ * chats here don't ask again. Ordinary sends only renew it for this chat.
  */
 export function personalMachineUseIntent(
   tenancy:
     | Pick<NonNullable<Session["tenancy"]>, "visibility" | "authorityEpoch">
     | null
     | undefined,
+  mode: "session" | "always" = "session",
 ): PersonalResourceAttachmentIntent | undefined {
   if (!tenancy) return undefined;
   return buildPersonalResourceAttachmentIntent({
-    mode: "session",
+    mode,
     visibility: tenancy.visibility === "workspace" ? "workspace" : "private",
     acknowledged: true,
     expectedAuthorityEpoch: tenancy.authorityEpoch,

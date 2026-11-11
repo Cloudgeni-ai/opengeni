@@ -166,6 +166,29 @@ describe("compute alerts", () => {
     }
   }, 60_000);
 
+  test("booking headroom remains diagnostic; actual fleet refusals still alert", async () => {
+    const rules = alerts(await render([...enabled, hostsTo]));
+    expect(rules.has("OpenGeniComputeHostDiskLow")).toBe(true);
+    const bookingMetrics = new Set([
+      "compute_fleet_host_disk_free_bytes",
+      "compute_fleet_host_disk_booking_headroom_bytes",
+      "compute_fleet_host_disk_reclaimable_bytes",
+    ]);
+    expect(
+      [...rules].filter(([, rule]) =>
+        selectedMetrics(rule.expr).some((metric) => bookingMetrics.has(metric)),
+      ),
+    ).toEqual([]);
+    expect(rules.has("OpenGeniComputeNoCapacity")).toBe(true);
+    expect(rules.has("OpenGeniComputeHostAlarm")).toBe(true);
+    expect(rules.has("OpenGeniComputeSandboxesUnhealthy")).toBe(true);
+    const emitted = computeMetricNames();
+    expect(emitted.has("compute_fleet_host_disk_free_bytes")).toBe(false);
+    expect(emitted.has("compute_fleet_host_disk_booking_headroom_bytes")).toBe(true);
+    expect(emitted.has("compute_fleet_host_disk_available_bytes")).toBe(true);
+    expect(emitted.has("compute_fleet_host_disk_reclaimable_bytes")).toBe(true);
+  }, 60_000);
+
   test("every alert carries plain-language notification copy", async () => {
     const required = ["summary", "headline", "user_impact", "next_step"];
     const allowed = new Set([...required, "value", "description", "action", "runbook_url"]);
@@ -197,6 +220,37 @@ describe("compute alerts", () => {
   test("fire on what they describe, for this release's hosts only", async () => {
     const groups = await render([...enabled, hostsTo]);
     await evaluate(groups, [
+      ...[
+        { name: "low filesystem space", available: 5, fires: true },
+        { name: "zero filesystem space is real", available: 0, fires: true },
+        { name: "booked disk with ample physical space", available: 70, fires: false },
+        { name: "older host has unknown filesystem space", available: null, fires: false },
+      ].map(({ name, available, fires }) => ({
+        name,
+        series: [
+          { series: `compute_fleet_host_disk_bytes{${own},host_name="h1"}`, values: "100x60" },
+          {
+            series: `compute_fleet_host_disk_booking_headroom_bytes{${own},host_name="h1"}`,
+            values: "0x60",
+          },
+          {
+            series: `compute_fleet_host_disk_available_bytes{${other},host_name="h1"}`,
+            values: "0x60",
+          },
+          { series: `compute_fleet_host_disk_bytes{${other},host_name="h1"}`, values: "100000x60" },
+          ...(available === null
+            ? []
+            : [
+                {
+                  series: `compute_fleet_host_disk_available_bytes{${own},host_name="h1"}`,
+                  values: `${available}x60`,
+                },
+              ]),
+        ],
+        alert: "OpenGeniComputeHostDiskLow",
+        at: "20m",
+        fires: fires ? [{ labels: { host_name: "h1" }, value: available! / 100 }] : [],
+      })),
       {
         name: "control down",
         series: [
@@ -238,6 +292,28 @@ describe("compute alerts", () => {
         alert: "OpenGeniComputeNoLeader",
         at: "6m",
         fires: [{}],
+      },
+      {
+        name: "pointers wait on old hosts",
+        series: [
+          { series: `compute_control_pointers_waiting_hosts{${own},pod="a"}`, values: "2x80" },
+          { series: `compute_control_pointers_waiting_hosts{${other},pod="b"}`, values: "0x80" },
+        ],
+        alert: "OpenGeniComputePointersWaiting",
+        at: "31m",
+        fires: [{ value: 2 }],
+      },
+      {
+        name: "pointers moved in after a while",
+        series: [
+          {
+            series: `compute_control_pointers_waiting_hosts{${own},pod="a"}`,
+            values: "1x20 0x60",
+          },
+        ],
+        alert: "OpenGeniComputePointersWaiting",
+        at: "31m",
+        fires: [],
       },
       {
         name: "a host lost",
@@ -408,28 +484,56 @@ describe("compute alerts", () => {
         fires: fires ? [{ labels: { host_name: "h1" }, value: 8 }] : [],
       })),
       {
-        name: "disk almost full",
+        name: "fully booked hosts without refused requests are not a capacity incident",
         series: [
           {
             series: `compute_fleet_host_disk_bytes{${own},pod="a",host_name="h1"}`,
             values: "1000x60",
           },
           {
-            series: `compute_fleet_host_disk_free_bytes{${own},pod="a",host_name="h1"}`,
-            values: "50x60",
+            series: `compute_fleet_host_disk_booking_headroom_bytes{${own},pod="a",host_name="h1"}`,
+            values: "0x60",
           },
           {
-            series: `compute_fleet_host_disk_bytes{${own},pod="a",host_name="h2"}`,
-            values: "1000x60",
-          },
-          {
-            series: `compute_fleet_host_disk_free_bytes{${own},pod="a",host_name="h2"}`,
+            series: `compute_fleet_host_disk_reclaimable_bytes{${own},pod="a",host_name="h1"}`,
             values: "500x60",
           },
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0x60",
+          },
         ],
-        alert: "OpenGeniComputeHostDiskLow",
+        alert: "OpenGeniComputeNoCapacity",
         at: "20m",
-        fires: [{ labels: { host_name: "h1" }, value: 0.05 }],
+        fires: [],
+      },
+      {
+        name: "sustained actual capacity refusals still alert",
+        series: [
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0+1x60",
+          },
+        ],
+        alert: "OpenGeniComputeNoCapacity",
+        at: "20m",
+        fires: [{ value: 20 }],
+      },
+      {
+        name: "another release's refusals do not become this release's incident",
+        series: [
+          {
+            series: `compute_control_requests_total{${own},outcome="no_capacity"}`,
+            values: "0x60",
+          },
+          {
+            series: `compute_control_requests_total{${other},outcome="no_capacity"}`,
+            values: "0+1x60",
+          },
+        ],
+        alert: "OpenGeniComputeNoCapacity",
+        at: "20m",
+        fires: [],
       },
     ]);
   }, 180_000);

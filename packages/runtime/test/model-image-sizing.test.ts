@@ -139,6 +139,50 @@ test("invalid and active formats fail before entering other image decoders", asy
   expect(() => createModelImageSizer(0)).toThrow(RangeError);
 });
 
+test("a raster image under the wrong type label is labelled by its bytes", async () => {
+  const size = createModelImageSizer(2000);
+  const jpeg = (await raster(32, 16).jpeg().toBuffer()).toString("base64");
+  const png = (await raster(32, 16).png().toBuffer()).toString("base64");
+  expect(await size(jpeg, "image/png")).toMatchObject({ data: jpeg, mediaType: "image/jpeg" });
+  expect(await size(png, "image/jpeg")).toMatchObject({ data: png, mediaType: "image/png" });
+  expect(await size(jpeg, "application/octet-stream")).toMatchObject({
+    data: jpeg,
+    mediaType: "image/jpeg",
+  });
+  // A mislabeled photo still takes the JPEG re-encode path when it is resized.
+  const large = (await raster(3072, 1536).jpeg().toBuffer()).toString("base64");
+  const sized = await createModelImageSizer(2000, 10 * 1024 * 1024, { jpegQuality: 85 })(
+    large,
+    "image/png",
+  );
+  expect(sized).toMatchObject({ mediaType: "image/jpeg", width: 2000, height: 1000 });
+});
+
+test("a JPEG sent as image/png reaches Claude as image/jpeg with no resize note", async () => {
+  const jpeg = (await raster(32, 16).jpeg().toBuffer()).toString("base64");
+  const bodies: any[] = [];
+  const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return response();
+  }) as typeof fetch);
+  await model.getResponse(
+    request([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "What is in this screenshot?" },
+          { type: "input_image", image: `data:image/png;base64,${jpeg}` },
+        ],
+      },
+    ]),
+  );
+  const content = bodies[0].messages[0].content;
+  const images = content.filter((block: any) => block.type === "image");
+  expect(images).toHaveLength(1);
+  expect(images[0].source).toEqual({ type: "base64", media_type: "image/jpeg", data: jpeg });
+  expect(JSON.stringify(content)).not.toContain("Image resized for transport");
+});
+
 const provider: ResolvedModelProvider = {
   id: "claude",
   label: "Claude",

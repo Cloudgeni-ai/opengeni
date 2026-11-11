@@ -33,9 +33,11 @@ semantic key may be layered at all three tiers:
 - **user** targets one subject in that account and is self-only at human API
   ingress.
 
-Organization writes require the literal `account:admin` permission on the
-unique authenticated account grant matching the workspace grant's account and
-subject; workspace permissions never substitute for that account authority.
+Organization writes require organization administration on the unique
+authenticated account grant matching the workspace grant's account and subject:
+the literal `account:admin` permission, or an active `owner` or `admin` role
+proven by the canonical human session. Workspace permissions never substitute
+for that account authority, and admin rights never cross organizations.
 Workspace writes require `documents:manage` (Members hold it; workspace Skills
 are shared team content). Personal writes derive the target
 from the authenticated human and accept no caller-selected subject. A scope change
@@ -227,7 +229,8 @@ user-facing Skills surface. It lists active authorized records and permits a
 direct human to create and activate an explicit Skill. The full proposal and
 lifecycle API remains available for purpose-built governance clients, but is
 not presented in the default Knowledge UI. Organization controls require
-the matching `account:admin` grant, workspace controls require
+organization administration (owner or admin) on the matching account grant,
+workspace controls require
 `documents:manage`, and personal controls remain self-only.
 
 The summary and full-content routes require exact attempt authority. The same
@@ -260,8 +263,6 @@ Canonical implementation:
 - `packages/contracts/src/preference-registry.ts`;
 - `packages/db/src/preference-registry-schema.ts`;
 - `packages/db/src/preference-registry.ts`;
-- `packages/db/drizzle/0137_preference_registry.sql`;
-- `packages/db/drizzle/0157_session_policy_role_snapshots.sql`;
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`;

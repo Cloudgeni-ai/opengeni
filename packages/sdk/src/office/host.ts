@@ -32,6 +32,13 @@ export type OfficeHost = {
       url?: string | null;
       addHandlerAsync?(type: string, handler: () => void): void;
       removeHandlerAsync?(type: string, options: { handler: () => void }): void;
+      /** The whole document as a file (`"compressed"` is .xlsx); see readWorkbookFile. */
+      getFileAsync?(
+        fileType: string,
+        options: { sliceSize?: number },
+        // The value's shape depends on the call; workbook-file.ts types it.
+        callback: (result: OfficeAsyncResult<never>) => void,
+      ): void;
     };
     /** Excel's theme colors (Office 2016 and later). */
     officeTheme?: { bodyBackgroundColor?: string };

@@ -8,7 +8,14 @@ import {
   matchesChord,
   type Chord,
 } from "./chords";
-import type { ChatRecord } from "./chat-directory";
+import {
+  chatParentTitle,
+  listsAsTopLevel,
+  readChatDirectory,
+  recordChatVisit,
+  rememberChats,
+  type ChatRecord,
+} from "./chat-directory";
 import {
   extendChatSwitcher,
   isSwitcherKey,
@@ -17,7 +24,9 @@ import {
   SWITCHER_LIMIT,
 } from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
-import { appActions, stepWorkspace } from "./registry";
+import { actionTitle, appActions, stepWorkspace, type ActionEnv } from "./registry";
+import { englishMessages } from "../../../messages/en";
+import type { SessionListRow } from "../../../session-list-model";
 
 function key(
   code: string,
@@ -228,9 +237,12 @@ describe("chat switcher", () => {
     id,
     workspaceId: "w",
     title: id,
+    avatar: null,
     updatedAt: 1,
     pinned: false,
     archived: false,
+    parentId: null,
+    parentTitle: null,
     row: null,
     readAt: 0,
     ...extra,
@@ -276,14 +288,39 @@ describe("chat switcher", () => {
     expect(state.ids[state.index]).toBe("a");
   });
 
-  test("archived and subagent chats are left out, and nothing opens with nowhere to go", () => {
-    const rows = [
-      record("a"),
-      record("old", { archived: true }),
-      record("child", { row: { parentSessionId: "a" } as ChatRecord["row"] }),
-    ];
-    expect(openChatSwitcher(directory(["a", "old", "child"], rows), "a", false)).toBeNull();
+  test("archived chats are left out, and nothing opens with nowhere to go", () => {
+    const rows = [record("a"), record("old", { archived: true })];
+    expect(openChatSwitcher(directory(["a", "old"], rows), "a", false)).toBeNull();
     expect(openChatSwitcher(directory([]), null, false)).toBeNull();
+  });
+
+  test("a sub-agent chat the person opened is there to go back to", () => {
+    const rows = [record("a"), record("worker", { parentId: "a", parentTitle: "a" })];
+    // Working in the sub-agent chat, a press goes back to its parent...
+    const fromWorker = openChatSwitcher(directory(["worker", "a"], rows), "worker", false)!;
+    expect(fromWorker.ids[fromWorker.index]).toBe("a");
+    // ...and from the parent, straight back to the sub-agent chat.
+    const back = openChatSwitcher(directory(["a", "worker"], rows), "a", false)!;
+    expect(back.ids).toEqual(["a", "worker"]);
+    expect(back.ids[back.index]).toBe("worker");
+    expect(back.viewed).toBe(2);
+  });
+
+  test("sub-agent chats never opened stay out of the carry-on list, unless pinned", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("worker", { updatedAt: 9, parentId: "a" }),
+      record("pinned-worker", { updatedAt: 3, parentId: "a", pinned: true }),
+    ];
+    const state = openChatSwitcher(directory(["a"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "pinned-worker", "b"]);
+    expect(state.viewed).toBe(1);
+    const grown = extendChatSwitcher(
+      state,
+      directory(["a"], [...rows, record("worker-2", { updatedAt: 10, parentId: "b" })]),
+    );
+    expect(grown).toBe(state);
   });
 
   test("chats in other workspaces join the list, unless that workspace is gone", () => {
@@ -309,7 +346,7 @@ describe("chat switcher", () => {
       record("older", { updatedAt: 5 }),
       record("newer", { updatedAt: 9, workspaceId: "other" }),
       record("gone", { updatedAt: 8, archived: true }),
-      record("child", { updatedAt: 7, row: { parentSessionId: "a" } as ChatRecord["row"] }),
+      record("child", { updatedAt: 7, parentId: "a" }),
     ];
     const state = openChatSwitcher(directory(["a", "b"], rows), "a", false)!;
     expect(state.ids).toEqual(["a", "b", "newer", "older"]);
@@ -366,6 +403,77 @@ describe("chat switcher", () => {
   });
 });
 
+describe("sub-agent chats in the chat directory", () => {
+  const row = (id: string, extra: Partial<SessionListRow> = {}) =>
+    ({
+      id,
+      workspaceId: "w",
+      parentSessionId: null,
+      title: id,
+      titleSource: "user",
+      status: "idle",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      updatedAt: "2026-11-01T10:00:00.000Z",
+      ...extra,
+    }) as SessionListRow;
+
+  test("a sub-agent chat names its parent, by the parent's latest title", () => {
+    const subject = `subagent-${crypto.randomUUID()}`;
+    rememberChats(subject, [row("worker", { parentSessionId: "lead", title: "Review PR" })]);
+    const rows = () => readChatDirectory(subject, "w").rows;
+    // Not known yet: nothing to say.
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBeNull();
+    rememberChats(subject, [row("lead", { title: "Release lead" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead");
+    rememberChats(subject, [row("lead", { title: "Release lead, v2" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead, v2");
+    expect(chatParentTitle(rows(), rows().get("lead")!)).toBeNull();
+  });
+
+  test("only top-level chats and pinned sub-agent chats list as the person's own", () => {
+    expect(listsAsTopLevel({ parentId: null, pinned: false })).toBe(true);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: false })).toBe(false);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: true })).toBe(true);
+  });
+
+  test("an opened sub-agent chat keeps its parent across reloads", () => {
+    const stored = new Map<string, string>();
+    const storage = {
+      getItem: (name: string) => stored.get(name) ?? null,
+      setItem: (name: string, value: string) => void stored.set(name, value),
+      removeItem: (name: string) => void stored.delete(name),
+      key: (index: number) => [...stored.keys()][index] ?? null,
+      get length() {
+        return stored.size;
+      },
+    };
+    const scope = globalThis as { window?: unknown };
+    const previous = scope.window;
+    scope.window = { localStorage: storage };
+    try {
+      const subject = `subagent-${crypto.randomUUID()}`;
+      rememberChats(subject, [row("lead", { title: "Release lead" })]);
+      recordChatVisit(subject, row("worker", { parentSessionId: "lead", title: "Review PR" }));
+      const saved = JSON.parse(stored.get(`opengeni.recentChats.${subject}`)!);
+      expect(saved[0]).toMatchObject({
+        id: "worker",
+        parentId: "lead",
+        parentTitle: "Release lead",
+      });
+      // A later load (another subject id stands in for a fresh page) reads it back.
+      const reloaded = `subagent-${crypto.randomUUID()}`;
+      stored.set(`opengeni.recentChats.${reloaded}`, JSON.stringify(saved));
+      const record = readChatDirectory(reloaded, "w").rows.get("worker")!;
+      expect(record.row).toBeNull();
+      expect(record.parentId).toBe("lead");
+      expect(listsAsTopLevel(record)).toBe(false);
+      expect(chatParentTitle(readChatDirectory(reloaded, "w").rows, record)).toBe("Release lead");
+    } finally {
+      scope.window = previous;
+    }
+  });
+});
+
 describe("workspace keys", () => {
   const workspaces = [{ id: "a" }, { id: "b" }, { id: "c" }];
 
@@ -396,5 +504,105 @@ describe("workspace keys", () => {
       applicableChords(next.chords, "desktop", "other").map((chord) => chordLabel(chord, "other")),
     ).toEqual(["Ctrl+Alt+↓", "Ctrl+Shift+PgDn"]);
     expect(chordAccelerator(mac[0]!)).toBe("CmdOrCtrl+Alt+Down");
+  });
+});
+
+describe("meeting actions", () => {
+  const start = () => appActions().find((action) => action.id === "meetings.start")!;
+  const stop = () => appActions().find((action) => action.id === "meetings.stop")!;
+  function meetingEnv(state: ActionEnv["meetings"]) {
+    const calls: string[] = [];
+    const env = {
+      meetings:
+        state === null
+          ? null
+          : {
+              ...state,
+              start: () => calls.push("start"),
+              show: () => calls.push("show"),
+              stop: () => calls.push("stop"),
+            },
+    } as unknown as ActionEnv;
+    return { env, calls };
+  }
+  const recorder = (recorderState: NonNullable<ActionEnv["meetings"]>["state"]) =>
+    ({ state: recorderState }) as NonNullable<ActionEnv["meetings"]>;
+
+  test("Start recording reads as the Meetings page's button and sits in the File menu", () => {
+    const { env } = meetingEnv(recorder("idle"));
+    expect(actionTitle(start(), env, null)).toBe(
+      englishMessages["meetings.recorderPanel.startRecording"],
+    );
+    expect(start().group).toBe("meetings");
+    expect(start().desktopMenu).toBe("file");
+    expect(stop().desktopMenu).toBe("file");
+    expect(start().keywords).toContain("meeting");
+  });
+
+  test("⌃⌘N on Mac and Ctrl+Alt+N elsewhere, on the web and in the desktop app", () => {
+    for (const surface of ["web", "desktop"] as const) {
+      const mac = applicableChords(start().chords, surface, "mac");
+      expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌃⌘N"]);
+      expect(matchesChord(key("KeyN", { meta: true, ctrl: true }), mac[0]!, "mac")).toBe(true);
+      // ⌘N alone is New chat; ⌥⌘N is Safari's New Window.
+      expect(matchesChord(key("KeyN", { meta: true }), mac[0]!, "mac")).toBe(false);
+      expect(matchesChord(key("KeyN", { meta: true, alt: true }), mac[0]!, "mac")).toBe(false);
+      const other = applicableChords(start().chords, surface, "other");
+      expect(other.map((chord) => chordLabel(chord, "other"))).toEqual(["Ctrl+Alt+N"]);
+      expect(matchesChord(key("KeyN", { ctrl: true, alt: true }), other[0]!, "other")).toBe(true);
+      // Ctrl+Shift+N is the browsers' private window.
+      expect(matchesChord(key("KeyN", { ctrl: true, shift: true }), other[0]!, "other")).toBe(
+        false,
+      );
+    }
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "mac")[0]!)).toBe(
+      "Ctrl+CmdOrCtrl+N",
+    );
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "other")[0]!)).toBe(
+      "CmdOrCtrl+Alt+N",
+    );
+    // Stopping a meeting has no key, so a stray press never ends one.
+    expect(stop().chords ?? []).toEqual([]);
+  });
+
+  test("AltGr+N typing on Windows never starts a recording", () => {
+    const chord = applicableChords(start().chords, "web", "other")[0]!;
+    const altGr = {
+      ...key("KeyN", { ctrl: true, alt: true, key: "ń" }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    };
+    expect(matchesChord(altGr, chord, "other")).toBe(false);
+  });
+
+  test("hidden where meetings don't record; while one records it goes there and Stop joins", () => {
+    expect(start().available(meetingEnv(null).env, null)).toBe(false);
+    expect(stop().available(meetingEnv(null).env, null)).toBe(false);
+
+    // Before the capture code loads, Start starts as soon as it has.
+    const loading = meetingEnv(recorder(null));
+    expect(start().available(loading.env, null)).toBe(true);
+    void start().run(loading.env, null);
+    expect(loading.calls).toEqual(["start"]);
+
+    // After a recording stopped or failed, it starts the next one.
+    for (const state of ["idle", "stopped", "failed"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(actionTitle(start(), view.env, null)).toBe("Start recording");
+      expect(stop().available(view.env, null)).toBe(false);
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["start"]);
+    }
+
+    for (const state of ["starting", "recording", "paused", "stopping"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(start().available(view.env, null)).toBe(true);
+      expect(actionTitle(start(), view.env, null)).toBe("Go to recording");
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["show"]);
+      expect(stop().available(view.env, null)).toBe(state === "recording" || state === "paused");
+    }
+    const recording = meetingEnv(recorder("recording"));
+    void stop().run(recording.env, null);
+    expect(recording.calls).toEqual(["stop"]);
   });
 });

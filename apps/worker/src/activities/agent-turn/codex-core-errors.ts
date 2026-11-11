@@ -22,7 +22,6 @@ export type SubscriptionCoreCodexFailurePayload = {
     | "subscription_capacity_unavailable"
     | "subscription_lease_busy"
     | "subscription_core_unsupported"
-    | "subscription_core_cutover_disabled"
     | "subscription_account_refused"
     | "subscription_failover_exhausted";
   retryable: boolean;
@@ -284,20 +283,6 @@ export function subscriptionCoreUnsupportedFailure(
     {
       error: `${consumer} is not available for ${displayName} subscriptions on this deployment yet.`,
       code: "subscription_core_unsupported",
-      retryable: false,
-    },
-    displayName,
-  );
-}
-
-/** The organization's cutover row for the provider exists but is switched off. */
-export function subscriptionCoreCutoverDisabledFailure(
-  displayName: string = DEFAULT_DISPLAY_NAME,
-): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError(
-    {
-      error: `${displayName} subscriptions are paused for this organization during maintenance.`,
-      code: "subscription_core_cutover_disabled",
       retryable: false,
     },
     displayName,

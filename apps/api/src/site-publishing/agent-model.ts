@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import {
+  isEuResidency,
   resolveWorkspaceSessionDefaults,
   type LimitDecision,
   type OrganizationModelDefaults,
@@ -12,6 +13,7 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveWorkspaceModelSelection,
   selectDefaultSessionModel,
+  settingsWithInferenceResidency,
   type WorkspaceModelSelection,
 } from "@opengeni/core";
 import { getOrganizationModelDefaults, getWorkspace, type Database } from "@opengeni/db";
@@ -80,8 +82,12 @@ export function siteOutsideModelChoice(input: {
       .model;
   // Always the concrete model: a session created without one would take the
   // workspace's ordinary default, which may be a subscription.
-  // The fallback is paid with credits, as the publish dialog says.
-  const credited = input.selections.filter((selection) => selection.model.cost === "credits");
+  // The fallback is paid with credits, as the publish dialog says. In an
+  // EU-only workspace both the model and its fallback must have an EU
+  // residency record; there is no fallback outside the EU.
+  const credited = regionEligibleSelections(input.settings, input.selections).filter(
+    (selection) => selection.model.cost === "credits",
+  );
   if (
     admissibleWorkspaceModel(credited, chosen) &&
     !isSubscriptionBilledModel(input.selections, chosen)
@@ -96,6 +102,16 @@ export function siteOutsideModelChoice(input: {
     !isSubscriptionBilledModel(input.selections, fallback)
     ? { kind: "fallback", model: fallback }
     : { kind: "unavailable" };
+}
+
+/** Under EU-only inference, only selections whose route is EU by its residency record. */
+function regionEligibleSelections(
+  settings: Pick<Settings, "requiredModelGeography">,
+  selections: readonly WorkspaceModelSelection[],
+): readonly WorkspaceModelSelection[] {
+  return settings.requiredModelGeography === "eu"
+    ? selections.filter((selection) => isEuResidency(selection.model.residency))
+    : selections;
 }
 
 /** Actual catalog billing, not just provider-name heuristics, fences every admission. */
@@ -119,7 +135,11 @@ export async function siteCreditModelSelections(
     ...scope,
     subjectId: `site:${siteId}`,
   });
-  return resolveWorkspaceModelSelection(input).filter(
+  const residency = await settingsWithInferenceResidency(deps.db, {
+    ...scope,
+    settings: input.settings,
+  });
+  return regionEligibleSelections(residency, resolveWorkspaceModelSelection(input)).filter(
     (selection) =>
       selection.model.cost === "credits" &&
       admissibleWorkspaceModel([selection], selection.model.id),
@@ -143,7 +163,10 @@ export async function resolveSiteOutsideModel(
     getOrganizationModelDefaults(deps.db, scope.accountId),
   ]);
   return siteOutsideModelChoice({
-    settings: selectionInput.settings,
+    settings: await settingsWithInferenceResidency(deps.db, {
+      ...scope,
+      settings: selectionInput.settings,
+    }),
     selections: resolveWorkspaceModelSelection(selectionInput),
     agentModel: input.agentModel,
     workspaceDefaults: resolveWorkspaceSessionDefaults(workspace?.settings ?? {}),
@@ -164,7 +187,13 @@ export type SiteAgentUnfundedReason = "no_credits" | "allowance_exhausted";
  */
 export function siteUnfundedReason(decision: LimitDecision): SiteAgentUnfundedReason | null {
   if (decision.allowed) return null;
-  if (decision.code === "insufficient_credits") return "no_credits";
+  if (
+    decision.code === "insufficient_credits" ||
+    decision.code === "api_credits_required" ||
+    decision.code === "byok_paid_credit_required" ||
+    decision.code === "subscription_plan_required"
+  )
+    return "no_credits";
   if (decision.code === "allowance_exhausted") return "allowance_exhausted";
   return null;
 }
@@ -188,6 +217,8 @@ export async function siteOutsideModelFunding(
     action: "agent_run:create",
     quantity: 1,
     model,
+    // A published Site is set up in the app: its visitors' turns are app work.
+    billingOrigin: "app",
   });
 }
 

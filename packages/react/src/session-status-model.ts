@@ -1,4 +1,5 @@
 import type { SessionStatus } from "@opengeni/sdk";
+import { SESSION_ARCHIVE_STOP_REASON } from "@opengeni/contracts/session-history";
 import { type OpenGeniText } from "./messages/runtime";
 
 /** Status token family (`--og-color-status-<tone>`) for a session status. */
@@ -9,8 +10,48 @@ export type SessionStatusTone = "queued" | "running" | "waiting" | "idle" | "fai
  * next turn the runtime refused to start (an admission block): nothing is
  * asked of the person, so it must not read as "Waiting on you". Accepted work
  * is kept, and Resume (or a new message) rechecks and starts it again.
+ *
+ * `archived` is a chat someone archived, or one the deployment archived after
+ * a long idle period: read-only, kept in long-term storage, continuable in a
+ * new chat. Archiving stops running work, which leaves the server status
+ * `cancelled`; that internal word never reaches a person for an archive.
  */
-export type SessionDisplayStatus = SessionStatus | "blocked";
+export type SessionDisplayStatus = SessionStatus | "blocked" | "archived";
+
+/** The archive facts a session (or a list row) carries; both are optional on older servers. */
+export type SessionArchiveFacts = {
+  archived?: boolean | undefined;
+  retention?: { archive: unknown } | null | undefined;
+};
+
+/**
+ * True when the chat is archived: archived by a person (`archived`, set the
+ * moment Archive is pressed) or moving to or in long-term storage
+ * (`retention.archive`). Either way it is read-only.
+ */
+export function sessionArchived(session: SessionArchiveFacts): boolean {
+  return session.archived === true || (session.retention?.archive ?? null) !== null;
+}
+
+/**
+ * True for the `cancelled` status change that archiving a chat records when it
+ * stops the chat's work: a timeline reads it as archived, never "cancelled".
+ */
+export function sessionStatusChangeIsArchive(payload: {
+  status?: unknown;
+  reason?: unknown;
+}): boolean {
+  return payload.status === "cancelled" && payload.reason === SESSION_ARCHIVE_STOP_REASON;
+}
+
+/** The status a timeline status divider presents: archived, stuck, or its own. */
+export function sessionStatusItemDisplayStatus(item: {
+  status: SessionStatus;
+  blocked?: true | undefined;
+  archived?: true | undefined;
+}): SessionDisplayStatus {
+  return item.archived ? "archived" : item.blocked ? "blocked" : item.status;
+}
 
 /** True when a `requires_action` session is held by an admission block, not by a person. */
 export function sessionAdmissionBlocked(session: {
@@ -24,12 +65,50 @@ export function sessionAdmissionBlocked(session: {
   );
 }
 
-/** The status to present for a session (or a list row carrying its admission block). */
-export function sessionDisplayStatus(session: {
-  status: SessionStatus;
-  admissionBlock?: unknown;
-}): SessionDisplayStatus {
+/**
+ * The status to present for a session (or a list row carrying its admission
+ * block and archive facts). An archived chat reads as archived whatever its
+ * last run state was.
+ */
+export function sessionDisplayStatus(
+  session: {
+    status: SessionStatus;
+    admissionBlock?: unknown;
+  } & SessionArchiveFacts,
+): SessionDisplayStatus {
+  if (sessionArchived(session)) return "archived";
   return sessionAdmissionBlocked(session) ? "blocked" : session.status;
+}
+
+/**
+ * Where a person's ordinary Send shows before the server answers. While a
+ * turn is still current or prompts already wait, it joins the queue. A turn
+ * parked on provider capacity (a used-up plan, an account to reconnect) is
+ * not work the Send waits for: the server starts the new message right away
+ * in its place, so it shows in the chat, unless an admission block (used-up
+ * Opengeni allowance or credits) holds every new turn.
+ */
+export function promptSendDestination(input: {
+  status: SessionStatus | null | undefined;
+  activeTurnId: string | null | undefined;
+  queuedPrompts: number;
+  admissionBlock?: unknown;
+}): "chat" | "queue" {
+  if (input.status === "waiting_capacity" && (input.admissionBlock ?? null) === null) return "chat";
+  return input.queuedPrompts > 0 ||
+    input.status === "running" ||
+    (input.activeTurnId ?? null) !== null
+    ? "queue"
+    : "chat";
+}
+
+/**
+ * Whether the session's own turn keeps the composer's run control (Pause)
+ * available: it runs, recovers, or is parked on provider capacity, where
+ * Pause is how a person stops it continuing by itself at the reset.
+ */
+export function sessionTurnKeepsRunControl(status: SessionStatus | null | undefined): boolean {
+  return status === "running" || status === "recovering" || status === "waiting_capacity";
 }
 
 /** Renderer-neutral session status presentation: label, color family and liveness. */
@@ -47,6 +126,8 @@ export const SESSION_STATUS_PRESENTATION = (
   blocked: { label: t("sessionStatusModel.stuck"), tone: "failed", pulse: false },
   failed: { label: t("sessionStatusModel.failed"), tone: "failed", pulse: false },
   cancelled: { label: t("sessionStatusModel.cancelled"), tone: "cancelled", pulse: false },
+  // Read-only and settled: the quiet neutral hue of a stopped chat.
+  archived: { label: t("sessionStatusModel.archived"), tone: "cancelled", pulse: false },
 });
 
 /**
@@ -96,4 +177,5 @@ export const SESSION_STATUS_BADGE: Record<
     fill: "status-failed",
   },
   cancelled: { text: "fg-subtle", border: "border", borderAlpha: 1, fill: "status-cancelled" },
+  archived: { text: "fg-subtle", border: "border", borderAlpha: 1, fill: "status-cancelled" },
 };

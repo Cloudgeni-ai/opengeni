@@ -7,12 +7,15 @@ import {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
 } from "../timeline/work-presentation";
 import { useErrorMessage } from "../lib/error-message";
+import { resolveAgentSignals, type AgentSignals } from "../session-agents-model";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
 import { TurnStepsAction, TurnStepsLoader } from "../timeline/turn-steps";
@@ -24,12 +27,16 @@ import {
   type TimelineSearchTarget,
 } from "./timeline-search";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
+import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
   compactionSkipTitle,
+  isTrimmedCompaction,
 } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
@@ -43,6 +50,7 @@ import {
   ArrowRightIcon,
   ArrowUpIcon,
   BotIcon,
+  CalendarClockIcon,
   CheckCircle2Icon,
   CheckIcon,
   ChevronDownIcon,
@@ -58,13 +66,13 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   XCircleIcon,
+  ZapIcon,
 } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Component,
   Fragment,
-  Suspense,
   createContext,
   lazy,
   memo,
@@ -95,11 +103,12 @@ import {
 } from "../older-history";
 import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
+import type { ArtifactLinkScope } from "./artifact-link-scope";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
   timelineAnchorCorrection,
-  timelineHasReader,
+  timelineHasSelection,
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
@@ -129,10 +138,12 @@ import {
 } from "./tip-follow";
 import {
   ActivityRail,
+  automationRunOutcomesOnly,
   buildTimeline,
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
+  type TimelineLivePause,
   type ActivityItem,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -148,6 +159,7 @@ import {
   type RetainedScreenshotLoader,
   type VideoArtifactPlaybackLoader,
   type ToolRegistry,
+  type TurnSummaryFacetConfiguration,
   type TurnSummaryOptions,
   type TurnSummaryStatus,
   type UserMessageItem,
@@ -168,14 +180,17 @@ import {
   isAgentWorkHumanInput,
 } from "../timeline/agent-work-human-input";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
+import { annotationQuoteText } from "../timeline/annotation-model";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
   agentMemberSessionId,
   agentMemberText,
   agentMemberTitle,
+  automationRunLine,
   cleanMachineInputSummary,
   isAgentMember,
+  isAutomationRunBatch,
   machineInputBatchLabel,
   machineInputSummaryIsUseful,
   readableMachineInputSource,
@@ -188,6 +203,7 @@ import {
 } from "../timeline/agent-identity";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
   noticeDisplayText,
   noticeIsResolvedApproval,
@@ -209,6 +225,10 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LazyPart } from "./lazy-part";
+import { MessageAttachments } from "./message-attachments";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -231,6 +251,14 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause, from its effective control
+   * (`timelineLivePause(session.effectiveControl)`). A turn still open under a
+   * pause reads "Paused" with its clock stopped, and paused time is not
+   * counted as work. Omit to rely on the session's events alone, which do not
+   * show a pause of an ancestor or the workspace that interrupted nothing.
+   */
+  pause?: TimelineLivePause | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /**
@@ -319,6 +347,13 @@ export type MessageTimelineProps = {
    * sandbox downloads by default.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Reads in the conversation's workspace: workspace-less `artifact:` links
+   * resolve through it, and the files sent with each user message load from
+   * it (`getFile` and `createFileDownloadUrl`), shown above the message the
+   * way they looked in the composer. `SessionConversation` supplies it.
+   */
+  artifactScope?: ArtifactLinkScope | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -333,6 +368,15 @@ export type MessageTimelineProps = {
   /** Customize collapsed turn facets for this timeline instance. */
   genieLoading?: GenieLoadingOptions | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
+  /**
+   * Show how the agent works on each turn row. Defaults to true. With `false`
+   * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
+   * step under it and no step facets (yours included). The steps stay behind
+   * the row for anyone who opens it. An object reads only its `turnDetail`
+   * switch. `SessionConversation` and `NativeSessionScreen` pass their own
+   * `agentSignals` here.
+   */
+  agentSignals?: AgentSignals | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
@@ -377,6 +421,12 @@ export type MessageTimelineProps = {
   onJumpToLatestQuestion?: (() => Promise<number | null>) | undefined;
   /** Host-owned content appended after timeline groups, such as startup progress. */
   trailingState?: ReactNode | undefined;
+  /**
+   * Session-failure event ids the host shows itself with their actions, such
+   * as a failed-session banner with Retry. Each failure is shown once: their
+   * turns keep a quiet "Failed" and the timeline does not repeat their text.
+   */
+  presentedFailureEventIds?: readonly string[] | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
@@ -397,6 +447,11 @@ export type MessageTimelineProps = {
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
  *   wheel/keys/pointer-armed scroll-up, or a settled scrollend away from the
  *   tip while the tip-follow camera is idle (Vimium / unfocused PageUp).
+ *   Moving the view is the only reader signal for follow: focus and clicks
+ *   inside the conversation (a card's buttons, Copy, a menu) never unpin, so
+ *   answering one approval after another keeps the newest card in view. A
+ *   text selection (content must not move under it) and an in-place
+ *   disclosure toggle (it keeps its place) are the two non-scroll exceptions.
  *   Height shrink compensates scrollTop by Δh (collapse owns motion); tip-ease
  *   pauses briefly so the two don't fight. Programmatic camera writes are
  *   tagged so their scroll echoes never count as leave.
@@ -452,6 +507,9 @@ const LIVE_NOTE_GAP_PX = 20;
 const LIVE_NOTE_RESERVE_MS = 700;
 /** Lets a live work disclosure report whether it is open (see `reportLiveFold`). */
 const LiveNoteFoldContext = createContext<((workId: string, open: boolean) => void) | null>(null);
+/** False when the host hides agent signals: turn rows then show only their status. */
+const AgentSignalsContext = createContext(true);
+const STATUS_ONLY_FACETS = { replace: [] } as const satisfies TurnSummaryFacetConfiguration;
 
 // State: 0 underfill retry, 1 prefetch pending, 2 compatibility-settled,
 // 3 explicit no-progress waiting to become an underfill retry.
@@ -518,6 +576,22 @@ function invokeOlderLoad(
 function maxScrollOf(node: HTMLElement): number {
   // Browser layout guarantees scrollHeight is at least clientHeight.
   return node.scrollHeight - node.clientHeight;
+}
+
+/**
+ * React bubbles events from portaled content (a card's setup dialog, a menu)
+ * through the timeline's handlers although that content is outside the
+ * scroller. Only events from the scroller's own DOM are reader intent.
+ */
+function eventFromScrollerDom(event: {
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
+}): boolean {
+  return (
+    event.currentTarget instanceof Node &&
+    event.target instanceof Node &&
+    event.currentTarget.contains(event.target)
+  );
 }
 
 /**
@@ -619,6 +693,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   resolveLink,
+  artifactScope,
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
@@ -626,6 +701,7 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  pause,
   renderMessageActions,
   renderMessageSender,
   renderMessageText,
@@ -645,6 +721,7 @@ export function MessageTimeline({
   computeLabel = null,
   genieLoading,
   turnSummary,
+  agentSignals: agentSignalsProp,
   autoFollow = true,
   onAnnotate,
   questionNavMinViewportHeight = 0,
@@ -660,20 +737,25 @@ export function MessageTimeline({
   onLoadNewer,
   onJumpToLatest,
   trailingState,
+  presentedFailureEventIds,
   emptyState,
   className,
 }: MessageTimelineProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
+  const agentSignals = resolveAgentSignals(agentSignalsProp).turnDetail;
   const resolvedItems = useMemo(() => {
-    const projectedItems = items ?? buildTimeline(t, events ?? []);
+    const builtItems = items ?? buildTimeline(t, events ?? []);
+    // A person who never sees the agent's work reads an automation run as
+    // its line and its answer only.
+    const projectedItems = agentSignals ? builtItems : automationRunOutcomesOnly(builtItems);
     if (!shouldRenderAuthNeeded) {
       return projectedItems;
     }
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded, t]);
+  }, [items, events, shouldRenderAuthNeeded, agentSignals, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;
@@ -795,9 +877,17 @@ export function MessageTimeline({
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
+  const pauses = useTimelinePauses(events, pause, readableTurns);
+  // By value: hosts may pass a fresh array on every render.
+  const presentedFailureKey = presentedFailureEventIds?.join("\n") ?? "";
   const projectedGroups = useMemo(
-    () => groupTimeline(t, resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns, t],
+    () =>
+      groupTimeline(t, resolvedItems, {
+        readableTurns,
+        pauses,
+        presentedFailureEventIds: presentedFailureKey ? presentedFailureKey.split("\n") : undefined,
+      }),
+    [resolvedItems, readableTurns, pauses, presentedFailureKey, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
@@ -852,10 +942,10 @@ export function MessageTimeline({
   const questionNavMinViewportRef = useRef(questionNavMinViewportHeight);
   questionNavMinViewportRef.current = questionNavMinViewportHeight;
   const scheduleQuestionNavRef = useRef<() => void>(() => {});
-  // Unpinned is not the same as away from the tip: focusing a control in the
-  // conversation (Copy, a connection card) hands the view to the reader while
-  // they are still at the bottom. Offer the jump only once there is something
-  // below them, or a newer window / catch-up to skip.
+  // Unpinned is not the same as away from the tip: selecting text or opening a
+  // disclosure hands the view to the reader while they are still at the
+  // bottom. Offer the jump only once there is something below them, or a newer
+  // window / catch-up to skip.
   const [awayFromTip, setAwayFromTip] = useState(false);
   const jumpPillShown = autoFollow && ((!pinned && awayFromTip) || hasNewer || canSkipTipCatchup);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
@@ -919,6 +1009,10 @@ export function MessageTimeline({
    * or explicit Jump to latest releases this fence.
    */
   const disclosureKeepsUnpinnedRef = useRef(false);
+  /** The in-place disclosure the reader last toggled while that fence holds. */
+  const disclosureToggleRef = useRef<Element | null>(null);
+  /** Distance from the end measured on the DOM right before this commit. */
+  const tipGapBeforeCommitRef = useRef<number | null>(null);
   /**
    * Unarmed scroll-away observed; waiting for scrollend (or rAF fallback).
    * Blocks layout tip-follow so a stream token cannot yank before leave settles.
@@ -1153,20 +1247,7 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     liveNoteIdsByWorkRef.current = liveNoteIdsByWork;
   }, [liveNoteIdsByWork]);
-  const turnsWithOutput = useMemo(
-    () =>
-      new Set(
-        resolvedItems.flatMap((item) =>
-          "turnId" in item &&
-          item.turnId &&
-          (item.kind === "tool-call" ||
-            ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
-            ? [item.turnId]
-            : [],
-        ),
-      ),
-    [resolvedItems],
-  );
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(resolvedItems), [resolvedItems]);
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -1294,6 +1375,7 @@ export function MessageTimeline({
         stopSettlement();
         releasePinFromReader();
         disclosureKeepsUnpinnedRef.current = true;
+        disclosureToggleRef.current = null;
       }
     };
     node.ownerDocument.addEventListener("selectionchange", onSelection);
@@ -1366,6 +1448,9 @@ export function MessageTimeline({
     // timeline reader intent. A real timeline wheel in either direction
     // releases the disclosure fence; downward movement may then re-pin
     // naturally when it reaches the bottom.
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
@@ -1393,7 +1478,7 @@ export function MessageTimeline({
     currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button && event.pointerType === "mouse") {
+    if ((event.button && event.pointerType === "mouse") || !eventFromScrollerDom(event)) {
       return;
     }
     stopSettlement();
@@ -1415,7 +1500,14 @@ export function MessageTimeline({
       : null;
   };
 
-  const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+  const onKeyDown = (event: {
+    key: string;
+    target: EventTarget | null;
+    currentTarget: EventTarget | null;
+  }) => {
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
@@ -1862,6 +1954,8 @@ export function MessageTimeline({
     previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
     const readingAnchor = readingAnchorRef.current;
     readingAnchorRef.current = null;
+    const tipGapBeforeCommit = tipGapBeforeCommitRef.current;
+    tipGapBeforeCommitRef.current = null;
     const settlement = settlementRef.current;
     settlementRef.current = null;
     const attempt = olderLoadAttemptRef.current;
@@ -1976,6 +2070,25 @@ export function MessageTimeline({
           applyPinned(false);
         }
       }
+    } else if (
+      autoFollow &&
+      !pinnedRef.current &&
+      !hasNewer &&
+      disclosureKeepsUnpinnedRef.current &&
+      tipGapBeforeCommit !== null &&
+      tipGapBeforeCommit <= 1 &&
+      disclosureToggleRef.current?.isConnected === true &&
+      disclosureToggleRef.current.getAttribute("aria-expanded") === "false" &&
+      !timelineHasSelection(node)
+    ) {
+      // A toggle keeps the view where the reader left it, but once the
+      // reader has closed it again and sits at the very end, nothing is open
+      // for them to read: new content follows like any reader at the tip,
+      // instead of growing out of view behind a Jump to latest.
+      disclosureKeepsUnpinnedRef.current = false;
+      disclosureToggleRef.current = null;
+      applyPinned(true);
+      snapToBottom(node);
     } else if (!pinnedRef.current && readingAnchor && readableTurns) {
       // A live work row moves behind newly streamed prose. Correct only the
       // residual movement native anchoring did not absorb, using the reader's
@@ -2617,13 +2730,13 @@ export function MessageTimeline({
                         style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                       >
                         {onAnnotate ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationSelection
                               rootRef={scrollRef}
                               sources={annotationSources}
                               onAnnotate={onAnnotate}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
                         {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
@@ -2673,11 +2786,15 @@ export function MessageTimeline({
                             touchPositionRef.current = null;
                           }}
                           onClickCapture={(event) => {
+                            if (!eventFromScrollerDom(event)) return;
                             const target =
                               event.target instanceof Element
                                 ? event.target.closest("button[aria-expanded]")
                                 : null;
-                            if (target) {
+                            // An in-place disclosure keeps its toggle where the reader
+                            // left it. A menu or dialog opener changes nothing here.
+                            const popup = target?.getAttribute("aria-haspopup");
+                            if (target && (popup === null || popup === "false")) {
                               if (target.hasAttribute("data-og-work-header")) {
                                 releaseProgress(
                                   target
@@ -2687,13 +2804,21 @@ export function MessageTimeline({
                               }
                               releasePinFromReader();
                               disclosureKeepsUnpinnedRef.current = true;
+                              disclosureToggleRef.current = target;
                             }
                           }}
                           onFocusCapture={(event) => {
-                            if (readableTurns && event.target !== event.currentTarget) {
+                            // Focus is not reading position: pressing a card's button
+                            // (Chromium focuses it) or a card handing focus to the next
+                            // one leaves follow alone. Focus that scrolls the view away
+                            // from the tip unpins through the scroll path like any
+                            // other navigation. Only a settle ease yields to it.
+                            if (
+                              readableTurns &&
+                              event.target !== event.currentTarget &&
+                              eventFromScrollerDom(event)
+                            ) {
                               stopSettlement();
-                              releasePinFromReader();
-                              disclosureKeepsUnpinnedRef.current = true;
                             }
                           }}
                           onPointerDown={onPointerDown}
@@ -2712,13 +2837,18 @@ export function MessageTimeline({
                         >
                           <TimelineBeforeLayout
                             capture={() => {
-                              if (readableTurns && timelineHasReader(scrollRef.current)) {
+                              // Selectionchange can arrive after this commit: a fresh
+                              // selection still owns the view before React moves it.
+                              if (readableTurns && timelineHasSelection(scrollRef.current)) {
                                 releasePinFromReader();
                               }
                               readingAnchorRef.current =
                                 !pinnedRef.current && scrollRef.current
                                   ? captureTimelineAnchor(scrollRef.current)
                                   : null;
+                              tipGapBeforeCommitRef.current = scrollRef.current
+                                ? maxScrollOf(scrollRef.current) - scrollRef.current.scrollTop
+                                : null;
                               settlementRef.current =
                                 readableTurns &&
                                 autoFollow &&
@@ -2921,13 +3051,13 @@ export function MessageTimeline({
                           </TimelineBeforeLayout>
                         </div>
                         {draftAnnotations && draftAnnotations.length > 0 ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationMarkers
                               rootRef={scrollRef}
                               annotations={draftAnnotations}
                               onSelect={onDraftAnnotationSelect}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
 
                         <div
@@ -3063,14 +3193,18 @@ export function MessageTimeline({
   );
   // Agent-authored object links resolve through the host, never the console.
   return (
-    <OpenGeniLinkProvider resolveLink={resolveLink}>
+    <OpenGeniLinkProvider resolveLink={resolveLink} artifactScope={artifactScope}>
       <MessageSenderContext.Provider value={renderMessageSender}>
         <AgentIdentityProvider
           items={resolvedItems}
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+          <ProviderLogoProvider value={resolveProviderLogo}>
+            <AgentSignalsContext.Provider value={agentSignals}>
+              {timeline}
+            </AgentSignalsContext.Provider>
+          </ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
@@ -3199,6 +3333,8 @@ type TimelineGroupRenderBoundaryProps = {
 
 type TimelineGroupRenderBoundaryState = {
   failed: boolean;
+  /** The item's code failed to download; only a reload helps. */
+  notLoaded: boolean;
   resetKeys: readonly unknown[];
 };
 
@@ -3222,7 +3358,7 @@ function TimelineGroupRenderError() {
     <div
       data-testid="timeline-group-render-error"
       role="status"
-      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
+      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-2 px-3 py-2 text-og-menu text-og-fg-muted"
     >
       <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div>
@@ -3239,11 +3375,12 @@ class TimelineGroupRenderBoundary extends Component<
 > {
   state: TimelineGroupRenderBoundaryState = {
     failed: false,
+    notLoaded: false,
     resetKeys: this.props.resetKeys,
   };
 
-  static getDerivedStateFromError(): Partial<TimelineGroupRenderBoundaryState> {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): Partial<TimelineGroupRenderBoundaryState> {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   static getDerivedStateFromProps(
@@ -3251,14 +3388,14 @@ class TimelineGroupRenderBoundary extends Component<
     state: TimelineGroupRenderBoundaryState,
   ): Partial<TimelineGroupRenderBoundaryState> | null {
     if (timelineRenderResetKeysChanged(state.resetKeys, props.resetKeys)) {
-      return { failed: false, resetKeys: props.resetKeys };
+      return { failed: false, notLoaded: false, resetKeys: props.resetKeys };
     }
     return null;
   }
 
   render(): ReactNode {
     if (this.state.failed) {
-      return <TimelineGroupRenderError />;
+      return this.state.notLoaded ? <LoadFailureNotice /> : <TimelineGroupRenderError />;
     }
     return this.props.children;
   }
@@ -3471,6 +3608,9 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
+  // Without agent signals a turn row is only its status ("Working · 8s").
+  const agentSignals = useContext(AgentSignalsContext);
+  const rowFacets = agentSignals ? turnSummary?.facets : STATUS_ONLY_FACETS;
   const previousSingleActivity = useRef<ActivityItem | undefined>(undefined);
   useLayoutEffect(() => {
     const work =
@@ -3515,6 +3655,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
+        if (!agentSignals && readableWorkIsEmpty(group)) return null;
         const preparing = isPreparingWork(group, { startupDetails, startupDismissed });
         if (preparing) {
           // Preparation is primary, never hidden in an activity disclosure.
@@ -3537,18 +3678,20 @@ const TimelineGroupView = memo(function TimelineGroupView({
           workStatus.kind === "working"
             ? {
                 ...workStatus,
-                preview: readableWorkShowsPreview(group) ? (
-                  <RollingActivity
-                    items={group.items}
-                    toolRegistry={toolRegistry}
-                    showCount={false}
-                  />
-                ) : undefined,
+                preview:
+                  agentSignals && readableWorkShowsPreview(group) ? (
+                    <RollingActivity
+                      items={group.items}
+                      toolRegistry={toolRegistry}
+                      showCount={false}
+                    />
+                  ) : undefined,
               }
             : workStatus.kind === "waiting"
               ? {
                   kind: "waiting",
                   label: workStatus.label,
+                  waitingOn: workStatus.waitingOn,
                   since: workStatus.since,
                   // One quiet line under the row saying what the wait needs,
                   // kept visible when the work is expanded; never a second
@@ -3597,7 +3740,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
-              facets={turnSummary?.facets}
+              facets={rowFacets}
+              renderLiveMark={turnSummary?.renderLiveMark}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
                 group.work.liveNoteIds?.length && reportLiveFold
@@ -3724,7 +3868,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             bare
             defaultOpen={settleChrome ? true : undefined}
             foldKey={group.id}
-            facets={turnSummary?.facets}
+            facets={rowFacets}
             contextCompactionCount={contextCompactionCount}
           >
             <ActivityRail
@@ -3759,6 +3903,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           }
           liveHeader={
             turnSummary?.rolling &&
+            agentSignals &&
             !containsPresentedImage &&
             !group.outcome &&
             !foldLiveCluster ? (
@@ -3770,7 +3915,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             ) : undefined
           }
           foldKey={group.id}
-          facets={turnSummary?.facets}
+          facets={rowFacets}
           settleFold={settleFold}
           contextCompactionCount={contextCompactionCount}
         >
@@ -3829,7 +3974,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           foldKey={group.id}
-          facets={turnSummary?.facets}
+          facets={rowFacets}
           settleFold={settleFold}
           copyText={insideTurn ? undefined : turnCopyText}
           contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
@@ -4266,8 +4411,15 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Switching a Codex chat to another model rebuilds its context once; say
+  // that plainly instead of describing an ordinary compaction.
+  const modelSwitch = item.implementation === "portable_model_switch";
+  // The chat's model could not summarize, so older messages were trimmed.
+  const trimmed = isTrimmedCompaction(item);
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL(t)[item.trigger] : null;
+    item.trigger && item.phase !== "started" && !modelSwitch
+      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
+      : null;
   const before =
     item.estimatedTokensBefore != null
       ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
@@ -4278,21 +4430,30 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       : null;
   const title =
     item.phase === "started"
-      ? t("messageTimeline.compactingConversationHistory")
+      ? modelSwitch
+        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
+        : t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
-        ? before && after
-          ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-          : t("messageTimeline.conversationHistoryCompacted")
+        ? trimmed
+          ? COMPACTION_TRIMMED_TITLE(t)
+          : modelSwitch
+            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+            : before && after
+              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+              : t("messageTimeline.conversationHistoryCompacted")
         : compactionSkipTitle(t, item.skipReason);
-  const subtitle =
-    item.phase === "compacted"
+  const subtitle = trimmed
+    ? COMPACTION_TRIMMED_SUBTITLE(t)
+    : item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
         : null;
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
   const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  // Longer copy wraps, centred, instead of truncating.
+  const wraps = failed || trimmed;
   const pill = failed
     ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
     : item.phase === "started"
@@ -4305,7 +4466,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 border px-3 py-1.5 text-og-sm",
           // A failure's recovery step may wrap on narrow screens; a full pill
           // radius would pinch its second line.
-          failed ? "rounded-og-lg" : "rounded-full",
+          wraps ? "rounded-og-lg" : "rounded-full",
           pill,
         )}
         role="status"
@@ -4321,13 +4482,13 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           <span
             className={cn(
               "min-w-0 max-w-full text-og-xs",
-              failed ? "text-balance text-center" : "inline-flex items-center gap-1",
+              wraps ? "text-balance text-center" : "inline-flex items-center gap-1",
             )}
           >
             {subtitle ? (
-              <span className={cn("opacity-80", !failed && "min-w-0 truncate")}>{subtitle}</span>
+              <span className={cn("opacity-80", !wraps && "min-w-0 truncate")}>{subtitle}</span>
             ) : null}
-            {subtitle && details && failed ? " " : null}
+            {subtitle && details && wraps ? " " : null}
             {details ? (
               <button
                 type="button"
@@ -4405,22 +4566,28 @@ function UserMessageRow({
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const deliveryFailed = item.delivery?.state === "failed";
+  const resources = item.resources ?? [];
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         <MessageSenderSlot item={item} />
+        {resources.some((resource) => resource.kind === "file") ? (
+          <MessageAttachments resources={resources} className="justify-end" />
+        ) : null}
         <CopyHoverFrame
           copyText={
             item.text ||
             (item.annotations ?? [])
-              .map((annotation) => `${annotation.quote}\n${annotation.note}`)
+              .map((annotation) => `${annotationQuoteText(annotation)}\n${annotation.note}`)
               .join("\n\n")
           }
           label={t("messageTimeline.copyMessage")}
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
-              {renderMessageActions?.(item)}
+              {renderMessageActions ? (
+                <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+              ) : null}
               <MessageFooterTime occurredAt={item.occurredAt} />
             </>
           }
@@ -4506,7 +4673,9 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
     item.response.outcome === "answered"
       ? t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
-        ? t("messageTimeline.skipped")
+        ? item.response.agentDecides
+          ? t("messageTimeline.youLetTheAgentDecide")
+          : t("messageTimeline.skipped")
         : item.response.outcome === "expired"
           ? t("messageTimeline.expired")
           : t("messageTimeline.cancelled");
@@ -4757,7 +4926,9 @@ function AgentMessageRow({
       trailing={
         item.streaming ? null : (
           <>
-            {renderMessageActions?.(item)}
+            {renderMessageActions ? (
+              <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+            ) : null}
             <MessageFooterTime occurredAt={item.occurredAt} />
           </>
         )
@@ -4899,13 +5070,14 @@ function SessionStatusRow({
   item: {
     status: SessionStatus;
     blocked?: true;
+    archived?: true;
     occurredAt: string;
     resolvedAt?: string;
   };
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const status = item.blocked ? "blocked" : item.status;
+  const status = sessionStatusItemDisplayStatus(item);
   const meta = SESSION_STATUS_META(t)[status];
   return (
     <div
@@ -5024,6 +5196,9 @@ function MachineInputBatchRow({
   const identity = useAgentIdentity();
   const label = machineInputBatchLabel(t, item.members, identity.titleFor);
   const single = item.members.length === 1 ? item.members[0]! : null;
+  if (isAutomationRunBatch(item.members)) {
+    return <AutomationRunRow item={item} />;
+  }
   if (single?.kind === "media_generation_result" && single.result) {
     return (
       <VideoGenerationResultRow
@@ -5092,6 +5267,41 @@ function MachineInputBatchRow({
           {truncate(singleSummary, 160)}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * An automation acted in this chat: one quiet line saying what happened,
+ * above the agent's answer. Its instructions are the agent's business and
+ * never shown here.
+ */
+function AutomationRunRow({ item }: { item: MachineInputBatchItem }) {
+  const t = useOpenGeniText();
+  const enter = useEntranceAnimation();
+  const line = automationRunLine(t, item.members);
+  const Icon = item.members.some((member) => (member.automation?.eventCount ?? 0) > 0)
+    ? ZapIcon
+    : CalendarClockIcon;
+  const received = t("messageTimeline.receivedClocktime", {
+    clockTime: formatClockTime(t, item.occurredAt),
+  });
+  return (
+    <div
+      className={cn(enter && "animate-og-enter", "flex justify-center px-3")}
+      data-og-automation-run=""
+    >
+      <p
+        className="inline-flex max-w-lg min-w-0 items-start gap-1.5 text-og-sm text-og-fg-muted"
+        title={`${line}\n${received}`}
+      >
+        <Icon aria-hidden className="mt-[0.2em] size-3.5 shrink-0 text-og-fg-subtle" />
+        <span className="line-clamp-2 text-center">{line}</span>
+        <span className="sr-only">
+          {" · "}
+          <time dateTime={item.occurredAt}>{received}</time>
+        </span>
+      </p>
     </div>
   );
 }
@@ -5198,15 +5408,17 @@ function MachineInputRow({
     );
   }
   const source = readableMachineInputSource(member.sourceId);
-  const summary = cleanMachineInputSummary(member.summary);
+  // An automation run says what happened; its summary may be its instructions.
+  const automation = member.kind === "scheduled_occurrence";
+  const summary = automation ? "" : cleanMachineInputSummary(member.summary);
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
         <span className="text-og-control font-medium text-og-fg-muted">
-          {MACHINE_INPUT_META(t)[member.kind]}
+          {automation ? automationRunLine(t, [member]) : MACHINE_INPUT_META(t)[member.kind]}
         </span>
-        {source && (
+        {source && !automation && (
           <span className="ml-1.5 text-og-control text-og-fg-subtle">
             {t("messageTimeline.fromSource", { source })}
           </span>
@@ -5285,7 +5497,7 @@ function VideoGenerationResultRow({
         </div>
         <CheckCircle2Icon
           aria-label={t("messageTimeline.ready")}
-          className="size-4 shrink-0 text-og-status-success"
+          className="size-4 shrink-0 text-og-status-idle"
         />
       </div>
     </section>
@@ -5302,6 +5514,32 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   if (item.allowance) return <AllowanceExhaustedRow refusal={item.allowance} />;
   if (item.sessionUsageLimit) return <SessionUsageLimitRow stop={item.sessionUsageLimit} />;
   if (item.learningRefusal) return <LearningRefusalRow refusal={item.learningRefusal} />;
+  if (item.retriedAttempt) {
+    // The turn's final outcome carries the failure that still matters; this
+    // retried attempt stays one quiet step, its recorded text a click away.
+    return (
+      <details className="group text-og-sm text-og-fg-muted" role="note" data-og-retried-attempt="">
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
+          <ChevronRightIcon
+            aria-hidden
+            className="size-3.5 transition-transform group-open:rotate-90"
+          />
+          <StatusDot status="failed" className="size-1" />
+          <span title={new Date(item.occurredAt).toLocaleString(t.locale)}>
+            {t("messageTimeline.attemptFailedRetried")}
+          </span>
+        </summary>
+        <div className="mt-1 pl-5">
+          <p className="whitespace-pre-wrap break-words">{noticeDisplayText(t, item)}</p>
+          {typeof item.details?.value === "string" ? (
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono text-og-control">
+              {item.details.value}
+            </pre>
+          ) : null}
+        </div>
+      </details>
+    );
+  }
   if (item.recordedOutcome) {
     return (
       <details

@@ -28,14 +28,21 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
         },
         state,
         capacity: Reported {
+            guest: None,
             memory_free_mib: 29_000,
             memory_reclaimable_mib: 3_000,
             cpu_millis: 6_500,
             cpu_free_millis: 6_372,
             disk_free_mib: 90_000,
+            disk_available_mib: Some(95_000),
+            disk_reclaimable_mib: 4_000,
             ready: Vec::new(),
             awake: 2,
             sandboxes: 5,
+            pointers_in_service: true,
+            reads_packs: true,
+            sets_aside: true,
+            info: None,
         },
     }
 }
@@ -72,6 +79,26 @@ fn only_the_leader_reports_the_fleet() {
         "compute_fleet_host_memory_reclaimable_bytes{host_name=\"hosts-a\"}",
     );
     assert_eq!(reclaimable, Some(3_000.0 * 1_048_576.0));
+    let reclaimable_disk = value(
+        &text,
+        "compute_fleet_host_disk_reclaimable_bytes{host_name=\"hosts-a\"}",
+    );
+    assert_eq!(reclaimable_disk, Some(4_000.0 * 1_048_576.0));
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_booking_headroom_bytes{host_name=\"hosts-a\"}"
+        ),
+        Some(90_000.0 * 1_048_576.0)
+    );
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"hosts-a\"}"
+        ),
+        Some(95_000.0 * 1_048_576.0)
+    );
+    assert!(!text.contains("compute_fleet_host_disk_free_bytes"));
     assert_eq!(
         value(
             &text,
@@ -94,12 +121,41 @@ fn only_the_leader_reports_the_fleet() {
         Some(1.5)
     );
 
+    // The count moves after standing still 12 s: one gap of 12 s, and
+    // the next note starts the next gap.
+    metrics.still([(HostId(1), Duration::from_secs(12))]);
+    metrics.still([(HostId(1), Duration::from_millis(200))]);
+    metrics.still([(HostId(1), Duration::from_millis(450))]);
+    let text = metrics.render(&hosts);
+    let bucket = |le: &str| {
+        value(
+            &text,
+            &format!(
+                "compute_fleet_host_renewal_gap_seconds_bucket{{host_name=\"hosts-a\",le=\"{le}\"}}"
+            ),
+        )
+    };
+    assert_eq!(bucket("10"), Some(0.0), "{text}");
+    assert_eq!(bucket("15"), Some(1.0), "{text}");
+    assert_eq!(bucket("+Inf"), Some(1.0), "{text}");
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_renewal_gap_seconds_sum{host_name=\"hosts-a\"}"
+        ),
+        Some(12.0)
+    );
+
     // A replica that stops leading forgets what it knew as the leader.
     metrics.leads(false);
     metrics.leads(true);
     let text = metrics.render(&hosts);
     assert!(
         !text.contains("compute_fleet_host_renewal_age_seconds{"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("compute_fleet_host_renewal_gap_seconds_count{"),
         "{text}"
     );
 }
@@ -115,6 +171,32 @@ fn a_lost_host_is_listed_but_reports_no_capacity() {
     let text = metrics.render(&hosts);
     assert!(text.contains("compute_fleet_host_info{host_name=\"hosts-b\",state=\"lost\""));
     assert!(!text.contains("compute_fleet_host_memory_free_bytes{host_name=\"hosts-b\"}"));
+    assert!(!text.contains("compute_fleet_host_disk_available_bytes{host_name=\"hosts-b\"}"));
+}
+
+#[test]
+fn unknown_filesystem_space_is_absent_but_zero_is_a_real_reading() {
+    let metrics = Metrics::default();
+    metrics.leads(true);
+    let mut older = host(1, "older", HostState::Live);
+    older.capacity.disk_available_mib = None;
+    let mut full = host(2, "full", HostState::Live);
+    full.capacity.disk_available_mib = Some(0);
+    let text = metrics.render(&[older, full]);
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"older\"}"
+        ),
+        None
+    );
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_disk_available_bytes{host_name=\"full\"}"
+        ),
+        Some(0.0)
+    );
 }
 
 #[test]

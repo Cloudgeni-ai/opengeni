@@ -64,7 +64,6 @@ export function UploadFilesDialog({
   onOpenChange,
   workspaceId,
   workspaceName,
-  personal,
   canWriteOrganization,
   defaultScope,
   onUploaded,
@@ -73,7 +72,6 @@ export function UploadFilesDialog({
   onOpenChange: (open: boolean) => void;
   workspaceId: string;
   workspaceName: string;
-  personal: boolean;
   canWriteOrganization: boolean;
   defaultScope: KnowledgeEntryScope;
   onUploaded: () => void;
@@ -85,9 +83,11 @@ export function UploadFilesDialog({
   const [scope, setScope] = useState<KnowledgeEntryScope>(defaultScope);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const scopes: KnowledgeEntryScope[] = personal
-    ? ["personal"]
-    : ["workspace", "personal", ...(canWriteOrganization ? (["organization"] as const) : [])];
+  const scopes: KnowledgeEntryScope[] = [
+    "workspace",
+    "personal",
+    ...(canWriteOrganization ? (["organization"] as const) : []),
+  ];
 
   const add = (list: FileList | null) => {
     const next = Array.from(list ?? []);

@@ -194,6 +194,17 @@ test("organization admins choose the default audience and admin visibility, with
     adminsSeePrivateSchedules: false,
   });
   expect((await patch(app, {})).status).toBe(422);
+  // Members connect their own machines until an owner or admin turns it off.
+  expect(await (await app.request(endpoint, { headers })).json()).toMatchObject({
+    membersConnectOwnMachines: true,
+  });
+  const ownMachinesOff = await patch(app, { membersConnectOwnMachines: false });
+  expect(ownMachinesOff.status).toBe(200);
+  expect(await ownMachinesOff.json()).toMatchObject({
+    membersConnectOwnMachines: false,
+    defaultVisibility: "private",
+  });
+  expect((await patch(app, { membersConnectOwnMachines: true })).status).toBe(200);
 
   // A deployment can only narrow what the organization chose.
   const narrowed = appFor({

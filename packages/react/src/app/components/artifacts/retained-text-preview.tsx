@@ -1,6 +1,8 @@
 import { Component, type ReactNode, useEffect, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { PierreFile } from "../../../components/pierre-file";
+import { LoadFailureNotice } from "../../../components/load-failure-notice";
+import { isChunkLoadError } from "../../../lib/chunk-load-error";
 import { enablePierreDiffs } from "../../../diffs";
 import { useAppContext } from "../../app-context";
 import { useAppearance } from "../../lib/appearance";
@@ -12,14 +14,23 @@ enablePierreDiffs();
 
 class HighlightBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
-  { failed: boolean }
+  { failed: boolean; notLoaded: boolean }
 > {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
+  state = { failed: false, notLoaded: false };
+  static getDerivedStateFromError(error: unknown) {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
   render() {
-    return this.state.failed ? this.props.fallback : this.props.children;
+    if (!this.state.failed) return this.props.children;
+    // The plain text still shows; Reload brings back highlighting that didn't download.
+    return this.state.notLoaded ? (
+      <>
+        <LoadFailureNotice />
+        {this.props.fallback}
+      </>
+    ) : (
+      this.props.fallback
+    );
   }
 }
 

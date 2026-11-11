@@ -1,5 +1,8 @@
 # Single model calls (Chat Completions)
 
+For the deployment's typed decision model, use the adjacent
+[decisions endpoint](model-inference.md).
+
 Opengeni exposes a stateless, OpenAI-compatible Chat Completions endpoint for
 single model calls: one request, one model response, no tools and no agent
 loop. It routes the call through the workspace's model catalog, so one client

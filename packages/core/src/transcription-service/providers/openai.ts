@@ -3,10 +3,14 @@ import {
   type VoiceInputPricing,
   type VoiceInputUsage,
 } from "@opengeni/config";
-import type { RecordingTranscriptionProvider } from "../../recording-transcription";
+import {
+  transcriptionProviderOutOfCredit,
+  type RecordingTranscriptionProvider,
+} from "../../recording-transcription";
 import { TranscriptionServiceError } from "../../transcription";
 import {
   deploymentTextModel,
+  keytermsPrompt,
   requestIdOf,
   textRequestAudio,
   textTranscriptionResult,
@@ -63,6 +67,8 @@ export function createOpenAiTranscriptionProvider(input: {
       form.append("model", input.model);
       const language = openAiLanguage(request.language);
       if (language) form.append("language", language);
+      const prompt = keytermsPrompt(request);
+      if (prompt) form.append("prompt", prompt);
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(input.model)) {
         form.append("response_format", "verbose_json");
@@ -82,7 +88,9 @@ export function createOpenAiTranscriptionProvider(input: {
       } catch (error) {
         throw fetchError(error);
       }
-      if (!response.ok) throw responseError(response.status);
+      if (!response.ok) {
+        throw responseError(response.status, await response.json().catch(() => null));
+      }
       const body = await response.json().catch(() => null);
       const parsed = parseTranscriptionResponseBody(body);
       if (!parsed) {
@@ -165,12 +173,26 @@ function audioBlob(audio: Uint8Array, mimeType: string): Blob {
   return new Blob([Uint8Array.from(audio).buffer], { type: mimeType });
 }
 
-export function responseError(status: number): TranscriptionServiceError {
+/**
+ * A failed response as a voice input error. `body` is the provider's error
+ * body, when read: an account out of credit (OpenAI says so with 429
+ * `insufficient_quota`) is told apart from a busy or rejecting provider.
+ */
+export function responseError(status: number, body?: unknown): TranscriptionServiceError {
+  if (transcriptionProviderOutOfCredit(body)) {
+    return new TranscriptionServiceError({
+      fallbackSafe: true,
+      code: "unavailable",
+      message: "Transcription is unavailable.",
+      providerCode: "quota_exceeded",
+    });
+  }
   if (status === 401 || status === 403) {
     return new TranscriptionServiceError({
       fallbackSafe: true,
       code: "unavailable",
       message: "Transcription is unavailable.",
+      providerCode: "unauthorized",
     });
   }
   if (status === 413) {

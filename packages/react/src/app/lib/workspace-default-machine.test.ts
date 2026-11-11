@@ -53,3 +53,43 @@ test("legacy and malformed defaults do not invent a target", () => {
     }),
   ).toBe(previous);
 });
+test("the person's own default comes before the workspace default", () => {
+  expect(
+    initialWorkspaceMachineCompute({
+      settings,
+      memberTarget: { kind: "machine", targetSandboxId: "mine" },
+      options: {},
+      fallback: previous,
+      backend: "docker",
+    }),
+  ).toEqual({ kind: "machine", sandboxId: "mine", folder: { kind: "root" } });
+  // It applies without a workspace default too.
+  expect(
+    initialWorkspaceMachineCompute({
+      settings: {},
+      memberTarget: { kind: "managed" },
+      options: {},
+      fallback: previous,
+      backend: "docker",
+    }),
+  ).toEqual({ kind: "sandbox", backend: "docker" });
+  // An explicit saved target still wins, and no own default keeps the workspace default.
+  expect(
+    initialWorkspaceMachineCompute({
+      settings,
+      memberTarget: { kind: "machine", targetSandboxId: "mine" },
+      options: { targetSandboxId: "old" },
+      fallback: previous,
+      backend: "docker",
+    }),
+  ).toBe(previous);
+  expect(
+    initialWorkspaceMachineCompute({
+      settings,
+      memberTarget: null,
+      options: {},
+      fallback: previous,
+      backend: "docker",
+    }),
+  ).toEqual({ kind: "machine", sandboxId: "current", folder: { kind: "root" } });
+});

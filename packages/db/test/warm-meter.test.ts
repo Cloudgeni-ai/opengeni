@@ -45,7 +45,7 @@ const acquireLease: typeof acquireLeaseUnscoped = (db, input) =>
 //       box while a TURN-HELD box in the SAME workspace SURVIVES (turn_holders=0
 //       guard). Only credits mode debits warm cost.
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// pgvector/pgvector:pg16 (the migration baseline does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (a NON-superuser so FORCE RLS applies; the warm-lease
 // read rides the SECURITY-DEFINER list_meterable_warm_leases fn). Container torn
 // down in afterAll regardless of outcome.

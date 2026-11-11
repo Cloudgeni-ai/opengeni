@@ -1,4 +1,4 @@
-import { useNavigate, usePage, useStringifySearch } from "../../lib/navigation";
+import { useNavigate, useStringifySearch } from "../../lib/navigation";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   CopyIcon,
@@ -54,11 +54,14 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
-import { FILE_AUDIENCE_COPY, useArtifactAudience } from "./site-audience";
+import {
+  editableArtifactAudienceCopy,
+  FILE_AUDIENCE_COPY,
+  useArtifactAudience,
+} from "./site-audience";
 import { apiErrorAdvice, isPermissionDenied, userErrorText } from "../../../ui/api-error";
 import { ARTIFACT_ACCESS_REQUIRED } from "../../lib/artifact-access";
 import {
@@ -78,8 +81,9 @@ import {
   type ArtifactView,
 } from "../../lib/artifact-library-view";
 import { cn } from "../../lib/utils";
-import type { ArtifactReturnSearch } from "../../lib/routes";
+import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
+import { useCopyArtifactLink } from "./copy-artifact-link";
 
 const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({
@@ -103,7 +107,7 @@ function PinnedMarker() {
   );
 }
 
-/** A Site or file only its owner (the viewer) can open, marked like an Only me schedule. */
+/** A Site, file or document only its owner (the viewer) can open, marked like an Only me schedule. */
 function OnlyMeMarker({ bare = false }: { bare?: boolean | undefined }) {
   return (
     <MetaChip icon={<LockIcon />} {...(bare ? { variant: "text" as const } : {})}>
@@ -113,26 +117,33 @@ function OnlyMeMarker({ bare = false }: { bare?: boolean | undefined }) {
 }
 
 function onlyMe(item: ArtifactCatalogItem): boolean {
-  return (
-    (item.kind === "site" || item.kind === "file" || item.kind === "image") &&
-    item.visibility === "private"
-  );
+  return item.visibility === "private";
+}
+
+function isEditableKind(
+  kind: ArtifactCatalogItem["kind"],
+): kind is "document" | "spreadsheet" | "presentation" {
+  return kind === "document" || kind === "spreadsheet" || kind === "presentation";
 }
 
 /**
- * Share or limit a file from its row, with the same confirmation as its
- * page. Only its owner sees the choice, and never in a Personal workspace.
+ * Share or limit a file or document from its row, with the same
+ * confirmation as its page. Only its owner sees the choice.
  */
 function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const editable = isEditableKind(item.kind);
   const owned = Boolean(
-    (item.kind === "file" || item.kind === "image") &&
+    (item.kind === "file" || item.kind === "image" || editable) &&
     item.ownedByViewer &&
     item.visibility &&
     item.status === "active" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext) &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
+    hasWorkspacePermission(
+      context.accessContext,
+      workspaceId,
+      editable ? "artifacts:publish" : "files:upload",
+    ),
   );
   const audience = useArtifactAudience({
     client: context.client,
@@ -141,10 +152,14 @@ function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) 
     title: item.title,
     visibility: item.visibility === "private" ? "private" : "workspace",
     ownedByCurrentUser: owned,
-    copy: FILE_AUDIENCE_COPY,
+    copy: isEditableKind(item.kind) ? editableArtifactAudienceCopy(item.kind) : FILE_AUDIENCE_COPY,
     canLimitToMe: true,
     update: async (visibility) => {
-      await context.client.updateFileVisibility(workspaceId, item.id, { visibility });
+      if (isEditableKind(item.kind))
+        await context.client.updateEditableArtifactVisibility(workspaceId, item.id, {
+          visibility,
+        });
+      else await context.client.updateFileVisibility(workspaceId, item.id, { visibility });
       invalidateArtifactCatalog(context.client, workspaceId);
     },
   });
@@ -297,12 +312,12 @@ function useArtifactOpen({
   loading = false,
   browseSearch,
 }: ArtifactOpenOptions) {
-  const page = usePage();
   const navigate = useNavigate();
   const stringifySearch = useStringifySearch();
   const audience = useLibraryFileAudience(workspaceId, item);
   const { accessContext } = useAppContext();
   const copies = useDuplicateSite(workspaceId);
+  const copyArtifactLink = useCopyArtifactLink(workspaceId);
   const canDuplicate =
     item.kind === "site" &&
     Boolean(item.versionId) &&
@@ -330,10 +345,13 @@ function useArtifactOpen({
     onSelect
       ? onSelect(item)
       : item.kind === "site"
-        ? // A Site opens in the Site view, with its chat beside it.
+        ? // A Site opens in the Site view, with its chat beside it. From the
+          // Artifacts page it carries that page's query, so the Site view's
+          // Back returns to the page as it was.
           void navigate({
             to: "/workspaces/$workspaceId/sites/$siteId",
             params: { workspaceId, siteId: item.id },
+            ...(browseSearch ? { search: siteViewArtifactsReturn(browseSearch) } : {}),
           })
         : void navigate({
             to: artifactRoute(item.kind),
@@ -377,14 +395,7 @@ function useArtifactOpen({
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />
-      <DropdownMenuItem
-        onSelect={() => {
-          void navigator.clipboard
-            ?.writeText(new URL(artifactPath(workspaceId, item), page.origin()).href)
-            .then(() => toast("Copied a link to this artifact"))
-            .catch(() => toast.error("Couldn't copy the link"));
-        }}
-      >
+      <DropdownMenuItem onSelect={() => void copyArtifactLink(item)}>
         <LinkIcon />
         Copy link
       </DropdownMenuItem>
@@ -399,10 +410,11 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href:
-            browseSearch && item.kind !== "site"
-              ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
-              : artifactPath(workspaceId, item, sessionId),
+          href: browseSearch
+            ? `${artifactPath(workspaceId, item)}${stringifySearch(
+                item.kind === "site" ? siteViewArtifactsReturn(browseSearch) : browseSearch,
+              )}`
+            : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();

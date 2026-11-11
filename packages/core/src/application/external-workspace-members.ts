@@ -19,10 +19,9 @@ import {
   cancelExternalWorkspaceMemberGrant,
   updateExternalWorkspaceMemberOperation,
   lookupExternalIdentity,
-  nestedPostgresMessage,
-  nestedPostgresSqlState,
 } from "@opengeni/db";
-import { organizationMembershipHttpStatus } from "../domain/organization-membership-lifecycle";
+import { rethrowExternalWorkspaceOperation } from "../access/external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
@@ -37,6 +36,21 @@ import {
  * in `../access`, under the same key authority and lifecycle fence.
  * Existing memberships are not overwritten, including reduced permissions. */
 export async function addExternalWorkspaceMemberForRequest(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  input: unknown,
+): Promise<ExternalIdentity> {
+  const identity = await addExternalWorkspaceMember(c, deps, workspaceId, input);
+  // After commit: a returning member's saved messages may wait for this.
+  await releaseAdmissionBlocksAfterAccessChange(
+    { db: deps.db },
+    { accountId: identity.accountId, workspaceId, change: "membership" },
+  );
+  return identity;
+}
+
+async function addExternalWorkspaceMember(
   c: Context,
   deps: AccessDeps,
   workspaceId: string,
@@ -121,26 +135,6 @@ export async function addExternalWorkspaceMemberForRequest(
     });
     return identity;
   });
-}
-
-function rethrowExternalWorkspaceOperation(error: unknown): never {
-  const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
-  if (status) {
-    const summary =
-      status === 409
-        ? "External membership operation changed or was cancelled"
-        : "External membership operation is not available";
-    // Permission fences (42501) raise fixed reasons without row data: name the
-    // one that refused so an integrator can act on it. Other states can carry
-    // identifiers in their message, so they keep only the summary; the cause
-    // stays attached for our logs.
-    const reason = status === 403 ? nestedPostgresMessage(error) : null;
-    throw new HTTPException(status, {
-      message: reason ? `${summary}: ${reason}` : summary,
-      cause: error,
-    });
-  }
-  throw error;
 }
 
 async function externalService(

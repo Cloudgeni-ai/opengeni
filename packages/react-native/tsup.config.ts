@@ -17,6 +17,11 @@ const external = [
   ...Object.keys(pkg.peerDependencies ?? {}),
 ];
 
+// MathJax is bundled into the math engine, which the timeline requires only when a
+// message first shows math. Left external, esbuild would hoist its imports to the top
+// of the timeline module, so every chat would load MathJax as it opened.
+const bundled = [/^mathjax-full(\/|$)/];
+
 export default defineConfig({
   entry: [
     "src/index.ts",
@@ -41,4 +46,5 @@ export default defineConfig({
     options.jsx = "automatic";
   },
   external,
+  noExternal: bundled,
 });

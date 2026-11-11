@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
   compactionSkipTitle,
+  isTrimmedCompaction,
   presentTurnFailureText,
 } from "../src/timeline/compaction-copy";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
@@ -15,6 +18,7 @@ import {
 import {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
@@ -1869,6 +1873,33 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a voice handoff's fixed notice reads in the host's language", () => {
+    // The stored text is an English notice, not something the person said.
+    reset();
+    const context =
+      "<realtime_delegation>\n  <transcript_delta>user: sjekk timene</transcript_delta>\n</realtime_delegation>";
+    const norwegian = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "timeline.projection.voiceSessionEnded":
+          "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+    });
+    const [message] = buildTimeline(norwegian, [
+      event("user.message", {
+        text: "Voice session ended. Remaining conversation context was sent to the agent.",
+        presentation: { kind: "realtime_voice_handoff", context },
+      }),
+    ]) as UserMessageItem[];
+    expect(message).toMatchObject({
+      text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      annotationSource: {
+        text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+      presentation: { kind: "realtime_voice_handoff", context },
+    });
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -2119,6 +2150,90 @@ describe("buildTimeline", () => {
     ]);
 
     expect((items[0] as AgentMessageItem).text).toBe("OpenAI docs.");
+  });
+
+  test.each([
+    [
+      "a handle with several references",
+      "Prices rose. \uE200cite\uE202turn0search3\uE202turn1view0\uE201 They fell later.",
+      "Prices rose. They fell later.",
+    ],
+    ["a file citation", "See the notes \uE200filecite\uE202turn3file0\uE201.", "See the notes."],
+    [
+      "a handle written as plain text",
+      "It ends in March.citeturn0search1turn0news2\nUse v3.",
+      "It ends in March.\nUse v3.",
+    ],
+    ["a plain-text file citation", "Done fileciteturn2file0.", "Done."],
+    ["a handle still streaming", "The answer is 42. \uE200cite\uE202turn0sea", "The answer is 42."],
+    ["stray delimiters from a cut-short handle", "Before \uE202 after\uE201.", "Before  after."],
+  ] as const)("hides %s from timeline text", (_label, text, visible) => {
+    reset();
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(visible);
+  });
+
+  // Built from escapes so no tool that acts on citation tags rewrites this file.
+  const claudeCite = (index: string, inner: string) =>
+    `\u003ccite index="${index}">${inner}\u003c/cite>`;
+
+  test("shows Claude citation tags as their quoted text, outside code only", () => {
+    reset();
+    const text = [
+      `Vals describes it as ${claudeCite("23-5", '"a fresh set of 66 tasks"')} (tbench.ai).`,
+      "```html",
+      claudeCite("1-1", "kept"),
+      "```",
+      `The board ${claudeCite("15-1", '"added no model since 3 Sep"')}; \`${claudeCite("2-2", "x")}\` too.`,
+    ].join("\n");
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", { text, phase: "final_answer" }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe(
+      [
+        'Vals describes it as "a fresh set of 66 tasks" (tbench.ai).',
+        "```html",
+        claudeCite("1-1", "kept"),
+        "```",
+        `The board "added no model since 3 Sep"; \`${claudeCite("2-2", "x")}\` too.`,
+      ].join("\n"),
+    );
+  });
+
+  test("hides a Claude citation tag that is still streaming", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.message.delta", { text: 'Done. \u003ccite index="4-2">"half' }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe('Done. "half');
+  });
+
+  test("shows source links without hosted-search tracking, outside code only", () => {
+    reset();
+    const text = [
+      "The café opens at nine ([example.com](https://example.com/hours?_t_q=cafe+hours&utm_source=openai)).",
+      "Watch https://example.com/watch?v=abc&utm_source=openai",
+      "`https://example.com/code?utm_source=openai`",
+    ].join("\n");
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", { text, phase: "final_answer" }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe(
+      [
+        "The café opens at nine ([example.com](https://example.com/hours)).",
+        "Watch https://example.com/watch?v=abc",
+        "`https://example.com/code?utm_source=openai`",
+      ].join("\n"),
+    );
+  });
+
+  test("keeps ordinary words that contain cite", () => {
+    reset();
+    const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(text);
   });
 
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
@@ -2691,6 +2806,32 @@ describe("buildTimeline", () => {
     );
   });
 
+  test("settles an idle checkpoint dropped for capacity as postponed, not failed", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }),
+      event("session.context.compaction.skipped", {
+        reason: "capacity_unavailable",
+        trigger: "proactive",
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "skipped",
+        trigger: "proactive",
+        skipReason: "capacity_unavailable",
+      }),
+    ]);
+    const projected = items[0];
+    if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(compactionSkipTitle(englishText, projected.skipReason)).toBe("Compaction postponed");
+    expect(compactionSkipSubtitle(englishText, projected.skipReason)).toBe(
+      "No subscription capacity right now. It runs with your next message if still needed.",
+    );
+    expect(compactionFailureDetails(englishText, projected)).toBeNull();
+  });
+
   test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -2753,6 +2894,43 @@ describe("buildTimeline", () => {
     expect(compactionSkipSubtitle(englishText, "summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    for (const trigger of ["operator", "overflow"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Request it again to retry. Chat history is unchanged.",
+      );
+    }
+    // Nobody requested an automatic compaction, so it is not offered again.
+    for (const trigger of ["proactive", "auto"] as const) {
+      expect(compactionSkipSubtitle(englishText, "summarization_failed", null, trigger)).toBe(
+        "Chat history is unchanged.",
+      );
+    }
+    // A failed idle checkpoint: the skipped event has no trigger of its own and
+    // keeps the one its request opened the landmark with.
+    reset();
+    const checkpoint = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }, { turnId: null }),
+      event("turn.started", {}, { turnId: "turn-c" }),
+      event(
+        "session.context.compaction.skipped",
+        { reason: "summarization_failed" },
+        { turnId: "turn-c" },
+      ),
+      event(
+        "turn.failed",
+        { error: "compaction summarization failed", code: "context_compaction_failed" },
+        { turnId: "turn-c" },
+      ),
+    ]);
+    const landmarks = checkpoint.filter((item) => item.kind === "context-compaction");
+    expect(landmarks).toHaveLength(1);
+    const landmark = landmarks[0]!;
+    if (landmark.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark).toMatchObject({ phase: "skipped", trigger: "proactive" });
+    expect(compactionSkipSubtitle(englishText, landmark.skipReason, null, landmark.trigger)).toBe(
+      "Chat history is unchanged.",
+    );
+    reset();
     expect(
       compactionFailureDetails(englishText, { ...projected, providerRejection: null }),
     ).toBeNull();
@@ -2775,6 +2953,96 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(malformed[0]).toMatchObject({ providerRejection: null });
+  });
+
+  test("a checkpoint that trimmed history names it and keeps the provider's reason behind Details", () => {
+    reset();
+    const providerRejection = {
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "invalid_request_error",
+      param: null,
+      requestId: "req_trimmed",
+    };
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.started", { trigger: "auto" }, { turnId: "turn-t" }),
+      event(
+        "session.context.compacted",
+        {
+          trigger: "auto",
+          implementation: "deterministic_trim",
+          estimatedTokensBefore: 900_000,
+          estimatedTokensAfter: 12_000,
+          fallback: {
+            reason: "provider_rejected",
+            providerRejection,
+            providerMessage: "max_tokens is too large",
+          },
+        },
+        { turnId: "turn-t" },
+      ),
+    ]);
+    const landmarks = items.filter((item) => item.kind === "context-compaction");
+    expect(landmarks).toHaveLength(1);
+    const landmark = landmarks[0]!;
+    if (landmark.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark).toMatchObject({
+      phase: "compacted",
+      implementation: "deterministic_trim",
+      providerRejection: { ...providerRejection, code: "invalid_request_error" },
+      providerMessage: "max_tokens is too large",
+    });
+    expect(isTrimmedCompaction(landmark)).toBe(true);
+    expect(COMPACTION_TRIMMED_TITLE(englishText)).toBe("Older messages trimmed");
+    expect(COMPACTION_TRIMMED_SUBTITLE(englishText)).toBe(
+      "The model couldn’t summarize them. Chat history above is unchanged.",
+    );
+    // The trim already recovered, so the repeat warning is not shown.
+    expect(compactionFailureDetails(englishText, landmark)).toEqual({
+      note: null,
+      facts: [
+        { label: "Response", value: "HTTP 400 · invalid_request_error" },
+        { label: "Request ID", value: "req_trimmed" },
+        { label: "Provider message", value: "max_tokens is too large" },
+      ],
+    });
+    // Without a rejection, the provider's message alone; without either, no Details.
+    expect(compactionFailureDetails(englishText, { ...landmark, providerRejection: null })).toEqual(
+      { note: null, facts: [{ label: "Provider message", value: "max_tokens is too large" }] },
+    );
+    const { providerMessage: _message, ...withoutMessage } = landmark;
+    expect(
+      compactionFailureDetails(englishText, { ...withoutMessage, providerRejection: null }),
+    ).toBeNull();
+    // An ordinary checkpoint is not a trimmed one.
+    expect(isTrimmedCompaction({ phase: "compacted", implementation: null })).toBe(false);
+  });
+
+  test("a compaction failure landmark lists the provider's message after its identifiers", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.skipped", {
+        reason: "summarization_failed",
+        providerRejection: {
+          httpStatus: 422,
+          type: null,
+          code: null,
+          param: null,
+          requestId: null,
+        },
+        providerMessage: "Unprocessable request",
+      }),
+    ]);
+    const landmark = items[0];
+    if (landmark?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(landmark.providerMessage).toBe("Unprocessable request");
+    expect(compactionFailureDetails(englishText, landmark)).toEqual({
+      note: "The provider rejects this request the same way until the conversation changes.",
+      facts: [
+        { label: "Response", value: "HTTP 422" },
+        { label: "Provider message", value: "Unprocessable request" },
+      ],
+    });
   });
 
   test("names a compaction turn failure and keeps the recorded text as detail", () => {
@@ -3384,6 +3652,37 @@ describe("buildTimeline", () => {
       "rig",
     ]);
     expect(phases.find((phase) => phase.phase === "sandbox")?.outcome).toBe("created");
+  });
+
+  test("a setup step keeps the name of the Sandbox Environment it sets up", () => {
+    reset();
+    const turn = { turnId: "turn-named-setup" };
+    const setup = { rigId: "rig-1", versionId: "version-1", rigName: " cloudgeni " };
+    const running = buildTimeline(englishText, [event("rig.setup.started", setup, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(running).toMatchObject({ phase: "rig", status: "running", subject: "cloudgeni" });
+
+    const settled = buildTimeline(englishText, [
+      event("rig.setup.started", setup, turn),
+      event("rig.setup.completed", setup, turn),
+    ]).find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(settled).toMatchObject({ phase: "rig", status: "complete", subject: "cloudgeni" });
+
+    const unnamed = buildTimeline(englishText, [event("rig.setup.started", {}, turn)]).find(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(unnamed?.subject).toBeUndefined();
+
+    // A later attempt replaces the failed one's row, name included.
+    const retried = buildTimeline(englishText, [
+      event("rig.setup.started", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.failed", { ...setup, attemptId: "attempt-1" }, turn),
+      event("rig.setup.started", { attemptId: "attempt-2" }, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]).toMatchObject({ phase: "rig", status: "running" });
+    expect(retried[0]?.subject).toBeUndefined();
   });
 
   test("warm reuse and setup failure retain their distinct outcomes", () => {
@@ -5477,6 +5776,33 @@ describe("credit exhaustion", () => {
     expect(items[1]).toMatchObject({ kind: "notice", tone: "failed" });
   });
 
+  test("an own-key or API credit stop keeps its own sentence on the turn and the notice", () => {
+    for (const [payload, text] of [
+      [
+        { type: "turn.failed", error: "Activity task failed: Add credits to use your own key." },
+        "Add credits to use your own key. The conversation is preserved.",
+      ],
+      [
+        {
+          type: "turn.completed",
+          detail: "API usage uses credits, not your plan credit.",
+          segmentLimit: "budget_exhausted",
+        },
+        "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+      ],
+    ] as const) {
+      reset();
+      const { type, ...rest } = payload;
+      const items = buildTimeline(englishText, [event(type, rest)]);
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+        outcome: "failed",
+        failureText: text,
+      });
+      expect(items.find((item) => item.kind === "notice")).toMatchObject({ tone: "failed", text });
+      expect(creditExhaustedFromEvents([event(type, rest)])).toBe(true);
+    }
+  });
+
   test("ordinary turn.completed is untouched — complete turn-end, no notice", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -5544,7 +5870,61 @@ describe("credit exhaustion", () => {
     );
     const turnGroup = groups.find((group) => group.kind === "turn");
     expect(turnGroup?.outcome).toBe("failed");
-    expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE(englishText));
+    // The credit notice tells it once; the folded turn keeps only its outcome.
+    expect(turnGroup?.failureText).toBeUndefined();
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "notice" &&
+          group.item.text === CREDIT_EXHAUSTION_MESSAGE(englishText),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("creditRefusalFromEvents", () => {
+  test("names the one fix of a stop between model calls from the last turn end", () => {
+    reset();
+    const stop = (detail: string, turnId: string) =>
+      event("turn.completed", { detail, segmentLimit: "budget_exhausted" }, { turnId });
+    expect(creditRefusalFromEvents([stop("Add credits to use your own key.", "turn-1")])).toBe(
+      "byok_paid_credit_required",
+    );
+    reset();
+    expect(creditRefusalFromEvents([stop("Upgrade to Pro to use your own key.", "turn-1")])).toBe(
+      "byok_upgrade_required",
+    );
+    reset();
+    expect(
+      creditRefusalFromEvents([stop("API usage uses credits, not your plan credit.", "turn-1")]),
+    ).toBe("api_credits_required");
+  });
+
+  test("an older refusal never names the latest stop's fix", () => {
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event(
+          "turn.failed",
+          { error: "Upgrade to Pro to use your own key." },
+          { turnId: "turn-1" },
+        ),
+        event(
+          "turn.completed",
+          { detail: "insufficient Opengeni credits", segmentLimit: "budget_exhausted" },
+          { turnId: "turn-2" },
+        ),
+      ]),
+    ).toBeNull();
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event("turn.failed", { error: "Add credits to use your own key." }, { turnId: "turn-1" }),
+        event("turn.completed", {}, { turnId: "turn-2" }),
+      ]),
+    ).toBeNull();
+    expect(creditRefusalFromEvents([])).toBeNull();
   });
 });
 

@@ -10,7 +10,7 @@ import {
   type SessionHumanInputRequest,
   type SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
+import { HumanInputForm, OpenGeniLinkProvider } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -68,6 +68,7 @@ import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { secretSaveTargets } from "@opengeni/react/app/lib/secrets-ui";
 import { hasInbox, isNeedsYouKind, useInbox } from "@opengeni/react/app/lib/inbox";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { BillingInboxSection } from "../components/billing-inbox";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
   question: "Question",
@@ -78,7 +79,10 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
 };
 
 function KindIcon({ item }: { item: InboxItem }) {
-  if (item.kind === "question") return <MessageCircleQuestionIcon />;
+  // An MCP server's question is an approval of its call, but reads as a question.
+  if (item.kind === "question" || (item.kind === "approval" && item.serverQuestion)) {
+    return <MessageCircleQuestionIcon />;
+  }
   if (item.kind === "approval") return <ShieldCheckIcon />;
   if (item.kind === "goal_paused") return <CirclePauseIcon />;
   if (item.kind === "reply") return <MessageSquareTextIcon />;
@@ -221,7 +225,8 @@ function InboxList({ label, children }: { label: string; children: ReactNode }) 
   );
 }
 
-function InboxRow(props: {
+/** One inbox row. Exported for the DEV UI kit. */
+export function InboxRow(props: {
   item: InboxItem;
   unread: boolean;
   title: string;
@@ -345,7 +350,7 @@ function InboxSkeleton() {
 export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const inbox = useInbox({ pollMs: 10_000 });
+  const inbox = useInbox({ pollMs: 10_000, workspaceId });
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState<InboxItem | null>(null);
@@ -361,8 +366,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     [context.workspaces],
   );
   const workspacesWithItems = new Set(items.map((item) => item.workspaceId));
-  // Nothing to pick, nothing shown: the scope switch appears only when items span workspaces.
-  const showScope = workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId);
+  const allBillingNotifications = inbox.data?.billingNotifications ?? [];
+  // Billing belongs to the organization, not this workspace. Keep the way
+  // back to the all-workspaces view even when the last chat item disappears.
+  const showScope =
+    allBillingNotifications.length > 0 ||
+    (items.length > 0 && (workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId)));
   const scoped = items.filter((item) => scope === "all" || item.workspaceId === workspaceId);
   const awake = scoped.filter((item) => !isSnoozed(item, now));
   // Most important first: what waits on the person, then what agents wanted
@@ -371,6 +380,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const fromAgents = awake.filter((item) => item.kind === "notification");
   const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = scoped.filter((item) => isSnoozed(item, now));
+  const billingNotifications = scope === "all" ? allBillingNotifications : [];
 
   useEffect(() => {
     // An agent's note is read once shown in full; a reply shows only its start,
@@ -427,11 +437,16 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
         approvalId: item.sourceKey,
         decision,
+        // An MCP server's confirmation is answered for the question shown.
+        ...(decision === "approve" && item.serverQuestion
+          ? { elicitationRound: item.serverQuestion.round }
+          : {}),
       });
       leave(item);
-      toast.success(decision === "approve" ? "Approved" : "Denied", {
-        description: item.sessionTitle ?? undefined,
-      });
+      toast.success(
+        decision === "reject" ? "Denied" : item.serverQuestion ? "Allowed" : "Approved",
+        { description: item.sessionTitle ?? undefined },
+      );
     });
 
   const snooze = (item: InboxItem, until: Date | null) =>
@@ -480,13 +495,6 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   // Under the title: what exactly is asked for, or the agent's note.
   const description = (item: InboxItem): ReactNode => {
     if (!item.body) return undefined;
-    if (item.kind === "approval") {
-      return (
-        <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
-          <SecretRefText text={item.body} linkable={false} />
-        </code>
-      );
-    }
     if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
@@ -496,13 +504,20 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(`From ${item.sender.label}`);
+    if (item.kind === "approval" && item.serverQuestion) {
+      parts.push(`${item.serverQuestion.server} asks`);
+    }
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
     if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
       parts.push(KIND_WORD[item.kind]);
     }
-    if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
+    // An approval's title says what it does; its body says where ("Gmail").
+    // A server question's meta already says who asks.
+    if (item.kind === "approval" && !item.serverQuestion) {
+      parts.push(item.body || KIND_WORD.approval);
+    }
     if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
@@ -515,6 +530,28 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   const control = (item: InboxItem): ReactNode => {
     const pending = busy[item.id];
+    if (item.kind === "approval" && item.serverQuestion) {
+      // A plain confirmation is answered here; a form is answered in the
+      // session, where its approval card shows the fields.
+      return (
+        <>
+          <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
+            <XIcon />
+            {pending === "reject" ? "Denying…" : "Deny"}
+          </RowButton>
+          {item.serverQuestion.kind === "confirm" ? (
+            <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
+              <CheckIcon />
+              {pending === "approve" ? "Allowing…" : "Allow"}
+            </RowButton>
+          ) : (
+            <RowButton disabled={Boolean(pending)} onClick={() => openSession(item)}>
+              Answer
+            </RowButton>
+          )}
+        </>
+      );
+    }
     if (item.kind === "approval") {
       return (
         <>
@@ -643,18 +680,28 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         {apiErrorFacts(inbox.error).serverMessage ?? "Something went wrong."}
       </Notice>
     );
-  } else if (awake.length === 0 && snoozed.length === 0) {
+  } else if (awake.length === 0 && snoozed.length === 0 && billingNotifications.length === 0) {
     body = (
       <EmptyState
         variant="page"
         icon={<InboxIcon />}
         title="Nothing is waiting on you"
-        description="When an agent asks you something, needs an approval or wants you to know something, it shows up here."
+        description={
+          scope === "workspace"
+            ? "Questions, approvals and agent updates in this workspace show up here."
+            : "Questions, approvals, agent updates and billing notices show up here."
+        }
       />
     );
   } else {
     body = (
       <SectionStack>
+        <BillingInboxSection
+          notifications={billingNotifications}
+          workspaces={context.workspaces}
+          markRead={inbox.markBillingRead}
+          onManageBilling={(path) => void navigate({ href: path })}
+        />
         {needsYou.length > 0 ? (
           <Section title="Needs you">
             <InboxList label="Needs you">{needsYou.map(row)}</InboxList>
@@ -670,7 +717,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
             <InboxList label="Replies">{replies.map(row)}</InboxList>
           </Section>
         ) : null}
-        {awake.length === 0 ? (
+        {awake.length === 0 && snoozed.length > 0 ? (
           <p className="text-sm text-fg-muted">
             Nothing needs you right now. Snoozed items come back on their own.
           </p>
@@ -692,10 +739,10 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<InboxIcon />}
           title="Inbox"
-          description="What your agents are waiting on you for, and what they wanted you to know."
+          description="Questions, updates and billing notices for you."
         />
         <div className="flex min-w-0 flex-col gap-4 pt-6">
-          {showScope && items.length > 0 ? (
+          {showScope ? (
             <Toolbar>
               <SegmentedControl
                 aria-label="Show items from"
@@ -889,7 +936,7 @@ function InboxSettingsSections({
             <ChoiceCard
               value="full_access"
               title="Full access"
-              description="Any agent working for you can see everything here, including questions and replies, and snooze or clear it. Ask one to catch you up."
+              description="Any agent working for you can see all chat items here, including questions and replies, and snooze or clear them. Ask one to catch you up."
             />
           </ChoiceCards>
         )}
@@ -1030,6 +1077,7 @@ function AnswerDialog({
         ) : request ? (
           // Artifact links in the question open the workspace's pages, as in the session.
           <OpenGeniLinkProvider
+            artifactScope={{ client: context.client, workspaceId: request.workspaceId }}
             resolveLink={(target) => {
               const href = openGeniConsolePath(target, request.workspaceId);
               return href ? { href } : null;

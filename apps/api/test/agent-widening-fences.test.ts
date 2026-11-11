@@ -472,6 +472,78 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
       "goal_set",
     ]);
   });
+
+  test("PUT /tool-policy grants an existing session new permissions only within the caller's own", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await narrowedRootSession(
+      grant,
+      ["set_session_title"],
+      ["sessions:read", "sessions:control"],
+    );
+    const attempt = await liveAttempt(grant, root.id);
+    const app = sessionRoutesApp();
+    const path = `/v1/workspaces/${grant.workspaceId}/sessions/${root.id}/tool-policy`;
+    const put = (authorization: string, body: Record<string, unknown>) =>
+      app.request(path, {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const body = (version: number, firstPartyMcpPermissions: Permission[]) => ({
+      mode: "explicit",
+      tools: [],
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions,
+      expectedVersion: version,
+    });
+
+    // The agent holds files:read itself, but may not raise its own session.
+    const agent = await agentBearer(
+      grant,
+      attempt,
+      ["set_session_title"],
+      [...AGENT_PERMISSIONS, "files:read"],
+    );
+    const widened = await put(agent, body(1, ["sessions:read", "sessions:control", "files:read"]));
+    expect(widened.status).toBe(403);
+    expect(await widened.text()).toContain(
+      "an agent may only narrow its session first-party permissions: files:read",
+    );
+
+    // A person without files:read cannot hand it out either.
+    const plainHuman = await put(
+      await humanBearer(grant),
+      body(1, ["sessions:read", "sessions:control", "files:read"]),
+    );
+    expect(plainHuman.status).toBe(403);
+
+    // A person who holds it can, and the next attempt signs from the session.
+    const human = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["sessions:read", "sessions:control", "files:read", "files:upload"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const granted = await put(
+      human,
+      body(1, ["sessions:read", "sessions:control", "files:read", "files:upload"]),
+    );
+    expect(granted.status).toBe(200);
+    expect(await granted.json()).toMatchObject({ toolPolicyVersion: 2 });
+    expect(
+      [
+        ...((await getSession(client.db, grant.workspaceId, root.id))?.firstPartyMcpPermissions ??
+          []),
+      ].sort(),
+    ).toEqual(["files:read", "files:upload", "sessions:control", "sessions:read"]);
+
+    // Narrowing stays open to the agent.
+    const narrowed = await put(agent, body(2, ["sessions:read", "sessions:control"]));
+    expect(narrowed.status).toBe(200);
+  });
 });
 
 describe("agent-created scheduled tasks freeze the creator boundary (real PostgreSQL)", () => {

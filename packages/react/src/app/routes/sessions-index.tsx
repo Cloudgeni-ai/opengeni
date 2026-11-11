@@ -1,4 +1,6 @@
 import { useAppApi } from "../lib/app-api";
+import { REPOSITORY_OPEN_REFRESH_COOLDOWN_MS } from "../lib/github-access-return";
+import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -6,7 +8,6 @@ import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
 import { useWorkspaceRigs } from "../lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "../lib/use-follow-up-repositories";
 import { useGitHubAppConnectLauncher } from "../components/github-app-connect-launcher";
-import { openGitHubInstallationSettings } from "../lib/github-app-connect";
 import { captureAnalyticsEvent } from "../lib/analytics-observer";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
@@ -46,12 +47,13 @@ import {
 } from "../../realtime";
 import {
   OpenGeniApiError,
+  type NewSessionDraft,
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
 } from "@opengeni/sdk";
-import { Link, type PageHost, useNavigate, usePage } from "../lib/navigation";
-import { ChevronDownIcon, CreditCardIcon, FolderIcon, LockIcon, PlusIcon } from "lucide-react";
+import { Link, useNavigate, usePage } from "../lib/navigation";
+import { CreditCardIcon, LockIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -67,7 +69,10 @@ import {
 import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
-import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
+import {
+  ChannelCreateDialog,
+  type ProjectAudience,
+} from "../components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "../components/new-session-draft-sync-notice";
@@ -84,6 +89,12 @@ import {
   visibilitySummary,
 } from "../components/session/new-session-settings-menu";
 import {
+  SessionSetupStrip,
+  runsOnSetupIcon,
+  visibilitySetupIcon,
+  type SessionSetupSetting,
+} from "../components/session/new-session-setup-strip";
+import {
   NO_SESSION_USAGE_LIMIT,
   parseSessionUsageLimitDraft,
   sessionUsageLimitCapability,
@@ -97,18 +108,34 @@ import {
 } from "../components/repository-picker";
 import { Button } from "../../ui/button";
 import { sessionDisplayTitle } from "../lib/session-rename";
-import {
-  DropdownMenu,
-  DropdownMenuCheck,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
+import {
+  OwnSubscriptionPlanNotice,
+  ownSubscriptionPlanNotice,
+} from "../components/credits/own-subscription-plan-notice";
+import { useDismissedNotice } from "../components/agents/agent-notices";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { isPaymentRequiredError } from "../lib/model-access";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerIsLoading,
+  composerSendBlockerNotice,
+  getNewSessionSendBlocker,
+  NewSessionCreateFailureNotice,
+  newSessionCreateFailureRecord,
+  newSessionSendSignature,
+  newSessionStartBlockerReason,
+  visibleNewSessionCreateFailure,
+  type NewSessionCreateFailure,
+  type NewSessionSendState,
+} from "../lib/composer-send-blocking";
+import {
+  creditRefusalRecord,
+  isPaymentRequiredError,
+  type CreditRefusalRecord,
+} from "../lib/model-access";
+import { composerSubmissionErrorMessage } from "../../lib/format";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -116,7 +143,9 @@ import { useAppContext, useLatestCallback } from "../app-context";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
+  composerLaunchAgentId,
   composerLaunchSearchKey,
+  continueArchivedChatMessage,
   modelProvidedAfterLaunch,
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
@@ -131,13 +160,7 @@ import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
 } from "../lib/machine-selectability";
-import {
-  effortOptionsForModel,
-  findPickerRow,
-  modelUsesCredits,
-  runnableLatencyModesForModel,
-  type PickerModelRow,
-} from "../lib/model-policy";
+import { findPickerRow, modelUsesCredits, type PickerModelRow } from "../lib/model-policy";
 import { isPersonalWorkspace } from "../lib/managed-self-context";
 import { attachManualRepository } from "../lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
@@ -153,11 +176,13 @@ import {
 import {
   recentSessionModelPresentation,
   recentSessionStatus,
-  recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionRepoLabel,
+  type OpenedChat,
 } from "../../session-list-model";
-import { signupStarterSet } from "../lib/signup-starter-set";
+import { readChatDirectory, useChatDirectoryVersion } from "../lib/actions/chat-directory";
+import { NEW_CHAT_WORDING, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -200,6 +225,7 @@ import {
   repositorySelectionFromResources,
 } from "../lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "../lib/use-new-session-draft";
+import { newSessionDraftConflictRevision } from "../../hooks/use-new-session-draft";
 import { userErrorText } from "../../ui/api-error";
 import {
   newSessionCreateSnapshot,
@@ -215,8 +241,13 @@ import {
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "./sessions-index-hydration";
-import type { Channel, SandboxBackend, Session } from "../types";
+import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import { ComposerAgentChip } from "../components/agents/composer-agent-chip";
+import { agentAvatar } from "../lib/agent-avatar";
+import { useAgents } from "../lib/agents";
+import { AGENT_ONLY_ME_CHAT, useComposerAgent } from "../lib/composer-agent";
+import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -260,7 +291,10 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  // The macOS window bar names the page; the hero keeps its greeting.
+  useWindowBarTitle("New session");
   const starters = useSessionUiFeature("starters");
+  const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
@@ -326,8 +360,14 @@ function SessionsIndexRouteContent({
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  // ?agent= (or an older ?botTemplateId= link) starts this chat with an
+  // agent (useComposerAgent, after the draft below): the composer stays as it
+  // is, and the chat follows its Instructions and shows its icon.
+  const launchAgentId = composerLaunchAgentId(launch);
+  const workspaceAgents = useAgents(workspaceId);
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -378,9 +418,7 @@ function SessionsIndexRouteContent({
   const draftSecretsOn =
     agentAvailability.isAvailable("secrets") &&
     capabilityOn(composerAgentCapabilities.draft.values, "secrets");
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const draftVaults = useVaults({
     client: context.client,
     workspaceId,
@@ -392,7 +430,7 @@ function SessionsIndexRouteContent({
     : null;
   const attachments = useDraftAttachments(
     workspaceId,
-    personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
+    draft.visibility === "private" ? "personal" : "workspace",
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
@@ -445,6 +483,12 @@ function SessionsIndexRouteContent({
     draft.visibility,
     tenancyCapabilities?.canCreatePrivate === true,
   );
+  const canCreatePrivateChat = tenancyCapabilities?.canCreatePrivate === true;
+  // A new project can be Only me wherever a new chat can.
+  const projectAudienceOffered = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: canCreatePrivateChat,
+  });
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -502,7 +546,8 @@ function SessionsIndexRouteContent({
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
-  // "+" > Runs on: where the new chat runs and on which environment or folder.
+  // Runs on (a setup chip above the message): where the new chat runs and on
+  // which environment or folder.
   const runsOnChoices = {
     draft,
     machines,
@@ -623,11 +668,10 @@ function SessionsIndexRouteContent({
     useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
   const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
   // The API refused to start this chat because no credit pays for its model.
-  const [createCreditRefusal, setCreateCreditRefusal] = useState<{
+  const [createCreditRefusal, setCreateCreditRefusal] = useState<CreditRefusalRecord<{
     workspaceId: string;
-    model: string;
-    message: string;
-  } | null>(null);
+  }> | null>(null);
+  const [createFailure, setCreateFailure] = useState<NewSessionCreateFailure | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -708,7 +752,10 @@ function SessionsIndexRouteContent({
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
-    const project = await channelsQuery.create({ name });
+    const project = await channelsQuery.create({
+      name,
+      ...(projectAudienceOffered ? { visibility: projectAudienceDraft } : {}),
+    });
     if (!project) {
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
@@ -716,7 +763,49 @@ function SessionsIndexRouteContent({
     selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft, selectProject]);
+    setProjectAudienceDraft("workspace");
+  }, [
+    channelsQuery,
+    projectAudienceDraft,
+    projectAudienceOffered,
+    projectNameDraft,
+    selectProject,
+  ]);
+
+  // An Only me project holds only Only me chats, so choosing one makes the new
+  // chat Only me. Where Only me is off, its Only me projects take no new chats.
+  const selectedProjectOnlyMe =
+    channelsQuery.channels.find((channel) => channel.id === selectedChannelId)?.visibility ===
+    "private";
+  useEffect(() => {
+    if (!selectedProjectOnlyMe || !tenancyCapabilities) return;
+    if (!canCreatePrivateChat) {
+      selectProject(null, false);
+      return;
+    }
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
+
+  const setDraftVisibility = useCallback(
+    (visibility: "private" | "workspace") =>
+      setDraft((current) =>
+        current.visibility === visibility ? current : { ...current, visibility },
+      ),
+    [],
+  );
+  const composerAgent = useComposerAgent({
+    workspaceId,
+    agentId: launchAgentId,
+    canCreatePrivateChat: tenancyCapabilities === null ? null : canCreatePrivateChat,
+    visibility: draft.visibility,
+    setVisibility: setDraftVisibility,
+    keepOnlyMe: selectedProjectOnlyMe,
+  });
+  const newSessionAgent = composerAgent.agent
+    ? { id: composerAgent.agent.id, avatar: agentAvatar(composerAgent.agent) }
+    : undefined;
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -843,7 +932,11 @@ function SessionsIndexRouteContent({
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
-    (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+    (
+      remote: NewSessionDraftEditable,
+      history: NewSessionSelectionHistory,
+      memberTarget: NewSessionDraft["memberDefaultExecutionTarget"] | null,
+    ) => {
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -868,6 +961,7 @@ function SessionsIndexRouteContent({
       setSelectedProjectChannelId(projectSelection.channelId);
       const compute = initialWorkspaceMachineCompute({
         settings: workspace?.settings,
+        memberTarget,
         options: remote.options,
         fallback: projectSelection.compute,
         backend: defaultSandboxBackend,
@@ -960,6 +1054,41 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // Own subscriptions the organization's plan doesn't include: the chosen
+  // model says so before Send, and anyone with one connected hears it once.
+  const ownSubscriptionHeadsUp = useDismissedNotice(
+    `ownSubscriptionPlan.${workspace?.accountId ?? "unknown"}`,
+  );
+  const ownSubscriptionNotice = ownSubscriptionPlanNotice({
+    selected: selectedPolicyRow?.catalog,
+    models: modelCatalog.models,
+    headsUpDismissed: ownSubscriptionHeadsUp.dismissed || !workspace?.accountId,
+  });
+  const ownSubscriptionNoticeView = ownSubscriptionNotice ? (
+    <div className="mt-6">
+      <OwnSubscriptionPlanNotice
+        plan={ownSubscriptionNotice.plan}
+        workspaceId={workspaceId}
+        canUpgrade={hasAccountPermission(
+          context.accessContext,
+          workspace?.accountId ?? "",
+          "billing:manage",
+        )}
+        {...(ownSubscriptionNotice.dismissible
+          ? { onDismiss: ownSubscriptionHeadsUp.dismiss }
+          : {})}
+      />
+    </div>
+  ) : null;
+  // The signup answer picks the starters, and with them the heading and placeholder.
+  const starterSet = signupStarterSet(
+    context.authSession?.user.email,
+    workspace?.accountId,
+    context.managedSelfContext?.memberships.find(
+      (membership) => membership.organizationId === workspace?.accountId,
+    )?.signupUseCase,
+  );
+  const wording = NEW_CHAT_WORDING;
   // A refused start names its model until the next start or a dismissal; before
   // any Send, an uncovered model with free credit left for others does the same.
   const refusedCreate =
@@ -972,14 +1101,38 @@ function SessionsIndexRouteContent({
     ? creditRefusalGap(modelCatalog.rows, refusedCreate.model, creditCoverageOptions)
     : freeCreditGap(modelCatalog.rows, context.model, creditCoverageOptions);
   const noteCreditRefusal = (error: Error, request: { model?: string | undefined }): boolean => {
-    if (!isPaymentRequiredError(error)) return false;
-    setCreateCreditRefusal({
-      workspaceId,
-      model: request.model ?? context.model,
-      message: error.message,
-    });
+    const refusal = creditRefusalRecord(error, { workspaceId }, request.model ?? context.model);
+    if (!refusal) return false;
+    setCreateCreditRefusal(refusal);
     // Re-read funding so the notice and picker name what the credit covers now.
     void modelCatalog.refresh();
+    return true;
+  };
+  // What this Send carries; a refused start stays visible until it changes.
+  const sendSignature = newSessionSendSignature({
+    text: message,
+    model: context.model,
+    reasoningEffort: context.reasoningEffort,
+    latencyMode: context.latencyMode,
+  });
+  const createFailureMessage = visibleNewSessionCreateFailure(createFailure, {
+    workspaceId,
+    signature: sendSignature,
+  });
+  const currentSendSignature = useLatestCallback(() => sendSignature);
+  // Any other refused start is shown under the composer instead of a toast:
+  // the chat was never created, so nothing else would say why.
+  const noteCreateFailure = (error: Error, sentSignature: string): boolean => {
+    // A payment refusal keeps its own dialog.
+    if (isPaymentRequiredError(error)) return false;
+    const failure = newSessionCreateFailureRecord({
+      workspaceId,
+      sent: sentSignature,
+      current: currentSendSignature(),
+      message: composerSubmissionErrorMessage(t, error),
+    });
+    if (!failure) return false;
+    setCreateFailure(failure);
     return true;
   };
   const chooseCoveredModel = (id: string) => {
@@ -993,11 +1146,10 @@ function SessionsIndexRouteContent({
     context.setReasoningEffort(choice.effort);
     if (choice.latencyMode !== null) context.setLatencyMode(choice.latencyMode);
   };
-  const newSessionPolicyValid = Boolean(
-    selectedPolicyRow?.selectable &&
-    effortOptionsForModel(selectedPolicyRow.catalog).includes(context.reasoningEffort) &&
-    (context.latencyMode === "standard" ||
-      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
+  const newSessionPolicyValid = pickerPolicyRunnable(
+    selectedPolicyRow,
+    context.reasoningEffort,
+    context.latencyMode,
   );
   const noRunnableModel =
     !modelCatalog.loading &&
@@ -1010,23 +1162,18 @@ function SessionsIndexRouteContent({
     selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
-  useEffect(() => {
-    if (modelCatalog.loading || newSessionDraft.loading) return;
-    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
-    // The server-resolved default comes first (saved workspace default, then a
-    // connected subscription, then credits, then the deployment default); the
-    // client ranking only covers a default that is itself unavailable.
-    const resolvedDefault = modelCatalog.defaultSelection;
+  // The server-resolved default comes first (saved workspace default, then a
+  // connected subscription, then credits, then the deployment default); the
+  // client ranking only covers a default that is itself unavailable.
+  const pendingFallbackModel = useMemo(() => {
+    if (modelCatalog.loading || newSessionDraft.loading) return null;
+    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return null;
     const next = composerFallbackModel({
       models: modelCatalog.models,
       rows: modelCatalog.rows,
-      defaultSelection: resolvedDefault,
+      defaultSelection: modelCatalog.defaultSelection,
     });
-    if (!next || next.id === context.model) return;
-    setModel(next.id);
-    setReasoningEffort(next.effort);
-    // An automatic replacement is not the person's choice.
-    setModelProvided((current) => (current === undefined ? current : false));
+    return next && next.id !== context.model ? next : null;
   }, [
     context.model,
     modelCatalog.defaultSelection,
@@ -1034,6 +1181,25 @@ function SessionsIndexRouteContent({
     modelCatalog.models,
     modelCatalog.rows,
     newSessionDraft.loading,
+  ]);
+  useEffect(() => {
+    const next = pendingFallbackModel;
+    if (!next) return;
+    setModel(next.id);
+    setReasoningEffort(next.effort);
+    // The replacement keeps the speed only where it runs it (a Free ChatGPT
+    // plan's GPT-6 Luna has no Ultrafast), so the swap never leaves a choice
+    // that cannot send.
+    const row = findPickerRow(modelCatalog.rows, next.id);
+    const fitted = row ? coveredModelChoice(row, next.effort, context.latencyMode) : null;
+    if (fitted?.latencyMode) setLatencyMode(fitted.latencyMode);
+    // An automatic replacement is not the person's choice.
+    setModelProvided((current) => (current === undefined ? current : false));
+  }, [
+    context.latencyMode,
+    modelCatalog.rows,
+    pendingFallbackModel,
+    setLatencyMode,
     setModel,
     setReasoningEffort,
   ]);
@@ -1042,26 +1208,46 @@ function SessionsIndexRouteContent({
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
-  const startBlocker =
-    modelCatalog.loading || newSessionDraft.loading
-      ? null
-      : modelCatalog.error
-        ? "model_catalog_unavailable"
-        : !newSessionPolicyValid
-          ? !modelCatalog.rows.some((row) => row.selectable)
-            ? "no_model_connected"
-            : selectedPolicyRow &&
-                selectedPolicyRow.billingClass !== "opengeni_credits" &&
-                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
-              ? "selected_model_not_connected"
-              : "model_policy_unavailable"
-          : privateCreateUnavailable
-            ? "private_session_unavailable"
-            : attachments.hasUnresolved
-              ? "attachments_pending"
-              : !computeReady
-                ? "compute_unavailable"
-                : null;
+  // Send's one guard: its enabled state, the early-Send hold, the guard Send
+  // runs and the visible line below the composer all read it.
+  const sendState: NewSessionSendState = {
+    created: createdSessionAuthority !== null,
+    draftLoading: newSessionDraft.loading,
+    catalogLoading: modelCatalog.loading,
+    catalogFailed: Boolean(modelCatalog.error),
+    replacingModel: pendingFallbackModel !== null,
+    policyValid: newSessionPolicyValid,
+    anyModelSelectable: modelCatalog.rows.some((row) => row.selectable),
+    selectedModelNotConnected: Boolean(
+      selectedPolicyRow &&
+      selectedPolicyRow.billingClass !== "opengeni_credits" &&
+      selectedPolicyRow.catalog.credentialReadiness.status !== "ready",
+    ),
+    selectedModelSelectable: selectedPolicyRow?.selectable === true,
+    // Null capabilities only mean the request is still in flight.
+    privateSessionLoading:
+      tenancyCapabilities === null && (personalWorkspace || draft.visibility === "private"),
+    privateSessionUnavailable: privateCreateUnavailable,
+    toolsLoading: !context.workspaceMcpCatalogReady || personalResourceCatalogRefreshPending,
+    accountsLoading: connectionAccounts.loading,
+    accountsFailed: connectionAccounts.error !== null,
+    accountChoice: connectionAccounts.requiresAccountChoice,
+    resourcesLoading:
+      fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled),
+    resourcesResolved: fixedResourceSelection.selectionResolved,
+    uploadPending: attachments.hasUnresolved,
+    computeLoading: draft.compute.kind === "machine" && fleet.loading,
+    computeReady,
+    // A chosen agent that hasn't loaded, or can't start a chat here, never
+    // becomes an ordinary chat.
+    agentLoading: composerAgent.loading,
+    agentBlocked: composerAgent.blocker !== null,
+  };
+  const sendBlocker = getNewSessionSendBlocker(sendState);
+  // Voice skips the connected-tool accounts; its control and URL launch read
+  // the same guard so a voice start can't be dropped silently either.
+  const voiceSendBlocker = getNewSessionSendBlocker({ ...sendState, voice: true });
+  const startBlocker = newSessionStartBlockerReason(sendBlocker);
   useEffect(() => {
     const record = () => {
       if (startBlocker)
@@ -1104,20 +1290,9 @@ function SessionsIndexRouteContent({
         : attachments.readyResources.length > 0
           ? FILE_ONLY_MESSAGE_TEXT(t)
           : "";
-      if (
-        busy ||
-        !context.workspaceMcpCatalogReady ||
-        newSessionDraft.loading ||
-        !newSessionPolicyValid ||
-        privateCreateUnavailable ||
-        personalResourceCatalogRefreshPending ||
-        (!realtimeModel &&
-          createdSessionAuthority === null &&
-          (connectionAccounts.loading ||
-            connectionAccounts.error !== null ||
-            connectionAccounts.requiresAccountChoice)) ||
-        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
-      )
+      // The same guard as Send's enabled state and the visible line, so a
+      // Send that runs here was shown as available and a refusal is explained.
+      if (busy || getNewSessionSendBlocker({ ...sendState, voice: realtimeModel !== null }))
         return false;
       if (createdSessionAuthority === null) {
         const unavailable = unavailableSessionMcpServerIds(
@@ -1145,12 +1320,7 @@ function SessionsIndexRouteContent({
         });
         return false;
       }
-      if (
-        createdSessionAuthority === null &&
-        ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
-      ) {
-        return false;
-      }
+      if (createdSessionAuthority === null && !text && !realtimeModel) return false;
       // A chosen limit must be a valid amount; an older server never gets one.
       const usageLimit =
         usageLimitCapability === "enabled" ? parseSessionUsageLimitDraft(usageLimitDraft) : null;
@@ -1165,6 +1335,13 @@ function SessionsIndexRouteContent({
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      // What this request carries, so its refusal is matched to the composer.
+      const sentSignature = newSessionSendSignature({
+        text: persistedValue.text,
+        model,
+        reasoningEffort,
+        latencyMode,
+      });
       // One Send always refers to one visible snapshot, even if a sibling edit
       // forces a draft save or create retry while the user continues typing.
       const visibleSignature = stableJson(persistedValue);
@@ -1194,89 +1371,10 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
-              for (let attempt = 0; attempt < 3; attempt += 1) {
-                // Voice launch does not consume the draft. Save local edits if
-                // possible, but never rebase an old voice draft over a sibling's
-                // newer unsent message merely to start a realtime session.
-                const flushed = await newSessionDraft.flush();
-                if (!flushed) {
-                  reportDraftSaveFailure(newSessionDraft);
-                  return null;
-                }
-                const submission = submissionFromSessionDraft(
-                  draft,
-                  defaultFirstPartyMcpTools,
-                  personalResourceAttachment.intent,
-                );
-                let draftConflict = false;
-                let outcomeUnknown = false;
-                const created = await context.startSession(
-                  workspaceId,
-                  {
-                    text: "",
-                    resources: [],
-                    tools: submittedSnapshot.tools,
-                    model,
-                    reasoningEffort,
-                    latencyMode,
-                    ...submission.extras,
-                  },
-                  {
-                    targetSandboxId: submission.options.targetSandboxId,
-                    workingDir: submission.options.workingDir,
-                    channelId: selectedChannelId,
-                    omitWorkspaceResources: submission.omitWorkspaceResources,
-                    installedSkillIds: launch.skillCapabilityId
-                      ? [launch.skillCapabilityId]
-                      : undefined,
-                    startMode: "realtime",
-                    expectedNewSessionDraftRevision: flushed.revision,
-                    newSessionDraftToolPolicy: persistedToolPolicy,
-                    agentLearning: draft.agentLearning,
-                    usageLimitMicros,
-                    visibility: newSessionCreateVisibility(
-                      personalWorkspace,
-                      submission.options.visibility ?? "workspace",
-                      tenancyCapabilities?.canCreatePrivate === true,
-                    ),
-                    onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
-                      draftConflict = newSessionDraft.captureConflict(error);
-                      outcomeUnknown = uncertain;
-                      recoverPersonalResourceAttachment(error, request);
-                      connectionAccounts.onSelectionError(error);
-                      // A brief outage shows the updating notice, not a toast.
-                      return (
-                        draftConflict ||
-                        newSessionDraft.reportUnavailable(error) ||
-                        noteCreditRefusal(error, request)
-                      );
-                    },
-                  },
-                );
-                if (!created) {
-                  if (draftConflict) continue;
-                  if (!outcomeUnknown) await preserveNewerLocalDraft();
-                  return null;
-                }
-                setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
-                setCreateCreditRefusal(null);
-                setUsageLimitSendBlocked(false);
-                return {
-                  sessionId: created.id,
-                  settleDraft: async () => true,
-                };
-              }
-              await preserveNewerLocalDraft();
-              newSessionDraft.clearError();
-              toast.error("Couldn't start voice", {
-                description: DRAFT_CHANGED_DURING_SEND_TEXT,
-              });
-              return null;
-            }
-
-            const submittedResources = submittedSnapshot.resources;
-            for (let attempt = 0; attempt < 3; attempt += 1) {
-              const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+              // Voice launch does not consume the draft. Unsaved local edits
+              // are saved as autosave would save them; an unchanged form
+              // saves nothing, so it never writes over another device's draft.
+              const flushed = await newSessionDraft.flush();
               if (!flushed) {
                 reportDraftSaveFailure(newSessionDraft);
                 return null;
@@ -1287,18 +1385,18 @@ function SessionsIndexRouteContent({
                 personalResourceAttachment.intent,
               );
               let draftConflict = false;
+              let draftChangedElsewhere = false;
               let outcomeUnknown = false;
               const created = await context.startSession(
                 workspaceId,
                 {
-                  text,
-                  resources: submittedResources,
+                  text: "",
+                  resources: [],
                   tools: submittedSnapshot.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
                   ...submission.extras,
-                  connectionAccounts: connectionAccounts.selections,
                 },
                 {
                   targetSandboxId: submission.options.targetSandboxId,
@@ -1308,6 +1406,8 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
+                  agent: newSessionAgent,
+                  startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1318,82 +1418,180 @@ function SessionsIndexRouteContent({
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                    // Only an older server still refuses a Send over its draft.
                     draftConflict = newSessionDraft.captureConflict(error);
+                    if (draftConflict) {
+                      draftChangedElsewhere =
+                        newSessionDraftConflictRevision(error) !== flushed.revision;
+                    }
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
                     connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
-                    // An unconfirmed create keeps its idempotency key, so the
-                    // person's next Send cannot start a second session.
                     return (
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
-                      noteCreditRefusal(error, request)
+                      noteCreditRefusal(error, request) ||
+                      noteCreateFailure(error, sentSignature)
                     );
                   },
                 },
               );
               if (!created) {
-                if (draftConflict) continue;
+                if (draftConflict) {
+                  await preserveNewerLocalDraft();
+                  newSessionDraft.clearError();
+                  toast.error("Couldn't start voice", {
+                    description: draftConflictDuringSendText(draftChangedElsewhere),
+                  });
+                  return null;
+                }
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
-              // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
               setCreateCreditRefusal(null);
+              setCreateFailure(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
-                settleDraft: async () => {
-                  const acknowledged = await newSessionDraft.acknowledgeConsumed(
-                    flushed,
-                    visibleSignature,
-                  );
-                  if (
-                    acknowledged?.kind === "consumed" &&
-                    newSessionDraft.isCurrentSignature(visibleSignature)
-                  ) {
-                    setMessage("");
-                    visibilityChosenRef.current = false;
-                    setDraft({
-                      ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
-                      visibility:
-                        tenancyCapabilities?.canCreatePrivate === true &&
-                        tenancyCapabilities.defaultVisibility === "private"
-                          ? "private"
-                          : "workspace",
-                    });
-                    attachments.removeReadyFiles(
-                      submittedResources.flatMap((resource) =>
-                        resource.kind === "file" ? [resource.fileId] : [],
-                      ),
-                    );
-                  } else if (
-                    acknowledged?.kind !== "preserved" ||
-                    !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                  ) {
-                    // The message was already accepted. If there is no newer
-                    // local edit, leave a sibling's later draft untouched.
-                    if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
-                      return true;
-                    }
-                    const preserved = await newSessionDraft.flushForSend();
-                    if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                      return false;
-                    }
-                  }
-                  return true;
-                },
+                settleDraft: async () => true,
               };
             }
-            await preserveNewerLocalDraft();
-            // Each attempt saved the draft before the create refused it, so the
-            // draft is not unsaved: clear that notice and resume autosave.
-            newSessionDraft.clearError();
-            toast.error("Couldn't send", {
-              description: DRAFT_CHANGED_DURING_SEND_TEXT,
-            });
-            return null;
+
+            const submittedResources = submittedSnapshot.resources;
+            // Send carries the clicked snapshot. Saving it first only keeps
+            // the draft in step; the server clears the draft afterwards only
+            // if nothing newer replaced it on another device.
+            const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+            if (!flushed) {
+              reportDraftSaveFailure(newSessionDraft);
+              return null;
+            }
+            const submission = submissionFromSessionDraft(
+              draft,
+              defaultFirstPartyMcpTools,
+              personalResourceAttachment.intent,
+            );
+            let draftConflict = false;
+            let draftChangedElsewhere = false;
+            let outcomeUnknown = false;
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: submittedSnapshot.tools,
+                model,
+                reasoningEffort,
+                latencyMode,
+                ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                channelId: selectedChannelId,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                installedSkillIds: launch.skillCapabilityId
+                  ? [launch.skillCapabilityId]
+                  : undefined,
+                agent: newSessionAgent,
+                expectedNewSessionDraftRevision: flushed.revision,
+                newSessionDraftToolPolicy: persistedToolPolicy,
+                agentLearning: draft.agentLearning,
+                usageLimitMicros,
+                visibility: newSessionCreateVisibility(
+                  personalWorkspace,
+                  submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
+                ),
+                onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                  // Only an older server still refuses a Send over its draft.
+                  draftConflict = newSessionDraft.captureConflict(error);
+                  if (draftConflict) {
+                    draftChangedElsewhere =
+                      newSessionDraftConflictRevision(error) !== flushed.revision;
+                  }
+                  outcomeUnknown = uncertain;
+                  recoverPersonalResourceAttachment(error, request);
+                  connectionAccounts.onSelectionError(error);
+                  // A brief outage shows the updating notice, not a toast.
+                  // An unconfirmed create keeps its idempotency key, so the
+                  // person's next Send cannot start a second session.
+                  return (
+                    draftConflict ||
+                    newSessionDraft.reportUnavailable(error) ||
+                    noteCreditRefusal(error, request) ||
+                    noteCreateFailure(error, sentSignature)
+                  );
+                },
+              },
+            );
+            if (!created) {
+              if (draftConflict) {
+                await preserveNewerLocalDraft();
+                // The draft is saved, so it is not unsaved: clear that notice
+                // and resume autosave.
+                newSessionDraft.clearError();
+                toast.error("Couldn't send", {
+                  description: draftConflictDuringSendText(draftChangedElsewhere),
+                });
+                return null;
+              }
+              if (!outcomeUnknown) await preserveNewerLocalDraft();
+              return null;
+            }
+            // The limit belongs to the chat just created; the next starts with none.
+            setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+            setCreateCreditRefusal(null);
+            setCreateFailure(null);
+            setUsageLimitSendBlocked(false);
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(
+                  flushed,
+                  visibleSignature,
+                );
+                // A newer draft from another device stayed; the form shows it.
+                if (acknowledged?.kind === "followed") return true;
+                if (
+                  acknowledged?.kind === "consumed" &&
+                  newSessionDraft.isCurrentSignature(visibleSignature)
+                ) {
+                  setMessage("");
+                  visibilityChosenRef.current = false;
+                  setDraft({
+                    ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
+                    visibility:
+                      tenancyCapabilities?.canCreatePrivate === true &&
+                      tenancyCapabilities.defaultVisibility === "private"
+                        ? "private"
+                        : "workspace",
+                  });
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  acknowledged?.kind !== "preserved" ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  // The message was already accepted. If there is no newer
+                  // local edit, leave a sibling's later draft untouched.
+                  if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
+                    return true;
+                  }
+                  const preserved = await newSessionDraft.flushForSend();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
+                }
+                return true;
+              },
+            };
           },
           navigate: async (sessionId) => {
             // Voice connects while the session page loads; the page adopts
@@ -1428,6 +1626,49 @@ function SessionsIndexRouteContent({
         setSubmitting(false);
       }
     },
+  );
+
+  // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
+  // the composer with a link to that chat once the saved draft has loaded,
+  // ahead of anything the person already typed, then leaves the URL.
+  const launchContinueSessionId = launch.continueSessionId;
+  const continuedSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchContinueSessionId || newSessionDraft.loading) return;
+    if (continuedSessionRef.current === launchContinueSessionId) return;
+    continuedSessionRef.current = launchContinueSessionId;
+    const pointer = continueArchivedChatMessage(
+      page.origin(),
+      workspaceId,
+      launchContinueSessionId,
+    );
+    setMessage((current) =>
+      current.includes(pointer.trim()) ? current : `${pointer}${current.trimStart()}`,
+    );
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      search: (previous: Record<string, unknown>) => {
+        const { continueSessionId: _dropped, ...rest } = previous;
+        return rest;
+      },
+      replace: true,
+    });
+  }, [launchContinueSessionId, navigate, newSessionDraft.loading, page, workspaceId]);
+  // The agent chip: `?agent=<id>` for an agent, nothing for Opengeni itself.
+  const selectComposerAgent = useCallback(
+    (agentId: string | null) => {
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+        search: (previous: Record<string, unknown>) => {
+          const { botTemplateId: _legacy, agent: _current, ...rest } = previous;
+          return agentId ? { ...rest, agent: agentId } : rest;
+        },
+        replace: true,
+      });
+    },
+    [navigate, workspaceId],
   );
 
   // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
@@ -1469,20 +1710,14 @@ function SessionsIndexRouteContent({
         search: {
           ...(launch.channelId ? { channelId: launch.channelId } : {}),
           ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+          ...(launch.agent ? { agent: launch.agent } : {}),
+          ...(launch.botTemplateId ? { botTemplateId: launch.botTemplateId } : {}),
         },
         replace: true,
       });
       return;
     }
-    if (
-      busy ||
-      !computeReady ||
-      !newSessionPolicyValid ||
-      !context.workspaceMcpCatalogReady ||
-      attachments.hasUnresolved
-    ) {
-      return;
-    }
+    if (busy || voiceSendBlocker !== null) return;
     handledLaunchKeyRef.current = launchKey;
     void submitNewSession(launchRealtime, {
       model: launchModel,
@@ -1492,10 +1727,7 @@ function SessionsIndexRouteContent({
       if (!ok) handledLaunchKeyRef.current = null;
     });
   }, [
-    attachments.hasUnresolved,
     busy,
-    computeReady,
-    context.workspaceMcpCatalogReady,
     launchEffort,
     launchFollowDefault,
     launchLatency,
@@ -1503,14 +1735,16 @@ function SessionsIndexRouteContent({
     launchRealtime,
     launchSkillCapabilityId,
     launchKey,
+    launch.agent,
+    launch.botTemplateId,
     launch.channelId,
     navigate,
     newSessionDraft.loading,
-    newSessionPolicyValid,
     setLatencyMode,
     setModel,
     setReasoningEffort,
     submitNewSession,
+    voiceSendBlocker,
     workspaceId,
   ]);
 
@@ -1532,15 +1766,11 @@ function SessionsIndexRouteContent({
         message.trim().length > 0 ||
         attachments.readyResources.length > 0) &&
       !busy &&
-      !newSessionDraft.loading &&
-      newSessionPolicyValid &&
-      !personalResourceCatalogRefreshPending &&
-      (createdSessionAuthority !== null ||
-        (!connectionAccounts.loading &&
-          connectionAccounts.error === null &&
-          !connectionAccounts.requiresAccountChoice)) &&
-      (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
-      (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
+      sendBlocker === null,
+    // What Send needs right after the page opens is still loading: an early
+    // Send waits for it instead of doing nothing. Any other blocker shows its
+    // line below the composer.
+    preparing: composerSendBlockerIsLoading(sendBlocker),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -1615,6 +1845,85 @@ function SessionsIndexRouteContent({
 
   // A transient outage is covered by the updating notice instead.
   const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
+  // With no usable credit, the notice above the composer carries the one
+  // Add credits action, so the heading's top-up button steps aside. Hosts that
+  // turn off addCredits (side panes) get the notice's billing link instead of
+  // the dialog.
+  const canTopUpCredits =
+    addCredits &&
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspace?.accountId) &&
+    hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:manage");
+  const noUsableCredit =
+    creditGap !== null ||
+    (modelUsesCredits(selectedPolicyRow?.catalog) &&
+      selectedPolicyRow?.catalog.creditFunding === "unavailable");
+  const openCreditTopup = () => setCreditTopupOpen(true);
+
+  // Where the chat runs and who can see it are chosen beside the project chip,
+  // above the message, and only when there is something to choose.
+  const setupDisabled = busy || newSessionDraft.loading;
+  const runsOnSetup: SessionSetupSetting | null = hasRunsOnChoices(runsOnChoices)
+    ? {
+        label: "Runs on",
+        summary: runsOnSummary(runsOnChoices),
+        icon: runsOnSetupIcon(runsOnChoices),
+        disabled: setupDisabled,
+        renderMenu: () => (
+          <RunsOnMenuBody
+            {...runsOnChoices}
+            disabled={setupDisabled}
+            onChange={setDraft}
+            onComputeChange={setExplicitComputeDraft}
+            onRetryMachines={() => void fleet.refresh()}
+          />
+        ),
+      }
+    : null;
+  const visibilitySetup: SessionSetupSetting | null = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+  })
+    ? {
+        label: "Visibility",
+        summary: visibilitySummary(draft.visibility),
+        icon: visibilitySetupIcon(draft.visibility),
+        disabled: setupDisabled,
+        renderMenu: (close) => (
+          <VisibilityMenuBody
+            value={draft.visibility}
+            disabled={setupDisabled}
+            workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}
+            onChange={(visibility) => {
+              visibilityChosenRef.current = true;
+              composerAgent.visibilityChosen();
+              // A shared chat can't go in an Only me project.
+              if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
+              setDraft((current) => ({ ...current, visibility }));
+              close();
+            }}
+          />
+        ),
+      }
+    : null;
+
+  // Who answers: Opengeni or one of the workspace's agents. Shown once there
+  // is an agent to pick (or one is already in the URL).
+  const agentChip =
+    composerAgent.selection !== null ||
+    (workspaceAgents.supported && (workspaceAgents.agents?.length ?? 0) > 0) ? (
+      <ComposerAgentChip
+        workspaceId={workspaceId}
+        agents={workspaceAgents.agents}
+        selection={composerAgent.selection}
+        disabled={setupDisabled}
+        onlyMeUnavailable={tenancyCapabilities !== null && !canCreatePrivateChat}
+        onSelect={selectComposerAgent}
+        onBrowse={() =>
+          void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
+        }
+      />
+    ) : null;
 
   return createElement(
     LightboxProvider,
@@ -1630,31 +1939,36 @@ function SessionsIndexRouteContent({
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
-            What should the agent do?
+            {wording.heading}
           </h1>
-          {addCredits &&
-          context.clientConfig.billingMode === "stripe" &&
-          workspace?.accountId &&
-          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+          {canTopUpCredits && workspace?.accountId ? (
             <>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="mt-2"
-                onClick={() => setCreditTopupOpen(true)}
-              >
-                <CreditCardIcon className="size-4" />
-                Add credits
-              </Button>
+              {noUsableCredit ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={openCreditTopup}
+                >
+                  <CreditCardIcon className="size-4" />
+                  Add credits
+                </Button>
+              )}
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
+                  refusalCode={
+                    refusedCreate?.code === "byok_paid_credit_required"
+                      ? "byok_paid_credit_required"
+                      : null
+                  }
                   open={creditTopupOpen}
                   workspaceId={workspaceId}
                   accountId={workspace.accountId}
                   canBuyCredits
                   onOpenChange={setCreditTopupOpen}
+                  beforeLeave={newSessionDraft.flush}
                 />
               </Suspense>
             </>
@@ -1675,7 +1989,14 @@ function SessionsIndexRouteContent({
             <CreditRefusalNotice
               gap={creditGap}
               message={refusedCreate?.message}
+              refusalCode={refusedCreate?.code}
               workspaceId={workspaceId}
+              accountId={workspace?.accountId ?? null}
+              canReadBilling={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:read",
+              )}
               canBuyCredits={
                 context.clientConfig.billingMode === "stripe" &&
                 hasAccountPermission(
@@ -1690,9 +2011,13 @@ function SessionsIndexRouteContent({
                 "connections:write",
               )}
               onChooseModel={busy ? undefined : chooseCoveredModel}
+              {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
             />
           </div>
+        ) : ownSubscriptionNotice && !ownSubscriptionNotice.dismissible ? (
+          // The chosen model waits for a plan: said before Send.
+          ownSubscriptionNoticeView
         ) : modelUsesCredits(selectedPolicyRow?.catalog) &&
           hasAccountPermission(
             context.accessContext,
@@ -1711,10 +2036,13 @@ function SessionsIndexRouteContent({
                   "billing:manage",
                 )}
                 canReadBilling
+                {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               />
             </Suspense>
           </div>
         ) : null}
+        {/* The one-time heads-up is a reminder: below anything about the chosen model. */}
+        {!creditGap && ownSubscriptionNotice?.dismissible ? ownSubscriptionNoticeView : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
           <ConsoleComposer
@@ -1724,7 +2052,8 @@ function SessionsIndexRouteContent({
             autoFocus
             disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder="Describe a task for the agent…"
+            placeholder={wording.placeholder}
+            messages={wording.composerMessages}
             controlsLeading={
               <>
                 <ComposerMobilePlus
@@ -1774,47 +2103,6 @@ function SessionsIndexRouteContent({
                   onToolSelectionChange={(selection) => {
                     changeConnectorSelection(selection);
                   }}
-                  {...(hasRunsOnChoices(runsOnChoices)
-                    ? {
-                        runsOn: {
-                          summary: runsOnSummary(runsOnChoices),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <RunsOnMenuBody
-                              {...runsOnChoices}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={setDraft}
-                              onComputeChange={setExplicitComputeDraft}
-                              onRetryMachines={() => void fleet.refresh()}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
-                  {...(hasVisibilityChoice({
-                    personalWorkspace,
-                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
-                  })
-                    ? {
-                        visibility: {
-                          summary: visibilitySummary(draft.visibility),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <VisibilityMenuBody
-                              value={draft.visibility}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={(visibility) => {
-                                visibilityChosenRef.current = true;
-                                setDraft((current) => ({
-                                  ...current,
-                                  visibility,
-                                }));
-                              }}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
                   {...(usageLimitCapability === "enabled"
                     ? {
                         usageLimit: {
@@ -1933,40 +2221,51 @@ function SessionsIndexRouteContent({
                       : voiceSelection.loadState
                   }
                   modelMenu="split"
-                  disabled={
-                    busy ||
-                    newSessionDraft.loading ||
-                    attachments.hasUnresolved ||
-                    !newSessionPolicyValid ||
-                    !computeReady ||
-                    personalMachineSelected ||
-                    !context.workspaceMcpCatalogReady
-                  }
+                  disabled={busy || voiceSendBlocker !== null || personalMachineSelected}
                   disabledReason={
-                    attachments.hasUnresolved
+                    voiceSendBlocker === "upload"
                       ? "Wait for attachments to finish before starting voice."
-                      : !newSessionPolicyValid
+                      : voiceSendBlocker === "policy"
                         ? "Choose supported model settings before starting voice."
-                        : !computeReady
+                        : voiceSendBlocker === "compute"
                           ? "Choose where this session should run first."
-                          : personalMachineSelected
-                            ? "Start with a message so personal machine access can attach to an accepted turn."
-                            : !context.workspaceMcpCatalogReady
-                              ? "Wait for session tools to finish loading."
-                              : null
+                          : voiceSendBlocker === "agent"
+                            ? composerAgent.blocker
+                            : voiceSendBlocker !== null &&
+                                composerSendBlockerIsLoading(voiceSendBlocker)
+                              ? "Wait for the chat to finish loading."
+                              : voiceSendBlocker !== null
+                                ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
+                                : personalMachineSelected
+                                  ? "Start with a message so personal machine access can attach to an accepted turn."
+                                  : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
               </>
             }
             header={
-              chatList ? (
+              chatList || agentChip || runsOnSetup || visibilitySetup ? (
                 <SessionSetupStrip
                   disabled={busy || newSessionDraft.loading}
-                  channels={channelsQuery.channels}
-                  selectedChannelId={selectedChannelId}
-                  onChannelChange={selectProject}
-                  onCreateProject={() => setProjectDialogOpen(true)}
+                  agent={agentChip}
+                  agentError={composerAgent.blocker}
+                  project={
+                    chatList
+                      ? {
+                          channels: canCreatePrivateChat
+                            ? channelsQuery.channels
+                            : channelsQuery.channels.filter(
+                                (channel) => channel.visibility !== "private",
+                              ),
+                          selectedChannelId,
+                          onChange: selectProject,
+                          onCreate: () => setProjectDialogOpen(true),
+                        }
+                      : null
+                  }
+                  runsOn={runsOnSetup}
+                  visibility={visibilitySetup}
                 />
               ) : undefined
             }
@@ -1984,6 +2283,29 @@ function SessionsIndexRouteContent({
               <Notice tone="info">{OPENGENI_UPDATING_NOTICE(t)}</Notice>
             </div>
           ) : null}
+
+          {/* A refused start, until the person changes what they send. */}
+          <NewSessionCreateFailureNotice
+            message={createFailureMessage}
+            onDismiss={() => setCreateFailure(null)}
+            className="mt-3"
+          />
+
+          {/* Send's blocker, when no other surface already explains it. */}
+          <ComposerSendBlockerNotice
+            blocker={sendBlocker}
+            explained={
+              fixedResourceCatalogError
+                ? [...NEW_SESSION_EXPLAINED_BLOCKERS, "resources"]
+                : NEW_SESSION_EXPLAINED_BLOCKERS
+            }
+            className="mt-3"
+            onAction={(action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(context.model);
+              else if (sendBlocker === "model_catalog") void modelCatalog.refresh();
+              else if (sendBlocker === "accounts") void connectionAccounts.refresh();
+            }}
+          />
 
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
@@ -2041,7 +2363,9 @@ function SessionsIndexRouteContent({
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
-            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            set={starterSet}
+            hostStarters={hostStarters}
+            fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);
@@ -2054,10 +2378,18 @@ function SessionsIndexRouteContent({
         open={projectDialogOpen}
         name={projectNameDraft}
         busy={channelsQuery.mutating}
+        audience={
+          projectAudienceOffered
+            ? { value: projectAudienceDraft, onChange: setProjectAudienceDraft }
+            : undefined
+        }
         onNameChange={setProjectNameDraft}
         onOpenChange={(open) => {
           setProjectDialogOpen(open);
-          if (!open) setProjectNameDraft("");
+          if (!open) {
+            setProjectNameDraft("");
+            setProjectAudienceDraft("workspace");
+          }
         }}
         onSubmit={() => void createProject()}
       />
@@ -2065,9 +2397,16 @@ function SessionsIndexRouteContent({
   );
 }
 
-/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
-const DRAFT_CHANGED_DURING_SEND_TEXT =
-  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+/**
+ * Send was refused as a draft conflict. Only a draft that really moved on
+ * since this Send saved it was changed somewhere else (another tab, window or
+ * device); otherwise nothing is known to have changed it.
+ */
+function draftConflictDuringSendText(changedElsewhere: boolean): string {
+  return changedElsewhere
+    ? "Your message is saved, but this draft kept changing in another tab or window. Check it and send again."
+    : "Your message is saved, but it couldn't be sent. Check the draft and send again.";
+}
 
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
@@ -2094,6 +2433,7 @@ function reportDraftSaveFailure(draft: {
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { workspaceSessionListEvent } = useOpenGeni();
+  const subjectId = useAppContext().accessContext.subjectId;
   const hintsAvailable =
     workspaceSessionListEvent?.workspaceId === workspaceId && workspaceSessionListEvent.available;
   const { sessions, pinned, refresh, error } = useWorkspaceSessions({
@@ -2105,8 +2445,24 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   useSessionListHintRefresh(refresh, error);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
+  // The chats the person opened here lead (kept across reloads, so the pane
+  // of an app that reopens often still shows them); then pins, which are
+  // server-authoritative, then running and recency rows.
+  const directoryVersion = useChatDirectoryVersion(subjectId);
+  const opened = useMemo<OpenedChat[]>(() => {
+    void directoryVersion;
+    const directory = readChatDirectory(subjectId, workspaceId);
+    return directory.recent.flatMap((id) => {
+      const record = directory.rows.get(id);
+      return record && record.workspaceId === workspaceId && !record.archived
+        ? [{ id, title: record.title, openedAt: record.updatedAt }]
+        : [];
+    });
+  }, [directoryVersion, subjectId, workspaceId]);
+  const recent = useMemo(
+    () => recentSessionsWithOpened(t, sessions, pinned, opened, 6),
+    [opened, pinned, sessions],
+  );
 
   if (recent.length === 0) {
     return null;
@@ -2120,16 +2476,45 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
       <ul className="flex min-w-0 flex-col divide-y divide-border/60">
-        {recent.map((session) => (
-          <RecentSessionRow
-            key={session.id}
-            workspaceId={workspaceId}
-            session={session}
-            catalogRows={modelCatalog.rows}
-          />
-        ))}
+        {recent.map((entry) =>
+          entry.kind === "session" ? (
+            <RecentSessionRow
+              key={entry.session.id}
+              workspaceId={workspaceId}
+              session={entry.session}
+              catalogRows={modelCatalog.rows}
+            />
+          ) : (
+            <OpenedChatRow key={entry.chat.id} workspaceId={workspaceId} chat={entry.chat} />
+          ),
+        )}
       </ul>
     </section>
+  );
+}
+
+/**
+ * A chat opened here that the current page of the list doesn't hold: its
+ * title and when it was opened. Its status isn't known here, so the row keeps
+ * the dot's place without claiming one.
+ */
+function OpenedChatRow({ workspaceId, chat }: { workspaceId: string; chat: OpenedChat }) {
+  return (
+    <li className="min-w-0">
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: chat.id }}
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
+      >
+        <span aria-hidden className="inline-block size-2 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg group-hover:text-fg">{chat.title}</span>
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
+          {chat.openedAt > 0 ? relativeTimeLabel(t, new Date(chat.openedAt).toISOString()) : null}
+        </span>
+      </Link>
+    </li>
   );
 }
 
@@ -2182,34 +2567,8 @@ function RecentSessionRow({
   );
 }
 
-// Setup selections sit above the prompt so the footer remains an action row.
-// Repo stays out of the compute band so that band only shows when rigs /
-// machines exist. Tools and repos live under “+” at every width.
-function SessionSetupStrip({
-  disabled,
-  channels,
-  selectedChannelId,
-  onChannelChange,
-  onCreateProject,
-}: {
-  disabled: boolean;
-  channels: Channel[];
-  selectedChannelId: string | null;
-  onChannelChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
-      <SessionFolderPicker
-        channels={channels}
-        selectedChannelId={selectedChannelId}
-        disabled={disabled}
-        onChange={onChannelChange}
-        onCreateProject={onCreateProject}
-      />
-    </div>
-  );
-}
+/** The accounts notice below the new-chat composer explains these itself. */
+const NEW_SESSION_EXPLAINED_BLOCKERS = ["accounts", "account_choice"] as const;
 
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
@@ -2261,68 +2620,16 @@ function SessionModelControl({
   );
 }
 
-function SessionFolderPicker({
-  channels,
-  selectedChannelId,
-  disabled,
-  onChange,
-  onCreateProject,
-}: {
-  channels: Channel[];
-  selectedChannelId: string | null;
-  disabled: boolean;
-  onChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  const selected = channels.find((channel) => channel.id === selectedChannelId) ?? null;
-  const label = selected?.name ?? "Default";
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          aria-label={`Project: ${label}`}
-          title={label}
-          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
-        >
-          <FolderIcon className="size-3.5 shrink-0" />
-          <span className="min-w-0 truncate">{label}</span>
-          <ChevronDownIcon className="size-3 shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
-        <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon />
-          <span className="min-w-0 flex-1 truncate">Default</span>
-          <DropdownMenuCheck checked={selectedChannelId === null} />
-        </DropdownMenuItem>
-        {channels.map((channel) => (
-          <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <FolderIcon />
-            <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon />
-          New project
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
+/** When the new-chat repository menu last re-read each workspace's repositories. */
+const repositoryMenuOpenReads = new Map<string, number>();
 
 function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
   disabled: boolean,
   onConnectWorkspaceApp: () => void,
-  page: PageHost,
 ): RepositoryContextPickerProps {
+  const githubSettingsUrl = `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`;
   return {
     setupMode:
       context.githubStatus?.setupMode ??
@@ -2338,26 +2645,49 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
+    personalGitHubManageUrl: `${githubSettingsUrl}&github=personal`,
+    githubSettingsUrl,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
-    selectedInstallationId: context.selectedInstallationId,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
-    githubAppOpen: context.githubAppOpen,
     org: context.githubOrg,
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
+    githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
+    githubUpdateFailed: context.githubStatusFailed && context.githubCatalogReady,
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([
-        context.refreshGitHub(workspaceId, undefined, { sync: true }),
-        context.refreshPersonalGitHub(workspaceId),
+        context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true }),
+        context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true }),
       ]);
+    },
+    // Opening the menu re-reads the workspace's App repositories, which the
+    // server keeps in line with GitHub (a repository just added there shows up).
+    onOpenRefresh: async () => {
+      if (context.repoBusy || context.githubStatus?.status !== "bound") return;
+      const now = Date.now();
+      if (
+        now - (repositoryMenuOpenReads.get(workspaceId) ?? 0) <
+        REPOSITORY_OPEN_REFRESH_COOLDOWN_MS
+      )
+        return;
+      repositoryMenuOpenReads.set(workspaceId, now);
+      await context.refreshGitHub(workspaceId);
     },
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
     onTogglePersonalGitHubRepo: (repository) =>
       void context.togglePersonalGitHubRepository(workspaceId, repository),
+    // Only All my repositories can use a repository found past the listed ones.
+    ...(context.personalGitHubSelection?.allRepositoriesAccess &&
+    context.personalGitHubStatus?.allRepositoriesAvailable !== false
+      ? {
+          onSearchPersonalGitHubRepositories: (query: string) =>
+            context.searchPersonalGitHubRepositories(workspaceId, query),
+        }
+      : {}),
     onPersonalGitHubRefChange: (repositoryId: string, ref: string) =>
       context.setSelectedPersonalGitHubRepoRefs((current) => ({
         ...current,
@@ -2425,11 +2755,7 @@ function workspaceRepositoryPickerProps(
         selectWorkspaceRepository: (matched, ref) => {
           assertCurrent();
           context.setSelectedRepoIds((current) => {
-            const next =
-              context.selectedInstallationId !== null &&
-              context.selectedInstallationId !== matched.installationId
-                ? new Set<number>()
-                : new Set(current);
+            const next = new Set(current);
             next.add(matched.id);
             return next;
           });
@@ -2497,15 +2823,9 @@ function workspaceRepositoryPickerProps(
       });
     },
     validationError: context.repositoryValidationError,
-    onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
     onConnectWorkspaceApp,
-    onConfigureInstallation: (installationId: number) =>
-      openGitHubInstallationSettings(context.client, workspaceId, installationId, page.assign),
-    onDisconnectInstallation: async (installationId: number) => {
-      await context.disconnectGitHubInstallation(workspaceId, installationId);
-    },
   };
 }
 
@@ -2522,17 +2842,10 @@ function WorkspaceRepositoryMenuBody({
   catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
   onConnectWorkspaceApp: () => void;
 }) {
-  const page = usePage();
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
-      {...workspaceRepositoryPickerProps(
-        context,
-        workspaceId,
-        disabled,
-        onConnectWorkspaceApp,
-        page,
-      )}
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled, onConnectWorkspaceApp)}
       {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />
@@ -2618,7 +2931,7 @@ function ComputeTargetControl(props: {
     fleetLoading: fleet.loading,
   });
 
-  // Where it runs is chosen under "+" > Runs on. Only what needs attention
+  // Where it runs is chosen with the Runs on chip above the message. Only what needs attention
   // shows under the composer: why Send waits on where it runs (with a retry
   // for a failed machine load), a catalog that couldn't be verified, and the
   // personal resources this chat will use.

@@ -29,6 +29,7 @@ import {
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
+  validateHumanInputResponse,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
@@ -686,6 +687,83 @@ describe("durable structured human input", () => {
         respondedBy: required.grant.subjectId,
       }),
     ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+
+    // "Let the agent decide" settles even a request that cannot be skipped,
+    // and the agent's resume sees that it was asked to decide.
+    // Only a person can make that choice: an agent (a parent answering for
+    // its child) or the system is refused.
+    for (const respondedBy of [`agent_attempt:${crypto.randomUUID()}`, "system:test"]) {
+      await expect(
+        acceptSessionHumanInputResponse(client.db, {
+          accountId: required.grant.accountId,
+          workspaceId: required.grant.workspaceId!,
+          sessionId: required.session.id,
+          requestId: required.requestId,
+          response: { outcome: "skipped", agentDecides: true },
+          respondedBy,
+        }),
+      ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+    }
+    const decided = await acceptSessionHumanInputResponse(client.db, {
+      accountId: required.grant.accountId,
+      workspaceId: required.grant.workspaceId!,
+      sessionId: required.session.id,
+      requestId: required.requestId,
+      response: { outcome: "skipped", agentDecides: true },
+      respondedBy: required.grant.subjectId,
+    });
+    expect(decided).toMatchObject({
+      action: "accepted",
+      request: { status: "skipped", response: { outcome: "skipped", agentDecides: true } },
+    });
+    expect(
+      (await getSessionHumanInputRequest(
+        client.db,
+        required.grant.workspaceId!,
+        required.session.id,
+        required.requestId,
+      ))!.response,
+    ).toEqual({ outcome: "skipped", agentDecides: true });
+  });
+
+  test("only the person answers secrets, Skill reviews and secret approvals", () => {
+    const text: HumanInputQuestion = {
+      id: "branch",
+      kind: "text",
+      prompt: "Which branch?",
+      options: [],
+      required: true,
+      allowOther: false,
+    };
+    const decide = { outcome: "skipped" as const, agentDecides: true as const };
+    expect(validateHumanInputResponse({ questions: [text], allowSkip: false }, decide)).toEqual(
+      decide,
+    );
+    const secret = {
+      ...text,
+      kind: "secret",
+      secret: { item: "Token", field: "token" },
+    } as unknown as HumanInputQuestion;
+    const skillReview = {
+      ...text,
+      skillReview: { skillId: "skill" },
+    } as unknown as HumanInputQuestion;
+    const approval = { ...text, id: `secret-approval:${crypto.randomUUID()}` };
+    for (const questions of [[secret], [text, secret], [skillReview], [approval]]) {
+      expect(() => validateHumanInputResponse({ questions, allowSkip: true }, decide)).toThrow(
+        HumanInputResponseValidationError,
+      );
+    }
+    expect(() =>
+      validateHumanInputResponse(
+        { questions: [text], allowSkip: true, origin: "secret_use_approval" },
+        decide,
+      ),
+    ).toThrow(HumanInputResponseValidationError);
+    // An ordinary skip is unchanged.
+    expect(
+      validateHumanInputResponse({ questions: [secret], allowSkip: true }, { outcome: "skipped" }),
+    ).toEqual({ outcome: "skipped" });
   });
 
   test("answer and early-expiry racers have one winner, while a passed deadline expires", async () => {
@@ -915,6 +993,7 @@ describe("durable structured human input", () => {
       action: "conflict",
       request: { id: parallelRequestId, status: "pending" },
     });
+    // An ordinary sibling approval stays decidable; a later resume applies it.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: frozen.grant.accountId,
@@ -923,7 +1002,7 @@ describe("durable structured human input", () => {
         subjectId: frozen.grant.subjectId,
         payload: { approvalId: "ordinary-call", decision: "approve" },
       }),
-    ).toMatchObject({ action: "conflict" });
+    ).toMatchObject({ action: "accepted" });
 
     if (first.action !== "accepted") throw new Error("first response was not accepted");
     const resumedAttemptId = crypto.randomUUID();
@@ -987,6 +1066,8 @@ describe("durable structured human input", () => {
     ).toMatchObject({ action: "accepted" });
 
     const ordinaryFirst = await freezeRequest();
+    // An approval decided first never blocks the question's answer: the
+    // answer's resume applies that approval too.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: ordinaryFirst.grant.accountId,
@@ -1009,8 +1090,7 @@ describe("durable structured human input", () => {
         respondedBy: ordinaryFirst.grant.subjectId,
       }),
     ).toMatchObject({
-      action: "conflict",
-      request: { id: ordinaryFirst.requestId, status: "pending" },
+      action: "accepted",
     });
 
     const concurrent = await freezeRequest({ parallel: true });

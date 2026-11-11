@@ -1,10 +1,11 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
   McpConnectionAccountSelection,
   McpServerConnectionRef,
-  Session,
+  ChatSession as Session,
 } from "@opengeni/sdk";
 
 import { normalizeProviderDomain } from "../../lib/capabilities";
@@ -102,7 +103,8 @@ export function connectedAccountGroups(
     const serverId = ref.serverId;
     const group = groups.get(serverId) ?? { serverId, name: ref.name, accounts: [] };
     for (const account of matchingConnectionAccounts(ref.connectionRef, connections).filter(
-      (entry) => entry.status === "active",
+      // Your own login works here only where you turned it on (D-54).
+      (entry) => entry.status === "active" && entry.turnedOnHere !== false,
     )) {
       if (!group.accounts.some((existing) => existing.id === account.id))
         group.accounts.push(account);
@@ -113,7 +115,7 @@ export function connectedAccountGroups(
 }
 
 export async function sessionConnectedAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],
@@ -152,7 +154,7 @@ export function selectedConnectionAccounts(
 }
 
 export async function sessionConnectionAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   session: Pick<Session, "id" | "workspaceId">,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],

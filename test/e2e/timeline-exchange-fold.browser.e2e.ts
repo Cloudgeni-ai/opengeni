@@ -739,7 +739,10 @@ describe("readable timeline browser regression", () => {
             return paragraph.textContent;
           }, intent);
           await nextPaint(page);
-          expect((await sample(page)).following).toBe(false);
+          // A selection is reading and unpins. Focus is not reading position:
+          // the view keeps following, but the settle ease still yields to it.
+          const following = intent === "focus";
+          expect((await sample(page)).following).toBe(following);
           await page.evaluate(() =>
             window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
           );
@@ -758,7 +761,7 @@ describe("readable timeline browser regression", () => {
             expect(
               await page.evaluate(() => document.activeElement?.hasAttribute("data-pinned-focus")),
             ).toBe(true);
-          expect((await sample(page)).following).toBe(false);
+          expect((await sample(page)).following).toBe(following);
         } finally {
           await page.context().close();
         }
@@ -1506,6 +1509,108 @@ describe("readable timeline browser regression", () => {
         };
       });
       expect(state).toEqual({ answerVisible: true, inStatusNote: false });
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
+  for (const width of [1280, 390]) {
+    test(`whitespace-only messages leave no blank band in a long live turn at ${width}px`, async () => {
+      const page = await openHarness("blank-notes", width, width < 500);
+      try {
+        await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          // The live turn, before its answer starts.
+          driver.show(driver.indexOf("agent.message.delta", { messageId: "blank-answer" })[0]!);
+        });
+        await page.waitForFunction(() =>
+          document
+            .querySelector("[data-og-timeline-scroller]")
+            ?.textContent?.includes("Now the roof"),
+        );
+        await page.waitForTimeout(400);
+        const layout = await page.evaluate(() => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const rows = [...scroller.querySelectorAll<HTMLElement>("[data-og-group-key]")].map(
+            (row) => row.getBoundingClientRect(),
+          );
+          let widestGap = 0;
+          for (let index = 1; index < rows.length; index += 1) {
+            widestGap = Math.max(widestGap, rows[index]!.top - rows[index - 1]!.bottom);
+          }
+          return {
+            emptyRows: rows.filter((row) => row.height < 1).length,
+            widestGap: Math.round(widestGap),
+            distanceFromTip: Math.round(
+              scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+            ),
+            following: scroller.dataset.ogBottomFollow === "true",
+          };
+        });
+        // Before the fix: 40 empty rows, each holding the list's 20px row gap.
+        expect(layout.emptyRows).toBe(0);
+        expect(layout.widestGap).toBeLessThanOrEqual(24);
+        expect(layout.following).toBe(true);
+        expect(layout.distanceFromTip).toBeLessThanOrEqual(1);
+      } finally {
+        await page.context().close();
+      }
+    }, 60_000);
+  }
+
+  test("a work row opened and closed at the tip neither drags nor yanks the view when the answer lands", async () => {
+    const page = await openHarness("blank-notes", 420);
+    try {
+      const answerAt = await page.evaluate(() => {
+        const driver = window.exchangeFoldHarness!;
+        return driver.indexOf("agent.message.delta", { messageId: "blank-answer" })[0]!;
+      });
+      for (let count = 1; count <= answerAt; count += 3) {
+        await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
+        await page.waitForTimeout(20);
+      }
+      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), answerAt);
+      await page.waitForTimeout(600);
+      const header = page.locator('[data-og-work-header="outer"]').last();
+      await header.click();
+      await page.waitForTimeout(600);
+      await header.click();
+      await page.waitForTimeout(900);
+      // The toggle stays focused. Before the fix it was held in place for every
+      // later commit: the view chased it down under the streaming answer, then
+      // jumped back by the whole answer when the turn settled above it.
+      await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        const moves: number[] = [];
+        let previous = scroller.scrollTop;
+        const frame = () => {
+          moves.push(scroller.scrollTop - previous);
+          previous = scroller.scrollTop;
+          (window as unknown as { answerMoves: number[] }).answerMoves = moves;
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      });
+      const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
+      for (let count = answerAt + 1; count <= total; count += 1) {
+        await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
+        await page.waitForTimeout(50);
+      }
+      await page.waitForTimeout(900);
+      const result = await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        const moves = (window as unknown as { answerMoves: number[] }).answerMoves;
+        return {
+          largestUpward: Math.max(0, ...moves.map((move) => -move)),
+          distanceFromTip: Math.round(
+            scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+          ),
+          following: scroller.dataset.ogBottomFollow === "true",
+        };
+      });
+      expect(result.largestUpward).toBeLessThan(240);
+      expect(result.following).toBe(true);
+      expect(result.distanceFromTip).toBeLessThanOrEqual(1);
     } finally {
       await page.context().close();
     }

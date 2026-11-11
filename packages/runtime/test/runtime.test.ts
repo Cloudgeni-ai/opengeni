@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 import {
@@ -60,6 +60,8 @@ import {
   skillReviewHumanInput,
   type McpAccountRouteLabel,
   type ToolAuthNeededPayload,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  UNATTENDED_PERSON_REFUSAL_TEXT,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
@@ -71,6 +73,7 @@ import {
   buildOpenGeniAgent,
   restoreInterruptedRunState,
   withMcpToolDisplayMetadata,
+  HUMAN_INPUT_AGENT_DECIDES_NOTE,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   compactMcpResultCustomDataRunState,
@@ -926,6 +929,68 @@ describe("structured human-input runtime boundary", () => {
     });
   });
 
+  test("the parent-agent text follows whether the caller says there is a parent", () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const description = (subSession: boolean | undefined) => {
+      const tool = buildOpenGeniAgent(settings, [], {
+        ...(subSession === undefined ? {} : { subSession }),
+      }).tools.find(
+        (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+      );
+      if (!tool || tool.type !== "function") throw new Error("tool missing");
+      return tool.description;
+    };
+    expect(description(true)).toContain(" Your parent agent also sees this request");
+    expect(description(true)).not.toContain("In a sub-session");
+    // A caller that does not say keeps the text conditioned on a parent.
+    expect(description(undefined)).toContain(
+      " In a sub-session, your parent agent also sees this request",
+    );
+    expect(description(false)).not.toContain("parent agent");
+  });
+
+  test("when the person lets the agent decide, the result tells it to choose and say what it chose", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const agent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000002",
+        toolCallId: "human-call-2",
+        response: { outcome: "skipped", agentDecides: true },
+      },
+    });
+    const tool = agent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!tool || tool.type !== "function") throw new Error("tool missing");
+    // The result's note is where the model learns what to do; the description
+    // does not repeat it on every call.
+    expect(tool.description).not.toContain("agentDecides");
+    expect(tool.description).toContain("message your parent agent instead");
+    const output = JSON.parse(
+      String(
+        await tool.invoke(
+          new RunContext(),
+          JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Which branch?" }] }),
+          {
+            toolCall: {
+              type: "function_call",
+              callId: "human-call-2",
+              name: HUMAN_INPUT_TOOL_NAME,
+              arguments: "{}",
+            },
+          },
+        ),
+      ),
+    );
+    expect(output).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000002",
+      outcome: "skipped",
+      agentDecides: true,
+      note: HUMAN_INPUT_AGENT_DECIDES_NOTE,
+    });
+    expect(output.note).toContain("say in one short sentence what you chose");
+  });
+
   test("returns malformed human-input arguments to the model instead of interrupting the turn", async () => {
     const settings = testSettings({
       sandboxBackend: "none",
@@ -990,8 +1055,105 @@ describe("structured human-input runtime boundary", () => {
       },
     ]);
     const retryInput = JSON.stringify(model.requests[1]?.input);
-    expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
+    expect(retryInput).not.toContain("Error details are redacted");
+    expect(retryInput).toContain("questions must be an array of question objects, not JSON text");
     expect(retryInput).toContain("human-call-invalid");
+  });
+
+  test("tells the model which human-input field is invalid instead of a redacted failure", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const validQuestion = {
+      id: "proceed",
+      kind: "single_select",
+      prompt: "Proceed with the exchange?",
+      confirm: true,
+      options: [
+        { id: "yes", label: "Yes" },
+        { id: "no", label: "No" },
+      ],
+    };
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            {
+              questions: [
+                {
+                  ...validQuestion,
+                  options: [...validQuestion.options, { id: "later", label: "Later" }],
+                },
+              ],
+              allowSkip: false,
+            },
+            "human-call-three-option-confirm",
+          ),
+        ],
+      },
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: [validQuestion], allowSkip: false },
+            "human-call-fixed",
+          ),
+        ],
+      },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+
+    const result = await runAgentStream(agent, "Ask me to confirm", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(2);
+    expect(result.interruptions).toHaveLength(1);
+    expect(result.interruptions[0]?.rawItem).toMatchObject({ callId: "human-call-fixed" });
+    const retryInput = JSON.stringify(model.requests[1]?.input);
+    expect(retryInput).not.toContain("Error details are redacted");
+    expect(retryInput).toContain("questions.0.confirm");
+    expect(retryInput).toContain("confirm questions are single_select with exactly two options");
+  });
+
+  test("refuses a question once the chat is switched to work without a person", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            {
+              questions: [
+                {
+                  id: "choice",
+                  kind: "single_select",
+                  prompt: "Choose one",
+                  options: [{ id: "a", label: "A" }],
+                },
+              ],
+              allowSkip: false,
+            },
+            "human-call-unattended",
+          ),
+        ],
+      },
+      { outputText: "Chose the conventional option." },
+    ]);
+    // Started attended, so the tool stays in its list; only the call is refused.
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      unattendedNow: true,
+    });
+    expect(agent.tools.map((tool) => tool.name)).toContain(HUMAN_INPUT_TOOL_NAME);
+
+    const result = await runAgentStream(agent, "Ask me to choose", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(result.interruptions).toHaveLength(0);
+    expect(result.finalOutput).toBe("Chose the conventional option.");
+    expect(JSON.stringify(model.requests[1]?.input)).toContain(UNATTENDED_PERSON_REFUSAL_TEXT);
   });
 
   test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
@@ -2791,7 +2953,7 @@ describe("runtime event normalization", () => {
         kind: "mfa",
         reason: "Approve the sign-in on your phone.",
       };
-      const runWith = async (argumentsJson: string) => {
+      const runWith = async (argumentsJson: string, unattendedNow = false) => {
         const requests: Array<{ input: unknown }> = [];
         const model: Model = {
           async getResponse(modelRequest) {
@@ -2830,6 +2992,7 @@ describe("runtime event normalization", () => {
         };
         const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
           mcpServers: [interactionServer],
+          ...(unattendedNow ? { unattendedNow: true } : {}),
         }) as unknown as { clone: (config: unknown) => Agent };
         const result = await runAgent(agent.clone({ model }), "hand the sign-in over", {
           toolExecution: { preApprovalInputGuardrails: true },
@@ -2854,6 +3017,18 @@ describe("runtime event normalization", () => {
       expect(serializeInteractionInterventionRequests(valid.result.interruptions)).toMatchObject([
         { toolCallId: "handoff-call", input: { ...request, expiresInSeconds: 1200 } },
       ]);
+
+      // Switched to work without a person after the chat started: the tool
+      // stays, but a valid hand-off is refused with a result, never awaited.
+      const unattended = await runWith(
+        JSON.stringify({ ...request, expiresInSeconds: 1200 }),
+        true,
+      );
+      expect(unattended.result.interruptions).toHaveLength(0);
+      expect(unattended.result.finalOutput).toBe("corrected");
+      expect(JSON.stringify(unattended.requests[1]!.input)).toContain(
+        UNATTENDED_PERSON_REFUSAL_TEXT,
+      );
     });
 
     test("describes invalid interaction arguments without echoing their values", () => {
@@ -3042,6 +3217,9 @@ describe("runtime event normalization", () => {
       sandboxBackend?: "none" | "modal";
       toolResultBytes?: number;
       spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+      unattended?: boolean;
+      unattendedNow?: boolean;
+      approvedToolCallIds?: string[];
     }) {
       const mcp = startTestMcpServer({
         toolResultIsError: input.toolResultIsError,
@@ -3138,9 +3316,146 @@ describe("runtime event normalization", () => {
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
+        ...(input.unattended ? { unattended: true } : {}),
+        ...(input.unattendedNow ? { unattendedNow: true } : {}),
+        ...(input.approvedToolCallIds ? { approvedToolCallIds: input.approvedToolCallIds } : {}),
       });
       return { agent, calls, mcp, prepared, settings };
     }
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "an unattended session refuses a call that needs approval instead of waiting (%s)",
+      async (lazyToolTransport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          lazyToolTransport,
+          unattendedNow: true,
+        });
+        try {
+          const model = new ScriptedModel([
+            {
+              output: [
+                scriptedFunctionCall("docs__search_documents", { query: "q" }, "unattended-call"),
+              ],
+            },
+            { outputText: "Left it for a person." },
+          ]);
+          const result = await runAgentStream(
+            // A clone of a clone keeps the refusal.
+            fixture.agent.clone({}).clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the run.
+          }
+          await result.completed;
+          // No approval pause, nothing executed, nothing approved or begun.
+          expect(result.interruptions).toHaveLength(0);
+          expect(result.finalOutput).toBe("Left it for a person.");
+          expect(JSON.stringify(model.requests[1]?.input)).toContain(
+            UNATTENDED_APPROVAL_REFUSAL_TEXT,
+          );
+          expect(fixture.mcp.calls).toHaveLength(0);
+          expect(fixture.calls.filter((call) => !call.startsWith("prepare:"))).toEqual([]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
+    test("an unattended session runs calls its policy allows", async () => {
+      {
+        // A resume that applies several recorded decisions runs every
+        // approved call, not only its trigger's; others are still refused.
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          unattendedNow: true,
+          approvedToolCallIds: ["approved-sibling"],
+        });
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          await tool.needsApproval(new RunContext(), { query: "q" }, "approved-sibling");
+          const approved = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "approved-sibling" },
+          } as any);
+          expect(JSON.stringify(approved)).not.toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+          expect(await tool.needsApproval(new RunContext(), { query: "q" }, "undecided")).toBe(
+            false,
+          );
+          const refused = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "undecided" },
+          } as any);
+          expect(JSON.stringify(refused)).toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+      {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "allow",
+          unattended: true,
+          unattendedNow: true,
+        });
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          const required = await tool.needsApproval(new RunContext(), { query: "q" }, "call-1");
+          expect(required).toBe(false);
+          const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "call-1" },
+          } as any);
+          expect(JSON.stringify(output)).not.toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+          expect(fixture.mcp.calls).toHaveLength(1);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("an attended session still asks for approval", async () => {
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "q" }, "call-1")).toBe(true);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("a chat that started unattended asks for approval once a person is there", async () => {
+      // Its instructions and tools stay as they started; only the refusal
+      // follows the current setting, so the person present can approve.
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask", unattended: true });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "q" }, "call-1")).toBe(true);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
 
     test.each([undefined, "codex_native", "generic_dispatch"] as const)(
       "account-qualified connector Ask pauses before executing a model call (%s)",
@@ -3343,12 +3658,15 @@ describe("runtime event normalization", () => {
         }
         await result.completed;
         const searchOutput = JSON.stringify(model.requests[1]!.input);
-        // Two accounts' identical tools tie, so the search lists compact
-        // candidates; the notice still names the account it left out.
-        expect(searchOutput).toContain('\\"schemasLoaded\\":false');
+        // Two accounts' identical tools tie: the first is loaded, the other is
+        // listed by name, and the notice names the account it left out.
+        expect(searchOutput).toContain('\\"schemasLoaded\\":true');
         const reached = searchOutput.includes("Personal: alice@example.test")
           ? ["alice", "bob"]
           : ["bob", "alice"];
+        expect(searchOutput).toMatch(
+          /\\"suggestions\\":\[\{\\"name\\":\\"mcp_[0-9a-f]+__search_documents/,
+        );
         expect(searchOutput).toContain(
           `These tools reach Documents (${reached[0]}@example.test). Also connected: Documents (${reached[1]}@example.test). If the request could mean those accounts too`,
         );
@@ -5690,11 +6008,15 @@ describe("runtime event normalization", () => {
     "## Skills",
     "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
     "Management tools are lazy and available through tool search.",
-    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
-    '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
-    `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
-    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about Opengeni setup, using it on a phone or computer, doing settings for the person in chat, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
-    '- {"id":"native-tool:visualize","name":"visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
+    "The following entries are descriptors, not the Skill instructions. Read a Skill by its name; an entry shows an id only when several Skills share that name, and then you read it by that id.",
+    '- {"name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    `- ${JSON.stringify(
+      ((entry) => ({ name: entry?.name, description: entry?.description }))(
+        composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"),
+      ),
+    )}`,
+    '- {"name":"opengeni-help","description":"Answer questions about Opengeni setup, using it on a phone or computer, doing settings for the person in chat, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
+    '- {"name":"visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
@@ -6030,7 +6352,7 @@ describe("runtime event normalization", () => {
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --full");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, and call commands");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, call, and read commands");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same public Codemode operation journal");
   });
 
@@ -6044,6 +6366,23 @@ describe("runtime event normalization", () => {
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(staticInstructions(off.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
     expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+  });
+
+  test("Codemode guidance keeps delayed polling inside its credential lifetime", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("intermediate data within the live attempt");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Background commands keep the launching attempt's credentials; a new turn does not renew those processes.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "For a later recheck, let the session wake, then launch a fresh command.",
+    );
+    // It does not advise replaying a possibly committed operation.
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Observation failure or outcome_unknown does not prove execution failed",
+    );
   });
 
   test("no token minted for the turn omits the directive", () => {
@@ -7355,19 +7694,90 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(created).toHaveLength(1);
-    expect(created[0]!.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
-    expect(created[0]!.diff).toBe("+oggh1.secret-broker-bearer");
+    // The bearer and the static gh gateway kit, both as private files.
+    expect(created).toHaveLength(2);
+    const bearer = created.find((file) => file.diff === "+oggh1.secret-broker-bearer");
+    const kit = created.find((file) => file !== bearer);
+    expect(bearer?.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
+    expect(kit?.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
+    expect(kit?.diff).toContain("Opengeni: gh as the person");
+    expect(kit?.diff).not.toContain("oggh1.secret-broker-bearer");
     expect(commands.every((command) => !command.includes("oggh1.secret-broker-bearer"))).toBe(true);
-    expect(capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })))).toContain(
-      created[0]!.path,
-    );
-    // The successful program moved the seed into its token file, so no
-    // separate cleanup round trip is needed.
+    const program = capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })));
+    expect(program).toContain(bearer!.path);
+    expect(program).toContain(kit!.path);
+    // The successful program moved the seed into its token file and the kit
+    // into place, so no separate cleanup round trip is needed.
     expect(deleted).toEqual([]);
     // The per-turn program decodes, runs and removes itself in one command.
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("/tmp/opengeni/repository-setup-payloads/");
+  });
+
+  test("a gh gateway kit that cannot be delivered leaves the clone working", async () => {
+    const commands: string[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    await runRepositoryCloneHook(
+      {
+        createEditor: () => ({
+          createFile: async (operation: { path: string; diff: string }) => {
+            if (operation.diff.includes("Opengeni: gh as the person")) {
+              throw new Error("editor unavailable");
+            }
+            created.push(operation.path);
+          },
+          updateFile: async () => undefined,
+          deleteFile: async (operation: { path: string }) => {
+            deleted.push(operation.path);
+          },
+        }),
+        exec: async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId: "personal-binding",
+          repositoryId: "9007199254740993123",
+          access: "read",
+        },
+      ],
+      {
+        environment: { HOME: "/workspace" },
+        gitCredentialBindings: [
+          {
+            credentialBindingId: "personal-binding",
+            provider: "github",
+            token: "oggh1.secret-broker-bearer",
+            transport: {
+              kind: "http_broker",
+              repositories: [
+                {
+                  repositoryUri: "https://github.com/acme/private.git",
+                  brokerUri: "https://broker.example.test/v1/git/personal/route",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    );
+
+    expect(created).toHaveLength(1);
+    // Only the failed kit write is cleaned up; the bearer seed was consumed.
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).not.toBe(created[0]);
+    const program = capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })));
+    expect(program).toContain(created[0]!);
+    expect(program).not.toContain("gh_gateway_kit_seed=");
+    expect(commands).toHaveLength(1);
   });
 
   test("smart-Git broker seed is cleaned up when the clone program fails", async () => {
@@ -7430,8 +7840,8 @@ describe("runtime event normalization", () => {
         },
       ),
     ).rejects.toThrow("Repository clone hook failed");
-    expect(created).toHaveLength(1);
-    expect(deleted).toEqual(created);
+    expect(created).toHaveLength(2);
+    expect(deleted.toSorted()).toEqual(created.toSorted());
     // The command reported its exit, so it already removed its payload in-box.
     expect(commands).toHaveLength(1);
   });
@@ -7491,8 +7901,8 @@ describe("runtime event normalization", () => {
       ),
     ).rejects.toThrow("Sandbox could not receive the Git broker credential");
 
-    expect(created).toHaveLength(1);
-    expect(deleted).toEqual(created);
+    expect(created).toHaveLength(2);
+    expect(deleted.toSorted()).toEqual(created.toSorted());
   });
 
   test("smart-Git broker renewal uses the same token-free command boundary", async () => {
@@ -8221,17 +8631,31 @@ describe("runtime event normalization", () => {
     ]);
   });
 
-  test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
+  test("converts MCP result values JSON cannot carry before the Agents SDK custom-data boundary", async () => {
     const bridge = new McpResultCustomDataBridge();
-
-    await expect(
-      bridge.captureResult(null, async () => ({
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const result = (await bridge.captureResult(null, async () => ({
         content: [{ type: "text" as const, text: "negative zero" }],
-        structuredContent: { exactValue: -0 },
-      })),
-    ).rejects.toThrow(
-      'Protocol JSON value at $.mcpResult["structuredContent"]["exactValue"] must be a finite number other than negative zero',
-    );
+        structuredContent: {
+          exactValue: -0,
+          total: 12n,
+          [Symbol("server mark")]: true,
+          at: new Date(0),
+        },
+      }))) as { structuredContent: Record<string, unknown> };
+      // The stored and SDK-visible forms agree: JSON writes -0 as 0.
+      expect(result.structuredContent).toEqual({
+        exactValue: 0,
+        total: 12,
+        at: "1970-01-01T00:00:00.000Z",
+      });
+      expect(Object.is(result.structuredContent.exactValue, 0)).toBe(true);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ rootPath: "$.mcpResult", count: 4 });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("releases only the live MCP audit marker after durable event capture", async () => {
@@ -8812,9 +9236,14 @@ describe("runtime event normalization", () => {
       },
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
     });
-    await expect(runOnce("normalized-invalid")).rejects.toThrow(
-      "customDataExtractor must return an object or null.",
-    );
+    // An extractor that returns a non-object loses its custom data; the tool
+    // call and the run still succeed.
+    const invalid = await runOnce("normalized-invalid");
+    expect(invalid?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+    });
   });
 
   test("a prefixed inner extractor mirrors the SDK sparse-array JSON boundary", async () => {
@@ -9281,6 +9710,57 @@ describe("runtime event normalization", () => {
       ]);
     } finally {
       configureRuntimeMetricsHooks(null);
+    }
+  });
+
+  test("a generated integration's known-outcome failure is a recoverable tool error on any server", async () => {
+    const sourceFailure = new IntegrationInvocationError(
+      "redirect_rejected",
+      "Integration redirected to an insecure destination",
+      "failed",
+      false,
+      302,
+    );
+    const server: MCPServer = {
+      name: "generated-integration-known-failure",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        throw sourceFailure;
+      },
+      async callToolResult() {
+        throw sourceFailure;
+      },
+      async invalidateToolsCache() {},
+    };
+    const error = {
+      code: "redirect_rejected",
+      message: "Integration redirected to an insecure destination",
+      status: 302,
+      retryable: false,
+    };
+    for (const bestEffort of [false, true]) {
+      const prefixed = new PrefixedMcpServer(
+        server,
+        bestEffort ? "generated-best-effort" : "generated-required",
+        undefined,
+        bestEffort,
+      );
+      const result = await prefixed.executeCatalogTool("read", {});
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ ok: false, error }) }],
+        structuredContent: { ok: false, error },
+      });
+      expect(JSON.stringify(result)).not.toContain("unavailable for the rest of this turn");
+      // A targeted call keeps receiving the typed failure itself.
+      await expect(
+        prefixed.executeCatalogTool("read", {}, undefined, { propagateInvocationErrors: true }),
+      ).rejects.toBe(sourceFailure);
     }
   });
 
@@ -14397,6 +14877,16 @@ describe("runtime Skill activation", () => {
         "references/runbook.md",
         "SKILL.md",
       ]);
+      // A path from another Skill does not cost the files that exist.
+      const partial = JSON.parse(
+        await skillRead!.invoke!(
+          undefined,
+          JSON.stringify({ skill: "infra-ops", paths: ["SKILL.md", "references/other.md"] }),
+        ),
+      );
+      expect(partial.files.map((file: { path: string }) => file.path)).toEqual(["SKILL.md"]);
+      expect(partial.missing).toEqual(["references/other.md"]);
+      expect(partial.availablePaths).toEqual(["SKILL.md", "references/runbook.md"]);
     },
   );
 

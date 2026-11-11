@@ -54,10 +54,18 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { cn } from "@opengeni/react/app/lib/utils";
+import {
+  isSeatLimitError,
+  planSeatsFull,
+  seatUpgradeFor,
+  seatUpgradeFromError,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationMemberName,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
 } from "@opengeni/react/app/types";
@@ -106,20 +114,28 @@ export function OrganizationPeoplePage({
   person,
   invitation,
   view,
+  canManageBilling,
 }: {
   workspaceId: string;
   person?: string;
   invitation?: string;
   view?: "invite";
+  /** Whether the signed-in person can change the plan; defaults to owners. */
+  canManageBilling?: boolean;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  const actions = usePeopleActions(directory, setConfirm);
+  const billing = canManageBilling ?? directory.actorRole === "owner";
+  const actions = usePeopleActions(directory, setConfirm, billing);
+
+  // Members who aren't owners or admins see who is here by name, nothing more.
+  if (!directory.canAdminister) return <MemberNamesList />;
 
   let page;
-  if (view === "invite") page = <InvitePage nav={nav} />;
-  else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
+  if (view === "invite") {
+    page = <InvitePage nav={nav} canManageBilling={billing} />;
+  } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
   } else page = <PeopleList nav={nav} actions={actions} />;
@@ -151,6 +167,7 @@ interface PeopleActions {
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
+  canManageBilling: boolean,
 ): PeopleActions {
   return useMemo(
     () => ({
@@ -165,7 +182,7 @@ function usePeopleActions(
           });
         } catch (error) {
           toast.error(`Couldn't restore ${memberName(member)}`, {
-            description: userErrorText(error),
+            description: seatRefusalText(error, directory, canManageBilling),
           });
         }
       },
@@ -184,8 +201,25 @@ function usePeopleActions(
         }
       },
     }),
-    [directory, setConfirm],
+    [directory, setConfirm, canManageBilling],
   );
+}
+
+/** A seat refusal tells people who can't change the plan to ask an owner. */
+function seatRefusalText(
+  error: unknown,
+  directory: OrganizationDirectory,
+  canManageBilling: boolean,
+): string {
+  // Directory actions wrap the API error; the refusal is its cause.
+  const refusal = error instanceof Error && error.cause !== undefined ? error.cause : error;
+  if (canManageBilling || !isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  const upgrade = seatUpgradeFor(directory.plan, directory.plans) ?? seatUpgradeFromError(refusal);
+  return upgrade?.key === "enterprise"
+    ? `Ask an organization owner about ${upgrade.label}.`
+    : upgrade
+      ? `Ask an organization owner to upgrade to ${upgrade.label}.`
+      : "Ask an organization owner to upgrade the plan.";
 }
 
 function activeOwnerCount(members: readonly OrganizationMember[]): number {
@@ -645,6 +679,96 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
   );
 }
 
+/* ------------------------------------------------- names, for members */
+
+/**
+ * Everyone in the organization by name, for a member who isn't an owner or
+ * admin: exactly what the server returns, with no email, role, status or
+ * workspace access.
+ */
+function MemberNamesList() {
+  const directory = useOrganizationDirectory();
+  const [query, setQuery] = useState("");
+  const { value, loading: reading, error } = directory.memberNames;
+  const loading = reading && value.members.length === 0 && !error;
+  const nameOf = (member: OrganizationMemberName) =>
+    member.name ?? (member.you && directory.youLabel ? directory.youLabel : "Unnamed person");
+
+  if (error) {
+    return (
+      <ErrorMessage
+        variant="inline"
+        title="Couldn't load the people in this organization."
+        action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(error)}
+      >
+        {userErrorTextWithoutReference(error)}
+      </ErrorMessage>
+    );
+  }
+  if (!loading && !value.available) {
+    return (
+      <EmptyState
+        variant="inline"
+        title="Only owners and admins can see who's in this organization."
+      />
+    );
+  }
+
+  const needle = query.trim().toLocaleLowerCase();
+  const shown = value.members
+    .filter((member) => !needle || nameOf(member).toLocaleLowerCase().includes(needle))
+    .sort((a, b) => (a.you === b.you ? 0 : a.you ? -1 : 1));
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <Toolbar>
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search people"
+          aria-label="Search people"
+          disabled={loading}
+        />
+      </Toolbar>
+      {needle && !loading ? (
+        <ToolbarSummary>
+          {shown.length} of {value.members.length}{" "}
+          {value.members.length === 1 ? "person" : "people"}
+        </ToolbarSummary>
+      ) : null}
+      {loading ? (
+        <RowList label="People" busy flush>
+          <ListRowSkeleton count={4} />
+        </RowList>
+      ) : shown.length === 0 ? (
+        <EmptyState
+          variant="inline"
+          title={needle ? `No one matches "${query.trim()}".` : "No one here yet."}
+          action={
+            needle ? (
+              <EmptyStateLink onClick={() => setQuery("")}>Clear search</EmptyStateLink>
+            ) : undefined
+          }
+        />
+      ) : (
+        <RowList label="People" nameLabel="Person" flush>
+          {shown.map((member) => {
+            const name = nameOf(member);
+            return (
+              <ListRow
+                key={member.id}
+                leading={<PersonAvatar name={name} />}
+                title={name}
+                titleAddon={member.you ? <MetaChip variant="outline">You</MetaChip> : undefined}
+              />
+            );
+          })}
+        </RowList>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------ person page */
 
 function WorkspaceAccessRows({
@@ -1063,13 +1187,22 @@ function InvitationPage({
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function InvitePage({ nav }: { nav: OrganizationNavigation }) {
+function InvitePage({
+  nav,
+  canManageBilling,
+}: {
+  nav: OrganizationNavigation;
+  canManageBilling: boolean;
+}) {
   const directory = useOrganizationDirectory();
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
-  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
+  const [seatLimitError, setSeatLimitError] = useState<{
+    message: string;
+    upgrade: SeatUpgrade | null;
+  } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1091,6 +1224,12 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   });
   const problems = chips.filter((chip) => chip.problem);
   const count = Math.max(1, chips.length - problems.length);
+  // The catalog picks the plan with room for everyone in the form (the
+  // server names a plan for one more person); the server's plan is the
+  // fallback without a catalog. A full plan says so up front.
+  const seatUpgrade =
+    seatUpgradeFor(directory.plan, directory.plans, count) ?? seatLimitError?.upgrade ?? null;
+  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
   const emailError =
     emails.length === 0
       ? showErrors
@@ -1135,13 +1274,18 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
           setEmails(result.failed.map((each) => each.email));
           const seatFailure = result.failed.find((each) => each.seatLimitReached);
           if (seatFailure) {
-            setSeatLimitError(seatFailure.message);
-            return false;
+            setSeatLimitError({
+              message: seatFailure.message,
+              upgrade: seatFailure.upgrade ?? null,
+            });
           }
+          // Other failures still say why, next to the seat notice.
+          const other = result.failed.filter((each) => !each.seatLimitReached);
+          if (other.length === 0) return false;
           throw new Error(
-            result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
-              : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
+            other.length === 1
+              ? `Couldn't invite ${other[0]!.email}. ${other[0]!.message}`
+              : `Couldn't invite ${joinNames(other.map((each) => each.email))}. ${other[0]!.message}`,
           );
         }
         nav.openSection("people");
@@ -1150,14 +1294,15 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
     >
       <FieldStack>
         <PlanSeats plan={directory.plan} />
-        {seatLimitError && directory.plan ? (
+        {seatsFull && directory.plan ? (
           <SeatLimitNotice
-            canManage={directory.actorRole === "owner"}
+            canManage={canManageBilling}
+            upgrade={seatUpgrade}
             onUpgrade={() => nav.openSection("billing")}
           />
         ) : seatLimitError ? (
           <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
-            {seatLimitError}
+            {seatLimitError.message}
           </Notice>
         ) : null}
         <Field
@@ -1250,6 +1395,7 @@ function PeopleConfirm({
             ? `Their access to ${joinNames(names)} is removed. Restoring doesn't bring it back.`
             : "They have no shared workspaces right now.",
           "Their unfinished work is stopped. Their Personal workspace is kept.",
+          "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
         ]}
         confirmLabel="Suspend"
         pendingLabel="Suspending…"
@@ -1280,6 +1426,7 @@ function PeopleConfirm({
             ? `${first} loses access to ${organizationName} and ${count} shared ${count === 1 ? "workspace" : "workspaces"} right away.`
             : `${first} loses access to ${organizationName} right away.`,
           "Their unfinished work is stopped. Their personal data is kept for as long as your retention policy says.",
+          "Schedules they own stop running for good. Each one says why on its Automations page, where people there can set it up again as theirs.",
           `${first} can never be invited to ${organizationName} again.`,
         ]}
         confirmLabel="Remove from organization"

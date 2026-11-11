@@ -8,7 +8,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import type { Settings } from "@opengeni/config";
-import { createDb, createSession, readLease, type Database, type DbClient } from "@opengeni/db";
+import {
+  advanceWorkspaceGenerationForDirectRequest,
+  createDb,
+  createSession,
+  readLease,
+  reapStaleLeaseHolders,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -94,7 +102,13 @@ async function drainingComputeLease(reason: "group_end" | "rotation") {
       ${reason === "rotation" ? new Date() : null},
       ${reason === "rotation" ? "operator" : null})
     returning id`;
-  return { ...ids, sandboxGroupId: session.sandboxGroupId, instanceId, leaseId: lease!.id };
+  return {
+    ...ids,
+    sessionId: session.id,
+    sandboxGroupId: session.sandboxGroupId,
+    instanceId,
+    leaseId: lease!.id,
+  };
 }
 
 /** The provider seam: records the disposition it was asked for and does what
@@ -118,6 +132,69 @@ function terminateSpy(beforeDelete?: () => Promise<void>) {
     return false;
   };
   return { fn, dispositions };
+}
+
+/** A Files/Terminal style request on the sandbox whose API process died
+ * mid-operation (as during an API rollout), before the chat was deleted: it
+ * was admitted on the warm box under its own holder, which then stopped
+ * heartbeating and was reaped, leaving the request open with no owner. The
+ * lease is then back to how the fixture drained it. */
+async function deadApiRequest(fixture: Awaited<ReturnType<typeof drainingComputeLease>>) {
+  const [drained] = await admin<
+    {
+      group_end_requested_at: Date | null;
+      rotation_requested_at: Date | null;
+      rotation_reason: string | null;
+    }[]
+  >`
+    select group_end_requested_at, rotation_requested_at, rotation_reason
+    from sandbox_leases where id = ${fixture.leaseId}`;
+  await admin`update sandbox_leases set liveness = 'warm', refcount = 1,
+      group_end_requested_at = null, rotation_requested_at = null, rotation_reason = null,
+      expires_at = now() + interval '10 minutes'
+    where id = ${fixture.leaseId}`;
+  const requestId = crypto.randomUUID();
+  const holderId = `direct:${requestId}`;
+  await admin`insert into sandbox_lease_holders
+      (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
+    values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, 'direct',
+      ${holderId}, ${fixture.sessionId}, now())`;
+  const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.sessionId,
+    requestId,
+    holderId,
+    initiatorSubjectId: "subject:dead-api-request",
+    sandboxGroupId: fixture.sandboxGroupId,
+    expectedEpoch: EPOCH,
+    expectedInstanceId: fixture.instanceId,
+    routeTargetId: null,
+    routeEpoch: 0,
+    operation: "exec",
+  });
+  await admin`update sandbox_lease_holders set last_heartbeat_at = now() - interval '10 minutes'
+    where lease_id = ${fixture.leaseId} and holder_id = ${holderId}`;
+  const reaped = await reapStaleLeaseHolders(db, {
+    workspaceId: fixture.workspaceId,
+    viewerHolderTtlMs: SETTINGS.sandboxViewerHolderTtlMs,
+    idleGraceMs: 0,
+  });
+  expect(reaped.reapedDirect).toBe(1);
+  await admin`update sandbox_leases set liveness = 'draining', refcount = 0,
+      group_end_requested_at = ${drained!.group_end_requested_at},
+      rotation_requested_at = ${drained!.rotation_requested_at},
+      rotation_reason = ${drained!.rotation_reason},
+      expires_at = now() - interval '1 second'
+    where id = ${fixture.leaseId}`;
+  return admission.id;
+}
+
+async function admissionSettled(id: string): Promise<boolean> {
+  const [row] = await admin<{ settled: boolean }[]>`
+    select settled_at is not null as settled
+    from sandbox_workspace_mutation_admissions where id = ${id}`;
+  return row!.settled;
 }
 
 async function drain(
@@ -207,5 +284,38 @@ describe("compute group end", () => {
     // The next sweep captures instead of deleting.
     const next = await drain(fixture);
     expect(next.dispositions).toEqual(["capture_required"]);
+  }, 60_000);
+
+  test("a request a dead API process left open does not keep the sandbox", async () => {
+    const fixture = await drainingComputeLease("group_end");
+    const orphan = await deadApiRequest(fixture);
+    // Before, the claim refused it for good and every sweep woke the sandbox
+    // to probe it instead.
+    const drained = await drain(fixture);
+    expect(drained.dispositions).toEqual(["discard"]);
+    expect(drained.result.status).toBe("terminated");
+    expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
+      liveness: "cold",
+      groupEndRequestedAt: null,
+    });
+    // Settled only by the cold commit, once the box was gone.
+    expect(await admissionSettled(orphan)).toBe(true);
+  }, 60_000);
+
+  test("a rotation still waits for a request a dead API process left open", async () => {
+    const fixture = await drainingComputeLease("group_end");
+    await admin`update sandbox_leases
+      set rotation_requested_at = now(), rotation_reason = 'operator'
+      where id = ${fixture.leaseId}`;
+    const orphan = await deadApiRequest(fixture);
+    // A rotation reads the workspace from the running box, which the request
+    // may still be writing to.
+    const drained = await drain(fixture);
+    expect(drained.dispositions).toEqual([]);
+    expect(drained.result.status).not.toBe("terminated");
+    expect(await admissionSettled(orphan)).toBe(false);
+    const [held] = await admin<{ liveness: string; archive_capture_id: string | null }[]>`
+      select liveness, archive_capture_id from sandbox_leases where id = ${fixture.leaseId}`;
+    expect(held).toEqual({ liveness: "draining", archive_capture_id: null });
   }, 60_000);
 });

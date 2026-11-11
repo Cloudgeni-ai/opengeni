@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -11,6 +11,7 @@ import {
   type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
+  appendSessionEvents,
   bindAuthorizedGitHubInstallationRepositories,
   claimRecordingTranscriptVersion,
   completeRecordingTranscriptVersion,
@@ -28,8 +29,11 @@ import {
   ensureExternalIdentity,
   eventOccurrenceProducerKey,
   getScheduledTask,
+  GITHUB_REMOVED_REPOSITORY_HOLD_MS,
   githubInstallationRouteKey,
+  listGitHubInstallationAccessForWorkspace,
   markEventOccurrenceStarted,
+  withBillingOriginOverride,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -43,8 +47,16 @@ import {
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
+import {
+  runPendingGitHubInstallationRepositoryResyncs,
+  settleGitHubInstallationRepositorySyncs,
+} from "../src/github-installation-sync";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { pumpDueEventSourceFeeds, pumpDueMcpEventSubscriptions } from "@opengeni/core";
+import {
+  addMcpEventSource,
+  pumpDueEventSourceFeeds,
+  pumpDueMcpEventSubscriptions,
+} from "@opengeni/core";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -603,7 +615,10 @@ describe("event sources", () => {
     });
     expect(waiting.status).toBe(201);
     const pending = (await f.json(waiting)).source;
+    // `linear` is the older name for a custom webhook with Linear's preset.
     expect(pending).toMatchObject({
+      adapter: "custom",
+      format: { preset: "linear", signature: { scheme: "hmac_sha256" } },
       status: "blocked",
       visibility: "private",
       awaitingSigningSecret: true,
@@ -696,7 +711,7 @@ describe("event sources", () => {
     expect(events[0]).toMatchObject({
       type: "Issue.create",
       subject: "ENG-42",
-      summary: "Issue created: ENG-42 Checkout is slow",
+      summary: "Checkout is slow",
       actor: { kind: "person", name: "Ada" },
     });
   });
@@ -745,7 +760,7 @@ describe("event sources", () => {
         signature: { scheme: "timestamped_hmac_sha256", toleranceSeconds: 300 },
       },
     });
-    expect(pending.statusReason).toContain("Paste the webhook's signing secret");
+    expect(pending.statusReason).toContain("Paste the signing secret Tailscale shows");
     // The preset names the app's documented event types before any arrive.
     const presetTypes = await f.json(
       await f.app.request(`${f.sources}/${pending.id}/event-types`, { headers: f.owner.headers }),
@@ -871,6 +886,94 @@ describe("event sources", () => {
       after.events.find((event: { type: string }) => event.type === "build.passed"),
     ).toMatchObject({ summary: "Build 12 passed" });
   });
+
+  test("an alert webhook keeps each firing episode once: a resend is skipped, a resolve and a re-fire arrive", async () => {
+    const f = await fixture({ enabled: true });
+    const secret = randomBytes(24).toString("hex");
+    // Alertmanager can't sign, but sends a bearer token, and resends a group
+    // on every repeat interval and whenever an alert joins or leaves it. The
+    // id joins status, fingerprint and start time: one firing episode.
+    const created = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({
+        kind: "webhook",
+        adapter: "custom",
+        name: "Alerts",
+        signingSecret: secret,
+        format: {
+          signature: { scheme: "token", header: "Authorization", prefix: "Bearer " },
+          batch: { path: "alerts" },
+          type: { path: "status" },
+          eventId: {
+            parts: [{ path: "status" }, { path: "fingerprint" }, { path: "startsAt" }],
+            separator: "|",
+          },
+          subject: "labels.alertname",
+          summary: "annotations.summary",
+        },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const source = (await f.json(created)).source;
+    expect(source).toMatchObject({
+      status: "active",
+      format: { eventId: { separator: "|" } },
+    });
+    const path = new URL(source.webhookUrl).pathname;
+    const alert = (name: string, status: string, startsAt: string, fingerprint?: string) => ({
+      status,
+      labels: { alertname: name, severity: "critical" },
+      annotations: { summary: `${name} is ${status}` },
+      startsAt,
+      ...(fingerprint ? { fingerprint } : {}),
+    });
+    const send = async (receiver: string, alerts: unknown[], token = secret) =>
+      await f.app.request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ version: "4", receiver, alerts }),
+      });
+    const events = async () =>
+      (
+        await f.json(
+          await f.app.request(`${f.sources}/${source.id}/events`, { headers: f.owner.headers }),
+        )
+      ).events.map((event: { type: string; summary: string }) => `${event.type} ${event.summary}`);
+
+    const first = "2026-10-26T18:00:00.000Z";
+    expect(
+      (await send("oncall", [alert("DiskFull", "firing", first, "fp1")], "x".repeat(48))).status,
+    ).toBe(401);
+    expect((await send("oncall", [alert("DiskFull", "firing", first, "fp1")])).status).toBe(200);
+    // The group again, now with a second alert: only the new one arrives.
+    expect(
+      (
+        await send("oncall", [
+          alert("DiskFull", "firing", first, "fp1"),
+          alert("HighLatency", "firing", first, "fp2"),
+        ])
+      ).status,
+    ).toBe(200);
+    // The first resolves, then fires again later: both are new.
+    expect((await send("oncall", [alert("DiskFull", "resolved", first, "fp1")])).status).toBe(200);
+    const again = "2026-10-26T19:30:00.000Z";
+    expect((await send("oncall", [alert("DiskFull", "firing", again, "fp1")])).status).toBe(200);
+    // An alert without a fingerprint has no id, so each delivery of it arrives.
+    expect((await send("oncall", [alert("Unlabelled", "firing", first)])).status).toBe(200);
+    expect((await send("pager", [alert("Unlabelled", "firing", first)])).status).toBe(200);
+
+    expect((await events()).sort()).toEqual(
+      [
+        "firing DiskFull is firing",
+        "firing HighLatency is firing",
+        "resolved DiskFull is resolved",
+        "firing DiskFull is firing",
+        "firing Unlabelled is firing",
+        "firing Unlabelled is firing",
+      ].sort(),
+    );
+  });
 });
 
 describe("agent tools", () => {
@@ -896,12 +999,240 @@ describe("agent tools", () => {
       const update = tools.find((tool) => tool.name === "scheduled_tasks_update")!;
       expect(names.includes("event_sources_list")).toBe(enabled);
       expect(names.includes("events_get")).toBe(enabled);
+      expect(names.includes("event_sources_create_webhook")).toBe(enabled);
       expect("events" in (create.inputSchema.properties ?? {})).toBe(enabled);
       expect("events" in (update.inputSchema.properties ?? {})).toBe(enabled);
       expect(create.inputSchema.required?.includes("schedule") ?? false).toBe(!enabled);
       expect(create.description?.includes("event_sources_list")).toBe(enabled);
       await close();
     }
+    // Adding and changing sources needs scheduled_tasks:manage.
+    const runner = await agent(on, on.owner.subjectId, {}, ["scheduled_tasks:run"]);
+    const runnerTools = (await runner.client.listTools()).tools.map((tool) => tool.name);
+    expect(runnerTools).toContain("event_sources_list");
+    for (const name of [
+      "event_sources_create_webhook",
+      "event_sources_update",
+      "event_sources_delete",
+    ]) {
+      expect(runnerTools).not.toContain(name);
+    }
+    await runner.close();
+  });
+
+  test("an agent adds any app's webhook, checks what arrived, and changes or removes it", async () => {
+    const f = await fixture({ enabled: true });
+    const owner = await agent(f, f.owner.subjectId);
+    const send = async (address: string, body: unknown) => {
+      const url = new URL(address);
+      return await f.app.request(`${url.pathname}${url.search}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    };
+
+    expect(await owner.call("event_sources_create_webhook", { name: "Watcher" })).toEqual({
+      error: expect.stringContaining("Pass either preset or format"),
+    });
+    expect(
+      await owner.call("event_sources_create_webhook", {
+        name: "Watcher",
+        format: { signature: { scheme: "rot13" }, type: { path: "event" } },
+      }),
+    ).toEqual({ error: expect.stringContaining("The format is not valid") });
+
+    // An app that can't sign: the secret travels in the address it posts to.
+    const format = {
+      signature: { scheme: "url_token" },
+      type: { path: "event" },
+      eventId: "id",
+      summary: ["title", "message"],
+    };
+    expect(
+      await owner.call("event_sources_create_webhook", {
+        name: "Page watcher",
+        format,
+        signingSecret: "short-secret",
+      }),
+    ).toEqual({ error: expect.stringContaining("at least 24 letters") });
+    // A reference that reached the tool unresolved is never stored as the secret.
+    const brace = "{";
+    expect(
+      await owner.call("event_sources_create_webhook", {
+        name: "Page watcher",
+        format,
+        signingSecret: `${brace}${brace}secret:Apps/page-watcher}}`,
+      }),
+    ).toEqual({ error: expect.stringContaining("still a secret reference") });
+    const token = randomBytes(24).toString("hex");
+    const created = await owner.call("event_sources_create_webhook", {
+      name: "Page watcher",
+      format,
+      signingSecret: token,
+    });
+    expect(created).toEqual({
+      source: {
+        id: expect.any(String),
+        name: "Page watcher",
+        kind: "webhook",
+        status: "active",
+      },
+      registerUrl: expect.stringMatching(
+        /^https:\/\/opengeni\.example\/.+\/[0-9a-f-]+\?token=<secret>$/u,
+      ),
+      note: expect.stringContaining("same secret reference"),
+    });
+    expect(JSON.stringify(created)).not.toContain(token);
+    const sourceId = created.source.id as string;
+    const address = created.registerUrl.replace("<secret>", token) as string;
+
+    const change = { event: "page.changed", id: "chg_1", message: "Prices changed" };
+    expect((await send(address, change)).status).toBe(200);
+    expect((await send(address.replace(token, "x".repeat(48)), change)).status).toBe(401);
+    expect((await send(address.replace(/\?.*$/u, ""), change)).status).toBe(401);
+
+    const described = await owner.call("event_sources_list", { sourceId });
+    expect(described.source).toMatchObject({
+      id: sourceId,
+      webhookUrl: address.replace(/\?.*$/u, ""),
+      format: { signature: { scheme: "url_token", parameter: "token" } },
+    });
+    expect(JSON.stringify(described)).not.toContain(token);
+    expect(described.eventTypes.map((type: { type: string }) => type.type)).toEqual([
+      "page.changed",
+    ]);
+    expect(described.recentDeliveries).toHaveLength(3);
+    expect(
+      described.recentDeliveries.find(
+        (delivery: { status: string }) => delivery.status === "accepted",
+      ),
+    ).toMatchObject({ eventTypes: ["page.changed"] });
+    expect(
+      described.recentDeliveries.filter(
+        (delivery: { status: string }) => delivery.status === "rejected",
+      ),
+    ).toHaveLength(2);
+
+    // Another member neither sees nor changes the owner's private source.
+    const other = await agent(f, f.other.subjectId);
+    expect(await other.call("event_sources_update", { sourceId, name: "Mine" })).toEqual({
+      error: expect.stringContaining("Event source not found"),
+    });
+    expect(await other.call("event_sources_delete", { sourceId })).toEqual({
+      error: expect.stringContaining("Event source not found"),
+    });
+
+    // A format change is checked like a new one, and against the kept secret.
+    expect(
+      await owner.call("event_sources_update", { sourceId, format: { type: { path: "event" } } }),
+    ).toEqual({ error: expect.stringContaining("The format is not valid") });
+    expect(
+      await owner.call("event_sources_update", {
+        sourceId,
+        format: { ...format, signature: { scheme: "url_token", parameter: "key" } },
+        visibility: "workspace",
+      }),
+    ).toMatchObject({
+      source: { id: sourceId, status: "active" },
+      registerUrl: expect.stringMatching(/\?key=<secret>$/u),
+    });
+    expect((await send(address.replace("?token=", "?key="), change)).status).toBe(200);
+
+    // A preset fills the format in; without its secret the source waits.
+    const linear = await owner.call("event_sources_create_webhook", {
+      name: "Linear",
+      preset: "linear",
+    });
+    expect(linear).toMatchObject({
+      source: {
+        preset: "linear",
+        status: "blocked",
+        statusReason: expect.stringContaining("Linear"),
+      },
+      registerUrl: expect.stringMatching(/^https:\/\/opengeni\.example\//u),
+    });
+    expect(
+      await owner.call("event_sources_update", {
+        sourceId: linear.source.id,
+        signingSecret: "lin_wh_0123456789abcdef",
+      }),
+    ).toMatchObject({ source: { preset: "linear", status: "active" } });
+    expect(
+      (await owner.call("event_sources_list", { sourceId: linear.source.id })).eventTypes.map(
+        (type: { type: string }) => type.type,
+      ),
+    ).toContain("Issue.create");
+
+    expect(await owner.call("event_sources_delete", { sourceId })).toEqual({ deleted: sourceId });
+    expect(
+      (await owner.call("event_sources_list", {})).sources.map(
+        (source: { id: string }) => source.id,
+      ),
+    ).toEqual([linear.source.id]);
+    await Promise.all([owner.close(), other.close()]);
+  });
+
+  test("an outside agent that sets a webhook's secret or format makes its deliveries API use; an agent in an app chat does not", async () => {
+    const f = await fixture({ enabled: true });
+    const holder = async (sourceId: string) => {
+      const [row] = await shared.admin<{ holder: string | null }[]>`
+        select secret_billing_origin as holder from event_sources where id = ${sourceId}::uuid`;
+      return row?.holder;
+    };
+    // An agent in a chat the person started in the app, and an outside
+    // agent signed in over MCP OAuth.
+    const chat = await agent(f, f.owner.subjectId);
+    const inApp = (name: string, args: Record<string, unknown>) =>
+      withBillingOriginOverride("app", () => chat.call(name, args));
+    const outside = await agent(f, f.owner.subjectId, { mcpOAuth: true });
+    const format = { signature: { scheme: "url_token" }, type: { path: "event" } };
+    const token = () => randomBytes(24).toString("hex");
+
+    const own = await inApp("event_sources_create_webhook", {
+      name: "Page watcher",
+      format,
+      signingSecret: token(),
+    });
+    const sourceId = own.source.id as string;
+    await inApp("event_sources_update", { sourceId, signingSecret: token() });
+    await inApp("event_sources_update", { sourceId, format: { ...format, eventId: "id" } });
+    // Renaming touches neither the secret nor the format.
+    await outside.call("event_sources_update", { sourceId, name: "Prices" });
+    expect(await holder(sourceId)).toBeNull();
+
+    // The format says how deliveries are verified and read.
+    expect(
+      await outside.call("event_sources_update", {
+        sourceId,
+        format: { ...format, signature: { scheme: "url_token", parameter: "key" } },
+      }),
+    ).toMatchObject({ source: { id: sourceId, status: "active" } });
+    expect(await holder(sourceId)).toBe("api");
+
+    const second = await inApp("event_sources_create_webhook", {
+      name: "Linear",
+      preset: "linear",
+    });
+    await outside.call("event_sources_update", {
+      sourceId: second.source.id,
+      signingSecret: "lin_wh_0123456789abcdef",
+    });
+    expect(await holder(second.source.id)).toBe("api");
+
+    // Creating one: with its secret, or a preset whose secret comes later.
+    const created = await outside.call("event_sources_create_webhook", {
+      name: "Outside watcher",
+      format,
+      signingSecret: token(),
+    });
+    const preset = await outside.call("event_sources_create_webhook", {
+      name: "Sentry",
+      preset: "sentry",
+    });
+    expect(await holder(created.source.id)).toBe("api");
+    expect(await holder(preset.source.id)).toBe("api");
+    await Promise.all([chat.close(), outside.close()]);
   });
 
   test("an agent finds a source, sets up a trigger without a schedule, and reads what a run carried", async () => {
@@ -1114,11 +1445,17 @@ describe("MCP event sources", () => {
     });
     app = f.app;
     const started: EventOccurrenceToStart[] = [];
-    const pump = async () => {
+    /** One pass of the subscription pump; `now` is the time its steps see. */
+    const pump = async (now?: Date) => {
       await shared.admin`update mcp_event_subscriptions
         set next_action_at = now() - interval '1 second', lease_until = null
         where workspace_id = ${f.workspace.id}`;
-      await pumpDueMcpEventSubscriptions({ db: db.db, settings: f.settings, bus: f.bus });
+      await pumpDueMcpEventSubscriptions({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        ...(now ? { now: () => now } : {}),
+      });
     };
     const dispatch = async () => {
       await makeDue(f.workspace.id);
@@ -1132,7 +1469,8 @@ describe("MCP event sources", () => {
       });
     };
     const subscriptions = async () =>
-      await shared.admin`select mode, cursor, gap_pending, server_subscription_id, failures
+      await shared.admin`select mode, poll_reason, poll_reason_at, route_id, cursor, gap_pending,
+          server_subscription_id, failures
         from mcp_event_subscriptions where workspace_id = ${f.workspace.id}`;
     const createSource = async () => {
       const created = await f.app.request(f.sources, {
@@ -1240,6 +1578,85 @@ describe("MCP event sources", () => {
       ],
     });
     expect(twoTypes.status).toBe(422);
+  });
+
+  test("a workspace source listens by URL, signed in by the credential provider", async () => {
+    const f = await mcpFixture();
+    const protectedServer = startFakeMcpEventsServer({
+      eventTypes: [TICKET_CREATED],
+      bearerToken: "listen-token",
+    });
+    fakes.push(protectedServer);
+    const serverUrl = "https://events.example/mcp";
+    // A person who is not an admin can't add one.
+    const asMember = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "mcp", serverId: "product-events", url: serverUrl }),
+    });
+    expect(asMember.status).toBe(403);
+
+    const provider = await f.app.request(`/v1/workspaces/${f.workspace.id}/credential-provider`, {
+      method: "PUT",
+      headers: f.service,
+      body: JSON.stringify({ url: "https://provider.example/credentials" }),
+    });
+    expect(provider.status).toBe(201);
+    const asked: Array<Record<string, any>> = [];
+    const network = {
+      // Any source's https URL reaches the local fake server.
+      fetch: async (url: string | URL, init?: RequestInit) =>
+        await fetch(String(url).replace(/^https:\/\/[^/]+\/mcp/, protectedServer.url), init),
+      providerFetch: (async (_url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        asked.push(body);
+        return Response.json({
+          status: "ok",
+          mcp: [
+            {
+              url: body.eventSubscription.serverUrl,
+              headers: { Authorization: "Bearer listen-token" },
+            },
+          ],
+        });
+      }) as never,
+    };
+    const add = async (url: string) =>
+      await addMcpEventSource({
+        db: db.db,
+        settings: f.settings,
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: "service:product",
+        ownerSubjectId: null,
+        serverId: "product-events",
+        url,
+        ...network,
+      });
+    const source = await add(serverUrl);
+    expect(source).toMatchObject({
+      kind: "mcp",
+      ownerSubjectId: null,
+      visibility: "workspace",
+      mcpServerUrl: serverUrl,
+      connectionId: null,
+    });
+    expect(asked[0]).toMatchObject({
+      purpose: "event_subscription",
+      eventSubscription: { serverUrl },
+      mcpServers: [{ id: "product-events", url: serverUrl }],
+    });
+    // Adding it again returns the same source; another URL for the same id conflicts.
+    expect((await add(serverUrl)).id).toBe(source.id);
+    await expect(add("https://other.example/mcp")).rejects.toMatchObject({ status: 409 });
+
+    const listed = await f.json(
+      await f.app.request(`${f.sources}/${source.id}`, { headers: f.owner.headers }),
+    );
+    expect(listed.source ?? listed).toMatchObject({
+      visibility: "workspace",
+      mcp: { serverId: "product-events", connectionId: null, url: serverUrl },
+    });
   });
 
   test("a server that offers events is ready to use: its first use adds the person's source", async () => {
@@ -1549,16 +1966,124 @@ describe("MCP event sources", () => {
       data: { reason: "dns" },
     });
     await f.pump();
-    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", failures: 0 }]);
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "poll", poll_reason: "callback_failed", failures: 0 },
+    ]);
     await f.fake.emit("ticket.closed", { title: "Polled instead" });
     await f.pump();
-    // Polling sticks: the webhook is not tried again.
+    // Polling sticks for a day: the webhook is not tried again meanwhile.
     expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
     expect(f.fake.requestsFor("events/poll")).toHaveLength(2);
     expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
       "Polled instead",
     ]);
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("active");
+  });
+
+  test("a polled stream moves to webhook once its server offers it, losing and repeating no event", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    await f.pump();
+    // The type offers only polling, so it polls for want of a webhook.
+    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", poll_reason: "not_offered" }]);
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Polled" }, { eventId: "t-1" });
+    await f.pump();
+
+    // The server starts offering webhook delivery while an event waits to be polled.
+    await f.fake.emit(
+      "ticket.created",
+      { queue: "billing", title: "Replayed" },
+      { eventId: "t-2" },
+    );
+    f.fake.setEventTypes([{ ...TICKET_CREATED, delivery: ["poll", "webhook"] }, TICKET_CLOSED]);
+    const [polling] = await f.subscriptions();
+    const polls = f.fake.requestsFor("events/poll").length;
+    // The step reads the event types again an hour on and sees the webhook.
+    await f.pump(new Date(Date.now() + 61 * 60_000));
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "webhook", poll_reason: null, poll_reason_at: null, failures: 0 },
+    ]);
+    // It subscribed from its last poll cursor and stopped polling.
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
+    expect(f.fake.requestsFor("events/subscribe")[0]?.params).toMatchObject({
+      cursor: polling!.cursor,
+    });
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(polls);
+
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Pushed" }, { eventId: "t-3" });
+    // The server sends an event that already arrived by poll; it is stored once.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Polled" }, { eventId: "t-1" });
+    await f.pump();
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(polls);
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Pushed",
+      "Replayed",
+      "Polled",
+    ]);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toContain(automation.id);
+  });
+
+  test("a failed move to webhook keeps the stream polling, and it tries again a day later", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    await f.automation(source.id, "ticket.created", { queue: "billing" });
+    await f.pump();
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Before" }, { eventId: "t-1" });
+    await f.pump();
+
+    f.fake.setEventTypes([{ ...TICKET_CREATED, delivery: ["poll", "webhook"] }, TICKET_CLOSED]);
+    await f.fake.emit(
+      "ticket.created",
+      { queue: "billing", title: "Meanwhile" },
+      { eventId: "t-2" },
+    );
+    f.fake.failNext("events/subscribe", {
+      code: -32_027,
+      message: "Callback endpoint error",
+      data: { reason: "dns" },
+    });
+    const failedAt = new Date(Date.now() + 61 * 60_000);
+    await f.pump(failedAt);
+    // The step polled instead, so the waiting event still arrived.
+    const [failed] = await f.subscriptions();
+    expect(failed).toMatchObject({
+      mode: "poll",
+      poll_reason: "callback_failed",
+      route_id: null,
+      failures: 0,
+    });
+    expect(new Date(failed!.poll_reason_at).getTime()).toBe(failedAt.getTime());
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Meanwhile",
+      "Before",
+    ]);
+
+    // For a day it keeps polling and doesn't try the webhook.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Still polled" });
+    await f.pump(new Date(failedAt.getTime() + 23 * 60 * 60_000));
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "poll", poll_reason: "callback_failed" },
+    ]);
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Still polled",
+      "Meanwhile",
+      "Before",
+    ]);
+
+    // A day after the failure it tries again, from the cursor polling reached.
+    const [polling] = await f.subscriptions();
+    await f.pump(new Date(failedAt.getTime() + 24 * 60 * 60_000 + 1_000));
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(2);
+    expect(f.fake.requestsFor("events/subscribe")[1]?.params).toMatchObject({
+      cursor: polling!.cursor,
+    });
+    expect(await f.subscriptions()).toMatchObject([
+      { mode: "webhook", poll_reason: null, failures: 0 },
+    ]);
+    expect(await f.events(source.id)).toHaveLength(3);
   });
 
   test("a server built for ChatGPT's earlier draft works over webhooks", async () => {
@@ -1590,7 +2115,215 @@ describe("MCP event sources", () => {
     await f.pump();
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("blocked");
   });
+
+  test("polling keeps one MCP session: one handshake and one events/list, then only polls", async () => {
+    const stub = startSessionfulMcpEventsStub({ nextPollMs: 30_000 });
+    try {
+      const f = await fixture({
+        enabled: true,
+        mcpServers: [{ id: "session-stub", name: "Session Stub", url: stub.url }],
+      });
+      const created = await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "mcp", serverId: "session-stub" }),
+      });
+      expect(created.status).toBe(201);
+      const source = (await f.json(created)).source as { id: string };
+      for (const queue of ["billing", "support"]) {
+        const automation = await f.createAutomation(f.owner.headers, {
+          triggers: [{ sourceId: source.id, eventTypes: ["ticket.created"], arguments: { queue } }],
+        });
+        expect(automation.status).toBe(201);
+      }
+      // Setting up the source and its triggers connects on its own; count the polling alone.
+      stub.reset();
+      let clock = Date.now();
+      const pump = async () => {
+        await shared.admin`update mcp_event_subscriptions
+          set next_action_at = now() - interval '1 second', lease_until = null
+          where workspace_id = ${f.workspace.id}`;
+        await pumpDueMcpEventSubscriptions({
+          db: db.db,
+          settings: f.settings,
+          bus: f.bus,
+          now: () => new Date(clock),
+        });
+        clock += 30_000;
+      };
+      const polls = 5;
+      for (let step = 0; step < polls; step += 1) await pump();
+      // Two subscriptions to one server with one sign-in share a session. Its
+      // handshake is the era probe (`server/discover`, which this 2025-era
+      // server doesn't know), `initialize` and `notifications/initialized`.
+      expect(stub.counts()).toEqual({
+        "server/discover": 1,
+        initialize: 1,
+        "notifications/initialized": 1,
+        "events/list": 1,
+        "events/poll": polls * 2,
+      });
+      expect(stub.sessionsOpened).toBe(1);
+
+      // The server forgets the session: a poll on it is refused with 404, and
+      // the step starts one new session and polls again on it. Both steps run
+      // at once, so either one or both may meet the old session first. The
+      // server is known to be 2025-era by now, so the new session skips the probe.
+      stub.expireSessions();
+      await pump();
+      const rejected = stub.rejectedForExpiredSession;
+      expect([1, 2]).toContain(rejected);
+      expect(stub.counts()).toEqual({
+        "server/discover": 1,
+        initialize: 2,
+        "notifications/initialized": 2,
+        "events/list": 2,
+        "events/poll": polls * 2 + 2 + rejected,
+      });
+      const rows = await shared.admin`select failures, cursor from mcp_event_subscriptions
+        where workspace_id = ${f.workspace.id}`;
+      expect(rows.map((row) => row.failures)).toEqual([0, 0]);
+
+      // Polling carries on in the new session.
+      await pump();
+      expect(stub.counts()).toMatchObject({
+        initialize: 2,
+        "events/list": 2,
+        "events/poll": polls * 2 + 4 + rejected,
+      });
+    } finally {
+      await stub.stop();
+    }
+  });
 });
+
+/**
+ * A 2025-era MCP server that keeps sessions, as most deployed servers do: it
+ * answers `initialize` with an `Mcp-Session-Id`, refuses requests without a
+ * session, answers 404 to a session it no longer knows, and counts every
+ * JSON-RPC message it receives by method.
+ */
+function startSessionfulMcpEventsStub(options: { nextPollMs: number }) {
+  const sessions = new Set<string>();
+  let counts: Record<string, number> = {};
+  let sessionsOpened = 0;
+  let rejectedForExpiredSession = 0;
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json", ...headers },
+    });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const sessionId = request.headers.get("mcp-session-id");
+      if (request.method === "DELETE") {
+        if (sessionId) sessions.delete(sessionId);
+        return new Response(null, { status: 200 });
+      }
+      // No server-to-client stream.
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      const message = (await request.json()) as {
+        id?: number | string;
+        method: string;
+        params?: Record<string, any>;
+      };
+      counts[message.method] = (counts[message.method] ?? 0) + 1;
+      // A 2025-era server: it doesn't know the 2026 era probe.
+      if (message.method === "server/discover") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32_601, message: "Method not found" },
+        });
+      }
+      if (message.method === "initialize" && !sessionId) {
+        const id = crypto.randomUUID();
+        sessions.add(id);
+        sessionsOpened += 1;
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              protocolVersion: message.params?.protocolVersion,
+              capabilities: { extensions: { "io.modelcontextprotocol/events": {} } },
+              serverInfo: { name: "session-stub", version: "1.0.0" },
+            },
+          },
+          200,
+          { "mcp-session-id": id },
+        );
+      }
+      if (!sessionId) {
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id ?? null,
+            error: { code: -32_000, message: "Bad Request: No valid session ID provided" },
+          },
+          400,
+        );
+      }
+      if (!sessions.has(sessionId)) {
+        rejectedForExpiredSession += 1;
+        return json(
+          {
+            jsonrpc: "2.0",
+            id: message.id ?? null,
+            error: { code: -32_001, message: "Session not found" },
+          },
+          404,
+        );
+      }
+      if (message.id === undefined) return new Response(null, { status: 202 });
+      if (message.method === "events/list") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { events: [TICKET_CREATED] },
+        });
+      }
+      if (message.method === "events/poll") {
+        return json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            events: [],
+            cursor: "c0",
+            hasMore: false,
+            nextPollMs: options.nextPollMs,
+          },
+        });
+      }
+      return json({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32_601, message: "Method not found" },
+      });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/mcp`,
+    counts: () => ({ ...counts }),
+    get sessionsOpened() {
+      return sessionsOpened;
+    },
+    get rejectedForExpiredSession() {
+      return rejectedForExpiredSession;
+    },
+    reset() {
+      counts = {};
+      sessionsOpened = 0;
+      rejectedForExpiredSession = 0;
+    },
+    expireSessions() {
+      sessions.clear();
+    },
+    stop: async () => await server.stop(true),
+  };
+}
 
 describe("GitHub event sources", () => {
   const webhookSecret = "github-hook-secret";
@@ -1612,13 +2345,14 @@ describe("GitHub event sources", () => {
   }
 
   async function githubFixture(
-    app: ReturnType<typeof fakeGitHubApp>,
-    options: { webhookBaseUrl?: string } = {},
+    app: { api: AppDependencies["githubAppApi"] },
+    options: { webhookBaseUrl?: string; enabled?: boolean } = {},
   ) {
+    const { enabled = true, ...rest } = options;
     const f = await fixture({
-      enabled: true,
+      enabled,
       github: { webhookSecret, appSlug: "opengeni-agent", api: app.api },
-      ...options,
+      ...rest,
     });
     const bind = async (installationId: number, repositoryIds: number[]) => {
       const checkedAt = new Date();
@@ -1866,6 +2600,332 @@ describe("GitHub event sources", () => {
     expect(await deliver(second, 801)).toEqual({ deliveries: 0 });
     expect((await f.addSource()).status).toBe(201);
     expect(await deliver(second, 801)).toEqual({ deliveries: 1 });
+  });
+
+  test("installation webhooks keep the workspace's repositories in line with GitHub", async () => {
+    const installationId = installation();
+    const github = { repositoryIds: [601, 602], suspended: false, listCalls: 0 };
+    const repository = (id: number) => ({
+      id,
+      installationId,
+      fullName: `acme/repo-${id}`,
+      name: `repo-${id}`,
+      private: true,
+      htmlUrl: `https://github.com/acme/repo-${id}`,
+      cloneUrl: `https://github.com/acme/repo-${id}.git`,
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    });
+    // Event triggers are off: the App's installation events still apply.
+    const f = await githubFixture(
+      {
+        api: {
+          ...fakeGitHubApp([]).api,
+          getInstallation: async ({ installationId: requested }) =>
+            requested === installationId
+              ? {
+                  installationId,
+                  accountId: 9001,
+                  accountLogin: "acme",
+                  accountType: "Organization",
+                  suspended: github.suspended,
+                }
+              : null,
+          listRepositories: async () => {
+            github.listCalls += 1;
+            return github.repositoryIds.map(repository);
+          },
+        },
+      },
+      { enabled: false },
+    );
+    await f.bind(installationId, [601, 602]);
+    const allowed = async () =>
+      (await listGitHubInstallationAccessForWorkspace(db.db, f.workspace.id))
+        .find((binding) => binding.installationId === installationId)!
+        .repositoryIds.sort((left, right) => left - right);
+    const deliver = async (event: string, payload: Record<string, unknown>, secret?: string) => {
+      const response = await f.app.request(
+        "/v1/webhooks/github",
+        signed(
+          JSON.stringify({ installation: { id: installationId }, ...payload }),
+          event,
+          crypto.randomUUID(),
+          secret,
+        ),
+      );
+      await settleGitHubInstallationRepositorySyncs();
+      return response;
+    };
+
+    // A removal applies before GitHub is answered.
+    github.repositoryIds = [601];
+    const removed = await f.app.request(
+      "/v1/webhooks/github",
+      signed(
+        JSON.stringify({
+          action: "removed",
+          installation: { id: installationId },
+          repository_selection: "selected",
+          repositories_added: [],
+          repositories_removed: [{ id: 602 }],
+        }),
+        "installation_repositories",
+      ),
+    );
+    expect(removed.status).toBe(200);
+    expect(await allowed()).toEqual([601]);
+    await settleGitHubInstallationRepositorySyncs();
+
+    // An addition is read from GitHub, never taken from the delivery.
+    github.repositoryIds = [601, 603];
+    expect(
+      (
+        await deliver("installation_repositories", {
+          action: "added",
+          repository_selection: "selected",
+          repositories_added: [{ id: 603 }, { id: 999 }],
+          repositories_removed: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect(await allowed()).toEqual([601, 603]);
+
+    // A forged delivery changes nothing.
+    github.repositoryIds = [601];
+    expect(
+      (
+        await deliver(
+          "installation_repositories",
+          { action: "removed", repositories_removed: [{ id: 603 }] },
+          "not-the-secret",
+        )
+      ).status,
+    ).toBe(401);
+    expect(await allowed()).toEqual([601, 603]);
+
+    // "All repositories" now: every repository, including one created later.
+    github.repositoryIds = [601, 603, 604, 605];
+    await deliver("installation_repositories", {
+      action: "added",
+      repository_selection: "all",
+      repositories_added: [{ id: 604 }],
+      repositories_removed: [],
+    });
+    expect(await allowed()).toEqual([601, 603, 604, 605]);
+    github.repositoryIds = [601, 603, 604, 605, 606];
+    await deliver("repository", { action: "created", repository: { id: 606 } });
+    expect(await allowed()).toEqual([601, 603, 604, 605, 606]);
+    github.repositoryIds = [601, 603, 604, 606];
+    await deliver("repository", { action: "deleted", repository: { id: 605 } });
+    expect(await allowed()).toEqual([601, 603, 604, 606]);
+
+    // Suspension leaves the list for when the installation returns; the
+    // binding is unusable through its live lifecycle check meanwhile.
+    github.suspended = true;
+    const callsBeforeSuspend = github.listCalls;
+    await deliver("installation", { action: "unsuspend" });
+    expect(github.listCalls).toBe(callsBeforeSuspend);
+    expect(await allowed()).toEqual([601, 603, 604, 606]);
+    github.suspended = false;
+
+    // An uninstalled App removes everything at once.
+    await deliver("installation", { action: "deleted" });
+    expect(await allowed()).toEqual([]);
+  });
+
+  function githubRepository(installationId: number, id: number) {
+    return {
+      id,
+      installationId,
+      fullName: `acme/repo-${id}`,
+      name: `repo-${id}`,
+      private: true,
+      htmlUrl: `https://github.com/acme/repo-${id}`,
+      cloneUrl: `https://github.com/acme/repo-${id}.git`,
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+  }
+
+  async function allowedRepositories(workspaceId: string, installationId: number) {
+    return (await listGitHubInstallationAccessForWorkspace(db.db, workspaceId))
+      .find((binding) => binding.installationId === installationId)!
+      .repositoryIds.sort((left, right) => left - right);
+  }
+
+  test("a removed repository stays removed while GitHub's list still names it", async () => {
+    const installationId = installation();
+    // GitHub's list lags its own webhook: it still names 602 after removing it.
+    const github = { repositoryIds: [601, 602] };
+    const f = await githubFixture(
+      {
+        api: {
+          ...fakeGitHubApp([]).api,
+          getInstallation: async () => ({
+            installationId,
+            accountId: 9001,
+            accountLogin: "acme",
+            accountType: "Organization",
+            suspended: false,
+          }),
+          listRepositories: async () =>
+            github.repositoryIds.map((id) => githubRepository(installationId, id)),
+        },
+      },
+      { enabled: false },
+    );
+    await f.bind(installationId, [601, 602]);
+    const deliver = async (payload: Record<string, unknown>) => {
+      const response = await f.app.request(
+        "/v1/webhooks/github",
+        signed(
+          JSON.stringify({ installation: { id: installationId }, ...payload }),
+          "installation_repositories",
+        ),
+      );
+      expect(response.status).toBe(200);
+      await settleGitHubInstallationRepositorySyncs();
+    };
+
+    await deliver({
+      action: "removed",
+      repository_selection: "selected",
+      repositories_added: [],
+      repositories_removed: [{ id: 602 }],
+    });
+    // The resync the removal started read 602 again and did not restore it.
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601]);
+
+    // An "added" delivery may arrive out of order with the removal: within the
+    // hold window the repository stays out.
+    await deliver({
+      action: "added",
+      repository_selection: "selected",
+      repositories_added: [{ id: 602 }],
+      repositories_removed: [],
+    });
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601]);
+
+    // GitHub's list still names it, so the installation is read again when
+    // the hold ends, and it shows up without another webhook.
+    setSystemTime(new Date(Date.now() + GITHUB_REMOVED_REPOSITORY_HOLD_MS + 2_000));
+    try {
+      expect(runPendingGitHubInstallationRepositoryResyncs()).toBeGreaterThanOrEqual(1);
+      await settleGitHubInstallationRepositorySyncs();
+      expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([601, 602]);
+      // Nothing is held any more: no further read is scheduled for it.
+      expect(runPendingGitHubInstallationRepositoryResyncs()).toBe(0);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("an empty list GitHub cannot confirm leaves the workspace's repositories alone", async () => {
+    const installationId = installation();
+    let listCalls = 0;
+    // A host that cannot report the installation, and answers a failure with
+    // an empty list.
+    const f = await githubFixture(
+      {
+        api: {
+          ...fakeGitHubApp([]).api,
+          listRepositories: async () => {
+            listCalls += 1;
+            return [];
+          },
+        },
+      },
+      { enabled: false },
+    );
+    await f.bind(installationId, [611, 612]);
+    const response = await f.app.request(
+      "/v1/webhooks/github",
+      signed(
+        JSON.stringify({
+          action: "added",
+          installation: { id: installationId },
+          repository_selection: "all",
+          repositories_added: [{ id: 613 }],
+          repositories_removed: [],
+        }),
+        "installation_repositories",
+      ),
+    );
+    expect(response.status).toBe(200);
+    await settleGitHubInstallationRepositorySyncs();
+    expect(listCalls).toBe(1);
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([611, 612]);
+  });
+
+  test("with event triggers off, the App's webhook is still answered", async () => {
+    const installationId = installation();
+    const f = await githubFixture(fakeGitHubApp(["pull_request"]), { enabled: false });
+    await f.bind(installationId, [621]);
+    const response = await f.app.request(
+      "/v1/webhooks/github",
+      signed(pullRequestOpened(installationId, 621), "pull_request"),
+    );
+    expect(response.status).toBe(200);
+    expect(await f.json(response)).toEqual({ deliveries: 0 });
+  });
+
+  test("with event triggers off, a forged removal or uninstall changes nothing", async () => {
+    const installationId = installation();
+    const f = await githubFixture(fakeGitHubApp([]), { enabled: false });
+    await f.bind(installationId, [641, 642]);
+    const removal = JSON.stringify({
+      action: "removed",
+      installation: { id: installationId },
+      repository_selection: "selected",
+      repositories_added: [],
+      repositories_removed: [{ id: 642 }],
+    });
+    const uninstall = JSON.stringify({ action: "deleted", installation: { id: installationId } });
+    const forged = [
+      signed(removal, "installation_repositories", crypto.randomUUID(), "not-the-secret"),
+      signed(uninstall, "installation", crypto.randomUUID(), "not-the-secret"),
+    ];
+    const { "x-hub-signature-256": _signature, ...unsignedHeaders } = signed(
+      uninstall,
+      "installation",
+    ).headers;
+    const unsigned = { method: "POST", headers: unsignedHeaders, body: uninstall };
+    for (const request of [...forged, unsigned]) {
+      const response = await f.app.request("/v1/webhooks/github", request);
+      expect(response.status).toBe(401);
+    }
+    await settleGitHubInstallationRepositorySyncs();
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([641, 642]);
+  });
+
+  test("an event that removes a repository still reaches the workspace's GitHub source", async () => {
+    const installationId = installation();
+    const f = await githubFixture(fakeGitHubApp(["pull_request", "repository"]));
+    await f.bind(installationId, [631, 632]);
+    expect((await f.addSource()).status).toBe(201);
+    const response = await f.app.request(
+      "/v1/webhooks/github",
+      signed(
+        JSON.stringify({
+          action: "deleted",
+          installation: { id: installationId },
+          repository: {
+            id: 632,
+            name: "repo-632",
+            full_name: "acme/repo-632",
+            owner: { login: "acme" },
+          },
+          sender: { login: "octocat", type: "User" },
+        }),
+        "repository",
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(await f.json(response)).toEqual({ deliveries: 1 });
+    expect(await allowedRepositories(f.workspace.id, installationId)).toEqual([631]);
   });
 
   test("an App that sends its webhooks elsewhere is left alone", async () => {
@@ -2664,6 +3724,133 @@ describe("This workspace event sources", () => {
       field: "data.sessionId",
       description: "The chat whose agent saved them; null when a person did",
     });
+  });
+
+  /** A chat `person` starts through the API, and its first turn. */
+  async function chat(
+    f: Awaited<ReturnType<typeof workspaceFixture>>,
+    person: { headers: Record<string, string> },
+    title: string,
+    visibility: "private" | "workspace",
+  ) {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}/sessions`, {
+      method: "POST",
+      headers: person.headers,
+      body: JSON.stringify({ initialMessage: title, resources: [], tools: [], visibility }),
+    });
+    expect(response.status).toBe(202);
+    const sessionId = String((await f.json(response)).id);
+    const [turn] = await shared.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${sessionId} order by created_at limit 1`;
+    return { sessionId, turnId: turn!.id };
+  }
+
+  async function finish(
+    f: Awaited<ReturnType<typeof workspaceFixture>>,
+    target: { sessionId: string; turnId: string },
+    output: string,
+  ) {
+    await appendSessionEvents(db.db, f.workspace.id, target.sessionId, [
+      { type: "turn.completed", turnId: target.turnId, payload: { output } },
+    ]);
+  }
+
+  test("another chat finishing wakes an automation; another person's private chat never does", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const automation = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId: source.id, eventTypes: ["turn.completed"] }],
+      }),
+    );
+    const types = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    const offered = types.eventTypes.map((entry: { type: string }) => entry.type);
+    expect(offered).toEqual(expect.arrayContaining(["turn.completed", "usage.exhausted"]));
+    expect(offered).not.toContain("session.status.changed");
+    // The first read only learns where "now" is.
+    await f.pump();
+
+    const research = await chat(f, f.owner, "Research", "private");
+    const theirs = await chat(f, f.other, "Their private chat", "private");
+    const team = await chat(f, f.other, "Team plan", "workspace");
+    await finish(f, research, "Found three sources.");
+    await finish(f, theirs, "Private answer");
+    await finish(f, team, "Plan ready");
+    await f.pump();
+
+    const stored = (await f.events(source.id, f.owner.headers)).filter(
+      (event) => event.type === "turn.completed",
+    );
+    expect(stored.map((event) => event.data.sessionId).sort()).toEqual(
+      [research.sessionId, team.sessionId].sort(),
+    );
+    expect(stored.find((event) => event.data.sessionId === research.sessionId)).toMatchObject({
+      subject: "New conversation",
+      summary: "Chat finished: New conversation",
+      url: `https://opengeni.example/workspaces/${f.workspace.id}/sessions/${research.sessionId}`,
+      actor: { kind: "person" },
+      data: {
+        sessionId: research.sessionId,
+        turnId: research.turnId,
+        startedByYou: true,
+        answerExcerpt: "Found three sources.",
+      },
+    });
+    expect(stored.find((event) => event.data.sessionId === team.sessionId)?.data.startedByYou).toBe(
+      false,
+    );
+    expect(stored.some((event) => event.data.sessionId === theirs.sessionId)).toBe(false);
+    expect(await f.queued(automation.id)).toBe(2);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
+  });
+
+  test("a chain of automations stops past three levels, with one skipped run on record", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const automation = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId: source.id, eventTypes: ["turn.completed"], includeOwnEvents: true }],
+      }),
+    );
+    await f.pump();
+    const report = await chat(f, f.owner, "Nightly report", "private");
+    /** The fact a chat of an automation run at `depth` writes when it finishes. */
+    const finishedAtDepth = async (depth: number) => {
+      const id = crypto.randomUUID();
+      await shared.admin`insert into workspace_activity_events (workspace_id, id, account_id, type,
+          occurred_at, session_id, turn_id, subject_id, automation_id, automation_run_id,
+          chain_depth, data)
+        values (${f.workspace.id}, ${id}, ${f.workspace.accountId}, 'turn.completed', now(),
+          ${report.sessionId}, ${report.turnId}, ${f.owner.subjectId}, ${automation.id},
+          ${crypto.randomUUID()}, ${depth}, '{}'::jsonb)`;
+      return id;
+    };
+
+    // A third-level run's chat finishing would start a fourth level: nothing starts.
+    await finishedAtDepth(3);
+    await f.pump();
+    const [deep] = (await f.events(source.id, f.owner.headers)).filter(
+      (event) => event.type === "turn.completed",
+    );
+    expect(deep).toMatchObject({ actor: { kind: "opengeni" } });
+    const [depth] = await shared.admin<{ chain_depth: number }[]>`
+      select chain_depth from inbound_events where id = ${deep!.id}`;
+    expect(depth?.chain_depth).toBe(3);
+    expect(await f.queued(automation.id)).toBe(1);
+    await f.dispatch();
+    expect(f.started).toEqual([]);
+    const skipped = await shared.admin<{ status: string; error: string }[]>`
+      select status, error from scheduled_task_runs where task_id = ${automation.id}`;
+    expect([...skipped]).toEqual([{ status: "skipped", error: "chain_limit" }]);
+
+    // A second-level run's chat finishing still starts the third level.
+    await finishedAtDepth(2);
+    await f.pump();
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
   });
 });
 

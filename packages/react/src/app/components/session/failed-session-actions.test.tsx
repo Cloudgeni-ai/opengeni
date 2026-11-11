@@ -200,7 +200,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a subscription", "Retry"]);
   expect(row().querySelector("details p")!.textContent).toBe(detail);
 
   // A deployment without subscriptions never names them or links to them.
@@ -210,12 +210,12 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a model", "Retry"]);
   await act(async () =>
     root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
   );
   expect(headline()).toContain("connect ChatGPT, or pick another model");
-  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect ChatGPT", "Retry"]);
 
   // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
   await act(async () =>
@@ -232,6 +232,107 @@ test("the free model's daily limit names it and offers credits, a subscription a
   await act(async () => root!.render(banner({ freeModel: false })));
   expect(headline()).toBe("This model's daily limit has been reached. Choose another model below.");
   expect(labels()).toEqual(["Retry"]);
+});
+
+test("own-key and API credit stops offer their one fix, never another model", async () => {
+  const banner = (reason: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason }}
+      creditExhausted
+      freeCreditGap={{
+        modelLabel: "Claude Opus 5.5",
+        covered: [{ id: "free-model", label: "Free model" }],
+        selectionUsable: false,
+      }}
+      onChooseModel={() => undefined}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canChooseModel
+    />
+  );
+  const container = await render(
+    banner("Activity task failed: Upgrade to Pro to use your own key."),
+  );
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () =>
+    root!.render(banner("Activity task failed: Add credits to use your own key.")),
+  );
+  expect(row().textContent).toContain("Add credits to use your own key.");
+  expect(row().textContent).not.toContain("out of Opengeni credits");
+  expect(labels()).toEqual(["Add credits"]);
+  await act(async () => root!.render(banner("API usage uses credits, not your plan credit.")));
+  expect(labels()).toEqual(["Add credits"]);
+});
+
+test("a stop between model calls names its refusal from the turn end, not the failure text", async () => {
+  // A budget-exhausted completed turn: the failure summary carries no refusal text.
+  const banner = (
+    creditRefusal:
+      | "byok_paid_credit_required"
+      | "byok_upgrade_required"
+      | "subscription_upgrade_required"
+      | null,
+  ) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: null }}
+      creditExhausted
+      creditRefusal={creditRefusal}
+      freeCreditGap={{
+        modelLabel: "My key model",
+        covered: [{ id: "free-model", label: "Free model" }],
+        selectionUsable: false,
+      }}
+      onChooseModel={() => undefined}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canChooseModel
+    />
+  );
+  const container = await render(banner("byok_paid_credit_required"));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain("Add credits to use your own key.");
+  expect(row().textContent).not.toContain("Free model");
+  expect(labels()).toEqual(["Add credits"]);
+  await act(async () => root!.render(banner("byok_upgrade_required")));
+  expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () => root!.render(banner("subscription_upgrade_required")));
+  expect(row().textContent).toContain("Upgrade to Pro to use your own subscription.");
+  expect(row().textContent).not.toContain("Free model");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+});
+
+test("a member who can't fix a refusal is told to ask an owner, with no action", async () => {
+  const banner = (creditRefusal: "byok_upgrade_required" | "api_credits_required") => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: null }}
+      creditExhausted
+      creditRefusal={creditRefusal}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits={false}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("byok_upgrade_required"));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  expect(row().textContent).not.toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual([]);
+  await act(async () => root!.render(banner("api_credits_required")));
+  expect(row().textContent).toContain(
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  );
+  expect(labels()).toEqual([]);
 });
 
 test("the free model keeps ordinary wording for failures other than its daily limit", async () => {
@@ -370,6 +471,10 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "policy",
     "personal_decision",
     "personal_loading",
+    // The open chat's connected accounts failed to load, were denied, or are reconnecting.
+    "accounts",
+    "accounts_denied",
+    "updating",
   ] as const) {
     await act(async () =>
       root!.render(<FailedSessionActions {...actions} composerBlocker={composerBlocker} />),
@@ -737,14 +842,20 @@ test("unsupported model directs to existing picker; a changed model permits reco
   const container = await render(
     <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel />,
   );
-  expect(container.textContent).toBe("This model isn’t available. Choose another below.");
+  // The headline replaced the recorded text, which stays behind Details.
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available. Choose another below.",
+  );
+  expect(container.querySelector("details")!.textContent).toBe(`Details${unavailable.reason}`);
   expect(container.querySelector("button")).toBeNull();
   await act(async () =>
     root!.render(
       <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel={false} />,
     ),
   );
-  expect(container.textContent).toBe("This model isn’t available.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available.",
+  );
   expect(container.querySelector("button")).toBeNull();
   await act(async () =>
     root!.render(<FailedSessionBanner failure={unavailable} actions={actions} modelChanged />),
@@ -766,8 +877,8 @@ test("safety refusal preserves draft and has no recovery action", async () => {
 test("billing offers at most one authorized action and never Retry", async () => {
   const container = await render(null);
   for (const [canBuyCredits, canConnectModel, expected] of [
-    [true, true, "Buy credits"],
-    [false, true, "Connect a model"],
+    [true, true, "Add credits"],
+    [false, true, "Use your own provider account"],
     [false, false, null],
   ] as const) {
     await act(async () =>
@@ -823,7 +934,7 @@ test("free credit for other models offers a covered model before buying credits"
   expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
   const switchButton = container.querySelector("button")!;
   expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
-  expect(container.querySelector("a")!.textContent).toBe("Buy credits");
+  expect(container.querySelector("a")!.textContent).toBe("Add credits");
   await act(async () => switchButton.click());
   expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
 
@@ -910,6 +1021,18 @@ test("a compaction failure the timeline already shows keeps only its recovery ac
 });
 
 test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // A usage-limit row in the timeline owns its failure: the banner keeps only Retry.
+  const limited = await render(
+    <FailedSessionBanner
+      failure={{ ...failure, failureCode: "allowance_exhausted" }}
+      actions={actions}
+      shownInTimeline
+    />,
+  );
+  expect(limited.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(limited.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
   // Another failure kind keeps its banner even if the caller claims ownership.
   const container = await render(
     <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
@@ -933,4 +1056,127 @@ test("the timeline flag never hides a failure the timeline cannot own", async ()
   );
   expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
   expect(quota.textContent).toContain("daily limit");
+});
+
+test("a Codex usage limit shows when it resets and a Continue at reset switch in place of Retry", async () => {
+  const changes: boolean[] = [];
+  const limited = {
+    ...failure,
+    failureCode: "codex_usage_limit_reached",
+    reason:
+      "Your ChatGPT/Codex subscription usage limit has been reached. Access resets in about 72h.",
+  };
+  const codexUsage = {
+    resetText: "Resets Sat 14:05.",
+    continueAtReset: false,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(
+    <FailedSessionBanner failure={limited} actions={actions} codexUsage={codexUsage} />,
+  );
+  const banner = container.querySelector('[data-testid="failed-session-banner"]');
+  expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
+  // The headline replaced the recorded sentence, which stays behind Details.
+  expect(banner?.querySelector("details")?.textContent).toBe(`Details${limited.reason}`);
+  expect(banner?.textContent).not.toContain("Retry");
+  expect(banner?.textContent).not.toContain("Continue with");
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  expect(toggle?.getAttribute("role")).toBe("switch");
+  expect(toggle?.getAttribute("aria-checked")).toBe("false");
+  expect(container.querySelector(`label[for="${toggle?.id}"]`)?.textContent).toBe(
+    "Continue at reset",
+  );
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([true]);
+  // Other failures keep Retry, and so does a banner without the switch.
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={failure} actions={actions} codexUsage={codexUsage} />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+  expect(container.textContent).toContain("Retry");
+  await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+});
+
+test("the Codex usage notice is one line with when it resets and the Continue at reset switch", async () => {
+  const { CodexUsageNotice } = await import("./codex-usage-notice");
+  const changes: boolean[] = [];
+  const choice = {
+    resetText: "Reset time unknown.",
+    continueAtReset: true,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(<CodexUsageNotice choice={choice} />);
+  const notice = container.querySelector('[data-testid="codex-usage-notice"]');
+  expect(notice?.querySelector("p")?.textContent).toBe(
+    "Codex usage limit reached. Reset time unknown.",
+  );
+  // One switch and no buttons: another model is picked in the composer.
+  expect(notice?.querySelectorAll("button:not([role=switch])")).toHaveLength(0);
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  // A waiting chat continues at the reset unless the person switches it off.
+  expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([false]);
+  // While a change is saving it ignores clicks, and its error shows plainly.
+  await act(async () =>
+    root!.render(<CodexUsageNotice choice={{ ...choice, pending: true, error: "Try again." }} />),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="codex-usage-continue-at-reset"]')!
+      .click(),
+  );
+  expect(changes).toEqual([false]);
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Try again.");
+});
+
+test("a chat its owner's machine isn't allowed for offers Allow in place of Retry", async () => {
+  const machineFailure = {
+    ...failure,
+    failureCode: "machine_access_required",
+    reason: "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+  };
+  // Someone who can't allow it reads the reason and keeps Retry for once it is.
+  const viewer = await render(<FailedSessionBanner failure={machineFailure} actions={actions} />);
+  expect(viewer.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    machineFailure.reason,
+  );
+  expect(viewer.textContent).not.toContain("database");
+  expect(viewer.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  let resolveAllow: (error: string | null) => void = () => {};
+  const onAllow = mock(() => new Promise<string | null>((resolve) => (resolveAllow = resolve)));
+  const owner = await render(
+    <FailedSessionBanner
+      failure={machineFailure}
+      actions={actions}
+      allowMachine={{ machineName: "Studio Mac", onAllow }}
+    />,
+  );
+  expect(owner.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+  );
+  const buttons = () => [...owner.querySelectorAll("button")];
+  expect(buttons().map((button) => button.textContent)).toEqual(["Allow for this chat"]);
+  await act(async () => {
+    buttons()[0]!.click();
+    buttons()[0]!.click();
+  });
+  expect(onAllow).toHaveBeenCalledTimes(1);
+  expect(buttons()[0]!.textContent).toBe("Allowing…");
+  expect(buttons()[0]!.disabled).toBe(true);
+  await act(async () => resolveAllow("This chat has ended. Start a new chat to use a repository."));
+  expect(owner.querySelector('[role="alert"]')!.textContent).toBe(
+    "This chat has ended. Start a new chat to use a repository.",
+  );
+  expect(buttons()[0]!.textContent).toBe("Allow for this chat");
 });

@@ -4,11 +4,12 @@
    Back, reload and shared links land on the same page:
      ?section=models                                     accounts, workspaces, settings
      ?section=models&account=org:codex:<id>              an organization account's page
+     ?section=models&account=org:compatible:<id>         one of its OpenAI-compatible endpoints
      ?section=models&view=connect                        Connect account
      ?section=models&view=connect-org:codex              one provider's step
      ?section=models&workspace=<id>                      one workspace's model page
      ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
-     ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
+     ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only (any provider)
      ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
      ?section=models&account=...&view=model-access       Models an account can serve
      ?section=models&view=account-rule-locks             What workspaces can change
@@ -26,41 +27,54 @@ export type ModelsProvider =
   | "openai"
   | "azure_openai"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "openai_compatible";
+
+/**
+ * "Claude Code (API key)" is not a provider of its own: it is the Anthropic
+ * API-key connection, reached from its own row and introduced by an
+ * explanation of the monthly API credits some Claude plans include.
+ */
+export const CLAUDE_CODE_API_STEP = "claude_code_api";
 
 export type ModelsView =
   | "connect"
   | "connect-workspace"
   | `connect:${ModelsProvider}`
   | `connect-org:${ModelsProvider}`
+  | `connect:${typeof CLAUDE_CODE_API_STEP}`
+  | `connect-org:${typeof CLAUDE_CODE_API_STEP}`
   | "allowed-models"
   | "compaction"
   | "account-rule-locks"
   | "model-access";
 
+/**
+ * Every provider has both steps: `connect-org:` connects it for the
+ * organization (owners and admins, who choose where it's available), and
+ * `connect:` connects it as one workspace's own (that workspace's admins).
+ * The step is the same page either way; only where the account lives differs.
+ */
 const PROVIDERS: readonly ModelsProvider[] = [
   "codex",
   "supergrok",
   "vercel",
   "openrouter",
   "opper",
+  "openai",
+  "azure_openai",
   "anthropic",
   "claude_subscription",
+  "openai_compatible",
 ];
-
-/**
- * Connected for the organization only: a workspace's own OpenAI or Azure key is
- * a direct connection with its own section.
- */
-const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = ["openai", "azure_openai"];
 
 const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect",
   "connect-workspace",
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
-  ...[...PROVIDERS, ...ORGANIZATION_ONLY_PROVIDERS].map(
-    (provider) => `connect-org:${provider}` as const,
-  ),
+  ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
+  `connect:${CLAUDE_CODE_API_STEP}` as const,
+  `connect-org:${CLAUDE_CODE_API_STEP}` as const,
   "allowed-models",
   "compaction",
   "account-rule-locks",
@@ -72,7 +86,7 @@ export function parseModelsView(value: unknown): ModelsView | undefined {
 }
 
 const ACCOUNT_KEY =
-  /^((org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))|org:gateway:(openai|azure_openai))$/;
+  /^((org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))|org:gateway:(openai|azure_openai)|org:compatible:[0-9a-f-]{36})$/;
 
 export function parseModelsAccount(value: unknown): string | undefined {
   return typeof value === "string" && ACCOUNT_KEY.test(value) ? value : undefined;
@@ -94,6 +108,8 @@ export type WorkspaceGatewayId = Exclude<GatewayId, "openai" | "azure_openai">;
 export type AccountKey = (
   | { provider: "codex" | "supergrok" | "claude"; id: string }
   | { provider: "gateway"; id: GatewayId }
+  /** An organization's OpenAI-compatible endpoint, by its connection id. */
+  | { provider: "compatible"; id: string }
 ) & {
   /** An organization account ("Everyone in <organization>"), not this workspace's own. */
   organization: boolean;
@@ -105,6 +121,9 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
   const rest = organization ? value.slice("org:".length) : value;
   const [provider, id] = rest.split(":", 2) as [string, string];
   if ((provider === "codex" || provider === "supergrok" || provider === "claude") && id) {
+    return { provider, id, organization };
+  }
+  if (provider === "compatible" && organization && /^[0-9a-f-]{36}$/.test(id ?? "")) {
     return { provider, id, organization };
   }
   if (
@@ -123,7 +142,7 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
 
 /** The account key for a row: `codex:<id>`, or `org:codex:<id>` for an organization account. */
 export function accountKey(
-  provider: "codex" | "supergrok" | "claude" | "gateway",
+  provider: "codex" | "supergrok" | "claude" | "gateway" | "compatible",
   id: string,
   organization = false,
 ): string {
@@ -133,15 +152,15 @@ export function accountKey(
 /** The provider a connect step is for, and whether it connects for the organization. */
 export function connectStepOf(
   view: ModelsView | undefined,
-): { provider: ModelsProvider; organization: boolean } | null {
+): { provider: ModelsProvider; organization: boolean; claudeCodeApi?: true } | null {
   if (!view) return null;
-  if (view.startsWith("connect-org:")) {
-    return { provider: view.slice("connect-org:".length) as ModelsProvider, organization: true };
-  }
-  if (view.startsWith("connect:")) {
-    return { provider: view.slice("connect:".length) as ModelsProvider, organization: false };
-  }
-  return null;
+  const organization = view.startsWith("connect-org:");
+  if (!organization && !view.startsWith("connect:")) return null;
+  const name = view.slice(organization ? "connect-org:".length : "connect:".length);
+  // Claude Code (API key) is the Anthropic API-key step with an introduction.
+  return name === CLAUDE_CODE_API_STEP
+    ? { provider: "anthropic", organization, claudeCodeApi: true }
+    : { provider: name as ModelsProvider, organization };
 }
 
 /**
@@ -183,6 +202,9 @@ export function organizationModelsSearch(input: {
   const step = connectStepOf(input.view);
   return {
     account: key && !key.organization ? accountKey(key.provider, key.id, true) : input.account,
-    view: step && !step.organization ? `connect-org:${step.provider}` : input.view,
+    view:
+      step && !step.organization
+        ? `connect-org:${step.claudeCodeApi ? CLAUDE_CODE_API_STEP : step.provider}`
+        : input.view,
   };
 }

@@ -499,6 +499,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
+ "rustls-native-certs 0.8.5",
  "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
@@ -654,6 +655,7 @@ dependencies = [
 name = "compute-protocol"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "compute-core",
  "serde",
  "serde_json",
@@ -705,6 +707,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "zstd",
 ]
 

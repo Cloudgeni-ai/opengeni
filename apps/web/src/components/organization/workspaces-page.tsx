@@ -467,6 +467,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
+  const slackAgents = useWorkspaceSlackAgentNames(directory, workspaceId, deleteOpen);
   const back = {
     label: "Workspaces",
     onClick: () => nav.openSection("workspaces"),
@@ -684,7 +685,10 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
           workspace.members.length > 0
             ? `${peopleLine} ${workspace.members.length === 1 ? "loses" : "lose"} access.`
             : "Nobody has access to it right now.",
-          "Its chats, files, automations and knowledge are deleted.",
+          "Its chats, files, automations, agents and knowledge are deleted.",
+          ...(slackAgents.length > 0
+            ? [`Its agents stop answering in Slack: ${slackAgents.join(", ")}.`]
+            : []),
           "This can't be undone.",
         ]}
         confirmLabel="Delete workspace"
@@ -697,6 +701,35 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
       <JoinDialog workspace={workspace} open={joinOpen} onOpenChange={setJoinOpen} />
     </DetailPage>
   );
+}
+
+/**
+ * The Slack agents that work in a workspace, read while its delete
+ * confirmation is open. Empty until known, and when they can't be read: the
+ * line is extra detail, never a reason to block the delete.
+ */
+function useWorkspaceSlackAgentNames(
+  directory: OrganizationDirectory,
+  workspaceId: string,
+  active: boolean,
+): string[] {
+  const [names, setNames] = useState<string[]>([]);
+  const { slackAgentNames } = directory;
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    void slackAgentNames(workspaceId)
+      .then((result) => {
+        if (live) setNames(result);
+      })
+      .catch(() => {
+        if (live) setNames([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [active, slackAgentNames, workspaceId]);
+  return names;
 }
 
 /** Rename: a one-field prompt, so a small centered dialog. */

@@ -11,7 +11,7 @@ import {
   fallbackOrderFor,
   hasFallbackOrderEntry,
   modelPermitted,
-  personalFallbackActive,
+  automaticallyUsable,
   subscriptionCoreModelPolicyProviderIds,
   type ModelDescriptor,
   type PlacementInput,
@@ -200,10 +200,14 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       tx,
       sql`select turn.metadata, session.visibility,
       get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-      case when policy.workspace_id is not null then policy.allowed_providers
-        else defaults.allowed_providers end as allowed_providers,
-      case when policy.workspace_id is not null then policy.allowed_models
-        else defaults.allowed_models end as allowed_models
+      case when policy.allowed_providers is null then defaults.allowed_providers
+        when defaults.allowed_providers is null then policy.allowed_providers
+        else array(select allowed from unnest(policy.allowed_providers) allowed
+          where allowed = any(defaults.allowed_providers)) end as allowed_providers,
+      case when policy.allowed_models is null then defaults.allowed_models
+        when defaults.allowed_models is null then policy.allowed_models
+        else array(select allowed from unnest(policy.allowed_models) allowed
+          where allowed = any(defaults.allowed_models)) end as allowed_models
       from sessions session join session_turns turn on turn.account_id = session.account_id
         and turn.workspace_id = session.workspace_id and turn.session_id = session.id
       join workspaces workspace on workspace.account_id = session.account_id and workspace.id = session.workspace_id
@@ -223,7 +227,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       )
     )
       return { status: "home_only" } as const;
-    if (!(await readSubscriptionCoreFailoverProvider(tx, identity.accountId, homeId)))
+    if (!(await readSubscriptionCoreFailoverProvider(tx, homeId)))
       return { status: "home_only" } as const;
     const effective = await readSubscriptionEffectiveSettings(
       tx,
@@ -235,7 +239,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
     const providers = new Map<string, SubscriptionCoreProvider>();
     for (const id of subscriptionCoreProviderIds()) {
       if (id !== homeId && !crossing) continue;
-      const registered = await readSubscriptionCoreFailoverProvider(tx, identity.accountId, id);
+      const registered = await readSubscriptionCoreFailoverProvider(tx, id);
       if (registered) providers.set(id, registered);
     }
     if (!providers.has(homeId)) return { status: "home_only" } as const;
@@ -344,11 +348,15 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
     const personal: Array<PlacementInput["session"]["personalAuthority"][number]> = [];
     for (const id of lockIds) {
       const entry = authority.personal.find((value) => value.provider === id);
+      // The chat owner's own entry, or the restricted entry this session's
+      // turn person received for their own account (explicit choice or
+      // turned on in this workspace). The SQL gate below proves either.
       if (
         !entry ||
         !identity.sessionOwnerSubjectId ||
         !identity.initiatingHumanSubjectId ||
-        entry.ownerMembershipId !== identity.sessionOwnerMembershipId
+        (entry.ownerMembershipId !== identity.sessionOwnerMembershipId &&
+          entry.sharedSessionChoice?.sessionId !== identity.sessionId)
       )
         continue;
       const [row] = await rawRows<{ authorized: boolean }>(
@@ -360,7 +368,11 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
           ${identity.sessionOwnerSubjectId}, ${identity.initiatingHumanSubjectId}) as authorized`,
       );
       if (row?.authorized)
-        personal.push({ provider: id, ownerMembershipId: entry.ownerMembershipId });
+        personal.push({
+          provider: id,
+          ownerMembershipId: entry.ownerMembershipId,
+          ...(entry.sharedSessionChoice ? { sharedSessionChoice: entry.sharedSessionChoice } : {}),
+        });
     }
     input.session.personalAuthority = personal;
     // A missing row cannot be protected by FOR UPDATE. Serialize B1's
@@ -416,9 +428,12 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         health: "stored",
       });
       // Background work carries each provider's own frozen compatibility
-      // pool. A live source change must not widen that accepted ceiling.
-      // The reader is scoped to the exact accepted carrier, not a new
-      // acceptance inferred from the current session owner.
+      // record. A record that accepted shared capacity (either legacy pool)
+      // may use every shared connection reaching the workspace: who manages
+      // a connection no longer divides shared capacity. A record without
+      // shared capacity keeps personal connections only. The reader is
+      // scoped to the exact accepted carrier, not a new acceptance inferred
+      // from the current session owner.
       const [frozen] = await rawRows<{
         authority: { authority?: string; sharedPool?: string } | null;
       }>(
@@ -434,9 +449,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         ? rows
         : rows.flatMap((connection) => {
             if (connection.ownership.kind === "personal") return [connection];
-            if (pool !== "workspace" && pool !== "organization") return [];
-            const managedHere = connection.ownership.managedByWorkspaceId === identity.workspaceId;
-            return (pool === "workspace" ? managedHere : !managedHere) ? [connection] : [];
+            return pool === "workspace" || pool === "organization" ? [connection] : [];
           });
       input.connections = [
         ...input.connections,
@@ -471,33 +484,25 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       ];
     }
     if (identity.sessionOwnerMembershipId) {
-      const [preference] = await rawRows<{ personal_fallback_opt_in: boolean }>(
-        tx,
-        sql`
-        select personal_fallback_opt_in from subscription_person_preferences
-        where account_id = ${identity.accountId}::uuid
-          and organization_membership_id = ${identity.sessionOwnerMembershipId}::uuid limit 1`,
-      );
-      input.people = [
-        {
-          membershipId: identity.sessionOwnerMembershipId,
-          active: true,
-          personalFallbackOptIn: preference?.personal_fallback_opt_in ?? false,
-        },
-      ];
+      input.people = [{ membershipId: identity.sessionOwnerMembershipId, active: true }];
     }
+    // A restricted entry the SQL gate proved belongs to this turn's person,
+    // who is a live member even when they do not own the chat.
+    for (const entry of input.session.personalAuthority)
+      if (!input.people.some((person) => person.membershipId === entry.ownerMembershipId))
+        input.people = [...input.people, { membershipId: entry.ownerMembershipId, active: true }];
     const servingBinding = policyBinding(bindings.get(serving.provider) ?? null);
-    // A target's personal pin cannot bootstrap fallback consent. An already
-    // automatic serving binding may, however, keep its warm account (D-27).
-    // Normal eligibility still checks frozen authority and live revocation;
-    // decidePlacement excludes it at the next re-selection without consent.
-    if (!personalFallbackActive(input))
-      input.connections = input.connections.filter(
-        (connection) =>
-          connection.provider === homeId ||
-          connection.ownership.kind === "shared" ||
-          (servingBinding?.choice === "automatic" && servingBinding.connectionId === connection.id),
-      );
+    // Another provider's personal accounts are failover targets only when
+    // they are the turn person's own subscription turned on here: a pin on
+    // the target cannot carry over. An already automatic serving binding may
+    // keep its warm account (D-27); eligibility still checks frozen authority
+    // and live revocation, and re-selection drops it when no longer usable.
+    input.connections = input.connections.filter(
+      (connection) =>
+        connection.provider === homeId ||
+        automaticallyUsable(input, connection) ||
+        (servingBinding?.choice === "automatic" && servingBinding.connectionId === connection.id),
+    );
     input.session.binding = servingBinding ? { ...servingBinding, choice: "automatic" } : null;
     input.session.reselectionPoints = subscriptionCoreReselectionPoints({
       binding: input.session.binding,

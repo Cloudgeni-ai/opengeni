@@ -13,12 +13,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import {
-  MIGRATIONS_DIR,
-  analyzeMigrationRlsBackfills,
-  staleAllowlistEntries,
-  unreviewedFindings,
-} from "./migration-rls-backfills";
+import { MIGRATIONS_DIR, analyzeMigrationRlsBackfills } from "./migration-rls-backfills";
 
 function main(): void {
   const root = process.cwd();
@@ -27,16 +22,7 @@ function main(): void {
     throw new Error(`run from the repository root (missing ${MIGRATIONS_DIR})`);
   }
 
-  const stale = staleAllowlistEntries(migrationsDir);
-  const violations = unreviewedFindings(analyzeMigrationRlsBackfills(migrationsDir));
-
-  if (stale.length > 0) {
-    console.error(
-      `GRANDFATHERED_MIGRATIONS in scripts/migration-rls-backfills.ts names ${stale.length} migration(s) that no longer exist:`,
-    );
-    for (const entry of stale) console.error(`  - ${entry}`);
-    console.error("Renamed a migration? Update the allowlist entry to the new file name.");
-  }
+  const violations = analyzeMigrationRlsBackfills(migrationsDir);
 
   if (violations.length > 0) {
     const writes = violations.filter((violation) => violation.kind === "write").length;
@@ -69,11 +55,6 @@ function main(): void {
       );
       console.error(`    ${violation.snippet}`);
     }
-    process.exitCode = 1;
-    return;
-  }
-
-  if (stale.length > 0) {
     process.exitCode = 1;
     return;
   }

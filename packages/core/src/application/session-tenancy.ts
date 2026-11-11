@@ -9,7 +9,6 @@ import {
   type SessionAuthorizationSurface,
   type SessionVisibility,
   type UpdateSessionVisibilityRequest,
-  type VariableSet,
 } from "@opengeni/contracts";
 import {
   assertSessionIsNotImported,
@@ -23,6 +22,8 @@ import {
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   replayAppliedSessionFork,
+  sessionAgentRequiresPrivateChat,
+  SessionAgentRequiresPrivateChatError,
   sessionHasLiveAttempts,
   SessionTenancyAccessError,
   SessionTenancyInvalidRequestError,
@@ -33,6 +34,8 @@ import {
   type ForkSessionContentResult,
   type TransitionSessionVisibilityResult,
 } from "@opengeni/db";
+import { sandboxBackendServed, unservedSandboxBackendMessage } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import {
   privacyDeploymentLimits,
@@ -46,7 +49,6 @@ import {
 } from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
-import { variableSetsRemovedError } from "../domain/encryption-key";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 
 type SessionTenancyDependencies = Pick<
@@ -297,6 +299,12 @@ export async function updateManagedHumanSessionVisibility(
     operation: "session.visibility.write",
     surface: authorizationSurface,
   });
+  if (
+    request.visibility === "workspace" &&
+    (await sessionAgentRequiresPrivateChat(deps.db, { workspaceId, sessionId }))
+  ) {
+    throw new SessionAgentRequiresPrivateChatError();
+  }
   if (request.visibility === "private") {
     await requireDeploymentAllowsOnlyMe(deps, {
       workspaceId,
@@ -542,29 +550,18 @@ export async function forkManagedHumanSession(
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
     operationKey: request.idempotencyKey,
     ...(beforeCommit ? { beforeCommit } : {}),
-    ...(request.rigId !== undefined || request.variableSetIds !== undefined
-      ? {
-          runtimeRequest: {
-            rigId: request.rigId ?? null,
-            variableSetIds: request.variableSetIds ?? [],
-          },
-        }
-      : {}),
+    ...(request.rigId !== undefined ? { runtimeRequest: { rigId: request.rigId } } : {}),
   };
   const recoverAppliedReceipt = async () =>
     await runTenancyMutation(async () => await replayAppliedSessionFork(deps.db, forkInput));
-  const runtimeSetupRequested = request.rigId !== undefined || request.variableSetIds !== undefined;
+  const runtimeSetupRequested = request.rigId !== undefined;
   let runtimeConfigurationPromise: Promise<{
-    variableSetIds: string[];
     rigId: string | null;
     rigVersionId: string | null;
   }> | null = null;
   const resolveRuntimeConfiguration = async () => {
     if (runtimeConfigurationPromise) return await runtimeConfigurationPromise;
     runtimeConfigurationPromise = (async () => {
-      // Variable Sets were replaced by vaults (RM-1).
-      if (request.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
-      const variableSets: VariableSet[] = [];
       let rigVersionId: string | null = null;
       if (request.rigId) {
         requirePermission(authorization.grant, "rigs:use");
@@ -575,7 +572,6 @@ export async function forkManagedHumanSession(
         rigVersionId = rig.activeVersion.id;
       }
       return {
-        variableSetIds: variableSets.map((variableSet) => variableSet.id),
         rigId: request.rigId ?? null,
         rigVersionId,
       };
@@ -640,6 +636,20 @@ export async function forkManagedHumanSession(
     authorization.grant.subjectId,
   );
   if (source) assertSessionIsNotImported(source);
+  // A fork copies the source row, including its sandbox backend, into a new
+  // session with its own box. Apply the create-time backend gate so a row on a
+  // backend this deployment does not serve (for example `local` on a cloud
+  // deployment) cannot be copied into a fresh host box. Applied receipts were
+  // replayed above; Connected Machine homes are bound to their machine.
+  if (
+    source &&
+    source.sandboxBackend !== "selfhosted" &&
+    !sandboxBackendServed(deps.settings, source.sandboxBackend)
+  ) {
+    throw new HTTPException(422, {
+      message: `This session cannot be forked here: ${unservedSandboxBackendMessage(deps.settings, source.sandboxBackend)}`,
+    });
+  }
   const runtimeConfiguration = runtimeSetupRequested ? await resolveRuntimeConfiguration() : null;
   const result = await runTenancyMutation(
     async () =>

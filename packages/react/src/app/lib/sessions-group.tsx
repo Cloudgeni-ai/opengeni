@@ -3,8 +3,10 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
+import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
+import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { SessionListTotals, SiteConversationGroup } from "@opengeni/sdk";
@@ -24,6 +26,8 @@ import {
   sessionActivityTime,
   type SessionRecencyGroup,
 } from "../../session-list-model";
+
+export { failureHandledByAgent, needsFailureReview };
 
 export {
   compareSessionActivity,
@@ -73,6 +77,7 @@ export type RailAggregateStatusKind =
   | "active"
   | "queued"
   | "waiting"
+  | "paused"
   | "unread"
   | "active_work"
   | "neutral";
@@ -103,6 +108,8 @@ export type RailStatusCounts = {
   queued: number;
   /** Idle sessions parked on their own wake-up (input or timer), not executing. */
   waiting: number;
+  /** Paused sessions whose work is parked for Resume. */
+  paused: number;
   unread: number;
   activeWork: number;
 };
@@ -122,6 +129,7 @@ export function sessionProjectTotals(
     active: 0,
     queued: 0,
     waiting: 0,
+    paused: 0,
     unread: 0,
     activeWork: 0,
   });
@@ -137,6 +145,7 @@ export function sessionProjectTotals(
       ...group,
       active: group.active - waiting,
       waiting,
+      paused: 0,
       sendFailed: 0,
     });
   }
@@ -159,9 +168,10 @@ function ownRailStatusCounts(
     attention: awaitsPerson(session) ? 1 : 0,
     attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
-    // lifecycle badge. Opening the session (or a parent agent consuming its
-    // result) acknowledges the failure together with the unread frontier.
-    failed: session.status === "failed" && session.unread ? 1 : 0,
+    // lifecycle badge. Opening the session acknowledges the failure together
+    // with the unread frontier; a failure its parent agent consumed is that
+    // agent's to handle and never asks the person (`failureHandled`).
+    failed: needsFailureReview(session) ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
       (session.status === "running" || session.status === "recovering")
@@ -173,9 +183,30 @@ function ownRailStatusCounts(
         ? 1
         : 0,
     waiting: sessionInputWait(session) ? 1 : 0,
+    paused: hasPausedWork(session) ? 1 : 0,
     unread: session.unread ? 1 : 0,
     activeWork: session.activelyWorking ? 1 : 0,
   };
+}
+
+/**
+ * Work a pause holds for Resume: a turn still open, queued or running. A
+ * paused chat with nothing in progress shows no marker, nor does one that
+ * needs the person or is ending (Cancel also pauses while the turn stops).
+ * Matches the server's `treeStats.pausedWorkDescendants`.
+ */
+function hasPausedWork(session: Session): boolean {
+  return (
+    !hasActiveEffectiveControl(session) &&
+    session.status !== "requires_action" &&
+    session.status !== "cancelled" &&
+    session.status !== "failed" &&
+    (Boolean(session.activeTurnId) ||
+      session.status === "running" ||
+      session.status === "recovering" ||
+      session.status === "queued" ||
+      session.status === "waiting_capacity")
+  );
 }
 
 function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts): void {
@@ -187,6 +218,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.active += source.active;
   target.queued += source.queued;
   target.waiting += source.waiting;
+  target.paused += source.paused;
   target.unread += source.unread;
   target.activeWork += source.activeWork;
 }
@@ -211,6 +243,7 @@ function railStatusCounts(
       active: summary.active - waiting,
       queued: summary.queued,
       waiting,
+      paused: 0,
       unread: summary.unread,
       activeWork: summary.activeWork,
     };
@@ -225,6 +258,7 @@ function railStatusCounts(
       "active",
       "queued",
       "waiting",
+      "paused",
       "unread",
       "activeWork",
     ] as const)
@@ -244,6 +278,7 @@ function railStatusCounts(
     counts.active += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
     counts.waiting += stats.waitingDescendants ?? 0;
+    counts.paused += stats.pausedWorkDescendants ?? 0;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -259,7 +294,9 @@ function railStatusCounts(
     }
   } else {
     for (const child of node.children) {
-      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      const childCounts = railStatusCounts(child, localDeliveryAttention);
+      if (failureHandledByAgent(child.session) && child.session.unread) childCounts.unread -= 1;
+      addRailStatusCounts(counts, childCounts);
     }
   }
   return counts;
@@ -298,6 +335,7 @@ export function summarizeRailNodes(
     active: 0,
     queued: 0,
     waiting: 0,
+    paused: 0,
     unread: 0,
     activeWork: 0,
   };
@@ -306,6 +344,53 @@ export function summarizeRailNodes(
   }
 
   return summarizeRailStatusCounts(counts, now);
+}
+
+/**
+ * The marker for one chat's row: the chat and everything it started.
+ *
+ * Like {@link summarizeRailNodes}, except that the chat's own unread reply
+ * outranks its workers' progress. A manager that has answered you while its
+ * workers still run (or while it waits on them) shows the unread dot, not a
+ * spinner or hourglass that reads as "nothing for you yet". What the dot now
+ * covers stays in its label ("1 unread · 2 working"), and an expanded row's
+ * workers keep their own markers. The chat's own running or queued turn keeps
+ * its spinner: progress it posts mid-turn can leave it unread, and the answer
+ * arrives when that turn ends; its own paused turn likewise stays paused.
+ * Anything that needs you, a failure and an unsent message still come first. Section headers and Site rows summarize
+ * many chats and keep the plain order.
+ *
+ * Paused is the one state a row does not take from its workers: the pause mark
+ * reads as "this chat is paused", so it shows only when the chat itself is
+ * paused (its own parked turn, or its pause holding its workers' work). Paused
+ * workers under a chat that is not paused stay in its hover card and on their
+ * own rows.
+ */
+export function summarizeRailRow(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
+  now: Date = new Date(),
+): RailAggregateStatus {
+  const counts = railStatusCounts(node, localDeliveryAttention);
+  if (!node.siteGroup && hasActiveEffectiveControl(node.session)) counts.paused = 0;
+  const summary = summarizeRailStatusCounts(counts, now);
+  if (node.siteGroup || !node.session.unread) return summary;
+  if (
+    summary.kind !== "active" &&
+    summary.kind !== "queued" &&
+    summary.kind !== "waiting" &&
+    summary.kind !== "paused"
+  )
+    return summary;
+  const own = ownRailStatusCounts(node.session, localDeliveryAttention);
+  if (own.active > 0 || own.queued > 0 || (summary.kind === "paused" && own.paused > 0))
+    return summary;
+  return {
+    kind: "unread",
+    count: counts.unread,
+    total: counts.total,
+    label: `${counts.unread} unread · ${summary.label}`,
+  };
 }
 
 /** Shared presentation for complete server metadata and loaded node summaries. */
@@ -366,6 +451,14 @@ export function summarizeRailStatusCounts(
       count: counts.waiting,
       total: counts.total,
       label: `${counts.waiting} waiting to resume`,
+    };
+  }
+  if (counts.paused > 0) {
+    return {
+      kind: "paused",
+      count: counts.paused,
+      total: counts.total,
+      label: `${counts.paused} paused`,
     };
   }
   if (counts.unread > 0) {
@@ -470,10 +563,13 @@ export type SessionBrowseDateField = "activity" | "created";
 export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
 
 export function sessionCreatorKey(session: Session): string {
-  return `${session.createdBy.kind}:${session.createdBy.subjectId}`;
+  return creatorIdentityKey(session.createdBy);
 }
 
 export function sessionCreatorLabel(session: Session): string {
+  // API keys and services: a friendly name and kind, never a raw id.
+  const machine = machineCreatorLabel(session.createdBy);
+  if (machine) return machine;
   const explicit = session.createdBy.label?.trim();
   if (explicit) return explicit;
   if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
@@ -490,7 +586,8 @@ export type SessionCreatorOption = {
 
 /**
  * Loaded creator choices with identity-specific labels only when frozen display
- * labels collide. The subject ID remains opaque; it is displayed, not parsed.
+ * labels collide. A person's subject ID remains opaque; it is displayed, not
+ * parsed. API keys and services are told apart by number, never by a raw id.
  */
 export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
   const byKey = new Map<
@@ -498,27 +595,41 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
     { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
   >();
   for (const session of sessions) {
-    byKey.set(sessionCreatorKey(session), {
+    const key = sessionCreatorKey(session);
+    // One API key's older subject-frozen and newer service-frozen sessions are
+    // one creator; prefer a session that carries the key's name.
+    if (
+      byKey.has(key) &&
+      creatorType(session.createdBy) === "api_key" &&
+      !session.createdBy.label?.trim()
+    ) {
+      continue;
+    }
+    byKey.set(key, {
       label: sessionCreatorLabel(session),
       kind: session.createdBy.kind,
       subjectId: session.createdBy.subjectId,
     });
   }
 
-  const labelCounts = new Map<string, number>();
-  for (const creator of byKey.values()) {
-    labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
+  const sharedLabels = new Map<string, string[]>();
+  for (const [key, creator] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
+    sharedLabels.set(creator.label, [...(sharedLabels.get(creator.label) ?? []), key]);
   }
 
   return new Map(
     [...byKey.entries()]
-      .map(([value, creator]) => ({
-        value,
-        label:
-          labelCounts.get(creator.label) === 1
-            ? creator.label
+      .map(([value, creator]) => {
+        const shared = sharedLabels.get(creator.label) ?? [value];
+        if (shared.length === 1) return { value, label: creator.label };
+        const machine = machineCreatorLabel({ kind: creator.kind, subjectId: creator.subjectId });
+        return {
+          value,
+          label: machine
+            ? `${creator.label} (${shared.indexOf(value) + 1})`
             : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
-      }))
+        };
+      })
       .sort(
         (left, right) =>
           left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
@@ -1086,6 +1197,7 @@ type RemovedCounts = {
   waiting: number;
   attention: number;
   paused: number;
+  pausedWork: number;
   failed: number;
   unreadFailed: number;
   unread: number;
@@ -1100,6 +1212,7 @@ function emptyRemovedCounts(): RemovedCounts {
     waiting: 0,
     attention: 0,
     paused: 0,
+    pausedWork: 0,
     failed: 0,
     unreadFailed: 0,
     unread: 0,
@@ -1114,6 +1227,7 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.waiting += source.waiting;
   target.attention += source.attention;
   target.paused += source.paused;
+  target.pausedWork += source.pausedWork;
   target.failed += source.failed;
   target.unreadFailed += source.unreadFailed;
   target.unread += source.unread;
@@ -1130,9 +1244,10 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     waiting: sessionInputWait(node.session) ? 1 : 0,
     attention: awaitsPerson(node.session) ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
+    pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
-    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
-    unread: node.session.unread ? 1 : 0,
+    unreadFailed: needsFailureReview(node.session) ? 1 : 0,
+    unread: node.session.unread && !failureHandledByAgent(node.session) ? 1 : 0,
     activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;
@@ -1143,6 +1258,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     counts.waiting += stats.waitingDescendants ?? 0;
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
+    counts.pausedWork += stats.pausedWorkDescendants ?? 0;
     counts.failed += stats.failedDescendants;
     counts.unreadFailed += stats.unreadFailedDescendants ?? stats.failedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
@@ -1185,6 +1301,14 @@ function prunePinnedSubtreesWithCounts(
             : {}),
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
+          ...(stats.pausedWorkDescendants !== undefined
+            ? {
+                pausedWorkDescendants: Math.max(
+                  0,
+                  stats.pausedWorkDescendants - removed.pausedWork,
+                ),
+              }
+            : {}),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
           ...(stats.unreadFailedDescendants !== undefined
             ? {

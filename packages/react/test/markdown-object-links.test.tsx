@@ -5,6 +5,7 @@ import { Markdown } from "../src/components/markdown";
 import {
   OpenGeniLinkProvider,
   sessionLinkResolver,
+  viewerLinkResolver,
   type OpenGeniLinkTarget,
 } from "../src/components/open-geni-links";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
@@ -25,6 +26,34 @@ const REPLY = [
 ].join("\n\n");
 
 describe("Opengeni object links inside an embedding host", () => {
+  test("a short editable reference renders and opens through the existing viewer", async () => {
+    const opened: unknown[] = [];
+    const resolve = viewerLinkResolver({
+      workspaceId: WORKSPACE,
+      open: (target) => void opened.push(target),
+    });
+    const r = await renderComponent(
+      <OpenGeniLinkProvider resolveLink={resolve}>
+        <Markdown artifactHref={() => "/wrong-file-route"}>
+          {`[Weekly report](artifact:${EDITABLE})`}
+        </Markdown>
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      expect(r.container.textContent).not.toContain("unavailable");
+      expect(r.container.innerHTML).not.toContain("/wrong-file-route");
+      const button = r.container.querySelector<HTMLButtonElement>("button");
+      expect(button?.textContent).toBe("Weekly report");
+      await actRun(() => button!.click());
+      expect(opened).toEqual([{ kind: "editable-artifact", artifactId: EDITABLE }]);
+      expect(
+        resolve({ kind: "editable-artifact", artifactId: EDITABLE, workspaceId: "other" }),
+      ).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("console paths never render as navigations when the host resolves nothing", () => {
     const html = renderToStaticMarkup(<Markdown>{REPLY}</Markdown>);
     expect(html).not.toContain(`href="/workspaces/`);

@@ -147,7 +147,6 @@ describe("worker integration adapter without PostgreSQL", () => {
       turn: { id: "turn", initiator: input.initiator, initiatorContext: {}, tools: [] } as never,
       attemptId: "attempt",
       effectiveSandboxBackend: "docker",
-      variableSet: null,
       connectionCredentials: {
         runCredentials: async () => {
           called = true;
@@ -229,7 +228,6 @@ describe("worker integration adapter without PostgreSQL", () => {
       turn: {} as never,
       attemptId: "attempt",
       effectiveSandboxBackend: "none",
-      variableSet: null,
       connectionCredentials: {
         runCredentials: async () => {
           called = true;

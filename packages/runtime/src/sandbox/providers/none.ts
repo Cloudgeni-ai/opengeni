@@ -7,6 +7,7 @@ export const noneProvider: ProviderRegistration = {
   instanceIdFields: [],
   workspaceCapturePolicy: () => null,
   descriptor: CAPABILITY_DESCRIPTORS.none,
+  sessionSupportsPty: false,
   // No sandbox: nothing to validate, and build() returns undefined. The factory
   // short-circuits on "none" before calling build, but we keep build honest.
   validateCredentials() {},

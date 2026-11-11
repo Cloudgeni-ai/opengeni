@@ -19,6 +19,7 @@ import {
   AuthRunMutationResponse,
   BrowserAction,
   BrowserLocator,
+  browserActionDeadlineMs,
   INTERACTION_ACTION_DEADLINE_MAX_MS,
   INTERACTION_MAX_ACTIONS_PER_BATCH,
   INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
@@ -109,6 +110,7 @@ import {
   BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
+  NO_OWN_TAB_IN_PERSONS_BROWSER,
   expandRefShorthand,
   type ResolvedBrowserSession,
   type ResolvedBrowserTarget,
@@ -157,6 +159,16 @@ class InteractionExecutionResult<T> {
 }
 
 const BROWSER_AGENT_MAX_NODES = 60;
+/**
+ * How to work with an open BrowserSession. It follows the first browser_open
+ * result the model reads in an attempt, so it arrives when a browser is in use
+ * instead of riding in the entry tool's description on every request of every
+ * session. What the model must know before opening (placement, headed or
+ * headless, storage, Code Mode for bulk work, CAPTCHAs) stays in the
+ * description.
+ */
+export const BROWSER_OPEN_RESULT_GUIDANCE =
+  "Act on the outline's elements directly instead of observing again; browser_observe, browser_act, browser_screenshot and browser_tabs work on this session. A new attached session opens a dedicated tab.";
 const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
 const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
 const BROWSER_AGENT_MAX_OMITTED_REGIONS = 4;
@@ -255,6 +267,7 @@ const CompactBrowserObservation = z
     diagnostics: InteractionDiagnosticSummary.optional(),
     dialog: BrowserDialog.optional(),
     screenshot: RetainedArtifactReferenceSchema.optional(),
+    notice: z.string().min(1).max(1_024).optional(),
     agentView: BrowserAgentView,
   })
   .strict();
@@ -290,6 +303,10 @@ const BrowserScreenshotInput = z
     quality: z.number().int().min(1).max(100).optional(),
   })
   .strict();
+// Shown only on a full-page capture that could not keep every scrollbar's
+// space; static, so it never changes text already sent.
+const INEXACT_SCROLLBARS_NOTE =
+  "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.";
 const BrowserScreenshotOutput = z
   .object({
     kind: z.literal("browser_screenshot"),
@@ -306,6 +323,7 @@ const BrowserScreenshotOutput = z
     scrollY: z.number(),
     capturedAt: z.string(),
     fullPage: z.boolean(),
+    note: z.string().optional(),
   })
   .strict();
 const BrowserReadInput = z
@@ -526,6 +544,14 @@ const DiscoveryOutput = z
   })
   .strict();
 
+/** browser_open's model view where only private profiles exist. */
+function withoutStorageMode(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
+  const properties = schema.properties as Record<string, unknown> | undefined;
+  if (!properties || !("storageMode" in properties)) return schema;
+  const { storageMode: _storageMode, ...rest } = properties;
+  return { ...schema, properties: rest } as AttemptToolJsonSchema;
+}
+
 /** browser_open may name the person's connected Chrome without a profile id;
  * the tool then resolves it (see chooseAttachedProfile). */
 const BrowserOpenPlacement = z.union([
@@ -558,6 +584,12 @@ const BrowserOpenInput = z
     networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
     includeScreenshot: z.boolean().optional(),
+    // Named by the refusal of a browser whose working copy needs adopting
+    // (see workingCopyRecoveryError), never needed otherwise.
+    adoptWorkingCopy: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -583,6 +615,13 @@ const BrowserOpenInput = z
         code: "custom",
         path: ["mode"],
         message: "mode=new cannot target an existing BrowserSession",
+      });
+    }
+    if (value.adoptWorkingCopy && !value.browserSessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["adoptWorkingCopy"],
+        message: "adoptWorkingCopy needs the browserSessionId whose working copy it adopts",
       });
     }
     if (
@@ -1068,6 +1107,9 @@ const ComputerActionBatchReceipt = z
     /** Actions that acted on an element of another role than the one named,
      * by their index in the batch. */
     roleStandIns: ComputerActionReceipt.shape.roleStandIns,
+    /** An action of the batch delivered raw input (a key press, a click)
+     * with nothing confirming that the app acted on it. */
+    unconfirmedInput: ComputerActionReceipt.shape.unconfirmedInput,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -1159,6 +1201,12 @@ export type CreateInteractionAttemptToolsInput = {
    * name and link it. Default: Opengeni Browser.
    */
   browserExtension?: { name: string; installUrl: string };
+  /**
+   * Whether the server accepts `storageMode: "ephemeral_context"` (the API's
+   * OPENGENI_EXPERIMENTAL_BROWSER_CONTEXT_POOL_ENABLED). When false, browser_open
+   * does not offer that mode to the model. Default: false, like the server.
+   */
+  ephemeralBrowserContexts?: boolean;
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -1170,6 +1218,10 @@ export function createInteractionAttemptToolDefinitions(
     name: "Opengeni Browser",
     installUrl: OPENGENI_BROWSER_EXTENSION_URL,
   };
+  const ephemeralContexts = input.ephemeralBrowserContexts ?? false;
+  const ephemeralGuidance = ephemeralContexts
+    ? " Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session."
+    : "";
   const definitions: AttemptToolDefinition[] = [];
   // A retried browser_act (same operation) must dispatch the same File IDs, so
   // each operation publishes a given path at most once.
@@ -1207,6 +1259,7 @@ export function createInteractionAttemptToolDefinitions(
     while (fullFrameSizes.size > 32) fullFrameSizes.delete(fullFrameSizes.keys().next().value!);
   };
   const browserSeen = new Map<string, BrowserTextObservation>();
+  let browserOpenGuidanceShown = false;
   const rememberBrowserReading = (
     context: AttemptToolExecutionContext,
     observation: BrowserTextObservation | undefined,
@@ -1311,7 +1364,31 @@ export function createInteractionAttemptToolDefinitions(
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+    personsBrowser: async (browserSessionId) =>
+      (await input.transport.getBrowserSession(input.workspaceId, browserSessionId)).placement
+        .kind === "attached_device",
   });
+  // Whether a computer_open result already named the person's own online
+  // computers in this attempt (or one is about to): once is enough to choose.
+  let personalComputersNamed = false;
+  // One read of those computers per attempt, shared by parallel opens. A read
+  // that failed or ran out of time is dropped, so a later open reads again.
+  let personalComputersLookup: Promise<PersonalComputer[] | null> | undefined;
+  const lookUpPersonalComputers = (): Promise<PersonalComputer[] | null> => {
+    if (!personalComputersLookup) {
+      const lookup: Promise<PersonalComputer[] | null> = onlinePersonalComputers(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+      ).then((computers) => {
+        if (computers === null && personalComputersLookup === lookup)
+          personalComputersLookup = undefined;
+        return computers;
+      });
+      personalComputersLookup = lookup;
+    }
+    return personalComputersLookup;
+  };
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
       newestRelevant(
@@ -1515,12 +1592,21 @@ export function createInteractionAttemptToolDefinitions(
       // When even the browser's state can't be read, the original refusal stands.
       return null;
     }
+    // Every call waiting on this browser gets the same plain answer.
+    if (isReconnectedAttachedBrowser(before))
+      throw reconnectedAttachedBrowserError(browserSessionId);
     if (!isResumablePausedBrowser(before)) return null;
-    const response = await input.transport.resumeBrowserSession(
-      input.workspaceId,
-      browserSessionId,
-      { operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId) },
-    );
+    let response: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
+    try {
+      response = await input.transport.resumeBrowserSession(input.workspaceId, browserSessionId, {
+        operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId),
+      });
+    } catch (error) {
+      throw (
+        (await workingCopyRecoveryError(input.transport, input.workspaceId, browserSessionId)) ??
+        error
+      );
+    }
     const resumed = { count, tabs: null as ResumedTabs | null, shownAt: null as number | null };
     if (response.operation.state !== "failed") {
       // From here the browser may have reloaded its tabs, even if what
@@ -1537,6 +1623,12 @@ export function createInteractionAttemptToolDefinitions(
       );
     }
     if (response.operation.state === "failed") {
+      const recovery = await workingCopyRecoveryError(
+        input.transport,
+        input.workspaceId,
+        browserSessionId,
+      );
+      if (recovery) throw recovery;
       throw new OpenGeniApiError(
         409,
         `BrowserSession ${browserSessionId} had stopped and could not be resumed: ${failure?.message ?? response.operation.state}`,
@@ -1632,6 +1724,19 @@ export function createInteractionAttemptToolDefinitions(
       if (tab && isGoneBrowserTabError(error))
         currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
       else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      // The tab the agent was working in is gone. In the person's own
+      // browser, with no other tab of its own left, say so plainly rather
+      // than that an ID the agent never named does not exist.
+      if (tab?.implicitTarget && isMissingBrowserTabError(error)) {
+        const next = await currentTab
+          .target({ browserSessionId: tab.browserSessionId })
+          .catch((resolution: unknown) => resolution);
+        if (
+          next instanceof BrowserTargetResolutionError &&
+          next.message === NO_OWN_TAB_IN_PERSONS_BROWSER
+        )
+          throw next;
+      }
       if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) {
         throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
       }
@@ -1854,17 +1959,27 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control.${ephemeralGuidance} Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task: BrowserSessions persist across tool calls, while shell-launched browser daemons do not survive remote-command cleanup. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
+    // A deployment without ephemeral contexts only has private profiles, so
+    // the model is not offered a mode the server refuses.
+    ...(ephemeralContexts ? {} : { modelInputSchema: withoutStorageMode }),
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
     modelText: (output, context) => {
       rememberBrowserReading(context, output.observation);
-      return browserOpenText(output);
+      const text = browserOpenText(output);
+      // How to work with the session, shown on the first model-read result of
+      // this attempt instead of in the description sent with every request
+      // (see BROWSER_OPEN_RESULT_GUIDANCE). Later opens add nothing to history.
+      if (context.caller.kind !== "model" || browserOpenGuidanceShown) return text;
+      browserOpenGuidanceShown = true;
+      return `${text}\n${BROWSER_OPEN_RESULT_GUIDANCE}`;
     },
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
+      const reattached: ReattachedBrowserRecord = { from: null };
       const opened = await reportingChatMove(
         chatMove,
         async () =>
@@ -1886,6 +2001,7 @@ export function createInteractionAttemptToolDefinitions(
                     context,
                     extension.installUrl,
                     chatMove,
+                    reattached,
                   ),
               ),
           ),
@@ -1898,6 +2014,13 @@ export function createInteractionAttemptToolDefinitions(
       const notes: Array<{ type: "text"; text: string }> = chatMove.moved
         ? [{ type: "text", text: CHAT_MOVED_NOTE }]
         : [];
+      if (reattached.from !== null) {
+        currentTab.forgetSession(reattached.from);
+        notes.push({
+          type: "text",
+          text: reattachedBrowserNote(reattached.from, opened.session.id),
+        });
+      }
       if (!value.includeScreenshot)
         return notes.length ? new InteractionExecutionResult(opened, notes) : opened;
       // The browser is already open. A failed capture must not turn its result
@@ -2182,6 +2305,7 @@ export function createInteractionAttemptToolDefinitions(
             scrollY: frame.scrollY,
             capturedAt: frame.capturedAt,
             fullPage: value.fullPage ?? false,
+            ...(frame.inexactScrollbars ? { note: INEXACT_SCROLLBARS_NOTE } : {}),
           },
           [browserToolImageContent(frame.data, frame.mediaType)],
         );
@@ -2193,7 +2317,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. viewport_reset returns the tab to its window's own size and scale. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. viewport_reset returns the tab to its window's own size and scale. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a web permission for this tab's exact current top-level origin; in the person's own Chrome, only camera, microphone, geolocation and notifications, in a tab this session opened, once they allow it. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -2220,7 +2344,7 @@ export function createInteractionAttemptToolDefinitions(
         );
         // Omitted fences are resolved by the API from the live target in the same
         // request, so acting on the current document costs one round trip.
-        const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
+        const request = {
           operationId: context.operationId,
           targetId,
           ...(value.expectedTargetGeneration === undefined
@@ -2234,7 +2358,31 @@ export function createInteractionAttemptToolDefinitions(
             : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action,
-        });
+        };
+        let receipt: z.infer<typeof BrowserActionReceipt>;
+        try {
+          receipt = await input.transport.actInBrowser(
+            input.workspaceId,
+            browserSessionId,
+            request,
+          );
+        } catch (error) {
+          // The request reached the API, but its answer was lost on the way
+          // back. The browser records each action under its operation ID, so
+          // read what it did rather than report a network error for an action
+          // that may well have completed.
+          const recorded = isLostMutationResponse(error)
+            ? await recordedBrowserReceipt(
+                input.transport,
+                input.workspaceId,
+                browserSessionId,
+                context.operationId,
+                browserActionDeadlineMs(action),
+              )
+            : null;
+          if (!recorded) throw error;
+          receipt = recorded;
+        }
         const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
         if (!value.includeScreenshot) return projected;
         // A tab cannot be captured while a JavaScript dialog is open; the
@@ -2548,7 +2696,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise give resourceKind, resourceId, targetId and a concise reason, and leave out the expected generation fields unless you have their exact values. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,
@@ -2722,7 +2870,10 @@ export function createInteractionAttemptToolDefinitions(
       const existing = output.existing;
       if (existing) {
         if (context.caller.kind === "model") rememberComputerReading(existing);
-        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText(existing)}`;
+        // The listing above already says whether a person is using the
+        // computer.
+        const { personInputSecondsAgo: _said, ...target } = existing.target;
+        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText({ ...existing, target })}`;
       }
       const launch = output.launch;
       if (!launch) return opened;
@@ -2732,6 +2883,14 @@ export function createInteractionAttemptToolDefinitions(
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
+      // An open that names no computer and no machine lands on the chat's
+      // current one, which may be its own cloud computer while the person
+      // asked about theirs. Their online computers are read alongside, so
+      // the result can name them; a failed or slow read names none.
+      const personalComputers =
+        !value.computerSessionId && !value.placement && !personalComputersNamed
+          ? lookUpPersonalComputers()
+          : undefined;
       const { unavailable, ...opened } = await reportingChatMove(
         chatMove,
         async () =>
@@ -2758,6 +2917,20 @@ export function createInteractionAttemptToolDefinitions(
       const notes: Array<{ type: "text"; text: string }> = chatMove.moved
         ? [{ type: "text", text: CHAT_MOVED_NOTE }]
         : [];
+      // Only an open on the chat's own computer waits for them, and only
+      // briefly: naming them must never hold up or fail the open. The claim
+      // comes before the wait, so parallel opens name them once.
+      if (
+        personalComputers &&
+        !personalComputersNamed &&
+        opened.session.placement?.kind === "sandbox_group"
+      ) {
+        personalComputersNamed = true;
+        const computers = await settledWithin(personalComputers, PERSONAL_COMPUTERS_WAIT_MS);
+        if (computers && computers.length > 0)
+          notes.push({ type: "text", text: personalComputersNote(computers) });
+        else personalComputersNamed = false;
+      }
       // Its screen is locked or shows another user's session: nothing on it
       // can be read, launched, captured or clicked, so say why and do nothing.
       if (unavailable)
@@ -2959,7 +3132,7 @@ export function createInteractionAttemptToolDefinitions(
                 ? [
                     {
                       type: "text" as const,
-                      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+                      text: "Not zoomed: this server does not support region, so this is the full screenshot of the target.",
                     },
                   ]
                 : []),
@@ -3423,6 +3596,100 @@ function onOfflineMachine(
 
 /** The most records of each kind the model sees from one discovery. */
 const DISCOVERY_MODEL_LIST_LIMIT = 50;
+
+/** The most of the person's computers one computer_open result names. */
+const PERSONAL_COMPUTERS_NAMED_LIMIT = 3;
+
+/** The longest an open on the chat's own computer waits to name them. */
+const PERSONAL_COMPUTERS_WAIT_MS = 250;
+
+/** The longest one read of the person's computers may run before it is dropped. */
+const PERSONAL_COMPUTERS_LOOKUP_TIMEOUT_MS = 5_000;
+
+type PersonalComputer = { name: string; os: string; sandboxId: string };
+
+/**
+ * The person's own Connected Machines (connected for themselves, not shared
+ * with the workspace) that are online with a screen, as the person who
+ * started the turn sees them. Empty when there are none; null when they
+ * cannot be listed in time: naming them only helps, so a failed or slow read
+ * must never fail an open.
+ */
+async function onlinePersonalComputers(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<PersonalComputer[] | null> {
+  if (!transport.listMachines) return [];
+  const abort = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const listed = await Promise.race([
+      transport.listMachines(workspaceId, { sessionId, signal: abort.signal }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          resolve(null);
+        }, PERSONAL_COMPUTERS_LOOKUP_TIMEOUT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (!listed) return null;
+    return listed.machines
+      .filter(
+        (machine) =>
+          machine.kind === "selfhosted" &&
+          !machine.isSessionGroup &&
+          machine.scope === "user" &&
+          machine.state === "online" &&
+          machine.hasDisplay,
+      )
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((machine) => ({ name: machine.name, os: machine.os, sandboxId: machine.sandboxId }));
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The value once settled within `ms`, or undefined: the wait never rejects. */
+async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The line a computer_open result adds when it opened the chat's own cloud
+ * computer while the person has computers of their own online: a request
+ * about "my computer" means one of theirs, which one more open reaches. */
+function personalComputersNote(computers: readonly PersonalComputer[]): string {
+  const one = computers.length === 1;
+  const named = computers
+    .slice(0, PERSONAL_COMPUTERS_NAMED_LIMIT)
+    .map(
+      (computer) =>
+        `${JSON.stringify(computer.name)
+          .replace(/\u2028/gu, "\\u2028")
+          .replace(
+            /\u2029/gu,
+            "\\u2029",
+          )} (${computer.os}), placement {"kind":"connected_machine","sandboxId":"${computer.sandboxId}"}`,
+    )
+    .join("; ");
+  return `This is this chat's own cloud computer, not the person's. Their online computer${one ? "" : "s"}: ${named}. To use ${one ? "it" : "one"}, call computer_open with ${one ? "that" : "its"} placement; this chat then runs there.`;
+}
+
 /** The most bytes a model caller's discovery result serializes to: its
  * structured records, its compact text (as escaped JSON) and the note, well
  * below the 1 MiB model-visible limit, so it is never spilled to a file. */
@@ -3694,8 +3961,30 @@ const FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_
 export function createFirstPartyInteractionAttemptToolDefinitions(
   input: CreateFirstPartyInteractionAttemptToolsInput,
 ): AttemptToolDefinition[] {
+  const client = firstPartyInteractionClient(input);
+  if (!client) return [];
+  return createInteractionAttemptToolDefinitions({
+    transport: client,
+    workspaceId: input.scope.workspaceId,
+    sessionId: input.scope.sessionId,
+    browserExtension: {
+      name: input.settings.browserExtensionName,
+      installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+    },
+    ephemeralBrowserContexts: input.settings.experimentalBrowserContextPoolEnabled,
+    selectedTools: input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    permissions: input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
+    ...(input.postSetupCard ? { postSetupCard: input.postSetupCard } : {}),
+  });
+}
+
+/** The attempt's own API client, signed with exactly its delegated authority. */
+function firstPartyInteractionClient(
+  input: CreateFirstPartyInteractionAttemptToolsInput,
+): OpenGeniClient | null {
   const secret = resolveFirstPartyDelegationSecret(input.settings);
-  if (!secret) return [];
+  if (!secret) return null;
   const selectedTools = input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS;
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const baseUrl = firstPartyApiBaseUrl(input.settings, input.scope.workspaceId);
@@ -3714,7 +4003,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
       ...(process.versions.bun ? { pinResolvedDestination: false } : {}),
     },
   );
-  const client = new OpenGeniClient({
+  return new OpenGeniClient({
     baseUrl,
     fetch: async (request, init) => {
       const bearer = await signDelegatedAccessToken(secret, {
@@ -3739,19 +4028,92 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
       return await guarded(request, { ...init, headers });
     },
   });
-  return createInteractionAttemptToolDefinitions({
-    transport: client,
-    workspaceId: input.scope.workspaceId,
-    sessionId: input.scope.sessionId,
-    browserExtension: {
-      name: input.settings.browserExtensionName,
-      installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
-    },
-    selectedTools,
-    permissions,
-    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
-    ...(input.postSetupCard ? { postSetupCard: input.postSetupCard } : {}),
-  });
+}
+
+/** Where an interaction_request_human call that paused the turn stands. */
+export type InteractionRequestTargetReading =
+  | {
+      controllerGeneration: string;
+      targetGeneration: string;
+      documentGeneration: string | null;
+    }
+  /** Why the target could not be read; the request is refused with it. */
+  | string;
+
+export type InteractionRequestTargetReader = (
+  request: Extract<RequestHumanInteractionToolInput, { operation: "request" }>,
+) => Promise<InteractionRequestTargetReading>;
+
+/**
+ * The request a pause must read its target for: every request that names no
+ * auth run (an auth run supplies its own generations). The reading fills the
+ * generations a request left out and checks the ones it supplied.
+ */
+export function interactionRequestNeedingCurrentTarget(
+  input: RequestHumanInteractionToolInput,
+): Extract<RequestHumanInteractionToolInput, { operation: "request" }> | null {
+  if (input.operation !== "request" || input.authRunId) return null;
+  return input;
+}
+
+const INTERACTION_REQUEST_TARGET_READ_TIMEOUT_MS = 15_000;
+
+/**
+ * Read the target a person-handoff request names, as it is now, so a request
+ * that leaves its generations out records the target's current ones. Runs
+ * with the attempt's own authority when the turn pauses; null when this
+ * deployment has no first-party interaction access.
+ */
+export function createFirstPartyInteractionRequestTargetReader(
+  input: CreateFirstPartyInteractionAttemptToolsInput,
+): InteractionRequestTargetReader | null {
+  const client = firstPartyInteractionClient(input);
+  if (!client) return null;
+  return async (request) =>
+    await readInteractionRequestTarget(client, input.scope.workspaceId, request);
+}
+
+export async function readInteractionRequestTarget(
+  transport: Pick<OpenGeniClient, "getBrowserTargetState" | "listComputerTargets">,
+  workspaceId: string,
+  request: Extract<RequestHumanInteractionToolInput, { operation: "request" }>,
+): Promise<InteractionRequestTargetReading> {
+  const browser = request.resourceKind === "browser_session";
+  const options = { signal: AbortSignal.timeout(INTERACTION_REQUEST_TARGET_READ_TIMEOUT_MS) };
+  try {
+    if (browser) {
+      const state = await transport.getBrowserTargetState(
+        workspaceId,
+        request.resourceId,
+        request.targetId,
+        options,
+      );
+      return {
+        controllerGeneration: state.controllerGeneration,
+        targetGeneration: state.targetGeneration,
+        documentGeneration: state.documentGeneration,
+      };
+    }
+    const listed = await transport.listComputerTargets(workspaceId, request.resourceId, options);
+    const target = listed.targets.find((candidate) => candidate.id === request.targetId);
+    if (!target) return `computer target ${request.targetId} was not found`;
+    return {
+      controllerGeneration: target.controllerGeneration,
+      targetGeneration: target.targetGeneration,
+      documentGeneration: null,
+    };
+  } catch (error) {
+    const what = browser
+      ? `browser tab ${request.targetId}`
+      : `computer target ${request.targetId}`;
+    if (error instanceof OpenGeniApiError && error.status === 404) {
+      return `${what} was not found`;
+    }
+    if (error instanceof OpenGeniApiError && error.status === 409) {
+      return `the ${browser ? "browser" : "computer"} session is not active or has changed`;
+    }
+    return `the current state of ${what} could not be read`;
+  }
 }
 
 /** Failures the browser resume route can continue from the browser's own
@@ -3763,13 +4125,127 @@ const RESUMABLE_LOST_BROWSER_FAILURES: ReadonlySet<string> = new Set([
 ]);
 
 /** A browser that is not running but continues from its saved working copy
- * when resumed: suspended, or lost to a restarted controller. */
+ * when resumed: suspended, or lost to a restarted controller. A session in
+ * the person's own Chrome has no working copy: it never resumes. */
 function isResumablePausedBrowser(session: z.infer<typeof BrowserSession>): boolean {
   return (
-    session.lifecycle === "suspended" ||
-    // A browser lost to a restarted controller continues from its preserved
-    // working copy. The resume refuses, and says why, when it cannot.
-    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
+    (session.lifecycle === "suspended" ||
+      // A browser lost to a restarted controller continues from its preserved
+      // working copy. The resume refuses, and says why, when it cannot.
+      (session.lifecycle === "lost" &&
+        RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))) &&
+    session.placement.kind !== "attached_device"
+  );
+}
+
+type WorkingCopyTransport = Partial<
+  Pick<OpenGeniClient, "inspectBrowserSessionWorkingCopy" | "adoptBrowserSessionWorkingCopy">
+>;
+
+/**
+ * A stopped browser whose working directory was moved, copied or restored
+ * (for example when its machine's disk was restored) does not continue from
+ * it by itself, because how recent that copy is cannot be proven. Its
+ * refusal then says what the agent can do with the tools it has: adopt
+ * exactly that copy through browser_open, or open a new browser. Read after
+ * a resume failed; null when the working copy is not why (or cannot be read),
+ * so the original refusal stands. Inspection changes nothing.
+ */
+async function workingCopyRecoveryError(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+): Promise<OpenGeniApiError | null> {
+  if (!transport.inspectBrowserSessionWorkingCopy || !transport.adoptBrowserSessionWorkingCopy)
+    return null;
+  const inspection = await transport
+    .inspectBrowserSessionWorkingCopy(workspaceId, browserSessionId)
+    .catch(() => null);
+  if (!inspection) return null;
+  const unfinished = inspection.activeAdoption;
+  if (
+    unfinished &&
+    unfinished.operationId ===
+      workingCopyAdoptionOperationId(browserSessionId, unfinished.manifestDigest)
+  )
+    return new OpenGeniApiError(
+      409,
+      `BrowserSession ${browserSessionId} cannot continue yet: adopting its working copy did not finish. Call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${unfinished.manifestDigest}" again to finish it.`,
+      { code: "conflict", retryable: false },
+    );
+  if (!inspection.adoptable || !inspection.manifest) return null;
+  const checkpoint = inspection.freshness.latestCheckpointAt;
+  return new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId} cannot continue by itself: its working directory was moved, copied or restored since it last ran, and how recent that copy is cannot be proven${
+      checkpoint ? ` (its latest saved checkpoint is from ${checkpoint})` : ""
+    }. To continue from exactly this copy (${inspection.manifest.entries} files, ${inspection.manifest.bytes} bytes), call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${inspection.manifest.digest}"; the directory it replaces is kept. To start over without it, call browser_open with mode "new".`,
+    { code: "conflict", retryable: false },
+  );
+}
+
+/** One adoption per browser and copy, so a retry of the same adoption (after
+ * a lost reply or one that stopped part way) settles it instead of starting
+ * another. */
+function workingCopyAdoptionOperationId(browserSessionId: string, manifestDigest: string): string {
+  return derivedOperationId("browser-working-copy-adoption", manifestDigest, browserSessionId);
+}
+
+/** Adopt exactly the inspected bytes of a stopped browser's working copy, as
+ * the refusal from workingCopyRecoveryError offered. The controller refuses
+ * when the bytes changed since, and keeps the directory it replaces. */
+async function adoptBrowserWorkingCopy(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  manifestDigest: string,
+): Promise<void> {
+  if (!transport.adoptBrowserSessionWorkingCopy)
+    throw new Error("this browser transport cannot adopt a working copy");
+  const adopted = await transport.adoptBrowserSessionWorkingCopy(workspaceId, browserSessionId, {
+    operationId: workingCopyAdoptionOperationId(browserSessionId, manifestDigest),
+    manifestDigest,
+  });
+  const phase = adopted.adoption?.phase ?? null;
+  if (phase === "adopted") return;
+  const again = `call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${manifestDigest}" again`;
+  const reason = adopted.inFlight
+    ? `the adoption is still running; ${again} in a moment`
+    : phase === "interrupted" || phase === "failed" || phase === "reverted" || phase === null
+      ? `the adoption stopped before the copy took the browser's place${
+          adopted.adoption?.failureCode ? ` (${adopted.adoption.failureCode})` : ""
+        }, and the browser's own directory is unchanged. Call browser_open with browserSessionId "${browserSessionId}" alone to see whether its copy can still be adopted, or with mode "new" to start over`
+      : phase === "collision" || phase === "reverting"
+        ? `the adoption found the browser's directories in an unexpected state and stopped without removing anything, so this browser stays unavailable until a person reverts the adoption. Call browser_open with mode "new" to continue in a new browser`
+        : `the adoption stopped part way; ${again} to finish it`;
+  throw new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId}'s working copy was not adopted: ${reason}.`,
+    { code: "conflict", retryable: adopted.inFlight },
+  );
+}
+
+/** A session in the person's own Chrome that ended because that Chrome
+ * reconnected (Chrome, or its extension's background worker, restarted). The
+ * new connection cannot inherit the old one's tabs and debugger attachments,
+ * so the session stays lost; a new session on the same profile continues. */
+function isReconnectedAttachedBrowser(session: z.infer<typeof BrowserSession>): session is z.infer<
+  typeof BrowserSession
+> & {
+  placement: { kind: "attached_device"; deviceId: string };
+} {
+  return (
+    session.lifecycle === "lost" &&
+    session.failureCode === "controller_transition_expired" &&
+    session.placement.kind === "attached_device"
+  );
+}
+
+function reconnectedAttachedBrowserError(browserSessionId: string): OpenGeniApiError {
+  return new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId} ended when the person's Chrome reconnected (Chrome or its extension restarted). Call browser_open with this browserSessionId to continue in the same Chrome profile.`,
+    { code: "attached_browser_reconnected", retryable: false },
   );
 }
 
@@ -3842,6 +4318,7 @@ async function actInComputerBatch(
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
   const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
+  let unconfirmedInput = false;
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -3934,6 +4411,7 @@ async function actInComputerBatch(
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
     for (const standIn of receipt.roleStandIns ?? [])
       roleStandIns.push({ ...standIn, actionIndex: index });
+    if (receipt.unconfirmedInput) unconfirmedInput = true;
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -3962,6 +4440,7 @@ async function actInComputerBatch(
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
     ...(roleStandIns.length ? { roleStandIns } : {}),
+    ...(unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4076,6 +4555,7 @@ async function actInComputerNativeBatch(
     observation,
     observationPrecedesStop: false,
     ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
+    ...(receipt.unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4087,6 +4567,7 @@ async function openBrowser(
   context: AttemptToolExecutionContext,
   extensionUrl: string,
   chatMove: ChatMoveRecord = { moved: false },
+  reattached: ReattachedBrowserRecord = { from: null },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
@@ -4096,6 +4577,21 @@ async function openBrowser(
   let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
+    if (isReconnectedAttachedBrowser(session)) {
+      // Continue in the same Chrome profile: reuse this chat's live session
+      // there, or open one, exactly as an open of that profile would.
+      reattached.from = session.id;
+      const { browserSessionId: _ended, ...rest } = value;
+      return await openBrowser(
+        transport,
+        workspaceId,
+        sourceSessionId,
+        { ...rest, placement: { kind: "attached_device", deviceId: session.placement.deviceId } },
+        context,
+        extensionUrl,
+        chatMove,
+      );
+    }
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
@@ -4141,6 +4637,18 @@ async function openBrowser(
     // reused for an omitted/default headed request: OAuth providers such as
     // Google reject that automation-shaped login surface.
     const requestedHeadless = value.headless ?? false;
+    // Without a deviceId, a session on a profile that has since disconnected
+    // is not reusable: its calls would all fail while another profile is
+    // connected. The open then chooses among the connected profiles.
+    const connectedProfileIds = attachedInventory
+      ? new Set(
+          attachedInventory.devices
+            .filter(
+              (device) => device.state === "connected" && device.capabilities.debuggerAttachment,
+            )
+            .map((device) => device.id),
+        )
+      : null;
     const reusable =
       value.mode === "new"
         ? null
@@ -4154,6 +4662,9 @@ async function openBrowser(
                   value.placement,
                   currentPlacement,
                 ) &&
+                (connectedProfileIds === null ||
+                  (candidate.placement.kind === "attached_device" &&
+                    connectedProfileIds.has(candidate.placement.deviceId))) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
                   candidate.baseRevisionId === value.baseRevisionId) &&
@@ -4208,12 +4719,30 @@ async function openBrowser(
       }
     }
   }
+  if (value.adoptWorkingCopy) {
+    if (!isResumablePausedBrowser(session))
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${session.id} is ${session.lifecycle}, so it has no stopped working copy to adopt; call browser_open without adoptWorkingCopy.`,
+        { code: "conflict", retryable: false },
+      );
+    await adoptBrowserWorkingCopy(transport, workspaceId, session.id, value.adoptWorkingCopy);
+  }
   if (isResumablePausedBrowser(session)) {
-    session = (
-      await transport.resumeBrowserSession(workspaceId, session.id, {
+    const stoppedId = session.id;
+    let resumed: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
+    try {
+      resumed = await transport.resumeBrowserSession(workspaceId, stoppedId, {
         operationId: context.operationId,
-      })
-    ).session;
+      });
+    } catch (error) {
+      throw (await workingCopyRecoveryError(transport, workspaceId, stoppedId)) ?? error;
+    }
+    if (resumed.operation?.state === "failed") {
+      const recovery = await workingCopyRecoveryError(transport, workspaceId, stoppedId);
+      if (recovery) throw recovery;
+    }
+    session = resumed.session;
   }
   const chosenProfile = profileChoice
     ? {
@@ -4569,8 +5098,10 @@ function lockedScreenText(message: string): string {
  * or launch it. A macOS launch finds a running app exactly, so there it is
  * always launched. Windows and Linux start another copy, so a listed window of
  * the app is observed instead. A launch acts on no window's contents, so any listed
- * target carries it: the screen when there is one. Its receipt observes the
- * app's window. A launch that cannot run is a note on the opened result, never
+ * target carries it (see launchCarrier). Its receipt observes the app's window,
+ * and names that window as its target: the carrier is an implementation detail,
+ * and naming another app's window would read as having acted on it. A launch
+ * that cannot run is a note on the opened result, never
  * an error that would hide the open computer. A retried call sends the same
  * operation ID; when the computer refuses it because the launch already ran
  * (with another fence) or the reply was lost, the recorded receipt answers.
@@ -4600,7 +5131,7 @@ async function launchOpenedComputerApp(
     // A window that cannot be read (closed meanwhile) is launched as usual.
     if (existing) return { existing };
   }
-  const carrier = opened.targets.find((target) => target.kind === "screen") ?? opened.targets[0];
+  const carrier = launchCarrier(opened.targets);
   if (!carrier)
     return {
       note: `The computer opened, but it has no screen or window to launch ${applicationId} from.`,
@@ -4612,20 +5143,22 @@ async function launchOpenedComputerApp(
   );
   try {
     return {
-      launch: await transport.actInComputer(workspaceId, opened.session.id, {
-        operationId,
-        targetId: carrier.id,
-        expectedTargetGeneration: carrier.targetGeneration,
-        expectedObservationId: null,
-        expectedFrameId: null,
-        action: { type: "launch", applicationId },
-      }),
+      launch: launchReceiptOnAppWindow(
+        await transport.actInComputer(workspaceId, opened.session.id, {
+          operationId,
+          targetId: carrier.id,
+          expectedTargetGeneration: carrier.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          action: { type: "launch", applicationId },
+        }),
+      ),
     };
   } catch (error) {
     const recorded = await Promise.resolve()
       .then(() => transport.getComputerActionReceipt(workspaceId, opened.session.id, operationId))
       .catch(() => null);
-    if (recorded) return { launch: recorded };
+    if (recorded) return { launch: launchReceiptOnAppWindow(recorded) };
     if (error instanceof OpenGeniApiError && error.outcomeUnknown)
       return {
         note: `${launchMayHaveRunNote(applicationId)} (${screenshotFailureReason(error)})`,
@@ -4638,6 +5171,83 @@ async function launchOpenedComputerApp(
 
 function launchMayHaveRunNote(applicationId: string): string {
   return `The computer opened, but the launch of ${applicationId} has no known outcome: it may have started. Check computer_targets for its window before launching it again.`;
+}
+
+/**
+ * The listed target a launch is sent through. A launch acts on no target's
+ * contents, but the computer starts it from a target and, when that target is
+ * one of the launched app's windows, observes that window rather than another
+ * of the app's (an app may already show windows other agents work in). So:
+ * the screen when there is one, else the target this computer was last
+ * observed or acted on in, else the focused window, else any readable one.
+ */
+export function launchCarrier(targets: readonly ComputerTarget[]): ComputerTarget | null {
+  const readable = targets.filter((target) => !target.offScreen);
+  return (
+    targets.find((target) => target.kind === "screen") ??
+    readable.find((target) => target.current) ??
+    readable.find((target) => target.kind === "window" && target.focused) ??
+    readable.find((target) => target.kind === "window") ??
+    readable[0] ??
+    targets[0] ??
+    null
+  );
+}
+
+/** A launch receipt naming the app window it observed as its target, rather
+ * than the target it was sent through. */
+export function launchReceiptOnAppWindow<T extends z.input<typeof ComputerActionReceipt>>(
+  receipt: T,
+): T {
+  const observed = receipt.observation?.target;
+  return observed && observed.kind === "window" && observed.id !== receipt.targetId
+    ? { ...receipt, targetId: observed.id }
+    : receipt;
+}
+
+/** A mutation whose request was sent but whose answer never arrived (the
+ * connection broke, or the response could not be read). */
+function isLostMutationResponse(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 0 && error.outcomeUnknown === true;
+}
+
+/**
+ * The browser's own receipt for an action whose answer was lost: what it
+ * recorded once the action settled, read for as long as the action itself
+ * may run. Null when nothing was recorded under the ID, or no settled
+ * receipt could be read in that time; the lost answer then stands.
+ */
+async function recordedBrowserReceipt(
+  transport: InteractionTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  operationId: string,
+  deadlineMs: number,
+): Promise<z.infer<typeof BrowserActionReceipt> | null> {
+  const deadline = Date.now() + deadlineMs;
+  let pause = 250;
+  for (;;) {
+    try {
+      const receipt = await transport.getBrowserActionReceipt(
+        workspaceId,
+        browserSessionId,
+        operationId,
+      );
+      if (
+        receipt.state === "completed" ||
+        receipt.state === "failed" ||
+        receipt.state === "outcome_unknown"
+      )
+        return receipt;
+    } catch (error) {
+      // Nothing recorded: the action may not have reached the browser, or
+      // may still be about to. Either way its outcome stays unknown.
+      if (error instanceof OpenGeniApiError && error.status === 404) return null;
+    }
+    if (Date.now() + pause > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, pause));
+    pause = Math.min(pause * 2, 2_000);
+  }
 }
 
 /** A target's name or ID compared without case or spaces. */
@@ -4730,7 +5340,8 @@ export function openComputerAppWindow(
 }
 
 type InteractionPlacementTransport = InteractionTransport &
-  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">>;
+  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">> &
+  WorkingCopyTransport;
 
 /** Where a placement-less open creates its session: the machine the chat is
  * routed to now. No active sandbox means the session's own group sandbox; a
@@ -4769,6 +5380,16 @@ class MachineMoveRefusedError extends OpenGeniApiError {
 
 /** Whether an open moved this chat to the machine it named. */
 type ChatMoveRecord = { moved: boolean };
+
+/** The session in the person's Chrome an open replaced, when the one it named
+ * had ended because that Chrome reconnected. */
+type ReattachedBrowserRecord = { from: string | null };
+
+/** The line an open's result adds when it continued in a new session because
+ * the one it named had ended: later calls must use the new ID. */
+function reattachedBrowserNote(endedBrowserSessionId: string, browserSessionId: string): string {
+  return `BrowserSession ${endedBrowserSessionId} ended when the person's Chrome reconnected; this continues in the same Chrome profile as BrowserSession ${browserSessionId}. Use the new ID from now on.`;
+}
 
 /** The line an open's result adds when it moved this chat to another machine:
  * the move outlasts the open, so later commands and files run there too. */
@@ -4935,9 +5556,13 @@ function assertInterventionResumeMatches(
     request.resourceKind !== intervention.resourceKind ||
     request.resourceId !== intervention.resourceId ||
     request.targetId !== intervention.targetId ||
-    request.expectedControllerGeneration !== intervention.controllerGeneration ||
-    request.expectedTargetGeneration !== intervention.targetGeneration ||
-    request.expectedDocumentGeneration !== intervention.documentGeneration ||
+    // An omitted generation was filled in from the target when it paused.
+    (request.expectedControllerGeneration !== undefined &&
+      request.expectedControllerGeneration !== intervention.controllerGeneration) ||
+    (request.expectedTargetGeneration !== undefined &&
+      request.expectedTargetGeneration !== intervention.targetGeneration) ||
+    (request.expectedDocumentGeneration !== undefined &&
+      request.expectedDocumentGeneration !== intervention.documentGeneration) ||
     request.kind !== intervention.kind ||
     request.reason !== intervention.reason ||
     (request.authRunId ?? null) !== intervention.authRunId
@@ -5364,6 +5989,7 @@ function projectBrowserObservation(
     ...(hasDiagnostics ? { diagnostics } : {}),
     ...(observation.dialog ? { dialog: observation.dialog } : {}),
     ...(observation.screenshot ? { screenshot: observation.screenshot } : {}),
+    ...(observation.notice ? { notice: observation.notice } : {}),
     agentView: {
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
@@ -5560,6 +6186,7 @@ function fullObservationText(observation: z.infer<typeof BrowserObservation>): s
       diagnostics: observation.diagnostics,
       dialog: observation.dialog,
       screenshot: observation.screenshot ?? undefined,
+      notice: observation.notice,
       agentView: {
         sourceKind: semantic?.kind ?? "none",
         nodes: flattenBrowserNodes(roots).map(({ node, depth }) => ({
@@ -5987,6 +6614,17 @@ function isGoneBrowserTabError(error: unknown): boolean {
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
     /(?:^|: )browser target does not exist\b/u.test(error.message)
+  );
+}
+
+/** Either way a controller says a tab it was asked for does not exist: the
+ * driver's "browser target does not exist…", or the controller's own check,
+ * which names the tab ("browser target \"10\" does not exist…"). */
+function isMissingBrowserTabError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    /(?:^|: )browser target (?:"[^"]*" )?does not exist\b/u.test(error.message)
   );
 }
 

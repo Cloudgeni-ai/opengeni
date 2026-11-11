@@ -14,14 +14,10 @@
 //! When an object already exists under a content name, GCS reports the
 //! checksums it computed when the object was stored, so [`Gcs::stored`]
 //! compares them with ours without downloading the object.
-//!
-//! The same answer says when the object was stored and which write of its
-//! name it is (its generation), which a sweep needs to delete an object
-//! only if nothing stored it again since the sweep looked (see
-//! [`crate::fresh`]).
 
 use std::fmt::{self, Write as _};
-use std::time::{Duration, SystemTime};
+use std::future::Future;
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -33,9 +29,16 @@ use object_store::path::Path;
 
 use crate::{Error, Result};
 
-/// Attempts per upload: transient failures and in-transit corruption are
-/// retried; anything else fails at once.
-const ATTEMPTS: u32 = 4;
+/// Attempts per request: transient failures (a lost connection or answer,
+/// 408, 429, any 5xx) and in-transit corruption are retried; anything else
+/// fails at once. One chunk check failing fails a whole verify, and a host
+/// asks about thousands of chunks at once when many sandboxes sleep
+/// together, so the store slowing it down must not fail them.
+const ATTEMPTS: u32 = 6;
+/// The wait before the second attempt. Each later one is four times the
+/// one before, to 25.6 s before the last: about 34 s in all, the backoff
+/// Cloud Storage asks of clients while it scales up to their rate.
+const FIRST_WAIT: Duration = Duration::from_millis(100);
 
 /// What a create-only upload found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,20 +55,6 @@ pub(crate) struct Stored {
     /// The checksums GCS computed when it stored the object, in
     /// `x-goog-hash` form; empty for composite objects, which have no MD5.
     pub(crate) checksums: String,
-    /// When the object was stored, to the second.
-    pub(crate) at: Option<SystemTime>,
-    /// Which write of the name this object is.
-    pub(crate) generation: Option<String>,
-}
-
-/// What a delete of one generation of an object did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Deleted {
-    Yes,
-    /// The name holds another generation now: it was stored again.
-    Changed,
-    /// Nothing is stored under the name.
-    Gone,
 }
 
 /// Checksummed uploads to one Google Cloud Storage bucket: create-only, or
@@ -114,43 +103,38 @@ impl Gcs {
 
     async fn send(&self, path: &Path, bytes: &Bytes, create_only: bool) -> Result<Created> {
         let hashes = checksums(bytes);
-        let mut delay = Duration::from_millis(100);
-        let mut attempt = 1;
-        loop {
-            match self.put(path, bytes, &hashes, create_only).await? {
-                Put::Done(created) => return Ok(created),
-                Put::Retry(reason) | Put::Fail(reason) if attempt >= ATTEMPTS => {
-                    return Err(Error::Transfer(format!("PUT {path}: {reason}")));
-                }
-                Put::Fail(reason) => return Err(Error::Transfer(format!("PUT {path}: {reason}"))),
-                // Retries are expected; only the final failure is reported.
-                Put::Retry(_) => {}
-            }
-            tokio::time::sleep(delay).await;
-            delay *= 4;
-            attempt += 1;
-        }
+        retried(
+            || format!("PUT {path}"),
+            || self.put(path, bytes, &hashes, create_only),
+        )
+        .await
     }
 
     /// What GCS keeps about the object at `path`, or `None` when there is
     /// no object.
     pub(crate) async fn stored(&self, path: &Path) -> Result<Option<Stored>> {
+        retried(|| format!("HEAD {path}"), || self.head(path)).await
+    }
+
+    async fn head(&self, path: &Path) -> Result<Attempt<Option<Stored>>> {
         let request = self
             .request(http::Method::HEAD, path)
             .await?
             .body(HttpRequestBody::empty())
             .map_err(|error| Error::Transfer(error.to_string()))?;
-        let response = self
-            .client
-            .execute(request)
-            .await
-            .map_err(|error| Error::Transfer(format!("HEAD {path}: {error}")))?;
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => return Ok(Attempt::Retry(error.to_string())),
+        };
         let status = response.status();
         if status == http::StatusCode::NOT_FOUND {
-            return Ok(None);
+            return Ok(Attempt::Done(None));
+        }
+        if transient(status) {
+            return Ok(Attempt::Retry(format!("status {status}")));
         }
         if !status.is_success() {
-            return Err(Error::Transfer(format!("HEAD {path}: status {status}")));
+            return Ok(Attempt::Fail(format!("status {status}")));
         }
         let headers = response.headers();
         // GCS sends one `x-goog-hash` header per algorithm.
@@ -171,57 +155,7 @@ impl Gcs {
             // Composite objects have no MD5; never match them.
             _ => String::new(),
         };
-        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
-        Ok(Some(Stored {
-            checksums,
-            at: header(http::header::LAST_MODIFIED.as_str()).and_then(|value| {
-                chrono::DateTime::parse_from_rfc2822(value)
-                    .ok()
-                    .map(SystemTime::from)
-            }),
-            generation: header("x-goog-generation").map(str::to_owned),
-        }))
-    }
-
-    /// Deletes the object at `path` if it is still `generation`, the write
-    /// of the name its caller looked at.
-    pub(crate) async fn delete_generation(&self, path: &Path, generation: &str) -> Result<Deleted> {
-        let mut delay = Duration::from_millis(100);
-        let mut attempt = 1;
-        loop {
-            let request = self
-                .request(http::Method::DELETE, path)
-                .await?
-                .header("x-goog-if-generation-match", generation)
-                .body(HttpRequestBody::empty())
-                .map_err(|error| Error::Transfer(error.to_string()))?;
-            let reason = match self.client.execute(request).await {
-                Ok(response) => match response.status() {
-                    status if status.is_success() => return Ok(Deleted::Yes),
-                    http::StatusCode::PRECONDITION_FAILED => return Ok(Deleted::Changed),
-                    http::StatusCode::NOT_FOUND => return Ok(Deleted::Gone),
-                    status
-                        if status == http::StatusCode::TOO_MANY_REQUESTS
-                            || status.is_server_error() =>
-                    {
-                        format!("status {status}")
-                    }
-                    status => {
-                        return Err(Error::Transfer(format!("DELETE {path}: status {status}")));
-                    }
-                },
-                // A delete whose answer was lost may have happened: the
-                // retry then finds the name changed or gone, never wrongly
-                // deletes, since it names the same generation.
-                Err(error) => error.to_string(),
-            };
-            if attempt >= ATTEMPTS {
-                return Err(Error::Transfer(format!("DELETE {path}: {reason}")));
-            }
-            tokio::time::sleep(delay).await;
-            delay *= 4;
-            attempt += 1;
-        }
+        Ok(Attempt::Done(Some(Stored { checksums })))
     }
 
     async fn request(&self, method: http::Method, path: &Path) -> Result<http::request::Builder> {
@@ -245,7 +179,7 @@ impl Gcs {
         bytes: &Bytes,
         hashes: &str,
         create_only: bool,
-    ) -> Result<Put> {
+    ) -> Result<Attempt<Created>> {
         let mut request = self
             .request(http::Method::PUT, path)
             .await?
@@ -260,38 +194,76 @@ impl Gcs {
             .map_err(|error| Error::Transfer(error.to_string()))?;
         let response = match self.client.execute(request).await {
             Ok(response) => response,
-            Err(error) => return Ok(Put::Retry(error.to_string())),
+            Err(error) => return Ok(Attempt::Retry(error.to_string())),
         };
         let status = response.status();
         if status.is_success() {
-            return Ok(Put::Done(Created::New));
+            return Ok(Attempt::Done(Created::New));
         }
         if status == http::StatusCode::PRECONDITION_FAILED {
-            return Ok(Put::Done(Created::Exists));
+            return Ok(Attempt::Done(Created::Exists));
         }
         let body = response.into_body().bytes().await.unwrap_or_default();
         let body = String::from_utf8_lossy(&body[..body.len().min(512)]).into_owned();
         let corrupted = body.contains("BadDigest") || body.contains("InvalidDigest");
         let reason = format!("status {status}: {body}");
-        Ok(
-            if corrupted
-                || status == http::StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error()
-            {
-                Put::Retry(reason)
-            } else {
-                Put::Fail(reason)
-            },
-        )
+        Ok(if corrupted || transient(status) {
+            Attempt::Retry(reason)
+        } else {
+            Attempt::Fail(reason)
+        })
     }
 }
 
-/// How one PUT went.
-enum Put {
-    Done(Created),
+/// How one attempt of a request went.
+enum Attempt<T> {
+    Done(T),
     /// Transient, or the bytes were corrupted on the way: send them again.
     Retry(String),
     Fail(String),
+}
+
+/// Runs `attempt` until it is done or fails, or [`ATTEMPTS`] times while
+/// it asks to be retried, waiting longer before each try; `what` names the
+/// request in the error.
+async fn retried<T, F>(what: impl Fn() -> String, mut attempt: impl FnMut() -> F) -> Result<T>
+where
+    F: Future<Output = Result<Attempt<T>>>,
+{
+    let mut wait = FIRST_WAIT;
+    let mut tried = 1;
+    loop {
+        let reason = match attempt().await? {
+            Attempt::Done(value) => return Ok(value),
+            Attempt::Fail(reason) => return Err(Error::Transfer(format!("{}: {reason}", what()))),
+            // Retries are expected; only the final failure is reported.
+            Attempt::Retry(reason) => reason,
+        };
+        if tried >= ATTEMPTS {
+            return Err(Error::Transfer(format!("{}: {reason}", what())));
+        }
+        tokio::time::sleep(jittered(wait)).await;
+        wait *= 4;
+        tried += 1;
+    }
+}
+
+/// Between half of `wait` and all of it, at random: requests the store
+/// turned away together come back spread out, not together again.
+fn jittered(wait: Duration) -> Duration {
+    let half = wait / 2;
+    let random = getrandom::u32().unwrap_or(u32::MAX / 2);
+    let extra = (half.as_nanos() * u128::from(random)) >> 32;
+    half + Duration::from_nanos(u64::try_from(extra).unwrap_or(u64::MAX))
+}
+
+/// Whether a request answered with `status` may succeed if sent again:
+/// the store timed it out, is turning requests away to slow the client
+/// down, or failed on its side.
+fn transient(status: http::StatusCode) -> bool {
+    status == http::StatusCode::REQUEST_TIMEOUT
+        || status == http::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 /// The `x-goog-hash` value for `bytes`: big-endian CRC32C and MD5, base64.
@@ -299,6 +271,31 @@ pub(crate) fn checksums(bytes: &[u8]) -> String {
     let crc = crc32c::crc32c(bytes).to_be_bytes();
     let md5 = md5::Md5::digest(bytes);
     format!("crc32c={},md5={}", BASE64.encode(crc), BASE64.encode(md5))
+}
+
+/// The MD5 in `checksums`, as [`checksums`] writes them, in lowercase hex:
+/// what S3, and stores like it, give as the entity tag of an object stored
+/// by one plain write or copied from one.
+pub(crate) fn md5_hex(checksums: &str) -> Option<String> {
+    let md5 = checksums
+        .split(',')
+        .find_map(|part| part.strip_prefix("md5="))?;
+    let md5 = BASE64.decode(md5).ok()?;
+    (md5.len() == 16).then(|| {
+        md5.iter().fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+    })
+}
+
+/// Whether the entity tag `tag` is the MD5 `md5` (lowercase hex); `None`
+/// when it is no plain MD5 at all, such as a multipart upload's (`-N` at
+/// its end) or a store's own kind of tag.
+pub(crate) fn tag_is_md5(tag: &str, md5: &str) -> Option<bool> {
+    let tag = tag.trim().trim_matches('"');
+    (tag.len() == 32 && tag.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| tag.eq_ignore_ascii_case(md5))
 }
 
 /// Percent-encodes an object name for a URL path, keeping `/` separators.
@@ -354,48 +351,70 @@ mod tests {
         assert_eq!(fake.names().len(), 0);
     }
 
-    /// The stored time and generation come from the same answer as the
-    /// checksums, and a delete names the generation it means.
-    #[tokio::test]
-    async fn only_the_generation_looked_at_is_deleted() {
+    /// Every request waits out a store turning it away for a while: one
+    /// chunk check failing would fail a whole verify.
+    #[tokio::test(start_paused = true)]
+    async fn requests_wait_out_a_store_turning_them_away() {
         let fake = Arc::new(Fake::default());
         let store = gcs(&fake);
-        let path = Path::from("p/chunks/v1/b");
-        let first = Bytes::from_static(b"first");
-        store.create(&path, &first).await.unwrap();
-        let seen = store.stored(&path).await.unwrap().unwrap();
-        let object = fake.object("p/chunks/v1/b").unwrap();
-        assert_eq!(seen.generation, Some(object.generation.to_string()));
-        let at = seen.at.unwrap();
-        let truncated = object.at.duration_since(at).unwrap();
+        let path = Path::from("p/chunks/v1/c");
+        let bytes = Bytes::from_static(b"chunk bytes");
+        let refusals = ATTEMPTS - 1;
+        *fake.unavailable.lock().unwrap() = refusals;
+        assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::New);
+        *fake.unavailable.lock().unwrap() = refusals;
+        let started = tokio::time::Instant::now();
+        let stored = store.stored(&path).await.unwrap().unwrap();
+        assert_eq!(stored.checksums, checksums(&bytes));
+        // Waited half or more of each wait, and no more than all of them.
+        let waited = started.elapsed();
+        let all: Duration = (0..refusals).map(|n| FIRST_WAIT * 4_u32.pow(n)).sum();
+        assert!(waited >= all / 2 && waited <= all, "waited {waited:?}");
+        *fake.unavailable.lock().unwrap() = refusals;
+        assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_keeps_turning_requests_away_fails_them_in_the_end() {
+        let fake = Arc::new(Fake::default());
+        let store = gcs(&fake);
+        let path = Path::from("p/chunks/v1/d");
+        *fake.unavailable.lock().unwrap() = u32::MAX;
+        let error = store.stored(&path).await.unwrap_err();
         assert!(
-            truncated < Duration::from_secs(1),
-            "to the second: {truncated:?}"
+            error.to_string().contains("HEAD p/chunks/v1/d: status 503"),
+            "{error}"
         );
-        // Stored again since it was looked at: the delete changes nothing.
-        store.replace(&path, &first).await.unwrap();
-        let looked_at = seen.generation.unwrap();
-        assert_eq!(
-            store.delete_generation(&path, &looked_at).await.unwrap(),
-            Deleted::Changed
-        );
-        assert!(fake.bytes("p/chunks/v1/b").is_some());
-        let now = store
-            .stored(&path)
+        assert_eq!(u32::MAX - *fake.unavailable.lock().unwrap(), ATTEMPTS);
+        *fake.unavailable.lock().unwrap() = u32::MAX;
+        let error = store
+            .create(&path, &Bytes::from_static(b"x"))
             .await
-            .unwrap()
-            .unwrap()
-            .generation
-            .unwrap();
-        assert_eq!(
-            store.delete_generation(&path, &now).await.unwrap(),
-            Deleted::Yes
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("transfer failed: PUT p/chunks/v1/d: status 503"),
+            "{error}"
         );
-        assert!(fake.bytes("p/chunks/v1/b").is_none());
-        assert_eq!(
-            store.delete_generation(&path, &now).await.unwrap(),
-            Deleted::Gone
+        assert_eq!(fake.names().len(), 0);
+    }
+
+    #[test]
+    fn waits_are_spread_between_half_and_all_of_the_backoff() {
+        let wait = Duration::from_secs(1);
+        let waits: Vec<Duration> = (0..200).map(|_| jittered(wait)).collect();
+        assert!(
+            waits
+                .iter()
+                .all(|&jittered| jittered >= wait / 2 && jittered <= wait)
         );
+        let spread = waits
+            .iter()
+            .max()
+            .unwrap()
+            .saturating_sub(*waits.iter().min().unwrap());
+        assert!(spread > wait / 4, "barely spread: {spread:?}");
     }
 
     #[test]
@@ -411,5 +430,24 @@ mod tests {
     #[test]
     fn names_are_encoded_but_keep_their_separators() {
         assert_eq!(encode("p/chunks/v1/a b+c"), "p/chunks/v1/a%20b%2Bc");
+    }
+
+    #[test]
+    fn an_entity_tag_is_matched_against_the_md5_of_the_checksums() {
+        let md5 = md5_hex(&checksums(b"")).unwrap();
+        assert_eq!(md5, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex("crc32c=AAAAAA=="), None);
+        assert_eq!(md5_hex("crc32c=AAAAAA==,md5=AAAA"), None, "not 16 bytes");
+        assert_eq!(
+            tag_is_md5("\"D41D8CD98F00B204E9800998ECF8427E\"", &md5),
+            Some(true)
+        );
+        assert_eq!(
+            tag_is_md5("d41d8cd98f00b204e9800998ecf8427f", &md5),
+            Some(false)
+        );
+        let multipart = "\"d41d8cd98f00b204e9800998ecf8427e-2\"";
+        assert_eq!(tag_is_md5(multipart, &md5), None, "a multipart upload's");
+        assert_eq!(tag_is_md5("17", &md5), None, "a generation");
     }
 }

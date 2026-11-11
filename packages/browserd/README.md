@@ -4,6 +4,23 @@ Placement-resident browser controller. It launches and owns the managed
 browser, target generations and operation receipts, and exposes only Opengeni
 interaction contracts. CDP endpoints are not product APIs.
 
+Observations and DOM reads leave out the values of fields that standard
+markup marks private: password inputs, the `current-password`,
+`new-password`, `one-time-code` and `cc-*` autocomplete tokens, hidden inputs
+and explicit private markers (`data-private`, `data-sensitive`,
+`data-opengeni-private`). The field stays present, labelled and fillable.
+Nothing is guessed from names, ids, placeholders or labels, and nothing is
+remembered: there is no memory of page-found or typed values. A read-only
+renderer snapshot finds these fields in frames and author shadow roots,
+including closed roots; a frame whose snapshot fails is read without it, so a
+read is never withheld. Screenshots, live-view images, recordings and
+clipboard copies are never refused. A fill accepts formatting-only digit
+grouping (a card widget inserting spaces) in any field.
+
+Attached Chrome extensions still advertise the DOMSnapshot privacy
+capability, but the agent no longer requires it: with an older extension the
+snapshot fails and the read continues.
+
 Browserd starts Chrome or Chromium itself with a private profile and a
 loopback-only DevTools port, and is the browser's only CDP client. It connects
 without an Origin header, attaches each

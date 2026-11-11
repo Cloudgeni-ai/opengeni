@@ -152,7 +152,13 @@ describe("skill_read gateway definition", () => {
       ).text();
       for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
         const selected = loadConfiguredBundledSkills({
-          firstPartyTools: name === "sites" ? ["artifacts_create", "artifacts_publish"] : [],
+          // Tool-gated Skills need the tools they explain.
+          firstPartyTools:
+            name === "sites"
+              ? ["artifacts_create", "artifacts_publish"]
+              : name === "projects"
+                ? ["project_list"]
+                : [],
           videoGenerationEnabled: false,
           bundledSkillIds,
           get sandboxBackend(): never {
@@ -251,6 +257,29 @@ describe("skill_read gateway definition", () => {
     expect((await read({ listFiles: false, paths: [files[1]!.path] })).structuredContent).toEqual({
       files: [files[1]],
     });
+  });
+
+  test("explicit paths that are not in the Skill return beside the files that exist", async () => {
+    const identity = { skillId: "workspace-skill", revisionId: "revision", scopeVersion: 4 };
+    const read = reader(async () => ({ ...identity, files }));
+    const partial = await read({ paths: ["SKILL.md", "references/x.md"] });
+    expect(partial.isError).toBe(false);
+    const expected = {
+      ...identity,
+      files: [files[0]],
+      missing: ["references/x.md"],
+      availablePaths: ["SKILL.md", "references/a.md"],
+      note: "Each path in missing is not a file of this Skill, so reading it again will not help. Paths are relative to this Skill's folder; a file that another Skill names is read from that Skill. availablePaths lists every file of this Skill.",
+    };
+    expect(partial.structuredContent).toEqual(expected);
+    expect(partial.content).toEqual([{ type: "text", text: JSON.stringify(expected) }]);
+
+    // A read where no path exists is a normal result, not a retry-inviting error.
+    const none = await read({ paths: ["references/x.md"] });
+    expect(none.isError).toBe(false);
+    expect(none.structuredContent).toEqual({ ...expected, files: [] });
+    const text = none.content[0]?.type === "text" ? none.content[0].text : "";
+    expect(text).not.toContain("Please try again");
   });
 
   test("the default read indexes scripts; explicit paths and inventory do not", async () => {
@@ -798,6 +827,8 @@ describe("skill_read use telemetry", () => {
           authorize: async () => {},
           load: async (skill) => {
             if (skill === "missing") throw new Error("Skill is not available in this session.");
+            if (skill === "broken")
+              return { ...builtin, files: [{ path: "../outside.md", content: "" }] };
             return builtin;
           },
           telemetry: {
@@ -811,10 +842,15 @@ describe("skill_read use telemetry", () => {
     const read = (args: Record<string, unknown>) =>
       environment.callModel({ modelName: "skill_read", arguments: args, subjectId: "agent:test" });
     await expect(read({ skill: "missing" })).rejects.toThrow("not available");
-    await expect(read({ skill: "deploy", paths: ["nope.md"] })).rejects.toThrow();
+    await expect(read({ skill: "broken", paths: ["SKILL.md"] })).rejects.toThrow("safe relative");
+    // A path the Skill lacks is a normal result that names it, not a refusal.
+    const partial = await read({ skill: "deploy", paths: ["nope.md"] });
+    expect(partial.isError).toBe(false);
+    expect(partial.structuredContent).toMatchObject({ files: [], missing: ["nope.md"] });
     expect(observations).toEqual([
       { caller: "model", kind: "refused", source: null, skill: "missing" },
       { caller: "model", kind: "refused", source: "builtin", skill: "builtin:opengeni-help" },
+      { caller: "model", kind: "files", source: "builtin", skill: "builtin:opengeni-help" },
     ]);
   });
 

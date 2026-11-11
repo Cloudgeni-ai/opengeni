@@ -1,7 +1,7 @@
 # Built-in integration marks
 
 The console's built-in integrations (Slack, Atlassian, Google Drive, Microsoft
-Teams, OneDrive, Outlook) are set up through their own integration flows, not
+Teams, OneDrive, SharePoint, Outlook) are set up through their own integration flows, not
 catalog rows, so they cannot use a vendored registry `logoAssetPath` or the
 first-party catalog marks in `apps/web/public/capability-logos`. These files
 are the exact marks those flows used to load from each vendor's CDN. They are

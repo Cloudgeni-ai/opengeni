@@ -12,8 +12,9 @@
 //     the MACHINE (the in-memory agent answers it) — the SDK-binds-once contract.
 //   - swap back to the group box routes there again (heterogeneous, single-active).
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Tool } from "@openai/agents";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { Agent, run as runAgent, type Tool } from "@openai/agents";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { wrapChannelABoxWithRouting } from "@opengeni/core";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -42,6 +43,7 @@ import {
   getRetainedProcess,
   initializeSessionStartAtomically,
   markWarmLeaseInstanceLost,
+  nestedPostgresSqlState,
   readLease,
   readActiveSandbox,
   readWorkspaceArchiveCapturePreflight,
@@ -55,6 +57,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import * as dbModule from "@opengeni/db";
 import {
   buildAgentCapabilities,
   buildManifest,
@@ -77,6 +80,11 @@ import {
 } from "../src/sandbox-routing";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { reconcileActiveSandboxPointer } from "../src/activities/agent-turn";
+import {
+  postClaimDatabaseRecoveryFailure,
+  sandboxRouteTransitionCode,
+} from "../src/activities/agent-turn/errors";
+import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 import { ModalCommandControl } from "../../../packages/runtime/src/sandbox/providers/modal-command-control";
 import { installModalCommandSession } from "../../../packages/runtime/src/sandbox/providers/modal-command-session";
 import {
@@ -229,6 +237,28 @@ async function claimTestConnection(input: {
     where id = ${input.enrollmentId}
   `;
   return connectionInstanceId;
+}
+
+/** The tool block one provider request carries when the runtime's own shell
+ *  capability (with the lean exec_command schema the model really sees) is
+ *  bound to this sandbox session. */
+async function requestShellTools(proxy: object): Promise<string> {
+  const capability = buildAgentCapabilities(settings, [], {}).find(
+    (candidate) => candidate.type === "shell",
+  )!;
+  const model = new ScriptedModel("done");
+  await runAgent(
+    new Agent({
+      name: "turn",
+      model,
+      tools: capability
+        .clone()
+        .bind(proxy as never)
+        .tools(),
+    }),
+    "hi",
+  );
+  return JSON.stringify(model.requests[0]!.tools);
 }
 
 /** A fake established GROUP box whose exec returns a fixed marker — the default
@@ -1669,9 +1699,16 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       environment: {},
       workingDir: null,
     };
+    const warnings: string[] = [];
     const pinned = (
       await establishSelfhostedTurnSession(
-        { db, settings, bus, opJournal: testOpJournal },
+        {
+          db,
+          settings,
+          bus,
+          opJournal: testOpJournal,
+          observability: { warn: (message: string) => void warnings.push(message) },
+        },
         { ...pinnedArgs, personalMachineAttempt: { ...exactAttempt, sessionId: session.id } },
       )
     ).session as { exec(args: unknown): Promise<unknown> };
@@ -1697,7 +1734,6 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: machine.enrollmentId,
       target: "only_me",
       ownerSubjectId: owner,
-      schedulesMayBeOnlyMe: true,
       expectedGeneration: original.generation,
     });
     expect(narrowed).toMatchObject({ outcome: "changed", sandboxId: machine.sandboxId });
@@ -1717,7 +1753,6 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: machine.enrollmentId,
       target: "workspace",
       ownerSubjectId: null,
-      schedulesMayBeOnlyMe: true,
       expectedGeneration: original.generation + 1,
     });
     expect(widened).toMatchObject({ outcome: "changed", audience: "workspace" });
@@ -1731,6 +1766,39 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       scope: "workspace",
       credentialGeneration: original.credentialGeneration,
     });
+    expect(warnings).toEqual([]);
+
+    // Once the Only-me machine is no longer the chat's active sandbox, the
+    // database refuses the pinned session's next operation. The tool error
+    // keeps the query error (with the refusal as its cause), and the log
+    // names the refusal itself.
+    expect(
+      await changeMachineAudience(db, {
+        accountId,
+        workspaceId,
+        subjectId: owner,
+        enrollmentId: machine.enrollmentId,
+        target: "only_me",
+        ownerSubjectId: owner,
+        expectedGeneration: original.generation + 2,
+      }),
+    ).toMatchObject({ outcome: "changed" });
+    await admin`
+      update sessions set active_sandbox_id = null
+      where account_id = ${accountId} and workspace_id = ${workspaceId} and id = ${session.id}`;
+    let refused: unknown;
+    try {
+      await pinned.exec({ cmd: "hostname" });
+    } catch (error) {
+      refused = error;
+    }
+    expect(String(refused)).toContain("Failed query");
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+    expect(providerRequests).toBe(8);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Connected Machine authority check failed: sqlState=42501");
+    expect(warnings[0]).toContain("reason=personal machine authority is no longer live");
+    expect(warnings[0]).toMatch(/functions=\S*assert_session_attempt/);
   }, 60_000);
 
   test("operation-level 404/NOT_FOUND preserves the warm provider identity and epoch", async () => {
@@ -2125,6 +2193,318 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
     expect(provisions).toBe(1);
   });
+
+  test("a lazy box sends the same shell tools whether or not it was resolved before binding", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-lazy-tools') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy-tools') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId: a!.id,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "compute",
+    });
+    const environment = { HOME: "/workspace" };
+    const manifest = buildManifest(settings, [], environment);
+    // The compute box, like every Connected Machine session, runs commands
+    // without stdin: its live session answers supportsPty() false.
+    const box = fakeGroupBox("compute-real");
+    Object.assign(box.session as object, {
+      supportsPty: () => false,
+      execCommand: async () => "ok",
+    });
+    const turnBox = () =>
+      wrapLazyTurnBoxWithRouting(
+        { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+        { workspaceId, sessionId: session.id, environment },
+        {
+          client: { backendId: "compute" },
+          backendId: "compute",
+          agentDefaultManifest: manifest,
+          provisioner: { get: async () => ({ established: { ...box, backendId: "compute" } }) },
+        },
+      ).session as { exec: (args: unknown) => Promise<unknown> };
+    // A plain turn binds before anything touches the box.
+    const lazyTools = await requestShellTools(turnBox());
+    // A turn with an attached file (or a resumed box) resolves the box first.
+    const resolved = turnBox();
+    await resolved.exec({ cmd: "true" });
+    const resolvedTools = await requestShellTools(resolved);
+
+    expect(resolvedTools).toBe(lazyTools);
+    expect(lazyTools).not.toContain("write_stdin");
+  });
+
+  test("moving a chat to a Connected Machine and back changes its shell tools once per move", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-placement-tools') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-placement-tools') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const connectionInstanceId = await claimTestConnection({
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const bus = busWithAgent(workspaceId, enrollment.id, connectionInstanceId, "the-laptop");
+    const environment = { HOME: "/workspace" };
+    const manifest = buildManifest(settings, [], environment);
+    // The Modal home offers stdin; the Connected Machine runs commands without it.
+    const home = fakeGroupBox("modal-home");
+    Object.assign(home.session as object, {
+      supportsPty: () => true,
+      execCommand: async () => "ok",
+      writeStdin: async () => "ok",
+    });
+    const routeIds = { workspaceId, sessionId: session.id, environment };
+    const services = { db, settings, bus: bus as never, opJournal: testOpJournal };
+    // A home turn binds lazily (what an on-demand turn does).
+    const homeTurn = () =>
+      wrapLazyTurnBoxWithRouting(services, routeIds, {
+        client: { backendId: "modal" },
+        backendId: "modal",
+        agentDefaultManifest: manifest,
+        provisioner: { get: async () => ({ established: home }) },
+      }).session as { exec: (args: unknown) => Promise<unknown> };
+    // A turn whose pointer names the machine is machine-primary: the worker
+    // establishes the machine session and pins it in the routing proxy.
+    const machineTurn = async () => {
+      const pointer = await readActiveSandbox(db, workspaceId, session.id);
+      const established = await establishSelfhostedTurnSession(services, {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        controlWorkspaceId: workspaceId,
+        agentId: enrollment.id,
+        connectionInstanceId,
+        workspaceRoot: "/home/user/project",
+        opStream: true,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        epoch: pointer!.activeEpoch,
+        environment,
+        workingDir: null,
+      });
+      return wrapTurnBoxWithRouting(
+        services,
+        {
+          ...routeIds,
+          pinnedSelfhosted: { sandboxId: machine.id, epoch: pointer!.activeEpoch },
+        },
+        established,
+      ).session as { exec: (args: unknown) => Promise<unknown> };
+    };
+    // Each turn is checked both ways: bound before anything touches the box
+    // (a plain message) and resolved first (an attached file, a resumed box).
+    const turnTools = async (
+      open: () => Promise<{ exec: (args: unknown) => Promise<unknown> }>,
+    ) => {
+      const plain = await requestShellTools(await open());
+      const resolvedFirst = await open();
+      await resolvedFirst.exec({ cmd: "true" });
+      expect(await requestShellTools(resolvedFirst)).toBe(plain);
+      return plain;
+    };
+
+    const sequence: string[] = [];
+    sequence.push(await turnTools(async () => homeTurn()));
+    sequence.push(await turnTools(async () => homeTurn()));
+    const toMachine = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: 0,
+    });
+    expect(toMachine.swapped).toBe(true);
+    sequence.push(await turnTools(machineTurn));
+    sequence.push(await turnTools(machineTurn));
+    const toHome = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: toMachine.pointer!.activeEpoch,
+    });
+    expect(toHome.swapped).toBe(true);
+    sequence.push(await turnTools(async () => homeTurn()));
+
+    const [homeTools, , machineTools] = sequence;
+    expect(homeTools).toContain('"name":"write_stdin"');
+    expect(machineTools).not.toContain("write_stdin");
+    expect(sequence).toEqual([homeTools, homeTools, machineTools, machineTools, homeTools]);
+  }, 60_000);
+
+  test("a machine-home chat moved to its own box mid-turn hands the turn home instead of reusing the machine", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-machine-home-move') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-machine-home-move') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    // The chat's durable home label is the machine, as for a chat started on one.
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "desktop",
+      enrollmentId: enrollment.id,
+    });
+    const connectionInstanceId = await claimTestConnection({
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    let machineOps = 0;
+    const bus = busWithAgent(workspaceId, enrollment.id, connectionInstanceId, "desktop", () => {
+      machineOps += 1;
+    });
+    const toMachine = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: session.activeEpoch,
+    });
+    expect(toMachine.swapped).toBe(true);
+    const pointer = toMachine.pointer!;
+    const services = { db, settings, bus: bus as never, opJournal: testOpJournal };
+    const environment = { HOME: "/workspace" };
+    // The machine-primary turn, wired as the worker wires it.
+    const established = await establishSelfhostedTurnSession(services, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      controlWorkspaceId: workspaceId,
+      agentId: enrollment.id,
+      connectionInstanceId,
+      workspaceRoot: "/home/user/project",
+      opStream: true,
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 0,
+        updatedAt: null,
+      },
+      operationResourcePolicySupported: false,
+      operationCpuQuotaSupported: false,
+      epoch: pointer.activeEpoch,
+      environment,
+      workingDir: null,
+    });
+    const turn = wrapTurnBoxWithRouting(
+      services,
+      {
+        workspaceId,
+        sessionId: session.id,
+        environment,
+        pinnedSelfhosted: { sandboxId: machine.id, epoch: pointer.activeEpoch },
+      },
+      established,
+    ).session as { exec: (args: unknown) => Promise<unknown> };
+    await turn.exec({ cmd: "true" });
+    expect(machineOps).toBe(1);
+
+    // Mid-turn the chat moves to its own managed box (the null pointer).
+    const toHome = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: pointer.activeEpoch,
+    });
+    expect(toHome.swapped).toBe(true);
+
+    // The next operation is the typed home transition, which failure settlement
+    // continues on the home box. It never lands on the machine the chat left.
+    let failure: unknown;
+    try {
+      await turn.exec({ cmd: "true" });
+    } catch (error) {
+      failure = error;
+    }
+    expect(sandboxRouteTransitionCode(failure)).toBe("home_unavailable_this_turn");
+    expect(machineOps).toBe(1);
+  }, 60_000);
 });
 
 describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", () => {
@@ -2286,11 +2666,12 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     expect(persisted.activeEpoch).toBe(2);
   }, 60_000);
 
-  // FAIL-OPEN on a transient lookup failure (issue #341 review / Bugbot): a throwing
-  // record lookup must NEVER be read as "row absent" and clear a (possibly healthy)
-  // user-chosen pointer. The SAME stranded pointer that reconciles cleanly when the
-  // lookup succeeds must be left UNTOUCHED (no CAS, no event) when the lookup throws.
-  test("a transient record-lookup failure never mutates the pointer (fail-open to pre-reconcile behavior)", async () => {
+  // FAIL-CLOSED on a transient lookup failure: a throwing record lookup must NEVER be
+  // read as "row absent" and clear a (possibly healthy) user-chosen pointer, nor be read
+  // as "no machine" and pick the home route. The SAME stranded pointer that reconciles
+  // cleanly when the lookup succeeds is left UNTOUCHED (no CAS, no event) and the
+  // failure propagates to the caller.
+  test("a transient record-lookup failure never mutates the pointer and never picks a route", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await seedAcctWs("transient");
     const session = await createSession(db, {
@@ -2323,26 +2704,25 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
 
     const events: Array<{ type: string }> = [];
     let lookups = 0;
-    const result = await reconcileActiveSandboxPointer(
-      db,
-      { accountId, workspaceId, sessionId: session.id },
-      pointer,
-      // A transient DB blip: the lookup THROWS (recovered by the time the CAS would run).
-      async () => {
-        lookups += 1;
-        throw new Error("transient db lookup failure");
-      },
-      async (evs) => {
-        events.push(...evs);
-      },
-    );
+    const lookupFailure = new Error("transient db lookup failure");
+    await expect(
+      reconcileActiveSandboxPointer(
+        db,
+        { accountId, workspaceId, sessionId: session.id },
+        pointer,
+        // A transient DB blip: the lookup THROWS (recovered by the time the CAS would run).
+        async () => {
+          lookups += 1;
+          throw lookupFailure;
+        },
+        async (evs) => {
+          events.push(...evs);
+        },
+      ),
+    ).rejects.toBe(lookupFailure);
 
-    // Fail open: no reconciliation happened. The pointer is UNTOUCHED (still the sibling
-    // at the same epoch), record null (→ machinePrimary:false, group box), no event.
+    // Fail closed: no reconciliation happened and no route was chosen. No event.
     expect(lookups).toBe(1);
-    expect(result.pointer?.activeSandboxId).toBe(sibling.id);
-    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch);
-    expect(result.record).toBeNull();
     expect(events).toHaveLength(0);
     // Crucially the DB pointer/epoch never moved — no CAS ran on the transient failure.
     const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
@@ -2364,6 +2744,159 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     expect(recovered.pointer?.activeSandboxId ?? null).toBeNull();
     expect(events2).toHaveLength(1);
     expect(events2[0]!.type).toBe("session.route.reconciled");
+  }, 60_000);
+
+  // A chat whose route names a Connected Machine must start every turn on that machine.
+  // Reading a failed route read as "no machine" used to start setup, credential seeding
+  // and file downloads on the chat's managed home; the routing proxy then saw the real
+  // pointer and discarded the whole attempt.
+  async function seedMachineChat(tag: string) {
+    const { accountId, workspaceId } = await seedAcctWs(tag);
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const attached = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: 0,
+    });
+    expect(attached.swapped).toBe(true);
+    const routeSettings = testSettings({ ...settings, sandboxBackend: "modal" });
+    const resolve = async (routeDb: Database = db) =>
+      await resolveSandboxRoute({
+        input: {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          attemptId: crypto.randomUUID(),
+        } as never,
+        turn: { id: crypto.randomUUID(), executionGeneration: 1 } as never,
+        fileAuthoritySubjectId: null,
+        settings: routeSettings,
+        db: routeDb,
+        eventing: { modelRunSettings: routeSettings } as never,
+        media: {} as never,
+        sandboxState: {} as never,
+        runSettings: routeSettings,
+        logicalSandboxSettings: routeSettings,
+      });
+    return { accountId, workspaceId, session, machine, resolve };
+  }
+
+  test("a machine chat's turn starts on its machine", async () => {
+    if (!available) return;
+    const { machine, resolve } = await seedMachineChat("machine-route");
+    const route = await resolve();
+    expect(route.machinePrimary).toBe(true);
+    expect(route.activeSandboxBackend).toBe("selfhosted");
+    expect(route.activeSandboxRecord?.id).toBe(machine.id);
+  }, 60_000);
+
+  test.each(["readActiveSandbox", "getSandboxForAttempt"] as const)(
+    "a transient %s failure is retried and the turn still starts on its machine",
+    async (read) => {
+      if (!available) return;
+      const { machine, resolve } = await seedMachineChat(`machine-retry-${read}`);
+      const spy = spyOn(dbModule, read);
+      spy.mockImplementationOnce(async () => {
+        throw Object.assign(new Error("connection closed"), { code: "CONNECTION_CLOSED" });
+      });
+      try {
+        const route = await resolve();
+        expect(route.machinePrimary).toBe(true);
+        expect(route.activeSandboxRecord?.id).toBe(machine.id);
+        expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+    60_000,
+  );
+
+  test("a machine record read that keeps failing stops the attempt instead of choosing home", async () => {
+    if (!available) return;
+    const { workspaceId, session, machine, resolve } = await seedMachineChat("machine-down");
+    const failure = Object.assign(new Error("connection closed"), { code: "CONNECTION_CLOSED" });
+    const spy = spyOn(dbModule, "getSandboxForAttempt").mockImplementation(async () => {
+      throw failure;
+    });
+    try {
+      await expect(resolve()).rejects.toBe(failure);
+      // Initial read plus each brief retry; then the failure propagates.
+      expect(spy.mock.calls.length).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+    // The chat's route is untouched: no reset to home, no epoch bump.
+    const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(persisted.activeSandboxId).toBe(machine.id);
+    expect(persisted.activeEpoch).toBe(1);
+  }, 60_000);
+
+  test("an unreachable database stops the attempt into the database recovery lane", async () => {
+    if (!available) return;
+    const { workspaceId, session, resolve } = await seedMachineChat("machine-db-unreachable");
+    // A real client whose server refuses connections, as during a database restart.
+    // Capture its genuine driver failure once, then let every route read hit it.
+    const unreachable = createDb("postgres://opengeni@127.0.0.1:1/opengeni", {
+      bootConnectGraceMs: 0,
+    });
+    const spy = spyOn(dbModule, "readActiveSandbox");
+    try {
+      const outage: unknown = await dbModule
+        .readActiveSandbox(unreachable.db, workspaceId, session.id)
+        .then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+      expect(outage).not.toBeNull();
+      spy.mockImplementation(async () => {
+        throw outage;
+      });
+      const error = await resolve().then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBe(outage);
+      const recovery = postClaimDatabaseRecoveryFailure({
+        error,
+        turnId: crypto.randomUUID(),
+        triggerEventId: crypto.randomUUID(),
+        executionGeneration: 1,
+        requireDatabaseProvenance: true,
+      });
+      expect(recovery?.type).toBe("OpenGeniPostClaimDatabaseRecovery");
+    } finally {
+      spy.mockRestore();
+      await unreachable.close().catch(() => undefined);
+    }
   }, 60_000);
 
   // BEHAVIORAL "pointer untouched" (issue #341 invariant A / Shape 1): a rejected

@@ -119,7 +119,14 @@ async function world(): Promise<World> {
   };
 }
 
-function gatewayFor(grant: AccessGrant, executed: Array<Record<string, unknown>>) {
+type GatewayTool = { serverId: string; toolName: string; source: "mcp" | "opengeni" };
+const INVENTORY: GatewayTool = { serverId: "inventory", toolName: "lookup", source: "mcp" };
+
+function gatewayFor(
+  grant: AccessGrant,
+  executed: Array<Record<string, unknown>>,
+  tool: GatewayTool = INVENTORY,
+) {
   const settings = testSettings({ environmentsEncryptionKey: Buffer.from(KEY).toString("base64") });
   const { catalog, gateway } = createWorkspaceToolGateway({
     accountId: grant.accountId,
@@ -129,17 +136,20 @@ function gatewayFor(grant: AccessGrant, executed: Array<Record<string, unknown>>
     resolveArguments: workspaceGatewaySecretArguments({ db: client!.db, settings, grant }),
     definitions: [
       {
-        identity: { serverId: "inventory", toolName: "lookup" },
-        modelName: "inventory__lookup",
-        codemodePath: ["inventory", "lookup"],
+        identity: { serverId: tool.serverId, toolName: tool.toolName },
+        modelName: tool === INVENTORY ? "inventory__lookup" : tool.toolName,
+        codemodePath: [tool.serverId, tool.toolName],
         title: "Inventory lookup",
-        inputSchema: {
-          type: "object",
-          properties: { token: { type: "string" } },
-          required: ["token"],
-          additionalProperties: false,
-        },
-        source: "mcp",
+        inputSchema:
+          tool === INVENTORY
+            ? {
+                type: "object",
+                properties: { token: { type: "string" } },
+                required: ["token"],
+                additionalProperties: false,
+              }
+            : { type: "object" },
+        source: tool.source,
         approval: "none",
         execute: async (argumentsValue) => {
           executed.push(argumentsValue);
@@ -154,7 +164,7 @@ function gatewayFor(grant: AccessGrant, executed: Array<Record<string, unknown>>
 function call(
   prepared: PreparedWorkspaceToolGateway,
   grant: AccessGrant,
-  reference: string,
+  reference: string | Record<string, unknown>,
   site: boolean,
 ) {
   return callWorkspaceToolGateway(
@@ -163,8 +173,8 @@ function call(
     {
       operationId: crypto.randomUUID(),
       catalogDigest: prepared.toolGatewayCatalog.digest,
-      identity: { serverId: "inventory", toolName: "lookup" },
-      arguments: { token: reference },
+      identity: prepared.toolGatewayCatalog.entries[0]!.identity,
+      arguments: typeof reference === "string" ? { token: reference } : reference,
       ...(site ? { siteArtifactId: SITE_ID, siteVersionId: SITE_VERSION } : {}),
     },
     client!.db,
@@ -255,5 +265,78 @@ describe("workspace tool gateway secret references (GW-4)", () => {
       });
     });
     expect(seen).toBeNull();
+  });
+
+  test("hand-off Opengeni tools keep reference text for people, services and Sites", async () => {
+    if (!client) return;
+    const fixture = await world();
+    const knowledgeSave: GatewayTool = {
+      serverId: "opengeni",
+      toolName: "knowledge_save",
+      source: "opengeni",
+    };
+    const escaped = `\\${fixture.reference}`;
+    for (const site of [false, true]) {
+      // A viewer without secrets:use loses nothing: hand-off needs no secret authority.
+      for (const grant of [fixture.viewer, fixture.member]) {
+        const executed: Array<Record<string, unknown>> = [];
+        const prepared = gatewayFor(grant, executed, knowledgeSave);
+        const response = await call(
+          prepared,
+          grant,
+          { content: `Pushes use ${fixture.reference}`, note: escaped },
+          site,
+        );
+        expect(response.result.isError ?? false).toBe(false);
+        expect(executed).toEqual([
+          { content: `Pushes use ${fixture.reference}`, note: fixture.reference },
+        ]);
+      }
+    }
+    const audits = await shared!.admin<Array<{ id: string }>>`
+      select id from audit_events
+      where account_id = ${fixture.owner.accountId}::uuid and action = 'vault.secret.used'`;
+    expect(audits).toEqual([]);
+  });
+
+  test("admin_action_call gets the value only for a credential field", async () => {
+    if (!client) return;
+    const fixture = await world();
+    const adminAction: GatewayTool = {
+      serverId: "opengeni",
+      toolName: "admin_action_call",
+      source: "opengeni",
+    };
+    const executed: Array<Record<string, unknown>> = [];
+    const prepared = gatewayFor(fixture.member, executed, adminAction);
+    const pathParameters = { workspaceId: fixture.owner.workspaceId };
+    await call(
+      prepared,
+      fixture.member,
+      {
+        id: "connectClaudeSubscriptionSetupToken",
+        pathParameters,
+        body: { token: fixture.reference },
+      },
+      false,
+    );
+    await call(
+      prepared,
+      fixture.member,
+      {
+        id: "createSession",
+        pathParameters,
+        body: { initialMessage: `Push with ${fixture.reference}` },
+      },
+      false,
+    );
+    expect(executed).toEqual([
+      { id: "connectClaudeSubscriptionSetupToken", pathParameters, body: { token: CANARY } },
+      {
+        id: "createSession",
+        pathParameters,
+        body: { initialMessage: `Push with ${fixture.reference}` },
+      },
+    ]);
   });
 });

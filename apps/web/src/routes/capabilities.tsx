@@ -4,9 +4,14 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import type { ChatClient } from "@opengeni/sdk";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import {
+  personalExtensionOrigin,
+  sortConnectorsForPresentation,
+} from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
@@ -25,14 +30,17 @@ import { SlackConnectionsPage } from "@/components/capabilities/slack-connection
 import { IntegrationPage } from "@/components/capabilities/integration-page";
 import { ProviderPage, type ProviderMode } from "@/components/capabilities/provider-page";
 import {
+  addConnectionErrorCopy,
   capabilityDescription,
+  catalogConnectAccess,
   isCommunityCapability,
   OWNERSHIP_HELP,
-  personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
   catalogServiceIdentity,
+  collapseConnectionService,
+  connectedConnectionServices,
   mergeConnectionServices,
   partitionConnectionServices,
 } from "@/components/capabilities/connection-services";
@@ -96,8 +104,15 @@ import {
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
+import {
+  OrganizationApiKeyDialog,
+  organizationApiKeyNoun,
+} from "@/components/capabilities/organization-api-key-dialog";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
-import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
+import {
+  useApiIntegrationOAuthCallback,
+  useFinishUnfinishedConnectSetups,
+} from "@/components/capabilities/use-api-integration-accounts";
 import {
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
@@ -107,10 +122,9 @@ import {
 } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { useCapabilitiesCatalog } from "@opengeni/react/app/components/capabilities/use-capabilities-catalog";
 import { useCatalogConnectionAccounts } from "@/components/capabilities/use-catalog-connection-accounts";
-import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
-import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
 import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-integration";
+import { useSharePointIntegration } from "@/components/capabilities/use-sharepoint-integration";
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
@@ -124,13 +138,14 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { WindowBarTitleBoundary } from "@opengeni/react/ui/window-bar-title";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
-import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorText } from "@opengeni/react/ui/error-text";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -159,11 +174,16 @@ import {
   oauthCallbackReasonMessage,
 } from "@opengeni/react/app/lib/oauth-callback-messages";
 import {
+  markPersonalGitHubRepositoryChooser,
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
-import { request } from "@/api";
+import {
+  canAddWorkspaceIntegrations,
+  canChangeWorkspaceIntegrations,
+  canManageWorkspaceIntegrations,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -189,6 +209,7 @@ import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
   ConnectionOwnership,
+  CreateConnectionRequest,
   SkillUninstallPreview,
 } from "@opengeni/react/app/types";
 
@@ -227,39 +248,43 @@ function providerModeCopy(
         };
   }
   if (serviceId === "atlassian") {
-    return optionName === "Retired sync"
-      ? {
-          title: "Previous sync connections",
-          description: "Native sync is retired. Imported documents and history remain.",
-        }
-      : {
-          title: "Let agents work in Jira and Confluence",
-          description: "Read and update the issues and pages you can already see in Atlassian.",
-        };
+    return {
+      title: "Let agents work in Jira and Confluence",
+      description: "Read and update the issues and pages you can already see in Atlassian.",
+    };
   }
   return null;
 }
 
 /** Keep the OAuth-return connection read alive even when the catalog read fails. */
 export function fetchOAuthReturnRows(
-  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "listCapabilities">,
   workspaceId: string,
   fetchConnections: () => Promise<ConnectionMetadata[] | null>,
 ) {
   return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
 }
 
-export function canManageApiIntegrations(
+/**
+ * What the viewer may do with plugins and API integrations here, matching the
+ * API: members add (unless their organization keeps that for admins) and
+ * remove; changing what is already set up stays with integration admins.
+ */
+export function apiIntegrationAccess(
   accessContext: AccessContext | null,
   workspaceId: string,
-): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
+  memberIntegrationSetup?: "members" | "admins",
+): { add: boolean; manage: boolean; change: boolean } {
+  return {
+    add: canAddWorkspaceIntegrations(accessContext, workspaceId, memberIntegrationSetup),
+    manage: canManageWorkspaceIntegrations(accessContext, workspaceId),
+    change: canChangeWorkspaceIntegrations(accessContext, workspaceId),
+  };
 }
 
 type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "skills";
-  slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
 
@@ -271,7 +296,7 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
   );
 }
 
-function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
+function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProps) {
   const context = useAppContext();
 
   const client = context.client;
@@ -293,12 +318,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     connections,
     connectionsLoadFailed,
     connectionsAccessDenied,
-    replaceConnection,
     fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
     socialConnections,
     slackInstallationBindings,
+    memberIntegrationSetup,
     loading,
     loadError,
     refresh,
@@ -408,6 +433,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // explanation and the way to retry don't vanish with a toast.
   const [callbackNotice, setCallbackNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [addError, setAddError] = useState<{ title: string; description: string } | null>(null);
   // Which integration's page is open.
   const openIntegration = openKey?.startsWith("integration:")
     ? openKey.slice("integration:".length)
@@ -448,6 +474,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     initialCustomApiFlowState,
   );
   const [customApiBusyKey, setCustomApiBusyKey] = useState<string | null>(null);
+  // An organization API where each person signs in, the person adding their own key.
+  const [ownKeyFor, setOwnKeyFor] = useState<ApiIntegrationInstallationSummary | null>(null);
   const [customApiRemoveTarget, setCustomApiRemoveTarget] = useState<{
     instance: ApiIntegrationInstallationSummary;
     removesDefinition: boolean;
@@ -505,12 +533,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   );
   const connectionsLoaded = connections !== null;
   const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
-  const canManageApiIntegrationInstances = canManageApiIntegrations(
+  const integrationAccess = apiIntegrationAccess(
     context.accessContext,
     workspaceId,
+    memberIntegrationSetup,
   );
-  // Skills are shared team procedures that Members may install and manage;
-  // plugins can add connections and MCP servers and stay administrative.
+  // Skills are shared team procedures that Members may install and manage.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -530,25 +558,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     onRuntimeChanged,
   });
   const github = useGitHubIntegration({ workspaceId });
-  const googleDrive = useGoogleDriveIntegration({
-    workspaceId,
-    connections,
-    refresh,
-    replaceConnection,
-  });
-  const atlassian = useAtlassianIntegration({
-    workspaceId,
-    connections,
-    connectionsLoaded,
-    connectionsLoadFailed: connectionsRetryable,
-    refresh,
-    replaceConnection,
-  });
   // Outlook Mail/Calendar/Contacts and OneDrive: one row per provider, folding
   // every connected account into that row's Connected accounts block. Every
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
+  // A setup interrupted after sign-in (closed dialog, reload, closed app)
+  // finishes here without reopening it.
+  useFinishUnfinishedConnectSetups({ workspaceId, refresh, onRuntimeChanged });
   const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
   const microsoftTeams = useMicrosoftTeamsIntegration({
     workspaceId,
@@ -590,27 +607,25 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     onRuntimeChanged,
     refreshRevision: catalogData.revision,
   });
+  const sharePoint = useSharePointIntegration({
+    workspaceId,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
+  });
   const slackBotMode = slack.catalogName === "Opengeni bot";
   const integrations = [
     { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    ...(googleDrive.hasHistoricalConnection
-      ? [
-          {
-            ...googleDrive,
-            model: connectionAccessModel(googleDrive.model, connectionsAccessDenied),
-          },
-        ]
-      : []),
-    ...(atlassian.hasHistoricalConnection
-      ? [{ ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) }]
-      : []),
     ...(teamsBot.visible ? [teamsBot] : []),
     microsoftTeams,
     outlookMail,
     outlookCalendar,
     outlookContacts,
     oneDrive,
+    sharePoint,
   ].map((adapter) => ({
     ...adapter,
     model: nativeIntegrationModel(
@@ -645,12 +660,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         options: [
           {
             id: model.id,
-            name:
-              model.id === "slack"
-                ? slack.catalogName
-                : model.id === "atlassian"
-                  ? "Retired sync"
-                  : model.name,
+            name: model.id === "slack" ? slack.catalogName : model.name,
             description: INTEGRATION_ROW_COPY[model.id] ?? model.description,
             status: model.chip.label,
             state: catalogStatusForChip(model.chip),
@@ -681,7 +691,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
                 ? "Your account"
                 : "Agent tools",
-            description: capabilityDescription(item) ?? undefined,
+            description: personalExtensionOrigin(item)
+              ? `From ${personalExtensionOrigin(item)}`
+              : (capabilityDescription(item) ?? undefined),
             status: connectorChip(item).label,
             state: catalogStatusForChip(connectorChip(item)),
             connected: item.enabled,
@@ -692,35 +704,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   ]);
   // One row per provider: a provider with several modes opens its own page,
   // where the mode is chosen as an outcome.
-  const connectionServices = allConnectionServices.map((service) => {
-    if (service.options.length < 2) return service;
-    const attention = service.options.find((option) => option.state === "attention");
-    const working = service.options.some((option) => option.state === "loading");
-    const connected = service.options.some((option) => option.connected);
-    return {
-      ...service,
-      options: [
-        {
-          id: service.id,
-          name: service.name,
-          description: SERVICE_ROW_COPY[service.id] ?? service.options[0]?.description,
-          status: attention?.status ?? (connected ? "Connected" : "Not connected"),
-          state: attention
-            ? ("attention" as const)
-            : working
-              ? ("loading" as const)
-              : connected
-                ? ("added" as const)
-                : ("available" as const),
-          connected,
-          onOpen: () => {
-            openIntegrationFrom();
-            goTo(`service:${service.id}`);
-          },
-        },
-      ],
-    };
-  });
+  const connectionServices = allConnectionServices.map((service) =>
+    collapseConnectionService(service, {
+      description: SERVICE_ROW_COPY[service.id] ?? service.options[0]?.description,
+      onOpen: () => {
+        openIntegrationFrom();
+        goTo(`service:${service.id}`);
+      },
+    }),
+  );
   const { featuredServices, remainingServices } = partitionConnectionServices(
     connectionServices,
     true,
@@ -730,9 +722,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   );
   // Connected first, then about 30 popular providers. The long tail of the
   // public registry is reached only by searching, labelled Community.
-  const connectedServices = connectionServices.filter((service) =>
-    service.options.some((option) => option.connected || option.state === "attention"),
-  );
+  const connectedServices = connectedConnectionServices(connectionServices);
   const popularServices = featuredServices
     .filter((service) => !connectedServices.includes(service))
     .slice(0, POPULAR_LIMIT);
@@ -811,13 +801,25 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
+  const currentWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId);
+  const selectedConnectAccess = selectedItem
+    ? catalogConnectAccess(
+        selectedItem,
+        context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
+        currentWorkspace?.kind,
+        memberIntegrationSetup,
+      )
+    : null;
   const selectedSetupUnavailable = selectedItem
-    ? nativeCatalogItemNotice(
+    ? (nativeCatalogItemNotice(
         selectedItem,
         nativeConnectCatalog,
         () => void refresh(),
         nativeConnectionFacts,
-      )
+      ) ??
+      (selectedConnectAccess?.blocked
+        ? { tone: "muted" as const, ...selectedConnectAccess.blocked }
+        : undefined))
     : undefined;
   const selectedSocialConnections = selectedItem
     ? (() => {
@@ -880,30 +882,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
-
-  const slackUserLinkHandled = useRef(false);
-  useEffect(() => {
-    if (!slackLinkToken || slackUserLinkHandled.current) return;
-    slackUserLinkHandled.current = true;
-    clearReturnParams();
-    void request(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/user-links`,
-      {
-        method: "POST",
-        body: JSON.stringify({ linkToken: slackLinkToken }),
-      },
-    )
-      .then(() => {
-        toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke Opengeni again.",
-        });
-      })
-      .catch((error) => {
-        toast.error("Couldn't link your Slack identity", {
-          description: userErrorText(error),
-        });
-      });
-  }, [slackLinkToken, workspaceId, clearReturnParams]);
 
   // Close the page if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A
@@ -1125,6 +1103,46 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
+  // An organization's API is managed in its settings; a workspace manager
+  // only turns it off here or back on.
+  async function setOrganizationApiHere(
+    instance: ApiIntegrationInstallationSummary,
+    enabledHere: boolean,
+  ) {
+    setCustomApiBusyKey(instance.instanceKey);
+    try {
+      await client.setOrganizationApiIntegrationHere(workspaceId, instance.capabilityId, {
+        enabledHere,
+      });
+      await refresh();
+      onRuntimeChanged();
+      toast.success(
+        enabledHere ? `${instance.displayName} is on here` : `${instance.displayName} is off here`,
+        {
+          description: enabledHere
+            ? "Chats in this workspace can use it again."
+            : "Chats in this workspace stop using it. Your organization's other workspaces keep it.",
+        },
+      );
+    } catch (error) {
+      toast.error("Couldn't change it", { description: userErrorText(error) });
+    } finally {
+      setCustomApiBusyKey(null);
+    }
+  }
+
+  async function addOrganizationApiKey(connectionRequest: CreateConnectionRequest) {
+    if (!ownKeyFor) return;
+    const instance = ownKeyFor;
+    await client.createConnection(workspaceId, connectionRequest);
+    await refresh();
+    onRuntimeChanged();
+    setOwnKeyFor(null);
+    toast.success(`Your ${organizationApiKeyNoun(instance)} for ${instance.displayName} is added`, {
+      description: "Only you can use it.",
+    });
+  }
+
   async function removeCustomApiInstance(): Promise<boolean> {
     if (!customApiRemoveTarget) return false;
     const { instance } = customApiRemoveTarget;
@@ -1256,12 +1274,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     );
     setOpenIntegration("github", true);
     if (result.outcome === "success") {
-      void context.refreshPersonalGitHub(workspaceId).then(() => {
-        toast.success("Your GitHub identity is connected");
-      });
+      // The GitHub page opens its repository chooser once the connection loads.
+      markPersonalGitHubRepositoryChooser(workspaceId);
+      void context
+        .refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true })
+        .then(() => {
+          toast.success("Your GitHub is connected");
+        });
       return;
     }
-    toast.error("Couldn't connect your GitHub identity", {
+    toast.error("Couldn't connect your GitHub", {
       description: personalGitHubOAuthFailureMessage(result.reason),
     });
   }, [context, workspaceId, setOpenIntegration]);
@@ -1346,10 +1368,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })
       .catch((error: unknown) => {
         if (!active) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Google Drive setup could not be checked. Reload to try again.";
+        const message = userErrorText(
+          error,
+          "Google Drive setup could not be checked. Reload to try again.",
+        );
         setCallbackNotice(message);
         toast.error("Google Drive setup needs attention", { description: message });
       });
@@ -1584,6 +1606,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     const input = capabilityInputFromForm(form);
     if (!input) return;
     setBusyId("add");
+    setAddError(null);
     try {
       const created = await client.createCapability(workspaceId, input);
       if (form.enableAfterAdd) {
@@ -1618,8 +1641,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setAddOpen(false);
       await refresh();
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to add capability");
-      toast.error(copy.title, { description: copy.description });
+      // The dialog stays open on failure; say why there, next to the form.
+      setAddError(addConnectionErrorCopy(error));
     } finally {
       setBusyId(null);
     }
@@ -1691,6 +1714,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           workspaceId={workspaceId}
           items={items}
           connections={connections}
+          connectionsLoadFailed={connectionsRetryable}
           bindings={slackInstallationBindings}
           refresh={refresh}
           onRuntimeChanged={onRuntimeChanged}
@@ -1722,6 +1746,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         busy={busyId === selectedItem.id}
         errorMessage={sheetError}
         setupUnavailable={selectedSetupUnavailable}
+        personalOnly={selectedConnectAccess?.personalOnly === true}
+        workspaces={context.workspaces}
         fikenSetup={{
           oauthAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-oauth"),
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
@@ -1731,12 +1757,22 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
+          canRemoveOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(
+              context.accessContext,
+              accountWorkspaceId,
+              PERSONAL_INTEGRATION_SETUP_PERMISSION,
+            ) ||
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
+          canReconnectOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
         }}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
+        canTurnOnOrOff={integrationAccess.change}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={
@@ -1862,25 +1898,33 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
           <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
-            <PageHeader
-              icon={<PlugIcon />}
-              title="Capabilities"
-              description="Tools, skills, and plugins your agents can use"
-              actions={
-                <div
-                  ref={setCatalogActionTarget}
-                  className="flex items-center gap-2 empty:hidden"
-                />
-              }
-              tabs={
-                <LineTabsList aria-label="Capability types">
-                  <LineTabsTrigger value="all">All</LineTabsTrigger>
-                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                </LineTabsList>
-              }
-            />
+            {/*
+              The catalog stays mounted, hidden, under the pages it opens: its
+              header names the macOS window bar only until an open page does.
+              Only the header: skill, plugin and bundle pages render inside
+              this tree (portaled out) and take the bar.
+            */}
+            <WindowBarTitleBoundary fallback>
+              <PageHeader
+                icon={<PlugIcon />}
+                title="Capabilities"
+                description="Tools, skills, and plugins your agents can use"
+                actions={
+                  <div
+                    ref={setCatalogActionTarget}
+                    className="flex items-center gap-2 empty:hidden"
+                  />
+                }
+                tabs={
+                  <LineTabsList aria-label="Capability types">
+                    <LineTabsTrigger value="all">All</LineTabsTrigger>
+                    <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                    <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                  </LineTabsList>
+                }
+              />
+            </WindowBarTitleBoundary>
             {(connectionsAccessDenied ||
               (context.accessContext?.workspaceGrants.some(
                 (grant) => grant.workspaceId === workspaceId,
@@ -1893,7 +1937,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
             {callbackNotice ? (
               <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
-                <p role="alert">{callbackNotice}</p>
+                <p role="alert">
+                  <ErrorText>{callbackNotice}</ErrorText>
+                </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Button
                     type="button"
@@ -2082,12 +2128,18 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       <CustomApiSection
                         instances={visibleCustomApiInstances}
                         connections={connections}
-                        canManage={canManageApiIntegrationInstances}
+                        canAdd={integrationAccess.add}
+                        canManage={integrationAccess.manage}
+                        canChange={integrationAccess.change}
                         busyKey={customApiBusyKey}
                         onConnect={openCustomApi}
                         onUpdate={(instance) => editCustomApi(instance, "update")}
                         onReconnect={(instance) => editCustomApi(instance, "reconnect")}
                         onRemove={(instance) => void previewRemoveCustomApi(instance)}
+                        onAddOwnKey={setOwnKeyFor}
+                        onSetOrganizationHere={(instance, enabledHere) =>
+                          void setOrganizationApiHere(instance, enabledHere)
+                        }
                       />
                     ) : null}
 
@@ -2223,7 +2275,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       workspaceId={workspaceId}
                       connections={connections}
                       canManage={canManageSkills}
-                      canManagePlugins={canManageApiIntegrationInstances}
+                      canManagePlugins={integrationAccess.manage}
+                      canInstallPlugins={integrationAccess.add}
+                      canUpdatePlugins={integrationAccess.change}
                       items={items}
                       logoUrl={logoUrl}
                       busyCatalogId={busyId}
@@ -2234,24 +2288,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         onRuntimeChanged();
                       }}
                     />
-                    {activeTab === "plugins" ? (
+                    {activeTab === "plugins" && eventTriggersEnabled ? (
                       <div className="mt-6 grid gap-4">
-                        {eventTriggersEnabled ? (
-                          <PrReviewAutomationCard workspaceId={workspaceId} />
-                        ) : null}
-                        <PrReviewSetupCard
-                          client={client}
-                          workspaceId={workspaceId}
-                          retiring={eventTriggersEnabled}
-                          canManage={
-                            canManageApiIntegrationInstances &&
-                            hasWorkspacePermission(
-                              context.accessContext,
-                              workspaceId,
-                              "secrets:write",
-                            )
-                          }
-                        />
+                        <PrReviewAutomationCard workspaceId={workspaceId} />
                       </div>
                     ) : null}
                   </div>
@@ -2280,7 +2319,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             name={selectedItem.name}
             returnUrl={window.location.href}
             dialogOnly
-            personalOnly={personalOnlyCapability(selectedItem)}
+            personalOnly={selectedConnectAccess?.personalOnly === true}
             connectLabel={`Connect ${selectedItem.name}`}
             dialogSubtitle="Review access, then sign in"
             description={capabilityDescription(selectedItem) ?? undefined}
@@ -2324,9 +2363,21 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             dispatchCustomApi({ type: "new", draft: { protocol, advanced: true } });
           }}
           open={addOpen}
-          onOpenChange={setAddOpen}
+          onOpenChange={(open) => {
+            setAddOpen(open);
+            setAddError(null);
+          }}
           busy={busyId === "add"}
+          error={addError}
           onSubmit={submitAddCustom}
+        />
+
+        <OrganizationApiKeyDialog
+          instance={ownKeyFor}
+          onOpenChange={(open) => {
+            if (!open) setOwnKeyFor(null);
+          }}
+          onAdd={addOrganizationApiKey}
         />
 
         <ConfirmDialog
@@ -2353,7 +2404,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           <CustomApiSetupDialog
             state={customApi}
             connections={connections}
-            canManage={canManageApiIntegrationInstances}
+            canManage={integrationAccess.add}
             onOpenChange={(open) => dispatchCustomApi({ type: open ? "open" : "close" })}
             onDraftChange={(patch) => dispatchCustomApi({ type: "draft", patch })}
             onPreview={() => void previewCustomApi()}

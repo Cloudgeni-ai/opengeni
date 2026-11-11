@@ -4,6 +4,12 @@ import {
   parseInteractionDriverDiagnostic,
   redactInteractionDriverMessage,
 } from "@opengeni/contracts";
+import {
+  boundClientErrorText,
+  CLIENT_ERROR_DETAIL_MAX_BYTES,
+  isProjectedClientErrorText,
+  scrubClientErrorText,
+} from "@opengeni/contracts/client-error-report";
 
 /**
  * Bounded classification of the error underneath an operational failure, so a
@@ -20,6 +26,12 @@ import {
  * code-written message with every variable part (window titles, page text,
  * paths, free-text reasons) redacted, so an operator can tell driver failures
  * apart. The message is redacted again at the log boundary.
+ *
+ * A second reviewed exception: an API request that fails with an unclassified
+ * internal error (500 `internal_error`, not mapped to a response by any route)
+ * logs its cause's message as `causeMessage`, so the server log says why. The
+ * message is scrubbed of credentials and query strings and bounded exactly
+ * like a web client error message, and only the server log carries it.
  */
 
 /** Reviewed error classes whose names carry no data. Wrappers that only
@@ -101,16 +113,46 @@ export type ErrorCauseAttributes = {
 
 /** Classify the first non-wrapper error in a cause chain. */
 export function errorCauseAttributes(error: unknown): ErrorCauseAttributes {
+  const cause = firstCause(error);
+  return cause ? classify(cause.error, cause.name) : {};
+}
+
+/** Largest UTF-8 byte length of a logged cause message. */
+export const ERROR_CAUSE_MESSAGE_MAX_BYTES = CLIENT_ERROR_DETAIL_MAX_BYTES.message;
+
+/**
+ * The scrubbed, bounded message of the first non-wrapper error in a cause
+ * chain, for the server log of an unclassified internal error only. A query
+ * builder's error quotes its SQL and parameters, so its database cause's
+ * message is used instead.
+ */
+export function errorCauseMessage(error: unknown): string | undefined {
+  const cause = firstCause(error);
+  if (!cause) return undefined;
+  let message = ownValue(cause.error, "message");
+  if (cause.name === "DrizzleQueryError") {
+    const database = ownValue(cause.error, "cause");
+    message = database && typeof database === "object" ? ownValue(database, "message") : undefined;
+  }
+  if (typeof message !== "string") return undefined;
+  const projected = boundClientErrorText(
+    scrubClientErrorText(message.slice(0, 16_384)).trim(),
+    ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  );
+  return projected.length > 0 ? projected : undefined;
+}
+
+function firstCause(error: unknown): { error: object; name: string | null } | null {
   const seen = new Set<unknown>();
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const name = reviewedName(current);
-    if (name === null || !WRAPPER_NAMES.has(name)) return classify(current, name);
+    if (name === null || !WRAPPER_NAMES.has(name)) return { error: current, name };
     current = ownValue(current, "cause");
   }
-  return {};
+  return null;
 }
 
 /** Re-validate attributes at the log boundary; callers may pass anything. */
@@ -119,14 +161,19 @@ export function projectErrorCauseAttributes(
 ): ErrorCauseAttributes {
   const { causeName, causeCode, causeAgentCode, causeStatus, causeSqlState } = attributes;
   const driverFailed = causeName === "BrowserControlRequestError" && causeCode === "driver_failed";
-  const causeDriverClass = driverFailed
+  // A read that kept failing reports resource_unavailable with the driver's
+  // class and frame, as a driver failure does.
+  const driverDiagnosed =
+    driverFailed ||
+    (causeName === "BrowserControlRequestError" && causeCode === "resource_unavailable");
+  const causeDriverClass = driverDiagnosed
     ? interactionDriverErrorClass(attributes.causeDriverClass)
     : null;
-  const causeDriverFrame = driverFailed
+  const causeDriverFrame = driverDiagnosed
     ? interactionDriverFrame(attributes.causeDriverFrame)
     : null;
   const causeDriverMessage =
-    driverFailed &&
+    (driverFailed || causeDriverClass !== null) &&
     typeof attributes.causeDriverMessage === "string" &&
     attributes.causeDriverMessage.length <= 4_096
       ? redactInteractionDriverMessage(attributes.causeDriverMessage)
@@ -157,6 +204,18 @@ export function projectErrorCauseAttributes(
   };
 }
 
+/** Re-validate a cause message at the log boundary: only an exact projection passes. */
+export function projectErrorCauseMessage(attributes: Record<string, unknown>): {
+  causeMessage?: string;
+} {
+  const { causeMessage } = attributes;
+  return typeof causeMessage === "string" &&
+    causeMessage.trim() === causeMessage &&
+    isProjectedClientErrorText(causeMessage, "message")
+    ? { causeMessage }
+    : {};
+}
+
 function classify(error: object, name: string | null): ErrorCauseAttributes {
   if (name === null || !PUBLIC_ERROR_CAUSE_NAMES.has(name)) return {};
   const result: ErrorCauseAttributes = { causeName: name };
@@ -170,12 +229,15 @@ function classify(error: object, name: string | null): ErrorCauseAttributes {
     if (typeof code === "string" && PUBLIC_INTERACTION_ERROR_CODES.has(code)) {
       result.causeCode = code;
     }
-    if (code === "driver_failed") {
-      const diagnostic = parseInteractionDriverDiagnostic(ownValue(error, "diagnostic"));
-      if (diagnostic) {
-        result.causeDriverClass = diagnostic.errorClass;
-        if (diagnostic.frame) result.causeDriverFrame = diagnostic.frame;
-      }
+    const diagnostic =
+      code === "driver_failed" || code === "resource_unavailable"
+        ? parseInteractionDriverDiagnostic(ownValue(error, "diagnostic"))
+        : null;
+    if (diagnostic) {
+      result.causeDriverClass = diagnostic.errorClass;
+      if (diagnostic.frame) result.causeDriverFrame = diagnostic.frame;
+    }
+    if (code === "driver_failed" || diagnostic) {
       const message = ownValue(interactionError, "message");
       if (typeof message === "string" && message.length > 0 && message.length <= 8_192) {
         result.causeDriverMessage = redactInteractionDriverMessage(message);

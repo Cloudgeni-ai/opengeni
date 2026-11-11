@@ -165,6 +165,7 @@ A preset decides which features show and single keys switch them:
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
 | `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `shareLinks`: Share in the chat header, a read-only link anyone holding it can open | on | on | off |
 | `addCredits`: the new-chat page's "Add credits" button for people who manage billing (card billing only); the credits notice still shows when a model's credits run out | on | off | on |
 
 Everything else (model and effort, capabilities, repositories, runs on,
@@ -181,7 +182,28 @@ the composer (its `detail` in the tooltip), and the person can leave it out of
 their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
+An item may also name the `tools` it is for, such as the tool that reaches the
+open document it describes, or the tools your own MCP server publishes for the
+record the page shows (by the names it publishes). A new chat that starts with that item
+loads those tools before its first model request, as a tool search by name
+would, so the agent can call them in its first step without searching. The
+chat's instructions and tool list stay the same as any other chat's, and its
+timeline shows that tool search. On Claude models (Anthropic Messages) nothing
+is loaded ahead and the agent searches as usual. This is decided once, when
+the chat is created: context that arrives later never loads tools, and names
+outside the chat's tool selection are ignored, so it grants nothing. Through
+the HTTP API, send the same names as `modelContextTools` next to
+`modelContext` when creating a session; the session proxy forwards them only
+with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
+
+`starters` replaces Opengeni's suggestions under the new-chat composer with
+the host's own, such as tasks that fit the app the chat sits in (the Excel
+add-in suggests explaining a sheet or writing a formula). Each one has an
+`id`, a `title`, an optional `description` and `icon`, and the `prompt` it puts
+in the composer for the person to edit and send. An empty list shows none, and
+the `starters` feature still turns them off. The new-chat page's recent chats
+lead with the ones the person opened there most recently.
 
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's
@@ -294,8 +316,8 @@ control (`sessions:control`) plus one of these:
   custom MCP servers, shared or workspace connections, other people's
   connections, or removing or reconfiguring an integration, and an
   organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
+- `connections:write` with `connections:read`: any account, shared or
+  personal, turning the integration on if it is not on yet.
 - `connections:read` alone, when the integration is already on and bound to a
   shared workspace account.
 
@@ -330,7 +352,7 @@ precedence, and host-managed connections (`authoritySource: "host"`) keep their
 own row.
 
 The agent's cards for the deployment's reviewed Microsoft integrations
-(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+(Outlook Mail, Calendar and Contacts, OneDrive, SharePoint and Teams) render the same way,
 with `SessionIntegrationCapabilityCard`. Each person connects their own
 Microsoft account, which installs the integration's reviewed tools for that
 account alone, so these cards need `sessions:control` plus
@@ -461,12 +483,17 @@ expect the documented dependency slice plus an `AccessGrant`.
 `submitComposerDraftForRequest` lives in
 `packages/core/src/application/composer-submit.ts`; it is the composer-shaped
 application boundary used by both the stock HTTP route and an in-process host.
-It validates/accepts the exact durable draft revision, appends the event,
-creates or steers the turn, rotates the draft, and returns the native
-`SubmitComposerDraftResponse`. An in-process host may provide
+It validates and accepts the submitted content, appends the event, creates or
+steers the turn, clears the draft if it still holds what was sent, and returns
+the native `SubmitComposerDraftResponse`. Send is never refused because the
+saved draft changed: `expectedDraftRevision` (and `expectedNewSessionDraftRevision`
+on create) is the revision the sender last saw, the basis for that clear. The
+draft is cleared when it is still at that revision or holds exactly the sent
+content; otherwise another device saved something newer, which stays and is
+returned as `draft`. A sender that saw no saved draft names revision 0. Retries
+stay idempotent through `clientEventId`. An in-process host may provide
 `additionalResources`; they join the accepted command, idempotency hash, turn,
-and durable session resource set atomically while the saved actor draft remains
-the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+and durable session resource set atomically. This avoids a trusted draft PUT solely to add host-authorized
 repositories or files. Terminal control lives in
 `packages/core/src/application/session-commands.ts` and uses an explicit
 authenticated command context. Scheduled-task validation/sync helpers live in
@@ -551,6 +578,39 @@ with `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` (SDK
 and is recorded as a `session.skills.updated` event with the Skill names. An
 agent can only remove Skills this way. A session Skill shadows a workspace
 Skill with the same name.
+
+Repositories attached to a session can be removed with
+`POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove` (SDK
+`removeSessionResources`) and a body of `{ resources: [{ kind: "repository", uri }] }`.
+The repositories are removed from the session and its child sessions, each
+recording a `session.resources.removed` event. Matching ignores letter case
+and a trailing `.git`. Removing a repository that is not attached is a no-op,
+so a retry completes a partial removal.
+
+When a person approves an agent's `github_repository_attach` call, the
+repository is added to the session and a `session.resources.added` event
+records it (see [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository)).
+
+Access through Opengeni ends on the next call: the personal Git broker, the
+GitHub tools and every new Git credential mint check the session's current
+repositories each time, including for a running turn, a child or a goal
+continuation. A token already written into a sandbox is not recalled: a
+shared GitHub App token stays valid until it expires (at most an hour). When
+Opengeni's own GitHub App minted a token for that repository alone, the next
+managed-sandbox turn best-effort revokes it; a token supplied by a host
+credential callback is never revoked. A sandbox shared with another session
+that still attaches the repository keeps its folder and credentials.
+
+Each session keeps a record of the removal (`session.removedRepositories`)
+until a person attaches the repository again with a message. Until then an
+agent cannot attach it again (to the chat or to a child it creates), turns
+queued earlier leave it out, and child sessions created later inherit the
+record. An agent acting through `admin_action_call` acts with the person's
+own authority and counts as that person. The next turn in a managed sandbox
+removes the repository folder and credential binding before the agent starts
+and then sets the record's `sandboxCleanupPending` to false; files on a
+Connected Machine are left alone. Check `session.git.read` status first if
+the folder may hold uncommitted or unpushed work.
 
 ### Agent instructions and per-message application context
 
@@ -956,14 +1016,15 @@ from the clone transport URI.
 
 A repository resource may carry `optional: true` to make its materialization
 best effort: when its clone fails (for example the repository is empty, the
-ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
-mount path in `skippedOptionalRepositories` on the `repository-clone`
-`sandbox.operation.completed` event, and the session continues without it.
-Without the flag a failed clone fails sandbox setup, as before. Opengeni sets
-it only on repositories it attaches on a person's behalf (a Slack task's
-recently used repositories); it grants no access and changes no credential
-routing. An optional clone is bounded to 60 seconds (90 seconds for all
-optional clones of one setup command) when the sandbox has a `timeout` binary,
+ref no longer exists, or an anonymous remote is unreachable), the clone hook
+logs a warning, reports the mount path in `skippedOptionalRepositories` on the
+`repository-clone` `sandbox.operation.completed` event, and the session
+continues without it. Without the flag a failed clone fails sandbox setup, as
+before. Opengeni sets it only on repositories it attaches on a person's behalf
+(a Slack task's repositories from the person's new-chat form); it grants no
+access and changes no credential routing. An optional clone is bounded to 60
+seconds (90 seconds for all optional clones of one setup command) when the
+sandbox has a `timeout` binary,
 so a hung fetch is skipped the same way. Before each turn's strict GitHub App
 allowlist recheck and installation-token mint, the worker also drops, for that
 turn only, an optional GitHub App repository that the workspace allowlist no
@@ -973,6 +1034,23 @@ them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
 named `optional-repository-access`. This only removes repositories from the
 turn. A repository without the flag keeps the strict checks and still fails
 the turn when its access is gone.
+
+The clone hook runs again on every turn and never deletes a repository folder
+that may hold work. A folder that another user owns (Git reports "dubious
+ownership", for example after `chown -R` on the chat's workspace machine) is
+added to that machine's global `safe.directory` and kept as it is. A folder that
+is not a readable work tree (a corrupt `.git`, or an interrupted clone), or that
+was cloned for a different `expectedCommitSha` than the repository now has, is
+renamed to the sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>`
+(with a numeric suffix if that name exists) and a fresh clone takes its place. A
+pinned clone records its commit as `opengeni.materializedCommit` in the
+repository's Git config, so the agent's own commits and branches stay in place
+while the pin is unchanged. Folders cloned before that record count while `HEAD`
+is the pin or built on it. The model is told where the moved copy is, and the
+`repository-clone` `sandbox.operation.completed` event
+lists each move in `recoveredRepositories` as `{ path, movedTo }`
+(workspace-relative). Only an empty folder, Opengeni's own temporary clone, or an
+untouched empty-remote stub is removed.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -1245,9 +1323,11 @@ fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
 `dispatcher`; it is not a bypass for destination policy.
 
 Private integration targets are denied by default. A self-hosted operator may
-explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
-trusted internal MCP/OAuth endpoints; local/test already has the narrow
-loopback escape needed by fixtures. Keep credential resolution outside the
+set `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS` to exact trusted
+hosts, optionally restricted by port; see [private destinations](workspace-integrations.md#trusted-private-network-destinations).
+The older `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` opens all
+private targets and is not needed for this list. Local/test retains its existing
+private-network escape. Keep credential resolution outside the
 pinned final transport so headers are attached only to the exact request URL
 that the broker audience-checks.
 

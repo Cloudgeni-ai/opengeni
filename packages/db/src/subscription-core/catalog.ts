@@ -2,10 +2,6 @@
  * Provider readiness for catalog, default-model and admission reads on the
  * shared subscription core, for any provider.
  *
- * Callers decide by the provider's cutover disposition first: a disabled
- * row reports the provider as not ready (fail closed), and an enabled row
- * reads only what is listed here.
- *
  * Connections that count, for one workspace and one acting subject:
  *
  * - active, allocatable shared connections that reach the workspace;
@@ -19,22 +15,22 @@
  *
  * A connection's model policy is what placement intersects: the connection
  * allowlist and exclusions. Nothing here returns credential material.
+ *
+ * Every reader that decides whether a model is available here (catalog
+ * readiness, admission, placement funding) counts exactly these
+ * connections. Who manages a connection never decides which models exist
+ * (docs/design/subscription-model-ids-without-pools.md).
  */
-import { providerSwitchesFor } from "@opengeni/subscriptions";
+import { providerSwitchesFor, withSubscriptionCoreModelIdForms } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
-import { rawRows, rlsContextForWorkspace, withRlsContext, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
 import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
 import {
   decodeSubscriptionQuota,
   listSubscriptionConnectionsForPlacement,
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
 } from "../subscription-core-repository";
-import {
-  listSubscriptionCorePersonalConnectionRowsInTransaction,
-  readSubscriptionCoreCutoverDisposition,
-  type SubscriptionCoreCutoverDisposition,
-} from "./administration";
+import { listSubscriptionCorePersonalConnectionRowsInTransaction } from "./administration";
 import {
   subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
@@ -50,24 +46,26 @@ export type SubscriptionCoreServingConnection = {
   /** Models the connection excludes. */
   excludedModelIds: string[];
   /**
-   * The legacy model-prefix pool the connection serves in this workspace:
-   * `workspace` for the workspace's own connection, else `organization`.
-   * Empty for a personal connection, which belongs to no shared pool.
-   */
-  pools: Array<"workspace" | "organization">;
-  /**
    * Product models with a live per-model cooldown on this connection (a
    * proven plan refusal). Read for personal connections, whose live model
    * list cannot be read outside an exact accepted turn.
    */
   cooledDownModelIds: string[];
-  /** Shared catalog proven fresh for the connection's current credential generation. */
+  /**
+   * The latest shared catalog observed under the connection's current
+   * credential generation. It may have expired: only `expiresAt > now`
+   * proves it fresh.
+   */
   modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
 type ModelPolicy = Pick<SubscriptionCoreServingConnection, "allowedModelIds" | "excludedModelIds">;
 
-/** Placement's static model admission for one connection (allowlists and exclusions). */
+/**
+ * Placement's static model admission for one connection (allowlists and
+ * exclusions). Lists are read in every id form of their models
+ * (`withSubscriptionCoreModelIdForms`), so any form of a listed model matches.
+ */
 export function subscriptionCoreConnectionAllowsModel(
   connection: ModelPolicy,
   modelId: string,
@@ -89,28 +87,6 @@ export function subscriptionCoreConnectionAllowlist(connection: ModelPolicy): st
 }
 
 /**
- * The provider's cutover disposition for a workspace whose organization the
- * caller does not hold. One extra workspace-to-organization lookup.
- */
-export async function readSubscriptionCoreCutoverDispositionForWorkspace(
-  db: Database,
-  provider: SubscriptionCoreProvider,
-  workspaceId: string,
-  accountId?: string | null,
-): Promise<{ accountId: string; disposition: SubscriptionCoreCutoverDisposition }> {
-  const organizationId = accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
-  return {
-    accountId: organizationId,
-    disposition: await readSubscriptionCoreCutoverDisposition(
-      db,
-      provider,
-      organizationId,
-      workspaceId,
-    ),
-  };
-}
-
-/**
  * Live per-model cooldowns of one connection, sorted by model id. A cooldown
  * ends at its stored time as a Date holds it (whole milliseconds).
  */
@@ -123,8 +99,8 @@ function liveModelCooldowns(quota: ReturnType<typeof decodeSubscriptionQuota>, n
 
 /**
  * The core connections of this provider that can serve new work of
- * `subjectId` in this workspace (see the module comment). Empty without an
- * enabled cutover. A null or non-human subject sees shared capacity only.
+ * `subjectId` in this workspace (see the module comment). A null or
+ * non-human subject sees shared capacity only.
  */
 export async function listSubscriptionCoreServingConnections(
   db: Database,
@@ -143,11 +119,6 @@ export async function listSubscriptionCoreServingConnections(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const cutover = await readSubscriptionProviderCutoverState(tx, {
-        accountId: input.accountId,
-        provider: providerId,
-      });
-      if (cutover !== "enabled") return [];
       const effective = await readSubscriptionEffectiveSettings(
         tx,
         input.accountId,
@@ -199,26 +170,27 @@ export async function listSubscriptionCoreServingConnections(
                     sql`, `,
                   )})`,
             );
-      const excludedById = new Map(exclusions.map((row) => [row.id, row.excluded_models ?? []]));
+      const excludedById = new Map(
+        exclusions.map((row) => [
+          row.id,
+          withSubscriptionCoreModelIdForms(provider.adapter, row.excluded_models ?? []),
+        ]),
+      );
       const servingShared = shared.map((candidate) => ({
         connectionId: candidate.id,
         ownership: "shared" as const,
         planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
         allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
         excludedModelIds: excludedById.get(candidate.id) ?? [],
-        pools: [
-          candidate.ownership.kind === "shared" &&
-          candidate.ownership.managedByWorkspaceId === input.workspaceId
-            ? ("workspace" as const)
-            : ("organization" as const),
-        ],
         cooledDownModelIds: [],
+        // The latest list under the current credential generation, fresh or
+        // expired; readers compare expiresAt themselves.
         modelCatalog:
-          candidate.observedModelSlugs != null &&
+          (candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs) != null &&
           candidate.modelCatalogObservedAt != null &&
           candidate.modelCatalogExpiresAt != null
             ? {
-                slugs: [...candidate.observedModelSlugs],
+                slugs: [...(candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs)!],
                 observedAt: candidate.modelCatalogObservedAt,
                 expiresAt: candidate.modelCatalogExpiresAt,
               }
@@ -245,9 +217,11 @@ export async function listSubscriptionCoreServingConnections(
             connectionId: row.id,
             ownership: "personal" as const,
             planType: row.plan_type,
-            allowedModelIds: row.allowed_model_ids ?? null,
+            allowedModelIds:
+              row.allowed_model_ids == null
+                ? null
+                : withSubscriptionCoreModelIdForms(provider.adapter, row.allowed_model_ids),
             excludedModelIds: [],
-            pools: [],
             cooledDownModelIds: liveModelCooldowns(decodeSubscriptionQuota(row), now),
           })),
       ];
@@ -257,7 +231,7 @@ export async function listSubscriptionCoreServingConnections(
 
 /**
  * The provider's readiness on the core: at least one connection can serve
- * new work of this subject here. False without an enabled cutover.
+ * new work of this subject here.
  */
 export async function subscriptionCoreWorkspaceReady(
   db: Database,

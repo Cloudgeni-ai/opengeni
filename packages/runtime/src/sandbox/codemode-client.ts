@@ -3,7 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
-import { sandboxCommandExitCode } from "./command-result";
+import { sandboxCommandExitCode, sandboxCommandOutput } from "./command-result";
+import { SandboxLifecycleCommandExitError } from "./lifecycle-command-error";
+import { managedShellToolsPathEnvironment, type ManagedShellToolsDownload } from "./shell-tools";
 
 /** Data shipped with the worker, never fetched from a package registry at turn time. */
 export type ManagedCodemodeClient = {
@@ -26,7 +28,11 @@ export function managedCodemodeClientBytes(client: ManagedCodemodeClient): strin
  * box installs the client in one provider command instead of staging a large
  * file through several editor round trips.
  */
-export type ManagedCodemodeClientDownload = { url: string };
+export type ManagedCodemodeClientDownload = {
+  url: string;
+  /** The release's rg and jq bundles, delivered beside the client. */
+  shellTools?: ManagedShellToolsDownload;
+};
 
 export function managedCodemodeClientDirectory(
   client: ManagedCodemodeClient,
@@ -141,7 +147,10 @@ if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).dige
   // installs from a fetched file and from an editor-staged one.
   const install = `
 const fs = require('node:fs'), crypto = require('node:crypto');
-const raw = fs.readFileSync(process.argv[1], 'utf8').trim();
+const transferred = fs.readFileSync(process.argv[1]);
+const raw = (transferred[0] === 0x1f && transferred[1] === 0x8b
+  ? require('node:zlib').gunzipSync(transferred, {maxOutputLength: ${Buffer.byteLength(managedCodemodeClientBytes(client))}})
+  : transferred).toString('utf8').trim();
 if (crypto.createHash('sha256').update(raw).digest('hex') !== ${JSON.stringify(digest)}) throw Error('Codemode client transfer integrity failure');
 const data = JSON.parse(raw), root = ${JSON.stringify(directory)};
 fs.mkdirSync(root, {recursive: true});
@@ -194,9 +203,18 @@ for (const name of ['package.json', 'ogtool', 'client.mjs']) {
     const result = await run(
       `node -e ${quote(install)} ${quote(stage)} && node -e ${quote(verify)}`,
     );
-    if (sandboxCommandExitCode(result) !== 0) {
-      throw new Error(
-        "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release",
+    const exitCode = sandboxCommandExitCode(result);
+    if (exitCode !== 0) {
+      // The command names only the staging file and digest. Its bounded
+      // output tail is kept, so setup can tell a full or blocked /workspace
+      // (which the model can fix) from other failures.
+      const message =
+        "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release";
+      if (exitCode === null) throw new Error(message);
+      throw new SandboxLifecycleCommandExitError(
+        message,
+        exitCode,
+        sandboxCommandOutput(result).slice(-1_000),
       );
     }
   } catch (error) {
@@ -242,6 +260,8 @@ export function managedCodemodeClientEnvironment(directory: string): string[] {
     'if [ -z "${OPENGENI_CODEMODE_NATIVE_CLIENT:-}" ]; then',
     `  export PATH=${quote(directory)}:"$PATH"`,
     `  export OPENGENI_CODEMODE_CLIENT_MODULE=${quote(`${directory}/client.mjs`)}`,
+    // The release's rg and jq go last, so the box's own copies win.
+    `  ${managedShellToolsPathEnvironment()}`,
     "else",
     "  unset OPENGENI_CODEMODE_CLIENT_MODULE",
     "fi",

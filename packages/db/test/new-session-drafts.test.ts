@@ -29,16 +29,8 @@ import {
   setWorkspaceDefaultRig,
   withWorkspaceSubjectRls,
 } from "../src/index";
-import { parseBatchedBackfillMigration } from "../src/migrate";
-import * as schema from "../src/schema";
 
-const projectProvenanceBackfill = parseBatchedBackfillMigration(
-  "0411_new_session_draft_project_provenance_backfill.sql",
-  await Bun.file(
-    new URL("../drizzle/0411_new_session_draft_project_provenance_backfill.sql", import.meta.url),
-  ).text(),
-);
-if (!projectProvenanceBackfill) throw new Error("project provenance backfill is not governed");
+import * as schema from "../src/schema";
 
 // Exact pre-0404 table shape. Using a separate Drizzle table object proves an
 // old binary neither selects nor writes the additive provenance columns.
@@ -182,52 +174,6 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
-  test("0411 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
-    const context = await fixture();
-    const projectId = crypto.randomUUID();
-    const compute = {
-      sandboxBackend: "selfhosted",
-      targetSandboxId: crypto.randomUUID(),
-      workingDir: "/workspace/legacy-project",
-    };
-    const saved = await saveDraft(context, 0);
-
-    await shared.admin`alter table new_session_drafts disable trigger new_session_drafts_project_provenance_v1_fence`;
-    try {
-      await shared.admin`
-        update new_session_drafts
-        set
-          session_options = ${shared.admin.json({
-            ...compute,
-            toolsProvided: false,
-            selectionHistory: { projects: [] },
-            selectedProjectChannelId: projectId,
-          })},
-          selected_project_channel_id = null,
-          selected_project_compute_snapshot = null
-        where id = ${saved.id}`;
-    } finally {
-      await shared.admin`alter table new_session_drafts enable trigger new_session_drafts_project_provenance_v1_fence`;
-    }
-
-    await shared.admin.begin(async (tx) => {
-      await tx.unsafe(projectProvenanceBackfill.statement);
-    });
-
-    const migrated = await readDraft(context.grant.workspaceId!, context.subjectId);
-    expect(migrated).toMatchObject({
-      selectedProjectChannelId: projectId,
-      selectedProjectComputeSnapshot: compute,
-      sessionOptions: {
-        ...compute,
-        toolsProvided: false,
-        selectionHistory: { projects: [] },
-      },
-    });
-    expect(Object.hasOwn(migrated!.sessionOptions, "selectedProjectChannelId")).toBe(false);
-    expect(newSessionDraftSelectedProjectChannelId(migrated!)).toBe(projectId);
-  });
-
   test("stores legacy, Default, and named-project provenance distinctly", async () => {
     const context = await fixture();
     const legacy = await saveDraft(context, 0);
@@ -667,46 +613,82 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect((rejected[0]!.reason as NewSessionDraftConflictError).currentRevision).toBe(1);
   });
 
-  test("rejects same-revision create content that is not the exact saved draft", async () => {
-    const context = await fixture();
-    const saved = await saveDraft(context, 0, {
-      text: "exact outside composer",
-      model: "scripted-model",
-      reasoningEffort: "high",
-      latencyMode: "priority",
-    });
-
-    await expect(
+  test("clears the draft a Send came from, and keeps a newer one from another device", async () => {
+    const seed = (
+      context: Awaited<ReturnType<typeof fixture>>,
+      expectedRevision: number,
+      sentText: string,
+    ) =>
       withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
         db.transaction((tx) =>
           seedNewSessionDraftInTransaction(tx, {
             workspaceId: context.grant.workspaceId!,
             subjectId: context.subjectId,
-            expectedRevision: saved.revision,
+            expectedRevision,
             expectedSnapshot: {
-              text: saved.text,
+              text: sentText,
               resources: [],
               tools: [],
               toolsProvided: false,
-              model: "different-model",
+              model: "scripted-model",
               reasoningEffort: "high",
               latencyMode: "priority",
               options: {},
             },
           }),
         ),
-      ),
-    ).rejects.toMatchObject({
-      name: "NewSessionDraftConflictError",
-      currentRevision: saved.revision,
-    });
-    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
-      revision: saved.revision,
-      text: "exact outside composer",
+      );
+    const policy = {
       model: "scripted-model",
       reasoningEffort: "high",
       latencyMode: "priority",
+    } as const;
+
+    // At the revision the Send came from, typing after that save was sent too.
+    const atBasis = await fixture();
+    const saved = await saveDraft(atBasis, 0, { text: "draft before", ...policy });
+    await expect(seed(atBasis, saved.revision, "draft before, then more")).resolves.toBe(true);
+    expect(await readDraft(atBasis.grant.workspaceId!, atBasis.subjectId)).toMatchObject({
+      revision: saved.revision + 1,
+      text: "",
     });
+
+    // Moved on, but it holds exactly what was sent.
+    const sameContent = await fixture();
+    const sent = await saveDraft(sameContent, 0, { text: "the message", ...policy });
+    await expect(seed(sameContent, sent.revision - 1, "the message")).resolves.toBe(true);
+    expect((await readDraft(sameContent.grant.workspaceId!, sameContent.subjectId))?.text).toBe("");
+
+    // Another device saved something newer: it stays as the draft.
+    const newer = await fixture();
+    const mine = await saveDraft(newer, 0, { text: "mine", ...policy });
+    const theirs = await saveDraft(newer, mine.revision, { text: "theirs", ...policy });
+    await expect(seed(newer, mine.revision, "mine")).resolves.toBe(false);
+    expect(await readDraft(newer.grant.workspaceId!, newer.subjectId)).toMatchObject({
+      revision: theirs.revision,
+      text: "theirs",
+    });
+  });
+
+  test("seeding preserves default, exclusion-only, and deliberately pinned connector policies", async () => {
+    for (const policy of [
+      { tools: [], toolsProvided: false, options: {} },
+      { tools: [], toolsProvided: true, options: { excludedMcpServerIds: [] } },
+      { tools: [], toolsProvided: true, options: { excludedMcpServerIds: ["slack"] } },
+      { tools: [], toolsProvided: false, options: { excludedMcpServerIds: ["slack"] } },
+      { tools: [], toolsProvided: true, options: {} },
+      { tools: [{ kind: "mcp" as const, id: "docs" }], toolsProvided: true, options: {} },
+    ]) {
+      const context = await fixture();
+      const saved = await saveDraft(context, 0, policy);
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, saved.revision);
+      const seeded = (await readDraft(context.grant.workspaceId!, context.subjectId))!;
+      expect(seeded.text).toBe("");
+      expect(seeded.tools).toEqual(policy.tools);
+      expect(newSessionDraftToolsProvided(seeded)).toBe(policy.toolsProvided);
+      expect(publicNewSessionDraftOptions(seeded)).toEqual(policy.options);
+    }
   });
 
   test("turns only an exact accepted revision into a safe seed after durable initialization", async () => {
@@ -714,7 +696,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
     const workingDir = "/workspace/opengeni";
-    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(exact, 0, {
       text: "private prompt",
       selectedProjectChannelId: channelId,
@@ -742,8 +723,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         sandboxBackend: "selfhosted",
         targetSandboxId,
         workingDir,
-        variableSetIds,
-        variableSetId: variableSetIds[1],
         rigId: crypto.randomUUID(),
         goal: { text: "do not retain", successCriteria: "never" },
         firstPartyMcpPermissions: ["sessions:create"],
@@ -857,9 +836,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         const workspaceDefault = await rig("workspace default");
         await setWorkspaceDefaultRig(client.db, workspaceId, workspaceDefault.id);
       }
-      const variableSetIds = [crypto.randomUUID()];
       await saveDraft(context, 0, {
-        options: { rigId: chosen.id, variableSetIds, variableSetId: variableSetIds[0] },
+        options: { rigId: chosen.id },
       });
       const session = await createUninitializedSession(context);
       await initialize(context, session.id, 1);
@@ -872,7 +850,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     // from old drafts are never carried into the seed.
     const replacedDefault = await seedWithRigChoice(true);
     expect(replacedDefault.options).not.toHaveProperty("rigId");
-    expect(replacedDefault.options).not.toHaveProperty("variableSetIds");
 
     // Without a workspace default nothing was replaced, so the choice is
     // remembered like any other selection.
@@ -1020,7 +997,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const projectB = crypto.randomUUID();
     const sandboxA = crypto.randomUUID();
     const sandboxB = crypto.randomUUID();
-    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(context, 0, {
       text: "Project A draft",
       selectedProjectChannelId: projectA,
@@ -1041,8 +1017,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       sandboxBackend: "selfhosted",
       targetSandboxId: sandboxB,
       workingDir: "/workspace/project-b",
-      variableSetIds,
-      variableSetId: variableSetIds[1],
       rigId: crypto.randomUUID(),
     };
     const projectBDraft = await saveDraft(context, 1, {

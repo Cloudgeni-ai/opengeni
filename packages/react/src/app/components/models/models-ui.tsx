@@ -13,6 +13,7 @@ import {
 import { Field, TextInput } from "../../../ui/field";
 import { FormDialog } from "../../../ui/form-dialog";
 import { FlushFormPage } from "../../../ui/flush-form-page";
+import { cn } from "../../../lib/cn";
 import { userErrorText } from "../../../ui/api-error";
 import type { ModelsView } from "../../lib/models-route";
 import { returnToSearch, type ReturnTo } from "../../lib/return-to";
@@ -140,7 +141,14 @@ export function accountReachLabel(
 ): string {
   if (reach.ownerWorkspaceId !== null) {
     const owner = workspaceName(reach.ownerWorkspaceId);
-    return owner ? `Belongs to ${owner}` : "Belongs to a workspace";
+    const belongs = owner ? `Belongs to ${owner}` : "Belongs to a workspace";
+    // It can also serve chosen shared workspaces, staying its owner's.
+    const others = reach.workspaceIds.filter((id) => id !== reach.ownerWorkspaceId);
+    if (others.length === 0) return belongs;
+    const other = others.length === 1 ? workspaceName(others[0]!) : undefined;
+    return other
+      ? `${belongs}, also ${other}`
+      : `${belongs}, also ${others.length} ${others.length === 1 ? "workspace" : "workspaces"}`;
   }
   if (reach.people !== null)
     return reach.people === 0
@@ -158,15 +166,31 @@ export function accountReachLabel(
   return `${names.length} workspaces${personal.length ? " and Personal" : ""}`;
 }
 
+/**
+ * A connect step's back link and title sit a little lower than a flush form's,
+ * so they don't press against the top of the settings column.
+ */
+export const MODELS_CONNECT_STEP_CLASS = "[&>form>header]:pt-4";
+
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
 export function ModelsFormPage({
   backLabel,
+  connectStep = false,
+  className,
   ...props
 }: Omit<ComponentPropsWithoutRef<typeof FlushFormPage>, "backLabel"> & {
   backLabel?: string | undefined;
+  /** A connect (or reconnect) step for an account: more room above the back link. */
+  connectStep?: boolean | undefined;
 }) {
   const listLabel = useModelsListLabel();
-  return <FlushFormPage backLabel={backLabel ?? listLabel} {...props} />;
+  return (
+    <FlushFormPage
+      backLabel={backLabel ?? listLabel}
+      className={cn(connectStep && MODELS_CONNECT_STEP_CLASS, className)}
+      {...props}
+    />
+  );
 }
 
 /**

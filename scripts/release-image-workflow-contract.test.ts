@@ -1,9 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { excludedWorkspaceDirectories } from "./publishable-workspaces";
 
@@ -167,9 +168,15 @@ describe("release image workflow contract", () => {
         installName: "Install source interaction dependencies",
       },
     ];
+    const keyed = (step: WorkflowStep | undefined) =>
+      JSON.stringify(step ?? {}).includes("OPENGENI_AGENT_MINISIGN_KEY");
     const validConsumer = (consumer: (typeof consumers)[number]) => {
       const steps = consumer.steps;
-      const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh");
+      const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh build");
+      const tools = steps.findIndex(
+        (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+      );
+      const sign = steps.findIndex((step) => step.run === "scripts/bake-agent.sh sign");
       const install = steps.findIndex((step) => step.name === consumer.installName);
       const setup = steps.findLastIndex(
         (step, index) => index < bake && step.uses?.startsWith("oven-sh/setup-bun@"),
@@ -188,7 +195,18 @@ describe("release image workflow contract", () => {
         [undefined, "."].includes(steps[install]?.["working-directory"]) &&
         steps[install]?.if === steps[bake]?.if &&
         steps[setup]?.if === steps[bake]?.if &&
-        steps[bake]?.env?.OPENGENI_RUNTIME_BUILD_ID === consumer.buildId
+        steps[bake]?.env?.OPENGENI_RUNTIME_BUILD_ID === consumer.buildId &&
+        // Pinned tools install and the build runs before, and without, the
+        // signing key; the signing step alone receives it.
+        tools > install &&
+        bake > tools &&
+        sign > bake &&
+        steps[tools]?.if === steps[bake]?.if &&
+        steps[sign]?.if === steps[bake]?.if &&
+        steps[sign]?.env?.OPENGENI_AGENT_MINISIGN_KEY ===
+          "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}" &&
+        Object.keys(steps[sign]?.env ?? {}).length === 1 &&
+        steps.filter(keyed).length === 1
       );
     };
     for (const consumer of consumers) {
@@ -207,8 +225,29 @@ describe("release image workflow contract", () => {
           steps.push(...steps.splice(install, 1));
         },
         (steps: WorkflowStep[]) => {
-          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh")!;
+          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh build")!;
           delete bake.env!.OPENGENI_RUNTIME_BUILD_ID;
+        },
+        (steps: WorkflowStep[]) => {
+          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh build")!;
+          bake.env!.OPENGENI_AGENT_MINISIGN_KEY = "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}";
+        },
+        (steps: WorkflowStep[]) => {
+          const tools = steps.find(
+            (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+          )!;
+          tools.env = { OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}" };
+        },
+        (steps: WorkflowStep[]) => {
+          const sign = steps.findIndex((step) => step.run === "scripts/bake-agent.sh sign");
+          const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh build");
+          steps.splice(bake, 0, ...steps.splice(sign, 1));
+        },
+        (steps: WorkflowStep[]) => {
+          const tools = steps.findIndex(
+            (step) => step.run === "scripts/install-agent-build-tools.sh zigbuild rsign",
+          );
+          steps.splice(tools, 1);
         },
       ]) {
         const invalid = structuredClone(consumer);
@@ -218,7 +257,7 @@ describe("release image workflow contract", () => {
     }
     const wrongControllerIdentity = structuredClone(consumers[1]!);
     wrongControllerIdentity.steps.find(
-      (step) => step.run === "scripts/bake-agent.sh",
+      (step) => step.run === "scripts/bake-agent.sh build",
     )!.env!.OPENGENI_RUNTIME_BUILD_ID = "${{ github.sha }}";
     expect(validConsumer(wrongControllerIdentity)).toBe(false);
   });
@@ -733,14 +772,15 @@ describe("release image workflow contract", () => {
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
     expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    // The seven BOM roles plus the amd64 Modal desktop box the chart pins.
     expect(
       candidate.match(/org\.opencontainers\.image\.revision=\$\{\{ inputs\.source_sha \}\}/g),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(
       candidate.match(
         /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(candidate).toContain(
       "candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}",
     );
@@ -908,6 +948,54 @@ describe("release image workflow contract", () => {
     );
   });
 
+  test("candidate chart pins the Modal desktop box it built from the same source", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const sourceRevision = "${{ inputs.source_sha }}";
+    const desktopBuilds = steps.filter(
+      (step) =>
+        step.uses?.startsWith("docker/build-push-action@") &&
+        step.with?.file === "docker/desktop.Dockerfile",
+    );
+    expect(desktopBuilds).toHaveLength(1);
+    const build = desktopBuilds[0]!;
+    expect(build.id).toBe("build-desktop");
+    expect(build.with?.context).toBe(".");
+    expect(build.with?.platforms).toBe("linux/amd64");
+    expect(build.with?.push).toBe(true);
+    expect(build.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${sourceRevision}`);
+    expect(build.with?.tags).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}",
+    );
+    expect(build.with?.["cache-from"]).toBeUndefined();
+
+    const occupied =
+      steps[stepIndex(parsed, "candidate", "Refuse occupied run-scoped candidate tags")];
+    expect(occupied.run).toContain("artifact-outbox-dispatcher desktop; do");
+    const resolveDigest = steps[stepIndex(parsed, "candidate", "Resolve desktop candidate digest")];
+    expect(resolveDigest.env?.BUILT_DIGEST).toBe("${{ steps.build-desktop.outputs.digest }}");
+    const anonymous =
+      steps[stepIndex(parsed, "candidate", "Verify candidate images support anonymous pull")];
+    expect(anonymous.env?.DESKTOP_DIGEST).toBe("${{ steps.desktop.outputs.digest }}");
+    expect(anonymous.run).toContain("artifact-outbox-dispatcher desktop; do");
+
+    const chart =
+      steps[
+        stepIndex(parsed, "candidate", "Package the deterministic immutable Helm chart candidate")
+      ];
+    expect(steps.indexOf(anonymous)).toBeLessThan(steps.indexOf(chart));
+    expect(chart.env?.DESKTOP_IMAGE_REF).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop@${{ steps.desktop.outputs.digest }}",
+    );
+    expect(chart.run?.match(/--desktop-image-ref "\$DESKTOP_IMAGE_REF"/g)).toHaveLength(2);
+    expect(chart.run).toContain(
+      'helm show values "$chart_path" > .release/chart-proof/values.yaml',
+    );
+    expect(chart.run).toContain(
+      'grep -qxF "  imageRef: \\"${DESKTOP_IMAGE_REF}\\"" .release/chart-proof/values.yaml || {',
+    );
+  });
+
   test("main CI publishes exact-SHA canary images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
     const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
@@ -1006,13 +1094,25 @@ describe("release image workflow contract", () => {
       });
     }
     const apiSteps = parsed.jobs["api-image"]?.steps ?? [];
-    const bake = apiSteps.find((step) => step.name === "Bake and sign exact-SHA canary agent");
-    expect(bake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
-    expect(bake?.env).toEqual({
+    const mainPush = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+    const tools = apiSteps.find(
+      (step) => step.name === "Install pinned canary agent build and signing tools",
+    );
+    expect(tools?.if).toBe(mainPush);
+    expect(tools?.env).toBeUndefined();
+    expect(tools?.run).toBe("scripts/install-agent-build-tools.sh zigbuild rsign");
+    const bake = apiSteps.find((step) => step.name === "Bake exact-SHA canary agent");
+    expect(bake?.if).toBe(mainPush);
+    expect(bake?.env).toEqual({ OPENGENI_RUNTIME_BUILD_ID: "${{ github.sha }}" });
+    expect(bake?.run).toBe("scripts/bake-agent.sh build");
+    const sign = apiSteps.find((step) => step.name === "Sign exact-SHA canary agent");
+    expect(sign?.if).toBe(mainPush);
+    expect(sign?.env).toEqual({
       OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}",
-      OPENGENI_RUNTIME_BUILD_ID: "${{ github.sha }}",
     });
-    expect(bake?.run).toBe("scripts/bake-agent.sh");
+    expect(sign?.run).toBe("scripts/bake-agent.sh sign");
+    expect(apiSteps.indexOf(tools!)).toBeLessThan(apiSteps.indexOf(bake!));
+    expect(apiSteps.indexOf(bake!)).toBeLessThan(apiSteps.indexOf(sign!));
     const requireBake = apiSteps.find(
       (step) => step.name === "Require complete exact-SHA canary agent bake",
     );
@@ -1021,9 +1121,7 @@ describe("release image workflow contract", () => {
     );
     expect(requireBake?.run).toContain("x86_64-unknown-linux-musl aarch64-unknown-linux-musl");
     expect(requireBake?.run).toContain('test -s "$asset.minisig"');
-    expect(apiSteps.indexOf(bake!)).toBeLessThan(
-      apiSteps.findIndex((step) => step.name === "Build API image"),
-    );
+    expect(apiSteps.indexOf(sign!)).toBeLessThan(apiSteps.indexOf(requireBake!));
     expect(apiSteps.indexOf(requireBake!)).toBeLessThan(
       apiSteps.findIndex((step) => step.name === "Build API image"),
     );
@@ -1379,11 +1477,15 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("expected_packages:");
     expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(publish).toContain("checks: read");
-    expect(publish).toContain("filter=latest&per_page=100");
+    expect(publish).toContain('-f check_name="$name" -f filter=latest');
+    expect(publish).not.toContain("check-runs?filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
     expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(publish).not.toContain('test "$(git rev-parse origin/production)" = "$SOURCE_SHA"');
     expect(publish).toContain("else max_by(.id)");
+    expect(publish).toContain(
+      'select(.name == $name and .app.slug == "github-actions" and .conclusion != "skipped")',
+    );
     expect(publish).toContain('.status == "completed" and .conclusion == "success"');
     expect(publish).not.toContain("| length == 1");
     for (const required of [
@@ -1453,6 +1555,143 @@ describe("release image workflow contract", () => {
     expect(publish).toBeDefined();
     expect(publish!.with?.target_commitish).toBe("${{ github.sha }}");
     expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
+  });
+
+  test("every agent version that lands on main is published without a hand-pushed tag", async () => {
+    // Deployments serve and update Connected Machines to their own build's
+    // agent version, so an unpublished version leaves machines behind.
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as {
+      on: { push: { branches?: string[]; paths?: string[]; tags?: string[] } };
+      concurrency: { "cancel-in-progress"?: boolean; queue?: string };
+      jobs: Record<
+        string,
+        { if?: string; outputs?: Record<string, string>; steps?: WorkflowStep[] }
+      >;
+    };
+    expect(parsed.on.push.branches).toEqual(["main"]);
+    expect(parsed.on.push.paths).toEqual(["agent/Cargo.toml"]);
+    expect(parsed.on.push.tags).toEqual(["agent-v*"]);
+    // A later push waits instead of replacing an earlier pending run.
+    expect(parsed.concurrency["cancel-in-progress"]).toBe(false);
+    expect(parsed.concurrency.queue).toBe("max");
+    expect(parsed.jobs.guard!.outputs?.publish).toBe("${{ steps.v.outputs.publish }}");
+    for (const job of ["build", "publish"]) {
+      expect(parsed.jobs[job]!.if).toBe("${{ needs.guard.outputs.publish == 'true' }}");
+    }
+
+    const guardStep = parsed.jobs.guard!.steps!.find(
+      (step) => step.name === "Resolve + verify the version",
+    )!;
+    const guard = guardStep.run!;
+    // Event values reach the script through the environment, never inline.
+    expect(guard).not.toContain("${{");
+    expect(guardStep.env).toEqual({
+      EVENT_NAME: "${{ github.event_name }}",
+      REF_TYPE: "${{ github.ref_type }}",
+      DISPATCH_VERSION: "${{ github.event.inputs.version }}",
+      GH_TOKEN: "${{ github.token }}",
+    });
+    const directory = mkdtempSync(join(tmpdir(), "agent-release-guard-"));
+    try {
+      mkdirSync(join(directory, "agent"));
+      mkdirSync(join(directory, "bin"));
+      writeFileSync(
+        join(directory, "agent", "Cargo.toml"),
+        '[workspace.package]\nversion = "0.1.158"\n',
+      );
+      // The stubs record their arguments and answer like `git ls-remote
+      // --exit-code` and the releases API for the tag they are asked about.
+      writeFileSync(
+        join(directory, "bin", "git"),
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$FIXTURE_CALLS"\nexit "$FIXTURE_LS_REMOTE_STATUS"\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(directory, "bin", "curl"),
+        '#!/usr/bin/env bash\nprintf \'curl %s\\n\' "${@: -1}" >> "$FIXTURE_CALLS"\n[ "$FIXTURE_RELEASE_STATUS" = fail ] && exit 7\nprintf \'%s\' "$FIXTURE_RELEASE_STATUS"\n',
+        { mode: 0o755 },
+      );
+      let runs = 0;
+      const run = (
+        event: "push" | "workflow_dispatch",
+        refType: "branch" | "tag",
+        refName: string,
+        lsRemote: number,
+        release: "200" | "404" | "500" | "fail" = "404",
+      ) => {
+        runs += 1;
+        const output = join(directory, `output-${runs}`);
+        const calls = join(directory, `calls-${runs}`);
+        writeFileSync(output, "");
+        writeFileSync(calls, "");
+        const result = spawnSync("bash", ["-c", guard], {
+          cwd: directory,
+          encoding: "utf8",
+          env: {
+            PATH: `${join(directory, "bin")}:${process.env.PATH}`,
+            GITHUB_OUTPUT: output,
+            GITHUB_REF_NAME: refName,
+            GITHUB_API_URL: "https://api.github.test",
+            GITHUB_REPOSITORY: "owner/repo",
+            EVENT_NAME: event,
+            REF_TYPE: refType,
+            DISPATCH_VERSION: "0.1.158",
+            GH_TOKEN: "fixture-token",
+            FIXTURE_CALLS: calls,
+            FIXTURE_LS_REMOTE_STATUS: String(lsRemote),
+            FIXTURE_RELEASE_STATUS: release,
+          },
+        });
+        return {
+          status: result.status,
+          stderr: result.stderr,
+          outputs: readFileSync(output, "utf8"),
+          calls: readFileSync(calls, "utf8"),
+        };
+      };
+      const releaseLookup =
+        "curl https://api.github.test/repos/owner/repo/releases/tags/agent-v0.1.158\n";
+      const tagLookup = "ls-remote --exit-code --tags origin refs/tags/agent-v0.1.158\n";
+      // A main push whose version has no release and no tag publishes it.
+      expect(run("push", "branch", "main", 2, "404")).toMatchObject({
+        status: 0,
+        outputs: "version=0.1.158\npublish=true\n",
+        calls: releaseLookup + tagLookup,
+      });
+      // An already released version is left alone.
+      expect(run("push", "branch", "main", 0, "200")).toMatchObject({
+        status: 0,
+        outputs: "version=0.1.158\npublish=false\n",
+        calls: releaseLookup,
+      });
+      // A tag whose own run never released it fails loudly instead of skipping.
+      const orphanTag = run("push", "branch", "main", 0, "404");
+      expect(orphanTag.status).not.toBe(0);
+      expect(orphanTag.outputs).toBe("");
+      expect(orphanTag.stderr).toContain("exists without a release");
+      // Lookups that fail are not mistaken for a missing release.
+      for (const [lsRemote, release] of [
+        [128, "404"],
+        [2, "500"],
+        [2, "fail"],
+      ] as const) {
+        const failed = run("push", "branch", "main", lsRemote, release);
+        expect(failed.status).not.toBe(0);
+        expect(failed.outputs).toBe("");
+      }
+      // Tag pushes and manual dispatch keep their exact-version check.
+      expect(run("push", "tag", "agent-v0.1.158", 2)).toMatchObject({
+        status: 0,
+        outputs: "version=0.1.158\npublish=true\n",
+      });
+      expect(run("push", "tag", "agent-v0.1.159", 2).status).not.toBe(0);
+      expect(run("workflow_dispatch", "branch", "main", 2)).toMatchObject({
+        status: 0,
+        outputs: "version=0.1.158\npublish=true\n",
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("standalone macOS agent signing keeps the same stable identity as the app", async () => {
@@ -1629,7 +1868,12 @@ ${parser}`,
       expect(imagesJob).toContain(identity);
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
-    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    // Every role is published for both architectures from a main push. Batch
+    // and PR builds may build an emulation-heavy role for amd64 only, but only
+    // behind the exact main-push condition that restores both platforms.
+    const bothPlatforms =
+      /platforms: (?:linux\/amd64,linux\/arm64|\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && 'linux\/amd64,linux\/arm64' \|\| 'linux\/amd64' \}\})\n/g;
+    expect(imagesJob.match(bothPlatforms)).toHaveLength(7);
 
     const imageSteps = [
       "api-image",
@@ -1645,7 +1889,7 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@v7.3.0",
+          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1657,37 +1901,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "fd47898c1119624dbafa8e62926cbbfbb950f541e41167765257f9ba01247cd6",
+        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "30caf29d97ddcbc7262219ff597c0febd8d99771e8a5d76c656fc3ba3189f9ba",
+        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "80eb5b15cc4d529a9b3b8cb3582f19465b34a288791f4233d734ebb7f1010e05",
+        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "41973667fdf57ab9af89ba5d7aa497dd74378f559e26de644131f5a18e1ce849",
+        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "d9653c9b324d2bf40c226c54784492d740d6000465f0aeb8571218d226d7f394",
+        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "146554993b13ba0e9cbb9776ffdeb4006c7ba98f81ca05f46d8f3abbf5fa67b1",
+        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "de1ae66fe410cd78f9965fe23e5d80d5506d1132c68cfec7a4c5c93e103fcd7d",
+        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
       },
     ]);
 

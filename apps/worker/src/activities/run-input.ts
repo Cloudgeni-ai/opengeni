@@ -3,6 +3,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
@@ -28,6 +29,11 @@ import {
 } from "@opengeni/db";
 import {
   createModelImageSizer,
+  HeifDecodeError,
+  heifToJpeg,
+  sniffHeifImage,
+  sniffModelImageType,
+  type HeifImageKind,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -37,6 +43,11 @@ import {
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
+import {
+  projectTurnHistoryForProvider,
+  settleTurnSearchRecords,
+  type TurnSearchRecords,
+} from "./search-record-form";
 
 /** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
  * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
@@ -166,6 +177,12 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   workspaceRecoveryNote?: string;
+  /** The latest save left rebuildable folders out (see `reducedWorkspaceSaveNote`). */
+  workspaceSaveNote?: string;
+  /** The managed sandbox stopped since the model's last output (see `unseenSandboxStopNote`). */
+  sandboxStopNote?: string;
+  /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
+  attendanceNote?: string;
   /**
    * File resources mounted into the sandbox for this turn. The system
    * instructions never list them, so each one must appear in the turn's
@@ -174,6 +191,18 @@ export type TurnInputOptions = {
   mountedFileResources?: readonly ResourceRef[];
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
+  /**
+   * The turn's hosted web-search record form. Settled here against the
+   * history this input sends, then read by the run's model calls. Without it
+   * searches keep the original `assistant` form.
+   */
+  searchRecords?: TurnSearchRecords;
+  /**
+   * A turn not served by Codex never sends Codex's opaque remote compaction
+   * checkpoint. A model switch rebuilds it before the turn; this is the
+   * backstop when that rebuild has not replaced it.
+   */
+  omitRemoteCompactionItems?: boolean;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -260,7 +289,8 @@ export class RetainedAttachmentTransportLimitError extends Error {
 // fails right now waits and retries rather than continuing without them.
 export { RetainedAttachmentUnavailableError };
 
-export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch";
+/** "not_viewable": verified bytes that are not a decodable image (permanent). */
+export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch" | "not_viewable";
 
 export type ModelAttachmentContent = {
   kind: "image" | "file";
@@ -268,6 +298,8 @@ export type ModelAttachmentContent = {
   filename: string;
   contentType: string;
   dataUrl: string;
+  /** Set when the file is a HEIC/HEIF photo shown to the model as a JPEG. */
+  convertedFrom?: HeifImageKind;
 };
 
 export type ModelHistoryAttachmentProjector = (
@@ -310,6 +342,77 @@ function safeErrorType(error: unknown): string {
   return /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : "Error";
 }
 
+// iPhone photos. Browsers that cannot identify the format upload it as an
+// untyped file, so an untyped .heic/.heif file is a candidate too; the bytes
+// decide before anything is decoded.
+const HEIF_CONTENT_TYPES = new Set([
+  "image/heic",
+  "image/heic-sequence",
+  "image/heif",
+  "image/heif-sequence",
+]);
+const UNTYPED_CONTENT_TYPES = new Set(["", "application/octet-stream", "binary/octet-stream"]);
+
+function isHeifAttachmentCandidate(file: FileAsset): boolean {
+  const normalized = file.contentType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  if (HEIF_CONTENT_TYPES.has(normalized)) return true;
+  return UNTYPED_CONTENT_TYPES.has(normalized) && /\.(heic|heif)$/i.test(file.safeFilename);
+}
+
+/** Whether a message shows HEIC/HEIF attachments as images (see its stamp). */
+function convertsHeifAttachments(item: Record<string, unknown>): boolean {
+  const formats = item[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD];
+  return Array.isArray(formats) && formats.includes("heif");
+}
+
+// Process-wide, keyed by the verified sha256 of the original file, so a long
+// conversation decodes each photo once per worker rather than every turn.
+// Decoding is deterministic, so every worker derives the same JPEG. A file
+// the decoder rejects is remembered too, and stays reference-only; any other
+// failure is thrown, so the turn retries like a failed storage read rather than
+// one worker showing the photo and another not.
+type HeifRendition = { dataUrl: string; kind: HeifImageKind } | null;
+const heifRenditions = new Map<string, HeifRendition>();
+let heifRenditionBytes = 0;
+const MAX_HEIF_RENDITION_CACHE_BYTES = 64 * 1024 * 1024;
+
+async function heifRendition(checksum: string, bytes: Uint8Array): Promise<HeifRendition> {
+  if (heifRenditions.has(checksum)) {
+    const cached = heifRenditions.get(checksum)!;
+    // Refresh recency.
+    heifRenditions.delete(checksum);
+    heifRenditions.set(checksum, cached);
+    return cached;
+  }
+  let rendition: HeifRendition = null;
+  const kind = sniffHeifImage(bytes);
+  if (kind) {
+    try {
+      const jpeg = await heifToJpeg(bytes);
+      rendition = { dataUrl: `data:image/jpeg;base64,${jpeg.data.toString("base64")}`, kind };
+    } catch (error) {
+      if (!(error instanceof HeifDecodeError)) throw error;
+      console.error("HEIF attachment does not decode; showing it by reference", {
+        reason: error.message,
+      });
+    }
+  }
+  const size = rendition?.dataUrl.length ?? 0;
+  if (size <= MAX_HEIF_RENDITION_CACHE_BYTES) {
+    while (
+      heifRenditions.size > 0 &&
+      (heifRenditionBytes + size > MAX_HEIF_RENDITION_CACHE_BYTES || heifRenditions.size >= 256)
+    ) {
+      const oldest = heifRenditions.keys().next().value!;
+      heifRenditionBytes -= heifRenditions.get(oldest)?.dataUrl.length ?? 0;
+      heifRenditions.delete(oldest);
+    }
+    heifRenditions.set(checksum, rendition);
+    heifRenditionBytes += size;
+  }
+  return rendition;
+}
+
 function modelAttachmentDescriptor(
   contentType: string,
 ): Pick<ModelAttachmentContent, "kind" | "contentType"> | null {
@@ -331,6 +434,8 @@ export async function modelAttachmentContentForFiles(
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
   options: {
     retainAll?: boolean;
+    /** Files to show as a JPEG when they are HEIC/HEIF photos. */
+    heifFileIds?: ReadonlySet<string>;
     /** Why a selected file produced no content; omitted files are not reported. */
     onReadFailure?: (fileId: string, failure: ModelAttachmentReadFailure) => void;
   } = {},
@@ -339,12 +444,16 @@ export async function modelAttachmentContentForFiles(
     file: FileAsset;
     descriptor: Pick<ModelAttachmentContent, "kind" | "contentType">;
     checksum: string;
+    heif: boolean;
   }> = [];
   let remainingBytes = options.retainAll
     ? Number.POSITIVE_INFINITY
     : MAX_INLINE_MODEL_ATTACHMENT_BYTES;
   for (const file of files) {
-    const descriptor = modelAttachmentDescriptor(file.contentType);
+    const heif = options.heifFileIds?.has(file.id) === true && isHeifAttachmentCandidate(file);
+    const descriptor = heif
+      ? ({ kind: "image", contentType: "image/jpeg" } as const)
+      : modelAttachmentDescriptor(file.contentType);
     const checksum = file.sha256?.trim().toLowerCase() ?? "";
     if (
       file.status !== "ready" ||
@@ -356,7 +465,7 @@ export async function modelAttachmentContentForFiles(
     ) {
       continue;
     }
-    selected.push({ file, descriptor, checksum });
+    selected.push({ file, descriptor, checksum, heif });
     remainingBytes -= file.sizeBytes;
   }
 
@@ -365,7 +474,7 @@ export async function modelAttachmentContentForFiles(
   const worker = async () => {
     while (cursor < selected.length) {
       const index = cursor++;
-      const { file, descriptor, checksum } = selected[index]!;
+      const { file, descriptor, checksum, heif } = selected[index]!;
       try {
         const bytes = await readFileBytes(file);
         if (bytes.byteLength !== file.sizeBytes) {
@@ -382,6 +491,22 @@ export async function modelAttachmentContentForFiles(
             fileId: file.id,
           });
           options.onReadFailure?.(file.id, "integrity_mismatch");
+          continue;
+        }
+        if (heif) {
+          const rendition = await heifRendition(checksum, bytes);
+          if (!rendition) {
+            options.onReadFailure?.(file.id, "not_viewable");
+            continue;
+          }
+          attachments[index] = {
+            kind: "image",
+            fileId: file.id,
+            filename: file.safeFilename,
+            contentType: "image/jpeg",
+            dataUrl: rendition.dataUrl,
+            convertedFrom: rendition.kind,
+          };
           continue;
         }
         attachments[index] = {
@@ -456,6 +581,19 @@ const boundedImageSizers = new Map<number, ReturnType<typeof createModelImageSiz
 
 type BoundedAttachmentImage = { image: string; note: string };
 
+const IMAGE_FORMAT_NAMES: Readonly<Record<string, string>> = {
+  "image/jpeg": "JPEG",
+  "image/png": "PNG",
+  "image/webp": "WebP",
+};
+
+/** What the model is told about an image it sees in another format than the file's. */
+function convertedImageNote(attachment: ModelAttachmentContent): string {
+  return attachment.convertedFrom
+    ? ` Shown to you as a JPEG; the file itself is a ${attachment.convertedFrom}.`
+    : "";
+}
+
 /**
  * The model-facing rendition of one image under the bound its message was
  * stamped with. Smaller images keep their original bytes. The file in the
@@ -465,7 +603,7 @@ async function boundedAttachmentImage(
   attachment: ModelAttachmentContent,
   bound: number,
 ): Promise<BoundedAttachmentImage> {
-  const original = { image: attachment.dataUrl, note: "" };
+  const original = { image: attachment.dataUrl, note: convertedImageNote(attachment) };
   const comma = attachment.dataUrl.indexOf(",");
   if (comma < 0) return original;
   const data = attachment.dataUrl.slice(comma + 1);
@@ -475,13 +613,22 @@ async function boundedAttachmentImage(
     boundedImageSizers.set(bound, sizer);
   }
   try {
+    // A file whose stored type does not match its bytes (a JPEG saved as
+    // image/png) keeps the original projection it always had, so earlier
+    // requests stay byte-identical. The provider transport labels it correctly.
+    if (sniffModelImageType(Buffer.from(data.slice(0, 24), "base64")) !== attachment.contentType)
+      return original;
     const sized = await sizer(data, attachment.contentType);
     if (sized.data === data && sized.mediaType === attachment.contentType) return original;
     return {
       image: `data:${sized.mediaType};base64,${sized.data}`,
-      note:
-        ` Shown to you downscaled to ${sized.width}x${sized.height} from ` +
-        `${sized.originalWidth}x${sized.originalHeight}; the file itself is full resolution.`,
+      note: attachment.convertedFrom
+        ? ` Shown to you as a ${IMAGE_FORMAT_NAMES[sized.mediaType] ?? "JPEG"}, downscaled to ` +
+          `${sized.width}x${sized.height} from ` +
+          `${sized.originalWidth}x${sized.originalHeight}; the file itself is the ` +
+          `full-resolution ${attachment.convertedFrom}.`
+        : ` Shown to you downscaled to ${sized.width}x${sized.height} from ` +
+          `${sized.originalWidth}x${sized.originalHeight}; the file itself is full resolution.`,
     };
   } catch (error) {
     // Decoding is deterministic: an image that cannot be resized here keeps
@@ -540,6 +687,21 @@ export function createModelHistoryAttachmentProjector(
       for (const id of unresolved) resolvedFileIds.add(id);
     }
 
+    // HEIC/HEIF photos are shown as a JPEG only on messages stamped for it.
+    const heifFileIds = new Set<string>();
+    for (const [index, refs] of refsByIndex) {
+      const item = items[index]!;
+      if (item[MODEL_ATTACHMENT_CATALOG_MARKER] === true || !convertsHeifAttachments(item))
+        continue;
+      for (const ref of refs) {
+        const file = fileById.get(ref.fileId);
+        if (file && isHeifAttachmentCandidate(file)) heifFileIds.add(file.id);
+      }
+    }
+    const isModelImage = (file: FileAsset, item?: Record<string, unknown>): boolean =>
+      modelAttachmentDescriptor(file.contentType)?.kind === "image" ||
+      (heifFileIds.has(file.id) && (item === undefined || convertsHeifAttachments(item)));
+
     if (readFileBytes) {
       const admitted = new Map(retainedByteSizes);
       let requestImageBytes = 0;
@@ -552,7 +714,7 @@ export function createModelHistoryAttachmentProjector(
             !policy.supportsImageInput ||
             file.status !== "ready" ||
             file.sizeBytes > MAX_INLINE_MODEL_ATTACHMENT_BYTES ||
-            modelAttachmentDescriptor(file.contentType)?.kind !== "image" ||
+            !isModelImage(file, items[index]!) ||
             !/^[a-f0-9]{64}$/i.test(file.sha256?.trim() ?? "")
           )
             continue;
@@ -576,13 +738,13 @@ export function createModelHistoryAttachmentProjector(
         .map((id) => fileById.get(id))
         .filter((file): file is FileAsset => {
           if (!file || attemptedContentIds.has(file.id)) return false;
-          const descriptor = modelAttachmentDescriptor(file.contentType);
-          return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
+          return isModelImage(file) && policy.supportsImageInput;
         });
       for (const file of readable) attemptedContentIds.add(file.id);
       const readFailures = new Map<string, ModelAttachmentReadFailure>();
       const content = await modelAttachmentContentForFiles(readable, readFileBytes, {
         retainAll: true,
+        heifFileIds,
         onReadFailure: (fileId, failure) => readFailures.set(fileId, failure),
       });
       const loadedIds = new Set(content.map((entry) => entry.fileId));
@@ -591,7 +753,10 @@ export function createModelHistoryAttachmentProjector(
           file.status === "ready" &&
           file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES &&
           /^[a-f0-9]{64}$/i.test(file.sha256 ?? "") &&
-          !loadedIds.has(file.id),
+          !loadedIds.has(file.id) &&
+          // A photo that does not decode stays reference-only; retrying
+          // cannot change verified bytes.
+          readFailures.get(file.id) !== "not_viewable",
       );
       if (missing.length > 0) {
         // Do not let a retry silently proceed with pixels removed.
@@ -614,6 +779,7 @@ export function createModelHistoryAttachmentProjector(
         const attachment = fileById.has(ref.fileId) ? contentById.get(ref.fileId) : undefined;
         const key = `${bound}:${ref.fileId}`;
         if (!attachment || attachment.kind !== "image" || boundedById.has(key)) continue;
+        if (attachment.convertedFrom && !convertsHeifAttachments(item)) continue;
         boundedById.set(key, await boundedAttachmentImage(attachment, bound));
       }
     }
@@ -649,7 +815,12 @@ export function createModelHistoryAttachmentProjector(
         const appShot = currentFile?.appShot
           ? [{ type: "input_text", text: renderAppShotForModel(ref.fileId, currentFile.appShot) }]
           : [];
-        if (!attachment || attachment.kind !== "image") {
+        if (
+          !attachment ||
+          attachment.kind !== "image" ||
+          // A message from before HEIC/HEIF conversion keeps the receipt it sent.
+          (attachment.convertedFrom !== undefined && !convertsHeifAttachments(original))
+        ) {
           return [
             {
               type: "input_text",
@@ -660,8 +831,9 @@ export function createModelHistoryAttachmentProjector(
         }
         const bound = attachmentImageBound(original);
         const bounded = bound === undefined ? undefined : boundedById.get(`${bound}:${ref.fileId}`);
+        const note = bounded?.note ?? convertedImageNote(attachment);
         return [
-          { type: "input_text", text: attachmentReceiptText(ref) + (bounded?.note ?? "") },
+          { type: "input_text", text: attachmentReceiptText(ref) + note },
           { type: "input_image", image: bounded?.image ?? attachment.dataUrl },
           ...appShot,
         ];
@@ -747,6 +919,9 @@ export async function turnInput(
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
     options.workspaceRecoveryNote,
+    options.workspaceSaveNote,
+    options.sandboxStopNote,
+    options.attendanceNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {
@@ -831,6 +1006,44 @@ function joinInternalContext(...parts: Array<string | undefined>): string | unde
   return content.length > 0 ? content.join("\n\n") : undefined;
 }
 
+/** Folders named in the reduced-save note before it summarizes the rest. */
+const REDUCED_SAVE_NOTE_MAX_PATHS = 20;
+
+/** Turn notice while the session's latest save is a drain's reduced save: a
+ * workspace restored from it lacks those folders until they are rebuilt. */
+export function reducedWorkspaceSaveNote(save: {
+  capturedAt: string;
+  omittedPaths: readonly string[];
+}): string {
+  const shown = save.omittedPaths.slice(0, REDUCED_SAVE_NOTE_MAX_PATHS);
+  const more = save.omittedPaths.length - shown.length;
+  const paths = `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+  return `Workspace note: this workspace was last saved at ${save.capturedAt} without these folders, which can be rebuilt: ${paths}. If they are missing, reinstall dependencies or rebuild before relying on them.`;
+}
+
+/** Turn notice after the chat's managed sandbox stopped since the model's last
+ * output: its replacement starts from the saved /workspace, so what the model
+ * set up elsewhere may be gone, and it would otherwise find out only from
+ * failing commands. One factual sentence: whether /workspace itself came back
+ * from an older save is told by the existing restore notices. */
+export function unseenSandboxStopNote(stop: {
+  kind: "stopped" | "lost";
+  at: string;
+  reason: string | null;
+}): string {
+  const at = new Date(stop.at);
+  const when = Number.isFinite(at.getTime())
+    ? ` at ${at.toISOString().slice(0, 16).replace("T", " ")} UTC`
+    : "";
+  const what =
+    stop.kind === "lost"
+      ? `stopped unexpectedly${when}`
+      : stop.reason === "idle"
+        ? `was stopped for being idle${when}`
+        : `was stopped${when}`;
+  return `Sandbox note: this chat's sandbox ${what}, after your last action; files outside /workspace and programs that were running may be gone.`;
+}
+
 async function openSuffixMessageInput(
   db: Database,
   runtime: OpenGeniRuntime,
@@ -882,7 +1095,10 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
+  preparationOptions: Pick<
+    TurnInputOptions,
+    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems" | "searchRecords"
+  > = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [activeHistory, envelope] = await Promise.all([
@@ -893,7 +1109,9 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
-  const stored = activeHistory.items;
+  const stored = preparationOptions.omitRemoteCompactionItems
+    ? activeHistory.items.filter((row) => row.item.type !== "compaction")
+    : activeHistory.items;
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",
@@ -923,10 +1141,22 @@ async function messageInput(
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );
+  const searchRecords = preparationOptions.searchRecords;
+  if (searchRecords)
+    await settleTurnSearchRecords(
+      db,
+      trigger.workspaceId,
+      trigger.sessionId,
+      searchRecords,
+      canonicalView,
+    );
   const providerView = await measureHistoryPreparationPhase(
     preparationOptions,
     "provider_projection",
-    () => projectHistoryForProvider(canonicalView, providerApi),
+    () =>
+      searchRecords
+        ? projectTurnHistoryForProvider(canonicalView, providerApi, searchRecords)
+        : projectHistoryForProvider(canonicalView, providerApi),
   );
   const referencedHistory = await measureHistoryPreparationPhase(
     preparationOptions,

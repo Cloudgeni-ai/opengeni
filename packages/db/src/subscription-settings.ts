@@ -7,8 +7,9 @@
  * resolver the core enforces with; nothing here resolves a setting itself.
  * Authority is the database's: organization rows are written only by
  * organization administrators (the settings manager policy), workspace rows
- * by workspace or organization administrators, and a locked setting cannot be
- * widened by anyone (the 0724 guard). The checks below only turn those
+ * by workspace or organization administrators, and a Personal workspace's row
+ * by its verified owner (1233); a locked setting cannot be widened by anyone
+ * (the 0724 guard). The checks below only turn those
  * refusals into typed errors before anything is written.
  */
 import {
@@ -25,8 +26,14 @@ import {
 } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
 
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { rawRows, withRlsContext, type Database } from "./database";
+import { setSubscriptionAdministrationSubject } from "./subscription-core/account-administrator";
 import { nestedPostgresSqlState } from "./persistence-errors";
+import {
+  declarePersonalWorkspaceOwnerSettings,
+  personalWorkspaceOwnerMayChangeSettings,
+  type PersonalWorkspaceOwnerSettingsInput,
+} from "./personal-workspace-owner-settings";
 import {
   readSubscriptionEffectiveSettings,
   withoutRetiredProviderKeys,
@@ -53,7 +60,7 @@ export type SubscriptionRotationMode = "spread" | "primary_first";
 
 /** The caller may not read or write these settings. */
 export class SubscriptionSettingsForbiddenError extends Error {
-  constructor(message = "missing permission to manage these model account settings") {
+  constructor(message = "You don't have permission to manage these model account settings.") {
     super(message);
     this.name = "SubscriptionSettingsForbiddenError";
   }
@@ -67,7 +74,10 @@ export class SubscriptionSettingsVersionConflictError extends Error {
   }
 }
 
-/** A Personal workspace follows the organization; it holds no overrides. */
+/**
+ * A Personal workspace whose owner isn't changing it as themselves (or one
+ * without an owner row, like a local one) follows the organization.
+ */
 export class SubscriptionSettingsPersonalWorkspaceError extends Error {
   constructor() {
     super("a Personal workspace follows the organization's model account settings");
@@ -231,7 +241,10 @@ async function withOrganizationAdministrator<T>(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.actorSubjectId);
+      await setSubscriptionAdministrationSubject(tx, {
+        accountId: input.organizationId,
+        subjectId: input.actorSubjectId,
+      });
       if (!(await isOrganizationAdministrator(tx, input.organizationId))) {
         throw new SubscriptionSettingsForbiddenError(
           "Only organization owners and admins can manage organization model account settings",
@@ -550,11 +563,19 @@ async function isPersonalWorkspace(
   return row?.kind !== "shared";
 }
 
+type WorkspaceSubjectInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+} & PersonalWorkspaceOwnerSettingsInput;
+
 async function workspaceAdministrator(
   tx: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: WorkspaceSubjectInput,
 ): Promise<boolean> {
-  if (await isPersonalWorkspace(tx, input)) return false;
+  // A Personal workspace's settings are its verified owner's (1233).
+  if (await isPersonalWorkspace(tx, input))
+    return await personalWorkspaceOwnerMayChangeSettings(tx, input);
   if (await isOrganizationAdministrator(tx, input.accountId)) return true;
   const [row] = await rawRows<{ admin: boolean }>(
     tx,
@@ -571,7 +592,7 @@ async function workspaceAdministrator(
 
 async function readWorkspaceState(
   tx: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: WorkspaceSubjectInput,
 ): Promise<WorkspaceSubscriptionSettingsState> {
   const [organization] = await rawRows<{ locked_settings: string[] | null }>(
     tx,
@@ -598,14 +619,15 @@ async function readWorkspaceState(
 
 async function withWorkspaceSubject<T>(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: WorkspaceSubjectInput,
   use: (tx: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
+      await declarePersonalWorkspaceOwnerSettings(tx, input);
       return await use(tx);
     },
     SUBSCRIPTION_SETTINGS_TRANSACTION,
@@ -615,7 +637,7 @@ async function withWorkspaceSubject<T>(
 /** A workspace's effective settings, sources, locks and stored overrides. */
 export async function readWorkspaceSubscriptionSettings(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: WorkspaceSubjectInput,
 ): Promise<WorkspaceSubscriptionSettingsState> {
   return await withWorkspaceSubject(db, input, (tx) => readWorkspaceState(tx, input));
 }
@@ -639,10 +661,7 @@ function mergeEntries<T>(
  */
 export async function updateWorkspaceSubscriptionSettings(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
+  input: WorkspaceSubjectInput & {
     patch: WorkspaceSubscriptionSettingsPatch;
     expectedVersion?: number;
   },
@@ -668,7 +687,10 @@ export async function updateWorkspaceSubscriptionSettings(
     return await withWorkspaceSubject(db, input, async (tx) => {
       // The settings lock before the row lock (see lockSubscriptionSettings).
       await lockSubscriptionSettings(tx, input.accountId, "shared");
-      if (await isPersonalWorkspace(tx, input))
+      if (
+        (await isPersonalWorkspace(tx, input)) &&
+        !(await personalWorkspaceOwnerMayChangeSettings(tx, input))
+      )
         throw new SubscriptionSettingsPersonalWorkspaceError();
       const [organization] = await rawRows<{ locked_settings: string[] | null }>(
         tx,

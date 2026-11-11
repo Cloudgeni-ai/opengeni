@@ -3,7 +3,12 @@ import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
 import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+  OPENGENI_SESSION_CHAT_ACCEPT,
+} from "./types";
 import type {
   AccessGrant,
   AccessContext,
@@ -16,6 +21,7 @@ import type {
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
 import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
+import type { ExternalActorStatedMembership } from "@opengeni/contracts/external-identities";
 export {
   getSessionProxyArtifactAssociation,
   getSessionProxyWorkspaceGrant,
@@ -70,6 +76,15 @@ export type SessionProxyResolution = (
   user: string;
   /** External identity source. Defaults to the facade's `source`, else `"default"`. */
   source?: string | undefined;
+  /**
+   * The user's membership as your app knows it right now, forwarded as
+   * `asUser(user, { membership })`. On every workspace-scoped request the
+   * user's grant in that shared workspace becomes exactly these permissions
+   * before the request is authorized (created if missing, changed only when
+   * it differs). Omit it to use the stored grant. Removing a user stays an
+   * explicit revoke.
+   */
+  membership?: ExternalActorStatedMembership | undefined;
   /**
    * The user is an anonymous visitor your product has not signed in, for
    * example a website visitor keyed by a cookie. Visitors cannot upload
@@ -288,7 +303,7 @@ export type SessionProxyHandlerOptions = {
    * {@link SessionProxyCreateInput}; this hook returns the complete create
    * request (agent, tools, MCP servers, Skills, instructions, model policy), and
    * the relay refuses the routes that would change that setup afterwards: a
-   * chat's agent, tool policy, Skills, variable sets, usage limit, visibility,
+   * chat's agent, tool policy, Skills, usage limit, visibility,
    * active sandbox and Codex account, forks, and `chat/completions`.
    *
    * Without it, the browser creates chats with Opengeni's own create request,
@@ -348,7 +363,8 @@ export type SessionProxyHandlerOptions = {
         route: SessionProxyRoute,
         response: Response,
         context: SessionProxyContext,
-      ) => Response | undefined | Promise<Response | undefined>)
+        // `void` lets a record-only `async` hook end without `return undefined`.
+      ) => Response | undefined | void | Promise<Response | undefined | void>)
     | undefined;
   /**
    * Attach your product's MCP tool server to every chat this relay creates,
@@ -426,6 +442,8 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "resources",
   "startMode",
   "modelContext",
+  // The tools the browser's context is for; they travel with that context.
+  "modelContextTools",
   // The person's own time zone, so the agent sees their local time.
   "timeZone",
   // Packaged-app bookkeeping; see `browserCreateFields`.
@@ -462,14 +480,7 @@ const FORWARDED_REQUEST_HEADERS = [
 
 /** Response headers relayed besides Opengeni's own `x-opengeni-*` metadata. */
 const RELAYED_RESPONSE_HEADERS = [
-  "content-type",
-  "content-length",
-  "content-disposition",
-  "content-range",
-  "accept-ranges",
-  "etag",
-  "last-modified",
-  "retry-after",
+  ...OPENGENI_BROWSER_RESPONSE_HEADERS,
   "cross-origin-resource-policy",
 ] as const;
 
@@ -478,10 +489,11 @@ const RELAYED_RESPONSE_HEADERS = [
  * `${method} ${route after sessions/{id}}`, or the workspace route.
  */
 const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
+  "GET configuration",
+  "GET model-context",
   "PUT agent",
   "PUT tool-policy",
   "PUT skills",
-  "PUT variable-sets",
   "PUT usage-limit",
   "PUT visibility",
   "POST active-sandbox",
@@ -613,7 +625,10 @@ export function createSessionProxyHandler(
       }
       const source = resolved.source ?? defaultSource;
       const workspaceId = await resolveWorkspace(target, resolved, source, chats);
-      const client = service.asUser(resolved.user, { source });
+      const client = service.asUser(resolved.user, {
+        source,
+        ...(resolved.membership ? { membership: resolved.membership } : {}),
+      });
       const context: SessionProxyContext = {
         request,
         workspaceId,
@@ -748,7 +763,9 @@ export function createSessionProxyHandler(
       ) {
         return errorJson(404, "session_not_found", "Session not found.");
       }
-      const op = inSession ? `${method} ${route.slice(2).join("/")}` : "";
+      const op = inSession
+        ? `${method === "HEAD" ? "GET" : method} ${route.slice(2).join("/")}`
+        : "";
       if (serverOwnsSetup && (SERVER_OWNED_SESSION_ROUTES.has(op) || isChatCompletions(route))) {
         return notAllowed();
       }
@@ -798,7 +815,9 @@ export function createSessionProxyHandler(
           upstream = await send();
         }
         const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
-        return (await options.afterForward?.(routeInfo, relayed, context)) ?? relayed;
+        // A record-only hook returns `void`, which is `undefined` at runtime.
+        const answered = await options.afterForward?.(routeInfo, relayed, context);
+        return (answered as Response | undefined) ?? relayed;
       };
 
       // --- Server-owned additions: the few routes whose body the relay reads.
@@ -930,6 +949,9 @@ export function createSessionProxyHandler(
             extras?.modelContext,
             decidedBrowserContext(extras, browser.browserContext),
           );
+          // The browser's context tools go only with the browser's own context.
+          if (!keepsBrowserContext(extras, browser.browserContext))
+            delete created.modelContextTools;
           return await forward({
             ...defaults,
             ...(toolServer
@@ -961,8 +983,17 @@ export function createSessionProxyHandler(
           created.modelContext,
           decidedBrowserContext(extras, browser.modelContext),
         );
+        const modelContextTools = [
+          ...new Set([
+            ...(created.modelContextTools ?? []),
+            ...(keepsBrowserContext(extras, browser.modelContext)
+              ? (browser.modelContextTools ?? [])
+              : []),
+          ]),
+        ];
         const response = await forward({
           ...created,
+          ...(modelContextTools.length ? { modelContextTools } : {}),
           visibility: created.visibility ?? defaults.visibility,
           agentAccess: created.agentAccess ?? defaults.agentAccess,
           memoryScope: created.memoryScope ?? defaults.memoryScope,
@@ -980,6 +1011,24 @@ export function createSessionProxyHandler(
           );
         }
         return response;
+      }
+
+      if (
+        method === "POST" &&
+        route.length === 2 &&
+        route[0] === "files" &&
+        route[1] === "uploads"
+      ) {
+        // An upload that names no scope follows this relay's chats, as in the
+        // web app: Only me when chats are private, so an older or custom client
+        // that omits it never shares a private chat's file with the workspace.
+        // An explicit scope is the uploader's own choice and passes through.
+        const body = (await readJsonBody(request, maxBodyBytes))!;
+        return await forward(
+          body.scope === undefined && defaults.visibility === "private"
+            ? { ...body, scope: "personal" }
+            : body,
+        );
       }
 
       if (inSession && sessionId) {
@@ -1060,9 +1109,12 @@ export function createSessionProxyHandler(
               modelSelection,
             );
             if (modelSelection) return await forward(message);
-            // Save requires explicit policy fields. Use this actor's durable draft,
-            // not browser choices. The API's expectedRevision fence rejects races.
+            // Use this actor's durable draft, not browser choices. A draft that
+            // follows the chat's settings is saved without them so it keeps
+            // following; an older API (no such flag) requires them. The API's
+            // expectedRevision fence rejects races.
             const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            if (draft.policyFollowsSession) return await forward(message);
             return await forward({
               ...message,
               model: draft.model,
@@ -1221,7 +1273,15 @@ function forwardedHeaders(request: Request, jsonBody: boolean): Headers {
     if (value !== null) headers.set(name, value);
   }
   if (jsonBody) headers.set("content-type", "application/json");
-  if (!headers.has("accept")) headers.set("accept", "application/json");
+  // A browser cannot opt back into the legacy full-configuration response.
+  // Accept already crosses older CORS hosts; don't introduce a new request header.
+  const accept = headers.get("accept");
+  if (!accept?.split(",").some((value) => value.trim() === OPENGENI_SESSION_CHAT_ACCEPT)) {
+    headers.set(
+      "accept",
+      accept ? `${accept}, ${OPENGENI_SESSION_CHAT_ACCEPT}` : OPENGENI_SESSION_CHAT_ACCEPT,
+    );
+  }
   return headers;
 }
 
@@ -1237,7 +1297,10 @@ function relayResponse(
 ): Response {
   if (upstream.status === 401) warnRejectedApiKey(upstream, rejectedKeyNotice);
   const headers = new Headers({ "Cache-Control": "no-store" });
+  headers.set("Access-Control-Expose-Headers", OPENGENI_BROWSER_RESPONSE_HEADERS.join(", "));
   for (const name of RELAYED_RESPONSE_HEADERS) {
+    // The relay deliberately does not claim the upstream server's contract.
+    if (name === OPENGENI_API_CONTRACT_HEADER) continue;
     const value = upstream.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
@@ -1869,6 +1932,7 @@ function createResources(value: unknown): FileResourceRef[] {
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
 type BrowserCreateFields = {
   modelContext?: string | undefined;
+  modelContextTools?: string[] | undefined;
   timeZone?: string | undefined;
   clientEventId?: string | undefined;
   expectedNewSessionDraftRevision?: number | undefined;
@@ -1889,6 +1953,15 @@ function browserCreateFields(body: Record<string, unknown> | undefined): Browser
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   if (modelContext?.trim()) fields.modelContext = modelContext;
+  const modelContextTools = body?.modelContextTools;
+  if (
+    modelContextTools !== undefined &&
+    (!Array.isArray(modelContextTools) ||
+      modelContextTools.some((name) => typeof name !== "string" || !name))
+  ) {
+    reject(400, "invalid_model_context_tools", "modelContextTools must be a list of tool names.");
+  }
+  if (modelContextTools?.length) fields.modelContextTools = modelContextTools as string[];
   const timeZone = normalizeMessageTimeZone(body?.timeZone);
   if (timeZone) fields.timeZone = timeZone;
   const visibility = body?.visibility;
@@ -2029,6 +2102,14 @@ function withBrowserContext(context: unknown): { browserContext?: string } {
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   return context.trim() ? { browserContext: context } : {};
+}
+
+/** The browser's context is forwarded as sent (the host neither replaced nor dropped it). */
+function keepsBrowserContext(
+  extras: SessionProxyMessageExtras | undefined,
+  sent: string | undefined,
+): boolean {
+  return Boolean(sent?.trim()) && extras?.browserContext === undefined;
 }
 
 /** The browser's context as the host decided: kept (absent), replaced (a string) or dropped (`null`). */

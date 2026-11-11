@@ -54,20 +54,38 @@ export function connectSetupPermission(attempt: {
     : "connections:write";
 }
 
+/**
+ * The owner a Connect step or OAuth callback re-checks. `personalOwnerVerified`
+ * is required: it is the only way to find a managed human's authority in their
+ * own Personal workspace, which has no membership row, so leaving it out must
+ * be a compile error rather than a silent denial in that workspace alone.
+ */
+export type ConnectOwner = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  personalOwnerVerified: boolean;
+  externalContinuation?: ExternalActorContinuation;
+};
+
 /** Accept only a verified request owner or authenticated server-minted OAuth
  * state. The callback does not need a browser cookie: it rechecks the stored
- * principal against current authority before claiming and committing effects. */
+ * principal against current authority before claiming and committing effects.
+ * Every OAuth/install callback re-checks its owner here, never through a bare
+ * membership lookup (`connect-owner-state-surface.test.ts`). */
 export async function requireConnectOwnerAuthority(
   db: Database,
-  state: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    personalOwnerVerified?: boolean;
-    externalContinuation?: ExternalActorContinuation;
-  },
+  state: ConnectOwner,
   permission: Permission = "connections:write",
   origin: ExternalActorContinuation | null = null,
+  options: {
+    /**
+     * Accept the verified owner of a Personal workspace for `workspace:admin`.
+     * Only for setups whose start step ran the full settings check
+     * (requireWorkspaceSettingsGrant): workspace-owned social accounts.
+     */
+    personalOwnerSettings?: boolean;
+  } = {},
 ): Promise<void> {
   async function requireExternal(continuation: ExternalActorContinuation) {
     try {
@@ -102,16 +120,25 @@ export async function requireConnectOwnerAuthority(
   await withWorkspaceSubjectRls(db, state.workspaceId, state.subjectId, async (tx) => {
     await lockExternalWorkspaceMembershipLifecycle(tx, state.accountId);
     const membership = await getWorkspaceGrant(tx, state.subjectId, state.workspaceId);
-    const grant =
-      membership?.accountId === state.accountId
-        ? membership
-        : state.personalOwnerVerified
-          ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
-          : null;
+    const ownMembership = membership?.accountId === state.accountId;
+    const grant = ownMembership
+      ? membership
+      : state.personalOwnerVerified
+        ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
+        : null;
+    // A Personal workspace's settings are its verified owner's, who never holds
+    // workspace:admin there (requireWorkspaceSettingsGrant). Callers that opt in
+    // minted this owner in a step that already passed that full check; here the
+    // owner only has to still own the workspace.
+    const personalOwnerSettings =
+      options.personalOwnerSettings === true &&
+      permission === "workspace:admin" &&
+      !ownMembership &&
+      grant !== null;
     if (
       !grant ||
       grant.accountId !== state.accountId ||
-      !hasPermission(grant.permissions, permission)
+      (!personalOwnerSettings && !hasPermission(grant.permissions, permission))
     )
       throw new HTTPException(403, { message: "Connection owner authority changed" });
   });

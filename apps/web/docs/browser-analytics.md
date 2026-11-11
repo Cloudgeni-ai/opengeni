@@ -51,12 +51,13 @@ once that lookup has finished.
 
 `analytics-journey.ts` reports `page` from a closed list, and anything else as
 `other`. Workspace pages are the first path segment after
-`/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
-`rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
-`schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, `files`, `playground`, `read-only-chats`, `inbox`, and `sites`; a session page also carries
-`session_id`.
-`environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
+`/workspaces/<id>/`: `sessions`, `agents`, `secrets`, `rigs`, `machines`,
+`computer-use`, `insights`, `priority`, `plugins`, `capabilities`,
+`schedules`, `automations`, `documents`, `memory`, `state`, `artifacts`,
+`settings`, `organization`, `files`, `playground`, `archived`,
+`read-only-chats`, `inbox`, `sites`, and `meetings`; a session page also
+carries `session_id`. `capabilities`, `agents`, `priority` and
+`read-only-chats` (the Archived page's old path) are redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
 `session-link`, `identity-link`, `checkout-return` (`/billing`),
@@ -85,6 +86,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `install_skill` | Install Skill (not Update Skill) |
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |
+| `upgrade_plan` | Upgrade to Pro buttons and links on own-key refusals |
 | `connect_model` | Connect a model links |
 | `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter`, `connect_opper` | Provider connect controls in settings and onboarding |
 
@@ -171,11 +173,13 @@ recorded failure code and closed markers, never from failure text:
 `provider_access`, `daily_limit`, `monthly_limit`, `provider_quota`,
 `rate_limited`, `provider_error`, `model_unavailable`, `codex_account`,
 `safety_refusal`, `sandbox`, `mcp`, `context_limit`, `connectivity`,
-`pre_start`, `other`. The first next step is reported as
+`pre_start`, `machine_access`, `other`. The first next step is reported as
 `turn_failure_action{failure_class, action}` with `action` one of `retry`,
 `switch_model` (another model chosen in the composer), `buy_credits`,
+`upgrade_plan` (Upgrade to Pro),
 `connect_model`, `new_session` (a labelled New session control),
-`send_message` (a new message sent from the composer), or `left` (best effort:
+`send_message` (a new message sent from the composer), `allow_machine`
+(the chat's machine allowed for it from the banner), or `left` (best effort:
 the banner went away without an action, the page was closed, or the tab stayed
 hidden for five minutes).
 

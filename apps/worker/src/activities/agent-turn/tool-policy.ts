@@ -4,10 +4,11 @@ import {
   type LazyToolTransport,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
   configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
+  paidHostedToolsChargeCredits,
   type ModelProviderApi,
   type ResolvedModelProvider,
   type Settings,
@@ -193,6 +194,20 @@ export function lazyToolTransportForTurn(
   return "generic_dispatch";
 }
 
+/**
+ * The opening tools a turn loads before its first model request (a new
+ * session's frozen `openingTools`). Not on Anthropic Messages: there the load
+ * would be an assistant tool_use with no thinking block before it, which
+ * Claude can reject while thinking is on, so the model searches as usual.
+ */
+export function openingToolNamesForTurn(
+  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+  turnMetadata: unknown,
+): string[] {
+  if (resolvedModel?.provider.api === "anthropic-messages") return [];
+  return openingToolsFromTurnMetadata(turnMetadata);
+}
+
 /** Only brand-new lazy-capable turns may overlap non-eager tool preparation. */
 export function shouldDeferNonEagerToolPreparation(args: {
   lazyToolTransport: LazyToolTransport | null;
@@ -248,6 +263,22 @@ export function hostedWebSearchForTurn(
 }
 
 /**
+ * Whether paid tools the model provider hosts (its own web search and image
+ * generation) would run on Opengeni's bill on this turn, decided by the
+ * single check point {@link paidHostedToolsChargeCredits} from the claim's
+ * billing class (`chargesOpenGeniCredits`, the frozen accepted policy's cost
+ * class `credits`). Such a turn gets Opengeni's metered tools instead, or is
+ * charged for what the provider reports. Every recovery attempt of a turn
+ * gets the same answer.
+ */
+export function hostedToolsBillCreditsForTurn(
+  settings: Parameters<typeof paidHostedToolsChargeCredits>[0],
+  turn: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  return paidHostedToolsChargeCredits(settings, turn);
+}
+
+/**
  * Image generation is an optional connected-account capability. A delegated
  * subscription may still authorize the text model without carrying the local
  * credential identity required for paid image operations; that must narrow the
@@ -262,7 +293,13 @@ export function connectedSubscriptionImageGenerationAuthority<T>(
   return { credentialContext, credentialId };
 }
 
-/** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
+/**
+ * Direct OpenAI hosted image IDs are reusable only by the exact API credential.
+ * Hosted image generation on the deployment's own OpenAI key has no image
+ * charge, so a turn whose hosted tools bill credits never gets it: the turn
+ * falls through to the priced Gateway image tool when one is available, and
+ * otherwise has no image tool.
+ */
 export function openAiHostedImageProviderBindingForTurn(
   settings: Pick<Settings, "openaiProvider" | "openaiApiKey" | "openaiBaseUrl">,
   resolvedModel: {
@@ -278,7 +315,9 @@ export function openAiHostedImageProviderBindingForTurn(
       };
     };
   } | null,
+  hostedToolsBillCredits: boolean,
 ): { providerId: string; providerBindingHash: string } | null {
+  if (hostedToolsBillCredits) return null;
   if (!resolvedModel?.configured.capabilities.hostedTools.imageGeneration.runnable) return null;
   const providerId = resolvedModel.provider.id;
   const isDirectOpenAi =

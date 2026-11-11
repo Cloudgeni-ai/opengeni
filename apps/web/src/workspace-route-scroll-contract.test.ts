@@ -9,7 +9,6 @@ const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
   workspaceRetiredPriorityRoute: { kind: "redirect" },
-  workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
     source: "../../../packages/react/src/app/routes/sessions-index.tsx",
@@ -25,15 +24,12 @@ const workspaceRouteContracts = {
   workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
-  // The old Variable sets URLs redirect to Secrets.
-  workspaceVariableSetsRoute: { kind: "redirect" },
-  workspaceVariableSetDetailRoute: { kind: "redirect" },
-  workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
   workspaceComputerUseRoute: { kind: "page", source: "routes/computer-use.tsx" },
   workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
+  workspaceLegacyReadOnlyChatsRoute: { kind: "redirect" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
@@ -46,6 +42,13 @@ const workspaceRouteContracts = {
   workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentNewRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentEditRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentIntroRoute: { kind: "page", source: "routes/agents.tsx" },
+  // Bot templates became agents.
+  workspaceBotTemplatesRoute: { kind: "redirect" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },

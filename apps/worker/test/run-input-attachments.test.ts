@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   type FileAsset,
@@ -10,6 +11,8 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import sharp from "sharp";
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
@@ -943,6 +946,20 @@ describe("turnInput attachment projection", () => {
       expect(String((modelInputs[4] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(
         workspaceRecoveryNote,
       );
+
+      // A chat whose attendance changed since it started carries the note in
+      // the turn's input, after the stored history it leaves unchanged.
+      const attendanceNote = "[Opengeni attendance]\nA person is now present in this chat.";
+      await turnInput({} as Database, runtime, {}, trigger, {
+        turnId: laterTurnId,
+        fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+        providerApi: "responses",
+        attendanceNote,
+      });
+      const attendance = modelInputs[5] as Array<Record<string, unknown>>;
+      expect(attendance[0]).toEqual(summary);
+      expect(attendance.at(-1)).toMatchObject({ type: "message", role: "system" });
+      expect(String(attendance.at(-1)!.content)).toContain(attendanceNote);
     } finally {
       listUpdates.mockRestore();
       getHistory.mockRestore();
@@ -1359,9 +1376,13 @@ describe("photo resolution sent to the model", () => {
         .jpeg({ quality: 90 })
         .toBuffer(),
     );
-  const project = async (bytes: Uint8Array, item: Record<string, unknown>) => {
+  const project = async (
+    bytes: Uint8Array,
+    item: Record<string, unknown>,
+    contentType = "image/jpeg",
+  ) => {
     const asset = {
-      ...file(photoId, "image/jpeg", bytes.length, "photo.jpg"),
+      ...file(photoId, contentType, bytes.length, "photo.jpg"),
       sha256: sha256(bytes),
     };
     const projected = await createModelHistoryAttachmentProjector(
@@ -1405,6 +1426,123 @@ describe("photo resolution sent to the model", () => {
     });
     expect(image).toBe(dataUrl(bytes));
     expect(receipt).not.toContain("downscaled");
+  });
+
+  // Earlier requests stay byte-identical: a JPEG stored as image/png always
+  // projected as its original bytes and label. The provider transport labels it.
+  test("a photo stored under the wrong image type keeps its original projection", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(
+      bytes,
+      { ...user("what is this?"), [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000 },
+      "image/png",
+    );
+    expect(image).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
+    expect(receipt).not.toContain("downscaled");
+  });
+});
+
+// A real HEVC-coded HEIC laid out like an iPhone photo (a grid of tiles with a
+// stored rotation); see packages/runtime/test/heif-image.test.ts. Shown upright
+// it is 64x96, red on top and blue below.
+const HEIC_PHOTO = new Uint8Array(
+  readFileSync(join(import.meta.dir, "../../../packages/runtime/test/fixtures/rotated-grid.heic")),
+);
+
+describe("HEIC photos sent to the model", () => {
+  const photoId = "00000000-0000-4000-8000-0000000000b1";
+  const stamped = (content: string) => ({
+    ...user(content),
+    [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
+  });
+  const project = async (
+    item: Record<string, unknown>,
+    options: { bytes?: Uint8Array; contentType?: string; filename?: string } = {},
+  ) => {
+    const bytes = options.bytes ?? HEIC_PHOTO;
+    const asset = {
+      ...file(
+        photoId,
+        options.contentType ?? "image/heic",
+        bytes.length,
+        options.filename ?? "IMG_0001.HEIC",
+      ),
+      sha256: sha256(bytes),
+    };
+    let reads = 0;
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        reads += 1;
+        return bytes;
+      },
+      async () => [asset],
+    )([{ ...item, [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: photoId }] }]);
+    const parts = projected[0]!.content as Array<Record<string, unknown>>;
+    const image = parts.find((part) => part.type === "input_image")?.image as string | undefined;
+    const receipt = String(parts.find((part) => String(part.text).includes(photoId))!.text);
+    return { image, receipt, reads, parts };
+  };
+
+  test("an attached HEIC is shown to the model as an upright JPEG", async () => {
+    const { image, receipt } = await project(stamped("what is this?"));
+    expect(image?.startsWith("data:image/jpeg;base64,")).toBe(true);
+    const jpeg = Buffer.from(image!.slice(image!.indexOf(",") + 1), "base64");
+    const metadata = await sharp(jpeg).metadata();
+    expect(metadata.format).toBe("jpeg");
+    expect([metadata.width, metadata.height]).toEqual([64, 96]);
+    const { data } = await sharp(jpeg).raw().toBuffer({ resolveWithObject: true });
+    expect(data[(10 * 64 + 32) * 3]!).toBeGreaterThan(180);
+    expect(data[(85 * 64 + 32) * 3 + 2]!).toBeGreaterThan(180);
+    expect(receipt).toContain("Shown to you as a JPEG; the file itself is a HEIC.");
+    // The first test also loads the decoder; a cold start can take seconds.
+  }, 30_000);
+
+  test("the photo's image is byte-identical on every later turn", async () => {
+    const first = await project(stamped("what is this?"));
+    const second = await project(stamped("what is this?"));
+    expect(second.parts).toEqual(first.parts);
+  });
+
+  test("a HEIC larger than its message's bound is downscaled after conversion", async () => {
+    const { image, receipt } = await project({
+      ...stamped("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 64,
+    });
+    const metadata = await sharp(
+      Buffer.from(image!.slice(image!.indexOf(",") + 1), "base64"),
+    ).metadata();
+    // So small a picture fits its byte budget only as WebP; photos stay JPEG.
+    expect([metadata.format, metadata.width, metadata.height]).toEqual(["webp", 43, 64]);
+    expect(receipt).toContain(
+      "Shown to you as a WebP, downscaled to 43x64 from 64x96; " +
+        "the file itself is the full-resolution HEIC.",
+    );
+  });
+
+  test("an untyped upload named .heic is recognized by its bytes", async () => {
+    const { image } = await project(stamped("and this?"), {
+      contentType: "application/octet-stream",
+    });
+    expect(image?.startsWith("data:image/jpeg;base64,")).toBe(true);
+  });
+
+  test("a message from before HEIC support keeps its reference-only receipt", async () => {
+    const { image, receipt, reads } = await project({
+      ...user("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    });
+    expect(image).toBeUndefined();
+    expect(receipt).not.toContain("JPEG");
+    expect(reads).toBe(0);
+  });
+
+  test("a HEIC that does not decode stays reference-only without failing the turn", async () => {
+    const broken = HEIC_PHOTO.slice(0, 200);
+    const { image, receipt } = await project(stamped("what is this?"), { bytes: broken });
+    expect(image).toBeUndefined();
+    expect(receipt).not.toContain("JPEG");
   });
 });
 

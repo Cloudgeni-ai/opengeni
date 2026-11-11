@@ -9,6 +9,9 @@ export const blaxelProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxIdentity"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.blaxel,
+  // The SDK session offers stdin once it has a sandbox URL and API key, which
+  // every configured Blaxel box has.
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     if (!settings.blaxelApiKey) {
       throw new SandboxConfigError("blaxel", "OPENGENI_BLAXEL_API_KEY is required");

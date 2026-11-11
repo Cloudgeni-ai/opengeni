@@ -2,7 +2,7 @@
 // renderer modules are available. The bridge exists only when the page is the
 // account's own server; the main process checks the sender again on every call.
 
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer, webFrame, type IpcRendererEvent } from "electron";
 
 import {
   DESKTOP_BRIDGE_GLOBAL,
@@ -14,13 +14,13 @@ import {
   type DesktopBridge,
   type DesktopCommand,
   type DesktopComputerCapabilities,
-  type DesktopMeetingDetectionStatus,
-  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
   type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
+import { dictationBridge } from "./dictation";
+import { meetingDetectionBridge } from "./meeting-detection";
 import { systemAudioBridge } from "./system-audio";
 
 function argument(name: string): string | null {
@@ -80,14 +80,8 @@ if (origin && window.location.origin === origin) {
     if (appShotListener) appShotListener(result);
     else waitingAppShot = { result, at: Date.now() };
   });
-  // Likewise a meeting notification's choice, which can arrive as the page loads.
-  let meetingListener: ((request: DesktopMeetingRequest) => void) | null = null;
-  let waitingMeeting: { request: DesktopMeetingRequest; at: number } | null = null;
-  ipcRenderer.on(DESKTOP_IPC.meetingDetectionRequest, (_event, request: DesktopMeetingRequest) => {
-    if (meetingListener) meetingListener(request);
-    else waitingMeeting = { request, at: Date.now() };
-  });
   const appVersion = argument("opengeni-app-version");
+  const windowBarHeight = Number(argument("opengeni-window-bar-height"));
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -105,9 +99,12 @@ if (origin && window.location.origin === origin) {
       ...(systemAudio ? (["meetingDetection"] as const) : []),
       "computerCapabilities",
       "captureWindow",
+      "dictation",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     ...(appVersion ? { appVersion } : {}),
+    ...(windowBarHeight > 0 ? { windowBarHeight } : {}),
+    zoomFactor: () => webFrame.getZoomFactor(),
     captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
@@ -181,32 +178,7 @@ if (origin && window.location.origin === origin) {
     ...(systemAudio
       ? {
           systemAudio: systemAudioBridge(ipcRenderer),
-          meetingDetection: {
-            status: () =>
-              ipcRenderer.invoke(
-                DESKTOP_IPC.meetingDetectionStatus,
-              ) as Promise<DesktopMeetingDetectionStatus>,
-            update: (change: { enabled?: boolean }) =>
-              ipcRenderer.invoke(
-                DESKTOP_IPC.meetingDetectionUpdate,
-                change,
-              ) as Promise<DesktopMeetingDetectionStatus>,
-            setRecording: (recording: boolean) =>
-              ipcRenderer.send(DESKTOP_IPC.meetingDetectionRecording, recording),
-            onRequest: (listener: (request: DesktopMeetingRequest) => void) => {
-              meetingListener = listener;
-              const waiting = waitingMeeting;
-              waitingMeeting = null;
-              if (waiting && Date.now() - waiting.at < 60_000) {
-                queueMicrotask(() => meetingListener?.(waiting.request));
-              }
-              return () => {
-                if (meetingListener === listener) meetingListener = null;
-              };
-            },
-            onChange: (listener: () => void) =>
-              subscribe(DESKTOP_IPC.meetingDetectionChanged, () => listener()),
-          },
+          meetingDetection: meetingDetectionBridge(ipcRenderer),
         }
       : {}),
     computerCapabilities: {
@@ -223,6 +195,7 @@ if (origin && window.location.origin === origin) {
         ) as Promise<DesktopComputerCapabilities>,
       onChange: (listener) => subscribe(DESKTOP_IPC.capabilitiesChanged, () => listener()),
     },
+    dictation: dictationBridge(ipcRenderer),
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }

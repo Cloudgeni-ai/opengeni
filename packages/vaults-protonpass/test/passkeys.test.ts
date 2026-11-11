@@ -105,6 +105,8 @@ describe("Proton Pass passkeys", () => {
       userName: "alice@example.test",
     });
     const decoded = decodeProtonPasskey(passkey)!;
+    expect(decoded.backupEligibility).toBe(true);
+    expect(decoded.backupState).toBe(true);
     expect(decoded).toMatchObject({
       credentialId,
       rpId: "example.test",

@@ -158,7 +158,7 @@ describe.skipIf(!real)("ownerless shared Codex refresh after 0700", () => {
     expect(callbacks).toBe(0);
   }, 180_000);
 
-  test("forged accepted owner/human identities and disabled cutover never reach the provider", async () => {
+  test("forged accepted owner/human identities never reach the provider", async () => {
     const state = await fixture();
     let callbacks = 0;
     for (const identity of [
@@ -180,22 +180,6 @@ describe.skipIf(!real)("ownerless shared Codex refresh after 0700", () => {
         );
       }
     }
-    await shared.admin`update subscription_provider_cutovers set enabled = false where account_id = ${state.accountId}::uuid and provider = 'codex'`;
-    expect(
-      await refreshSubscriptionCoreCodexCredential(
-        client.db,
-        ownerlessRefreshSettings,
-        state.identity,
-        state.lease,
-        1,
-        {
-          refresh: async () => {
-            callbacks++;
-            throw new Error("disabled cutover reached provider");
-          },
-        },
-      ),
-    ).toEqual({ kind: "refused" });
     expect(callbacks).toBe(0);
   }, 180_000);
 

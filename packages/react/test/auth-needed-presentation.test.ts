@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { authNeededPresentation, providerLabel } from "../src/auth-needed-presentation";
+import {
+  authNeededPresentation,
+  capabilityReconnectConnectionId,
+  providerLabel,
+} from "../src/auth-needed-presentation";
 import {
   approvalAnswerLabels,
   APP_ACTION_TOOL_NAME,
@@ -66,6 +70,35 @@ describe("authNeededPresentation", () => {
     expect(`${view.title} ${view.footnote} ${view.startFailed}`).not.toMatch(/reconnect/i);
   });
 
+  test("an agent's card for an account that stopped working reconnects that account", () => {
+    const capability = {
+      id: "mcp:gmail",
+      name: "Gmail",
+      action: "connect",
+      rationale: "Your Gmail stopped working on 2026-10-29.",
+      requiredVariables: [],
+    } as unknown as NonNullable<AuthNeededItem["capability"]>;
+    const lapsed = item({
+      source: "capability",
+      providerDomain: "gmailmcp.googleapis.com",
+      reason: "refresh_failed",
+      connectionId: "conn-1",
+      capability,
+    });
+    expect(capabilityReconnectConnectionId(lapsed)).toBe("conn-1");
+    const view = authNeededPresentation(t, lapsed);
+    expect(view.title).toBe("Reconnect Gmail");
+    expect(view.actionLabel).toBe("Reconnect");
+    expect(view.missing).toBe(false);
+    expect(view.reasonLine).toBe("Your Gmail stopped working on 2026-10-29.");
+    // The same card without a lapsed connection is still a first connection.
+    const first = item({ source: "capability", reason: "missing_connection", capability });
+    expect(capabilityReconnectConnectionId(first)).toBeUndefined();
+    expect(authNeededPresentation(t, first).actionLabel).toBe("Connect");
+    // A failed tool call's own reconnect row is not an agent's card.
+    expect(capabilityReconnectConnectionId(item({ connectionId: "conn-1" }))).toBeUndefined();
+  });
+
   test("tools that cannot run here offer no action", () => {
     const view = authNeededPresentation(t, item({ reason: "unsupported_auth" }));
     expect(view.unavailable).toBe(true);
@@ -73,9 +106,62 @@ describe("authNeededPresentation", () => {
     expect(view.footnote).toBeNull();
   });
 
+  test("a plugin is installed, not connected, and says who can install it", () => {
+    const view = authNeededPresentation(
+      t,
+      item({
+        reason: "missing_connection",
+        providerDomain: "sentry.io",
+        capability: {
+          id: "plugin:marketplace/anthropic/sentry",
+          name: "Sentry",
+          kind: "plugin",
+          action: "enable",
+          rationale: "To triage this morning's errors.",
+          requiredVariables: [],
+        } as unknown as NonNullable<AuthNeededItem["capability"]>,
+      }),
+      { setupUnavailable: true },
+    );
+    expect(view.title).toBe("Install Sentry");
+    expect(view.footnote).toBe(
+      "Installing Sentry needs permission to manage this workspace's plugins. Ask a workspace admin to install it.",
+    );
+    expect(`${view.title} ${view.footnote}`).not.toMatch(/connect/i);
+  });
+
   test("provider labels are calm names, not raw domains", () => {
     expect(providerLabel(t, "https://www.notion.so/path")).toBe("Notion");
     expect(providerLabel(t, "")).toBe(t("messageTimeline.thisService"));
+    expect(providerLabel(t, "gmailmcp.googleapis.com")).toBe("Gmail");
+  });
+
+  test("a connected account that needs more access is asked to allow it, in plain words", () => {
+    const view = authNeededPresentation(
+      t,
+      item({
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "conn-1",
+        reason: "insufficient_scope",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        toolName: "send_message",
+      }),
+    );
+    expect(view.title).toBe("Give Gmail more access");
+    expect(view.actionLabel).toBe("Allow");
+    expect(view.reasonLine).toBe(
+      "It needs your permission to draft and send email. Everything it can already do stays the same.",
+    );
+    expect(view.footnote).toBe("After you allow it, the agent carries on where it stopped.");
+    expect(view.canRecover).toBe(true);
+    expect(`${view.title} ${view.footnote}`).not.toMatch(/reconnect/i);
+    // Unknown access keeps the generic line; the button still says Allow.
+    const generic = authNeededPresentation(
+      t,
+      item({ connectionId: "conn-1", reason: "insufficient_scope", scopes: ["write"] }),
+    );
+    expect(generic.title).toBe("Give Linear more access");
+    expect(generic.reasonLine).toBe("It needs additional access to continue.");
   });
 });
 

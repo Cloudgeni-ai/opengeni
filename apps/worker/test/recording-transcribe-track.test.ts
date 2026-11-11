@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import type { RecordingTranscriptionProvider } from "@opengeni/core";
+import { pcmWavPiece } from "../src/activities/dictation-pieces";
 import { transcribeTrack } from "../src/activities/recordings";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
@@ -120,7 +121,8 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
     // 12 s pieces with 3 s overlap: windows of 6 s.
     expect(pieces).toEqual([0, 1, 2, 3, 4]);
     expect(sent.every((item) => item.mimeType === "audio/flac" && item.head === "fLaC")).toBe(true);
-    expect(sent.map((item) => item.fileName)).toEqual([
+    // Pieces are sent a few at once, so in any order.
+    expect(sent.map((item) => item.fileName).sort()).toEqual([
       "track-1-0.flac",
       "track-1-1.flac",
       "track-1-2.flac",
@@ -168,7 +170,7 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       request: { ...request, scope },
     });
     expect(long.words.length).toBeGreaterThan(0);
-    expect(identities).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
+    expect(identities.sort()).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
     // A track sent whole keeps the attempt's identity.
     await transcribeTrack({
       provider,
@@ -180,5 +182,131 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       request: { ...request, scope: { ...scope, requestId: "version:a2:0" } },
     });
     expect(identities.at(-1)).toBe("version:a2:0");
+  });
+
+  test("sends only the stretches with sound, and nothing for a silent track", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const heard: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(sent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [
+        { startMilliseconds: 2_000, endMilliseconds: 6_000 },
+        { startMilliseconds: 15_000, endMilliseconds: 20_000 },
+      ],
+      onSent: (milliseconds) => heard.push(milliseconds),
+    });
+    // Pieces are sent a few at once, so in any order.
+    expect(sent.map((item) => item.fileName).sort()).toEqual(["track-1-0.webm", "track-1-1.webm"]);
+    expect(heard.sort((left, right) => left - right)).toEqual([4_000, 5_000]);
+    // Words land on the track's timeline, and the track keeps its length.
+    const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
+    expect(
+      seconds.every((second) => (second >= 2 && second < 6) || (second >= 15 && second < 20)),
+    ).toBe(true);
+    expect(seconds).toContain(2);
+    expect(seconds).toContain(15);
+    expect(result.audioMilliseconds).toBe(25_000);
+
+    const silent: typeof sent = [];
+    const nothing = await transcribeTrack({
+      provider: countingProvider(silent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [],
+    });
+    expect(silent).toEqual([]);
+    expect(nothing).toEqual({
+      languages: [],
+      audioMilliseconds: 25_000,
+      diarized: false,
+      words: [],
+    });
+  });
+
+  test("a speech PCM track is cut from its samples, sent as FLAC to a model that takes it", async () => {
+    // 25 s of a 440 Hz tone at 16 kHz.
+    const samples = new Int16Array(25 * 16_000);
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] = Math.round(Math.sin((index / 16_000) * 2 * Math.PI * 440) * 8_000);
+    }
+    const wav = pcmWavPiece(
+      { sampleRate: 16_000, data: new Uint8Array(samples.buffer) },
+      0,
+      samples.length,
+    );
+    const track = { bytes: wav, mimeType: "audio/wav", fileName: "track-1.wav", extension: "wav" };
+    const sound = [
+      { startMilliseconds: 2_000, endMilliseconds: 6_000 },
+      { startMilliseconds: 15_000, endMilliseconds: 20_000 },
+    ];
+    const flac: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    await transcribeTrack({
+      provider: countingProvider(flac),
+      spec: {
+        model: "m",
+        name: "M",
+        capabilities,
+        usdPerHour: null,
+        audioFormats: ["wav", "flac"],
+      },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+    });
+    expect(flac.map((item) => [item.fileName, item.mimeType, item.head]).sort()).toEqual([
+      ["track-1-0.flac", "audio/flac", "fLaC"],
+      ["track-1-1.flac", "audio/flac", "fLaC"],
+    ]);
+    // A model that names no formats gets the same lossless FLAC.
+    const pcm: typeof flac = [];
+    const heard: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(pcm),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+      onSent: (milliseconds) => heard.push(milliseconds),
+    });
+    expect(pcm.map((item) => [item.fileName, item.head]).sort()).toEqual([
+      ["track-1-0.flac", "fLaC"],
+      ["track-1-1.flac", "fLaC"],
+    ]);
+    expect(heard.sort((left, right) => left - right)).toEqual([4_000, 5_000]);
+    const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
+    expect(seconds).toContain(2);
+    expect(seconds).toContain(15);
+    // A model that takes only WAV gets the samples as they are.
+    const wavOnly: typeof flac = [];
+    await transcribeTrack({
+      provider: countingProvider(wavOnly),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null, audioFormats: ["wav"] },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+    });
+    expect(wavOnly.map((item) => [item.fileName, item.head]).sort()).toEqual([
+      ["track-1-0.wav", "RIFF"],
+      ["track-1-1.wav", "RIFF"],
+    ]);
   });
 });

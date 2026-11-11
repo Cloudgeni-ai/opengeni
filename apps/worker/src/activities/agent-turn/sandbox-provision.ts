@@ -424,12 +424,15 @@ export function classifySandboxLogicalProvisionFailure(
 
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   const chain = sandboxProvisionErrorChain(error);
-  // Rotation resumes through the durable lifecycle wake. Retrying here holds
-  // a turn worker and can repeat the entire lease wait for every skill root.
+  // Rotation resumes through the durable lifecycle wake. An exhausted sibling
+  // warming wait also yields to same-turn recovery. Retrying either here holds
+  // a turn worker and repeats the entire lease wait for every skill root.
   if (
     chain.some(
       (value) =>
-        value instanceof SandboxLeaseTransitionError && value.reason === "rotation_in_progress",
+        value instanceof SandboxLeaseTransitionError &&
+        (value.reason === "rotation_in_progress" ||
+          (value.reason === "provider_recovery_in_progress" && value.liveness === "warming")),
     )
   )
     return false;

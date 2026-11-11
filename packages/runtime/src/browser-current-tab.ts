@@ -25,7 +25,14 @@ export type CurrentBrowserTabDeps = {
   listTargets: (
     browserSessionId: string,
   ) => Promise<ReadonlyArray<{ id: string; kind: string; selected: boolean }>>;
+  /** Whether a BrowserSession runs in the person's own browser, whose other
+   * tabs are theirs: there only its selected tab is ever used implicitly. */
+  personsBrowser?: (browserSessionId: string) => Promise<boolean>;
 };
+
+/** Said when a session in the person's own browser has no tab of its own. */
+export const NO_OWN_TAB_IN_PERSONS_BROWSER =
+  "This browser session has no tab of its own in the person's browser. Open one with browser_tabs operation=open, or pass targetId to use one of the person's tabs.";
 
 export type ResolvedBrowserSession = {
   browserSessionId: string;
@@ -105,8 +112,14 @@ export class CurrentBrowserTab {
     const pages = (await this.deps.listTargets(session.browserSessionId)).filter(
       (target) => target.kind === "page" || target.kind === "popup",
     );
-    const chosen =
-      pages.find((target) => target.selected) ?? (pages.length === 1 ? pages[0] : null);
+    const selected = pages.find((target) => target.selected);
+    if (!selected && (await this.deps.personsBrowser?.(session.browserSessionId))) {
+      throw new BrowserTargetResolutionError(
+        "browser_target_required",
+        NO_OWN_TAB_IN_PERSONS_BROWSER,
+      );
+    }
+    const chosen = selected ?? (pages.length === 1 ? pages[0] : null);
     if (!chosen) {
       throw new BrowserTargetResolutionError(
         "browser_target_required",
@@ -139,8 +152,11 @@ export const BROWSER_LOCATOR_KIND_WORDS: LocatorKindWords = {
 /** A bare string passed where a locator is expected: `role:name` names the
  * element with that role and exact name, anything else is an element ref. */
 function expandLocatorString(value: string, kindWords: LocatorKindWords): Record<string, unknown> {
-  const role = ROLE_SHORTHAND.exec(value);
+  let role = ROLE_SHORTHAND.exec(value);
   if (!role) return { kind: "ref", ref: value };
+  // `role:button:Save` names the kind as the object form does ({kind:'role'}).
+  // No surface has a role called "role", so it means `button:Save`.
+  if (role[1]!.trim().toLowerCase() === "role") role = ROLE_SHORTHAND.exec(role[2]!.trim()) ?? role;
   const word = role[1]!.trim();
   const name = role[2]!.trim();
   const kind = Object.hasOwn(kindWords, word.toLowerCase())

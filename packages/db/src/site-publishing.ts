@@ -3,6 +3,7 @@ import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./
 import type { Permission } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import {
   rlsSubjectIdOrEmpty,
   subjectHasLiveWorkspaceAuthorityInScope,
@@ -1289,7 +1290,8 @@ export async function getSiteWorkspaceMemberPermissions(
       const [row] = await rawRows<{ permissions: unknown }>(
         tx,
         sql`select permissions from workspace_memberships
-          where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+          where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId}
+            and ${rawMembershipOutsidePersonalWorkspace("workspace_memberships")} limit 1`,
       );
       return row
         ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))

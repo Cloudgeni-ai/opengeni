@@ -8,14 +8,20 @@ import { MessageSquareIcon, PinIcon, type LucideIcon } from "lucide-react";
 import { Fragment, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ChatRecord } from "../../lib/actions/chat-directory";
-import { readChatDirectory, useChatDirectoryVersion } from "../../lib/actions/chat-directory";
+import {
+  chatParentTitle,
+  readChatDirectory,
+  useChatDirectoryVersion,
+} from "../../lib/actions/chat-directory";
 import type { ChatSwitcherState } from "../../lib/actions/chat-switcher";
 import type { ChordPlatform } from "../../lib/actions/chords";
 import type { WorkspaceChoice } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
+import { SessionAvatar } from "../session/session-avatar";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { currentChatStatus } from "../../lib/actions/chat-status";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
+import { ChatTitleInParent } from "./chat-title";
 import { Keycaps } from "./keycaps";
 import { WorkspaceTag } from "./workspace-tag";
 
@@ -107,6 +113,9 @@ export default function ChatSwitcher(props: {
               record && record.workspaceId !== props.workspaceId
                 ? (workspaceNames.get(record.workspaceId) ?? null)
                 : null;
+            const title = record?.title ?? "Untitled chat";
+            // A sub-agent chat says which chat it belongs to.
+            const parentTitle = record ? chatParentTitle(directory.rows, record) : null;
             const row = (
               <div
                 key={id}
@@ -128,11 +137,25 @@ export default function ChatSwitcher(props: {
                   selected ? "bg-hover text-fg" : null,
                 )}
               >
-                <Icon
-                  aria-hidden="true"
-                  className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
-                />
-                <span className="min-w-0 flex-1 truncate">{record?.title ?? "Untitled chat"}</span>
+                {record?.avatar ? (
+                  <SessionAvatar
+                    avatar={record.avatar}
+                    name={record.title}
+                    workspaceId={record.workspaceId}
+                    seed={record.id}
+                    size="xs"
+                  />
+                ) : (
+                  <Icon
+                    aria-hidden="true"
+                    className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
+                  />
+                )}
+                {parentTitle ? (
+                  <ChatTitleInParent title={title} parentTitle={parentTitle} />
+                ) : (
+                  <span className="min-w-0 flex-1 truncate">{title}</span>
+                )}
                 {elsewhere ? <WorkspaceTag name={elsewhere} /> : null}
                 <ChatStatusMarks
                   status={record ? currentChatStatus(record, sidebarIds, now) : null}

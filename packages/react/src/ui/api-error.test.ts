@@ -3,9 +3,11 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 
 import {
   apiErrorAdvice,
+  apiErrorDetailCode,
   apiErrorDetails,
   apiErrorFacts,
   isPermissionDenied,
+  serverRefusalText,
   userErrorText,
   userErrorTextWithoutReference,
 } from "./api-error";
@@ -137,19 +139,73 @@ describe("api errors in product words", () => {
     ).toBe("Try again. If it keeps happening, reload the page.");
   });
 
-  test("the one-line text keeps the support reference unless Technical details show it", () => {
+  test("an expected refusal is only what to do, with no status or reference", () => {
     const error = apiError(409, "variable set name is already in use: Prod");
-    expect(userErrorText(error)).toBe(
-      `Variable set name is already in use: Prod. Reference: ${REFERENCE}.`,
-    );
+    expect(userErrorText(error)).toBe("Variable set name is already in use: Prod.");
     expect(userErrorTextWithoutReference(error)).toBe("Variable set name is already in use: Prod.");
+    // The toast Bendik saw, from the archive refusal.
+    const archive = apiError(
+      409,
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
+      "session_archive_blocked",
+    );
+    expect(archive.message).toStartWith("API 409: ");
+    expect(userErrorText(archive)).toBe(
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
+    );
+    for (const status of [400, 401, 403, 404, 422, 429]) {
+      expect(userErrorText(apiError(status, "nope"))).not.toContain(REFERENCE);
+    }
+    // A raw message carries its status in the prefix.
     expect(userErrorText(new Error(`Opengeni API 404: not found Reference: ${REFERENCE}.`))).toBe(
-      `Try again. If it keeps happening, reload the page. Reference: ${REFERENCE}.`,
+      "Try again. If it keeps happening, reload the page.",
     );
     // No reference, nothing appended; an app error keeps its own message.
     expect(userErrorText(Object.assign(new Error("gone"), { status: 404 }))).toBe(
       "It may have been removed. Reload the page and try again.",
     );
     expect(userErrorText(new Error("Pick a workspace first."))).toBe("Pick a workspace first.");
+  });
+
+  test("an unexpected failure keeps its reference for the surface to offer discreetly", () => {
+    expect(userErrorText(apiError(503, "upstream down"))).toBe(
+      `Opengeni couldn't finish the request. Try again in a moment. Reference: ${REFERENCE}.`,
+    );
+    expect(
+      userErrorText(new Error(`Opengeni API 500: database unavailable Reference: ${REFERENCE}.`)),
+    ).toBe(`Try again. If it keeps happening, reload the page. Reference: ${REFERENCE}.`);
+    expect(userErrorText(new TypeError("Failed to fetch"))).toBe(
+      "Check your connection and try again.",
+    );
+  });
+
+  test("a refusal a route words for people keeps its own sentence when the page knows its code", () => {
+    const sentence =
+      "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.";
+    const refusal = (status: number, details?: Record<string, unknown>) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: { message: sentence, requestId: REFERENCE, code: "forbidden", details },
+        }),
+        { mutation: true },
+      );
+    const marked = refusal(403, { code: "teams_connection_refused", reason: "not_tenant_admin" });
+    expect(apiErrorDetailCode(marked)).toBe("teams_connection_refused");
+    expect(serverRefusalText(marked, ["teams_connection_refused"])).toBe(sentence);
+    // The generic advice is unchanged for every other page and code.
+    expect(userErrorText(marked)).toBe(
+      "You don't have permission to do this. Ask an admin for access.",
+    );
+    expect(serverRefusalText(marked, ["other_code"])).toBeUndefined();
+    expect(serverRefusalText(refusal(403), ["teams_connection_refused"])).toBeUndefined();
+    // Only an expected refusal: a server failure never shows its message.
+    expect(
+      serverRefusalText(refusal(500, { code: "teams_connection_refused" }), [
+        "teams_connection_refused",
+      ]),
+    ).toBeUndefined();
+    expect(serverRefusalText(new Error(sentence), ["teams_connection_refused"])).toBeUndefined();
+    expect(apiErrorDetailCode(new Error("x"))).toBeUndefined();
   });
 });

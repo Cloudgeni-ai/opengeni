@@ -24,6 +24,16 @@ export type HumanInputSurfaceProps = {
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
   /** Forwarded to the active form: start as its compact bar (drafts kept). */
   defaultCollapsed?: boolean | undefined;
+  /**
+   * Hand the active request to another agent instead of letting the asking
+   * agent decide (see HumanInputForm `onLetAgentDecide`); `false` hides it.
+   */
+  onLetAgentDecide?:
+    | ((request: SessionHumanInputRequest) => void | Promise<void>)
+    | false
+    | undefined;
+  /** Requests an agent was asked to decide: their card says so. */
+  agentDecidingRequestIds?: ReadonlySet<string> | undefined;
 };
 
 /**
@@ -44,6 +54,8 @@ export function HumanInputSurface({
   decisionButtons,
   allowedSaveTo,
   defaultCollapsed,
+  onLetAgentDecide,
+  agentDecidingRequestIds,
 }: HumanInputSurfaceProps) {
   const batchTotalRef = useRef(0);
 
@@ -88,6 +100,12 @@ export function HumanInputSurface({
     allowedSaveTo,
     defaultCollapsed,
     ...(messages ? { messages } : {}),
+    ...(onLetAgentDecide === false
+      ? { onLetAgentDecide: false }
+      : onLetAgentDecide
+        ? { onLetAgentDecide: () => onLetAgentDecide(active) }
+        : {}),
+    agentDeciding: agentDecidingRequestIds?.has(active.id) ?? false,
     onSubmit: (response) => onSubmit(active.id, response),
   };
 

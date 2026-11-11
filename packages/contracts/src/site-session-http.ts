@@ -389,3 +389,22 @@ export function siteFrameBodyRefusal(
   const payload = bodyRecord(record.payload);
   return payload ? refusedField(payload, SITE_FRAME_MESSAGE_FIELDS, "payload.") : null;
 }
+
+/**
+ * A session-create body without its file attachments, when those are all it
+ * attaches, for the console's own Site view: it attaches the person's files to
+ * a new conversation's first message. Any other resource (a repository, a
+ * workspace resource) stays in the body, so `siteFrameBodyRefusal` refuses it
+ * as before. Site frames are always checked against the full body.
+ */
+export function withoutFileResources(body: unknown): unknown {
+  const record = bodyRecord(body);
+  if (!record) return body;
+  const { resources, ...rest } = record;
+  if (
+    !Array.isArray(resources) ||
+    !resources.every((resource) => bodyRecord(resource)?.kind === "file")
+  )
+    return body;
+  return rest;
+}

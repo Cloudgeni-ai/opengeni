@@ -1,5 +1,465 @@
 # @opengeni/events
 
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [23964f7]
+- Updated dependencies [c976c87]
+- Updated dependencies [cb3cf2c]
+- Updated dependencies [936423e]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [f80cd7a]
+- Updated dependencies [c472500]
+- Updated dependencies [0b65ea4]
+  - @opengeni/db@6.14.0
+  - @opengeni/contracts@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+  - @opengeni/db@6.13.0
+  - @opengeni/contracts@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- 26c2fbd: Reattach Connected Machine command output from its retained position as soon as the exact runner or controller reconnects, instead of waiting for the silence probe. Reuses the existing operation and receipt without restarting commands, extending deadlines, or changing credential expiry.
+- Updated dependencies [64fd53f]
+- Updated dependencies [2aa8ba4]
+- Updated dependencies [7332869]
+- Updated dependencies [34ff418]
+- Updated dependencies [d29c500]
+- Updated dependencies [831f2ef]
+- Updated dependencies [4eb53af]
+- Updated dependencies [281af3a]
+- Updated dependencies [2117a2d]
+- Updated dependencies [a898141]
+- Updated dependencies [85622d5]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [a43ce53]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [3929153]
+- Updated dependencies [752da12]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [bd4f53a]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [94360cf]
+- Updated dependencies [f1999bf]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+- Updated dependencies [1445841]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/db@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- Updated dependencies [9bb1b56]
+- Updated dependencies [10ee575]
+- Updated dependencies [7e92bda]
+- Updated dependencies [ee15e95]
+- Updated dependencies [71395d6]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [80ff42d]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [336970a]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [2a02889]
+- Updated dependencies [f21e253]
+- Updated dependencies [a505ce8]
+- Updated dependencies [9b96f0e]
+- Updated dependencies [1ee6ee2]
+- Updated dependencies [a2abf51]
+- Updated dependencies [06606ef]
+- Updated dependencies [8b01834]
+- Updated dependencies [d7252be]
+- Updated dependencies [b271f6d]
+- Updated dependencies [b631728]
+- Updated dependencies [217bd09]
+- Updated dependencies [8a8864c]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [b5d8da2]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [ca69414]
+- Updated dependencies [9ea4868]
+- Updated dependencies [bb33f35]
+- Updated dependencies [a31cd5d]
+- Updated dependencies [650e54a]
+- Updated dependencies [432bccf]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [c663db0]
+- Updated dependencies [c8c10a8]
+- Updated dependencies [386586f]
+- Updated dependencies [9420c9b]
+- Updated dependencies [99e117e]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [9c65c34]
+- Updated dependencies [57748cf]
+- Updated dependencies [54e9620]
+- Updated dependencies [04d36ce]
+- Updated dependencies [1a207de]
+- Updated dependencies [3ef0bd4]
+- Updated dependencies [84647c6]
+- Updated dependencies [0b91aac]
+- Updated dependencies [a531446]
+- Updated dependencies [de1210c]
+- Updated dependencies [60a67e6]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/db@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- Updated dependencies [2caf31f]
+- Updated dependencies [c9e5547]
+- Updated dependencies [25a0452]
+- Updated dependencies [b032ab0]
+- Updated dependencies [2e02796]
+- Updated dependencies [b5a7db4]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [6674146]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/db@6.10.0
+  - @opengeni/contracts@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [ff8b164]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/db@6.9.0
+  - @opengeni/contracts@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [fbb70bc]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/db@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [e764a94]
+- Updated dependencies [b0736b7]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [af08d2a]
+- Updated dependencies [d7a740f]
+- Updated dependencies [4a7da4c]
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [80eb21d]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/db@6.6.0
+  - @opengeni/contracts@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- Updated dependencies [4e4f77e]
+- Updated dependencies [e797d94]
+- Updated dependencies [4b67778]
+- Updated dependencies [7de2adf]
+- Updated dependencies [89eabf0]
+- Updated dependencies [f1998df]
+- Updated dependencies [89eabf0]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [02e68d1]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [d5ce7de]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [c649c2e]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [a8d1310]
+- Updated dependencies [7b0f510]
+- Updated dependencies [c314c95]
+- Updated dependencies [27ac6cd]
+- Updated dependencies [f866a11]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/db@6.5.0
+  - @opengeni/contracts@6.5.0
+
+## 6.4.0
+
+### Patch Changes
+
+- Updated dependencies [1f918a4]
+- Updated dependencies [106652b]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [f13df88]
+- Updated dependencies [7a9dc90]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [b3cc70d]
+- Updated dependencies [53f851d]
+- Updated dependencies [237329e]
+- Updated dependencies [8a7d1c8]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [3c16116]
+- Updated dependencies [5ebed12]
+- Updated dependencies [4a48589]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [1e98c19]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [67f4f3e]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [ed0ba73]
+- Updated dependencies [e9e5640]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/db@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [c2e0db6]
+- Updated dependencies [923c161]
+- Updated dependencies [e104fbb]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [64beb77]
+- Updated dependencies [c35704f]
+- Updated dependencies [98542ad]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [83520e5]
+- Updated dependencies [a550481]
+- Updated dependencies [278ad58]
+- Updated dependencies [59d708c]
+- Updated dependencies [79605f2]
+- Updated dependencies [af8fb16]
+- Updated dependencies [bb16142]
+- Updated dependencies [94ba6a2]
+- Updated dependencies [3a47d0b]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/db@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/db@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/db@6.1.0
+
+## 6.0.2
+
+### Patch Changes
+
+- Updated dependencies [e1ebd25]
+- Updated dependencies [b1cffc3]
+- Updated dependencies [83ed5c0]
+- Updated dependencies [073127d]
+- Updated dependencies [44ba53b]
+- Updated dependencies [9a450e3]
+- Updated dependencies [202e3fd]
+- Updated dependencies [c7e16f0]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [d8a1b83]
+- Updated dependencies [aa6b340]
+- Updated dependencies [df7dd0d]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [7bb4ea9]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [09972b5]
+- Updated dependencies [a6004c8]
+- Updated dependencies [cebc433]
+- Updated dependencies [ac9aeba]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [28a87b9]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [6e33a98]
+- Updated dependencies [d9df3db]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [8e0b7e2]
+- Updated dependencies [840d3fc]
+- Updated dependencies [d166d88]
+- Updated dependencies [047bf8c]
+- Updated dependencies [f74d748]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [a133a9d]
+- Updated dependencies [676426c]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [46f1de4]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [fd80817]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [e4f699c]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5c4f5b0]
+- Updated dependencies [ac2e841]
+- Updated dependencies [067d06b]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [af0437b]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/db@6.0.0
+
+## 5.5.1
+
+### Patch Changes
+
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [9e8fb2f]
+- Updated dependencies [83bd1e4]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [d450fe5]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/db@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

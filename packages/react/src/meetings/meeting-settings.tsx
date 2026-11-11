@@ -1,10 +1,12 @@
 // Workspace settings → General → Meetings: who sees new meetings, which
-// model transcribes them, and whether people are recognized by voice. All
-// live under the workspace's `recordings` settings, which a patch replaces as
-// a whole.
+// model transcribes them, whether an agent writes their notes, and whether
+// people are recognized by voice. All live under the workspace's
+// `recordings` settings, which a patch replaces as a whole.
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { regionRestrictedText } from "../inference-region";
 import { useState, type ComponentProps } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
 
 import {
   type RecordingPerson,
@@ -22,6 +24,7 @@ import {
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { Section } from "../ui/section";
+import { WordListRow } from "../ui/word-list-row";
 import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { SettingRow, SettingRowLink } from "../ui/setting-row";
@@ -55,6 +58,8 @@ export function transcriptionModelUnavailableReason(
   entry: RecordingTranscriptionModel,
   msg: OpenGeniText = defaultText,
 ): string {
+  const regionRestricted = regionRestrictedText(msg, entry.unavailableReason);
+  if (regionRestricted) return regionRestricted;
   const providerName = entry.providerName;
   switch (entry.funding) {
     case "workspace_subscription":
@@ -64,6 +69,21 @@ export function transcriptionModelUnavailableReason(
     case "deployment":
       return msg("meetings.settings.providernameIsnTAvailableHere", { providerName });
   }
+}
+
+/**
+ * "Not supported in EU" when no live model is available and the server
+ * switched them off for the region, otherwise null.
+ */
+export function liveTranscriptRestriction(
+  liveModels: readonly Pick<RecordingTranscriptionModel, "available" | "unavailableReason">[],
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (liveModels.some((entry) => entry.available)) return null;
+  return regionRestrictedText(
+    msg,
+    liveModels.find((entry) => entry.unavailableReason)?.unavailableReason,
+  );
 }
 
 /** "30 days", "1 year", "2 years". */
@@ -232,6 +252,17 @@ function MeetingDefaultsViewContent({
   };
 
   const voiceprints = current.voiceprints === true;
+
+  const keyterms = current.keyterms ?? [];
+  const chooseKeyterms = (next: string[]) => {
+    const { keyterms: _previous, ...rest } = current;
+    void save(
+      next.length > 0 ? { ...rest, keyterms: next } : rest,
+      next.length > 0
+        ? msg("meetings.settings.meetingsListenForTheseWords")
+        : msg("meetings.settings.meetingsListenForNoWords"),
+    );
+  };
   const [confirmingOff, setConfirmingOff] = useState(false);
   const chooseVoiceprints = (next: boolean) => {
     if (next === voiceprints) return;
@@ -248,6 +279,7 @@ function MeetingDefaultsViewContent({
   const liveTranscript = current.liveTranscript === true;
   const liveModel = models.liveModels[0] ?? null;
   const liveAvailable = models.liveModels.some((entry) => entry.available);
+  const liveRestricted = liveTranscriptRestriction(models.liveModels, msg);
   const chooseLiveTranscript = (next: boolean) => {
     if (next === liveTranscript) return;
     const { liveTranscript: _previous, ...rest } = current;
@@ -256,6 +288,19 @@ function MeetingDefaultsViewContent({
       next
         ? msg("meetings.settings.newMeetingsShowALive")
         : msg("meetings.settings.newMeetingsDonTShow"),
+    );
+  };
+
+  // On unless turned off, so only `false` is ever saved.
+  const autoSummary = current.autoSummary !== false;
+  const chooseAutoSummary = (next: boolean) => {
+    if (next === autoSummary) return;
+    const { autoSummary: _previous, ...rest } = current;
+    void save(
+      next ? rest : { ...rest, autoSummary: false },
+      next
+        ? msg("meetings.settings.anAgentWritesTheNotes")
+        : msg("meetings.settings.meetingsNoLongerGetNotes"),
     );
   };
 
@@ -413,20 +458,52 @@ function MeetingDefaultsViewContent({
           />
         }
       />
+      <WordListRow
+        words={keyterms}
+        saving={saving}
+        disabled={!canManage}
+        disabledReason={reason}
+        text={{
+          label: msg("meetings.settings.wordsToListenFor"),
+          description: msg("meetings.settings.wordsToListenForDescription"),
+          placeholder: msg("meetings.settings.wordsToListenForPlaceholder"),
+          termTooLong: (term, max) =>
+            msg("meetings.settings.wordTooLong", { term, max: String(max) }),
+          tooMany: (max) => msg("meetings.settings.tooManyWords", { max: String(max) }),
+        }}
+        onChange={chooseKeyterms}
+      />
+      <SettingRow
+        label={msg("meetings.settings.writeNotesAfterEachMeeting")}
+        description={msg("meetings.settings.whenATranscriptIsReady")}
+        control={
+          <Switch
+            aria-label={msg("meetings.settings.writeNotesAfterEachMeeting")}
+            checked={autoSummary}
+            pending={saving}
+            disabled={!canManage}
+            {...(reason ? { disabledReason: reason } : {})}
+            onCheckedChange={chooseAutoSummary}
+          />
+        }
+      />
       {liveModel ? (
         <SettingRow
           label={msg("meetings.settings.liveTranscript")}
-          description={msg("meetings.settings.showsWhatSSaidWhile", {
-            value:
-              liveModel.usdPerHour !== null
-                ? msg("meetings.settings.providernameChargesAboutValuePer", {
-                    providerName: liveModel.providerName,
-                    value: liveModel.usdPerHour.toFixed(2),
-                  })
-                : "",
-          })}
+          description={
+            liveRestricted ??
+            msg("meetings.settings.showsWhatSSaidWhile", {
+              value:
+                liveModel.usdPerHour !== null
+                  ? msg("meetings.settings.providernameChargesAboutValuePer", {
+                      providerName: liveModel.providerName,
+                      value: liveModel.usdPerHour.toFixed(2),
+                    })
+                  : "",
+            })
+          }
           hint={
-            !models.loading && !liveAvailable ? (
+            !models.loading && !liveAvailable && !liveRestricted ? (
               onConnectModels ? (
                 <SettingRowLink onClick={onConnectModels}>
                   {msg("meetings.settings.connectProvidernameToShowA", {
@@ -443,10 +520,11 @@ function MeetingDefaultsViewContent({
           control={
             <Switch
               aria-label={msg("meetings.settings.liveTranscript")}
-              checked={liveTranscript}
+              checked={liveTranscript && !liveRestricted}
               pending={saving}
-              disabled={!canManage}
-              {...(reason ? { disabledReason: reason } : {})}
+              disabled={!canManage || liveRestricted !== null}
+              // The description already says "Not supported in EU".
+              {...(!liveRestricted && reason ? { disabledReason: reason } : {})}
               onCheckedChange={chooseLiveTranscript}
             />
           }
@@ -575,7 +653,9 @@ function VoiceRows({
       await work();
       toast.success(success);
     } catch (error) {
-      toast.error(failure, { description: error instanceof Error ? error.message : undefined });
+      toast.error(failure, {
+        description: error instanceof Error ? userErrorText(error) : undefined,
+      });
     } finally {
       setBusy(false);
     }

@@ -151,6 +151,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     const created = await call("PUT", "/credential-provider", {
       url: "https://product.example/credentials",
       workspaceFilter: { externalSource: "product" },
+      allowPersonalWorkspaces: true,
       enabled: false,
       timeoutMs: 2000,
     });
@@ -160,6 +161,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect(first.provider).toMatchObject({
       organizationId: accountId,
       workspaceFilter: { externalSource: "product" },
+      allowPersonalWorkspaces: true,
     });
     const updated = await call("PUT", "/credential-provider", {
       url: "https://product.example/new",
@@ -169,6 +171,8 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect(second.secret).toBeUndefined();
     expect(second.provider).toMatchObject({
       workspaceFilter: null,
+      // PUT replaces the configuration: an omitted switch is off again.
+      allowPersonalWorkspaces: false,
       enabled: true,
       timeoutMs: 10_000,
     });
@@ -236,6 +240,73 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect((await call("DELETE", `/webhooks/${webhook.id}`)).status).toBe(204);
     expect((await call("GET", `/webhooks/${webhook.id}`)).status).toBe(404);
     expect((await call("DELETE", "/credential-provider")).status).toBe(204);
+  });
+
+  test("the provider and webhooks pick from the organization's shared workspaces; others are a 422", async () => {
+    const stranger = crypto.randomUUID();
+    try {
+      const refused = await call("PUT", "/credential-provider", {
+        url: "https://product.example/credentials",
+        workspaceFilter: null,
+        allowedWorkspaceIds: [stranger],
+      });
+      expect(refused.status).toBe(422);
+      expect(await refused.text()).toContain(stranger);
+      expect(await getOrganizationCredentialProvider(client.db, { accountId })).toBeNull();
+
+      const created = await call("PUT", "/credential-provider", {
+        url: "https://product.example/credentials",
+        workspaceFilter: null,
+        allowedWorkspaceIds: [workspaceId],
+      });
+      expect(created.status).toBe(201);
+      expect((await created.json()).provider.allowedWorkspaceIds).toEqual([workspaceId]);
+      // Leaving the list out keeps it; the other fields are replaced as before.
+      const kept = await call("PUT", "/credential-provider", {
+        url: "https://product.example/new",
+        workspaceFilter: null,
+      });
+      expect((await kept.json()).provider).toMatchObject({
+        url: "https://product.example/new",
+        allowedWorkspaceIds: [workspaceId],
+      });
+
+      const webhookRefused = await call("POST", "/webhooks", {
+        url: "https://receiver.example/events",
+        eventTypes: ["turn.completed"],
+        workspaceFilter: null,
+        allowedWorkspaceIds: [stranger],
+      });
+      expect(webhookRefused.status).toBe(422);
+      const webhookCreated = await call("POST", "/webhooks", {
+        url: "https://receiver.example/events",
+        eventTypes: ["turn.completed"],
+        workspaceFilter: null,
+        allowedWorkspaceIds: [workspaceId],
+      });
+      expect(webhookCreated.status).toBe(201);
+      const { webhook } = await webhookCreated.json();
+      expect(webhook.allowedWorkspaceIds).toEqual([workspaceId]);
+      const patched = await call("PATCH", `/webhooks/${webhook.id}`, {
+        workspaceFilter: null,
+        allowedWorkspaceIds: null,
+      });
+      expect((await patched.json()).allowedWorkspaceIds).toBeNull();
+      expect(
+        (
+          await call("PATCH", `/webhooks/${webhook.id}`, {
+            workspaceFilter: null,
+            allowedWorkspaceIds: [stranger],
+          })
+        ).status,
+      ).toBe(422);
+      expect(
+        (await (await call("GET", `/webhooks/${webhook.id}`)).json()).allowedWorkspaceIds,
+      ).toBe(null);
+    } finally {
+      await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;
+      await call("DELETE", "/credential-provider");
+    }
   });
   test("agent attempts cannot use account admin", async () => {
     const bearer = await signDelegatedAccessToken(delegationSecret, {

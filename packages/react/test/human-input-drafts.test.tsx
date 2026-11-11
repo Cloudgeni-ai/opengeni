@@ -254,13 +254,7 @@ describe("HumanInputForm unsent answer drafts", () => {
     });
     await type(summaryField(), "Ship it");
     await click(checkbox("Production"));
-    await act(async () => {
-      container()
-        .querySelector("form")!
-        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await submitForm();
     expect(submissions).toHaveLength(1);
     expect(readHumanInputDraft(scope, { questions })).toBeNull();
     expect(window.sessionStorage.getItem(humanInputDraftKey(scope))).toBeNull();
@@ -275,13 +269,7 @@ describe("HumanInputForm unsent answer drafts", () => {
     });
     await type(summaryField(), "Ship it");
     await click(checkbox("Production"));
-    await act(async () => {
-      container()
-        .querySelector("form")!
-        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await submitForm();
     await remount();
     expect(summaryField().value).toBe("Ship it");
   });
@@ -470,13 +458,19 @@ function storedSavedAt(): number | null {
 }
 
 async function submitForm(): Promise<void> {
-  await act(async () => {
-    container()
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await Promise.resolve();
-    await Promise.resolve();
-  });
+  // Several questions are asked one at a time: submitting moves on until the last step sends.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const form = container().querySelector("form");
+    if (!form) return;
+    const step = Number(form.dataset.humanInputStep ?? "0");
+    const steps = form.querySelectorAll("[data-human-input-question]").length;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    if (step === 0 || step >= steps) return;
+  }
 }
 
 function hookClient(listHumanInputRequests: () => Promise<SessionHumanInputRequest[]>) {

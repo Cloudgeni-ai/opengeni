@@ -12,6 +12,7 @@ import {
   getRigChange,
   initializeSessionStartAtomically,
   listRigVersions,
+  updateOrganizationRigReach,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
   type DbClient,
@@ -134,18 +135,6 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 }
 
 describe("rig route permission matrix", () => {
-  test("default Variable Set references are refused now that vaults replace them", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const response = await app().request(`/v1/workspaces/${ws.workspaceId}/rigs`, {
-      method: "POST",
-      headers: { authorization: await bearer(ws, "user:m", ["rigs:manage"]) },
-      body: JSON.stringify({ name: "secret-rig", defaultVariableSetIds: [crypto.randomUUID()] }),
-    });
-    expect(response.status).toBe(422);
-    expect(await response.json()).toMatchObject({ error: "variable_sets_removed" });
-  });
-
   test("read requires rigs:use; write requires rigs:manage; propose requires rigs:use", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -674,7 +663,7 @@ describe("rig route permission matrix", () => {
     }
   });
 
-  test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {
+  test("name collision is a 409", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage"]) };
@@ -691,21 +680,132 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "dup" }),
     });
     expect(collision.status).toBe(409);
+  });
 
-    const badRef = await app().request(base, {
-      method: "POST",
-      headers: {
-        authorization: await bearer(ws, "user:m", [
-          "rigs:manage",
-          "variable-sets:attach",
-          "variable-sets:use",
-        ]),
-      },
-      body: JSON.stringify({
-        name: "bad-ref",
-        defaultVariableSetIds: ["11111111-1111-4111-8111-111111111111"],
-      }),
+  test("organization owners and admins pick where an organization rig works", async () => {
+    if (!available) return;
+    const origin = await freshWorkspace();
+    const target = await freshWorkspace(origin.accountId);
+    const third = await freshWorkspace(origin.accountId);
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await organizationMember([origin, target, third], subjectId);
+    const rig = await createRig(client.db, {
+      ...origin,
+      subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "organization-reach",
     });
-    expect(badRef.status).toBe(422);
+    const http = app();
+    const putReach = async (permissions: Permission[], rigId: string, body: unknown) =>
+      await http.request(`/v1/workspaces/${target.workspaceId}/rigs/${rigId}/reach`, {
+        method: "PUT",
+        headers: {
+          authorization: await bearer(target, subjectId, permissions),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+    const admin = ["rigs:manage", "rigs:use", "account:admin"] as Permission[];
+    const onlyTarget = {
+      allowedWorkspaceIds: [target.workspaceId],
+      allowPersonalWorkspaces: false,
+    };
+
+    expect((await putReach(["rigs:manage", "rigs:use"], rig.id, onlyTarget)).status).toBe(403);
+    const changed = await putReach(admin, rig.id, onlyTarget);
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({
+      reach: {
+        homeWorkspaceId: origin.workspaceId,
+        allowedWorkspaceIds: [target.workspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
+    expect(await auditActions(origin.workspaceId, rig.id)).toContain("rig.reach.changed");
+
+    const read = async (workspace: { accountId: string; workspaceId: string }) =>
+      await http.request(`/v1/workspaces/${workspace.workspaceId}/rigs/${rig.id}`, {
+        headers: { authorization: await bearer(workspace, subjectId, ["rigs:use"]) },
+      });
+    const inTarget = await read(target);
+    expect(inTarget.status).toBe(200);
+    expect((await inTarget.json()).reach.allowedWorkspaceIds).toEqual([target.workspaceId]);
+    expect((await read(third)).status).toBe(404);
+    expect((await read(origin)).status).toBe(200);
+
+    const workspaceRig = await createRig(client.db, {
+      ...target,
+      subjectId,
+      scope: "workspace",
+      name: "workspace-reach",
+    });
+    expect((await putReach(admin, workspaceRig.id, onlyTarget)).status).toBe(409);
+  });
+
+  test("organization owners list every organization rig, wherever it works", async () => {
+    if (!available) return;
+    const origin = await freshWorkspace();
+    const target = await freshWorkspace(origin.accountId);
+    const third = await freshWorkspace(origin.accountId);
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await organizationMember([origin, target, third], subjectId);
+    const organizationRig = async (name: string) =>
+      await createRig(client.db, {
+        ...origin,
+        subjectId,
+        scope: "organization",
+        allowOrganization: true,
+        name,
+      });
+    const everywhere = await organizationRig("listed-everywhere");
+    const elsewhere = await organizationRig("listed-elsewhere");
+    await updateOrganizationRigReach(client.db, elsewhere.id, {
+      accountId: origin.accountId,
+      homeWorkspaceId: origin.workspaceId,
+      allowedWorkspaceIds: [third.workspaceId],
+      allowPersonalWorkspaces: false,
+      subjectId,
+    });
+    const workspaceRig = await createRig(client.db, {
+      ...target,
+      subjectId,
+      scope: "workspace",
+      name: "listed-workspace",
+    });
+    const http = app();
+    const list = async (permissions: Permission[]) => {
+      const response = await http.request(
+        `/v1/workspaces/${target.workspaceId}/organization-rigs`,
+        { headers: { authorization: await bearer(target, subjectId, permissions) } },
+      );
+      return {
+        status: response.status,
+        body: (await response.json()) as {
+          rigs?: Array<{ id: string; name: string; reach: unknown }>;
+          complete?: boolean;
+        },
+      };
+    };
+    const ids = (body: { rigs?: Array<{ id: string }> }) => body.rigs!.map((rig) => rig.id);
+    const owner = ["rigs:use", "account:admin"] as Permission[];
+
+    // Only organization owners, who decide where each works.
+    expect((await list(["rigs:use", "rigs:manage"])).status).toBe(403);
+
+    const after = await list(owner);
+    expect(after.status).toBe(200);
+    expect(after.body.complete).toBe(true);
+    expect(ids(after.body).sort()).toEqual([everywhere.id, elsewhere.id].sort());
+    expect(ids(after.body)).not.toContain(workspaceRig.id);
+    expect(after.body.rigs!.find((rig) => rig.id === elsewhere.id)).toEqual({
+      id: elsewhere.id,
+      name: "listed-elsewhere",
+      reach: {
+        homeWorkspaceId: origin.workspaceId,
+        allowedWorkspaceIds: [third.workspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
   });
 });

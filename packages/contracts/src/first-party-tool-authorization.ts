@@ -27,6 +27,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   notify_user: { sessionRequired: true, allOf: ["sessions:control"] },
   notification_withdraw: { sessionRequired: true, allOf: ["sessions:control"] },
   inbox_tidy: { sessionRequired: true, allOf: ["sessions:control"] },
+  call_user: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
@@ -141,6 +142,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // request (never a tool approval, which stays human-only).
   session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
   set_other_session_title: { allOf: ["sessions:control"] },
+  bot_template_save: { sessionRequired: true, allOf: ["sessions:create"] },
   interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -180,6 +182,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   secret_get: { sessionRequired: true, allOf: ["secrets:read"] },
   secret_move: { sessionRequired: true, allOf: ["secrets:write"] },
   secret_delete: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Credential profiles: reading names item references (secret metadata);
+  // changing one also needs workspace:admin (workspace) or sessions:control
+  // (session), checked when the tool runs.
+  secret_profile_get: { sessionRequired: true, allOf: ["secrets:list"] },
+  secret_profile_set: { sessionRequired: true, allOf: ["secrets:write"] },
   // Retired (RETIRED_SECRET_TOOL_NAMES): never registered; kept for stored selections.
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
   environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
@@ -205,6 +212,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   },
   github_connect_link: { allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
+  github_repository_attach: { sessionRequired: true, allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },
   social_posts_recent: { allOf: ["connections:read"] },
   social_daily_analysis_context: { allOf: ["connections:read"] },
@@ -250,6 +258,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   events_get: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
+  event_sources_create_webhook: { allOf: ["scheduled_tasks:manage"] },
+  event_sources_update: { allOf: ["scheduled_tasks:manage"] },
+  event_sources_delete: { allOf: ["scheduled_tasks:manage"] },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
@@ -260,10 +271,17 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_upload_file: { sessionRequired: true, allOf: ["connections:read", "files:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
-  // Scheduled runs only; the destination is the task's human-chosen channel.
+  // Bot posting to an explicit channel. Listed only where a bot is available; in
+  // interactive chats a send follows the person's Slack send permission.
   slack_bot_prepare_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_send_prepared_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
+  // Slack-started chats only; the server finds the chat's own Slack thread.
+  slack_agent_handoff: { sessionRequired: true, allOf: ["sessions:read"] },
+  slack_agent_suggest: { sessionRequired: true, allOf: ["sessions:read"] },
+  slack_agent_chats: { sessionRequired: true, allOf: ["sessions:read"] },
+  // Posts a card only; creating needs a current admin of the target to confirm.
+  slack_agent_propose: { sessionRequired: true, allOf: ["sessions:read"] },
   fiken_companies_list: { allOf: ["connections:read"] },
   fiken_contacts_list: { allOf: ["connections:read"] },
   fiken_products_list: { allOf: ["connections:read"] },

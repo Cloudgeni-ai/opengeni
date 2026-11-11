@@ -7,7 +7,7 @@ import type {
   SessionSummary,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { act, createElement, type ReactNode } from "react";
+import { act, createElement, useCallback, useState, type ReactNode } from "react";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
@@ -150,6 +150,7 @@ type Calls = {
   }>;
   decisions: Array<{ sessionId: string; approvalId: string; decision: string }>;
   reviews: Array<{ sessionId: string; approvalId: string }>;
+  messages: Array<{ sessionId: string; text?: string; modelContext?: string }>;
 };
 
 function fakeClient(state: {
@@ -160,7 +161,7 @@ function fakeClient(state: {
 }) {
   const pending = <T,>(value: () => T): Promise<T> =>
     state.hold ? new Promise<T>(() => {}) : Promise.resolve(value());
-  const calls: Calls = { submitted: [], decisions: [], reviews: [] };
+  const calls: Calls = { submitted: [], decisions: [], reviews: [], messages: [] };
   const client = {
     getSession: async () => {
       throw new Error("not used");
@@ -183,6 +184,14 @@ function fakeClient(state: {
     },
     listEventPage: (_workspaceId: string, sessionId: string) =>
       pending(() => ({ events: state.events?.[sessionId] ?? [] })),
+    sendMessage: async (
+      _workspaceId: string,
+      sessionId: string,
+      message: { text?: string; modelContext?: string },
+    ) => {
+      calls.messages.push({ sessionId, ...message });
+      return {};
+    },
     sendApprovalDecision: async (
       _workspaceId: string,
       sessionId: string,
@@ -292,6 +301,16 @@ describe("descendant request model", () => {
     );
   });
 
+  test("keeps a sub-session resuming from a decision made here, until its turn ends", () => {
+    const nodes = [
+      node(summary("resuming", { status: "running" })),
+      node(summary("ended", { status: "idle" })),
+      node(summary("other", { status: "running" })),
+    ];
+    const resuming = new Set(["resuming", "ended"]);
+    expect(waitingDescendants(nodes, resuming).map((session) => session.id)).toEqual(["resuming"]);
+  });
+
   test("a list hint matters only when it names this tree or asks for a full reconcile", () => {
     const ids = new Set(["parent", "child"]);
     expect(hintTouchesTree({ available: true, sessionIds: ["other", "child"] }, ids)).toBe(true);
@@ -382,7 +401,7 @@ describe("DescendantRequests", () => {
     expect(container().querySelector("[data-descendant-requests-toggle]")).toBeNull();
 
     await act(async () => setNativeValue(answerField()!, "feature/login"));
-    await click(button("Send answers")!);
+    await click(button("Send answer")!);
 
     expect(calls.submitted).toHaveLength(1);
     expect(calls.submitted[0]!.sessionId).toBe("child");
@@ -405,6 +424,56 @@ describe("DescendantRequests", () => {
     await flush(0);
     await flush(0);
     expect(container().querySelector("[data-descendant-request]")).toBeNull();
+  });
+
+  test("Let the agent decide hands the question to this chat's agent, not the sub-session", async () => {
+    const child = summary("child", { title: "Build portable Git merge batcher core" });
+    const { client, calls } = fakeClient({ requests: { child: [request("child")] } });
+    await render({ client, waiting: [child] });
+
+    await click(button("Let the agent decide")!);
+
+    // Nothing went to the sub-session: this chat's agent answers it.
+    expect(calls.submitted).toEqual([]);
+    expect(calls.messages).toHaveLength(1);
+    const message = calls.messages[0]!;
+    expect(message.sessionId).toBe(PARENT);
+    expect(message.text).toBe("Let the agent decide: Which branch should I review?");
+    expect(message.modelContext).toContain("sessionId child, requestId request-1");
+    expect(message.modelContext).toContain("session_human_input_respond");
+    expect(message.modelContext).toContain("Build portable Git merge batcher core");
+    // The card stays answerable and says the agent is on it.
+    expect(container().textContent).toContain("Your agent is deciding");
+    expect(button("Let the agent decide")).toBeUndefined();
+    expect(answerField()).not.toBeNull();
+  });
+
+  test("a hand-off already in this chat marks the card as being decided", async () => {
+    const childId = "6f0e3b52-6a51-4d7e-9a0c-1d2e3f4a5b6c";
+    const requestId = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
+    const child = summary(childId);
+    const { client } = fakeClient({ requests: { [childId]: [request(childId, requestId)] } });
+    const handOff = event("user.message", {
+      text: "Let the agent decide: Which branch should I review?",
+      modelContext: `opengeni:human-input-delegation ${JSON.stringify({ sessionId: childId, requestId })}\nAnswer it.`,
+    });
+    await render({ client, waiting: [child], events: [handOff] });
+    expect(container().textContent).toContain("Your agent is deciding");
+    expect(button("Let the agent decide")).toBeUndefined();
+  });
+
+  test("a hand-off that cannot be sent shows the API's own message", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk");
+    const child = summary("child");
+    const { client } = fakeClient({ requests: { child: [request("child")] } });
+    (client as unknown as { sendMessage: () => Promise<never> }).sendMessage = async () => {
+      throw new OpenGeniApiError(503, "", { code: "maintenance" });
+    };
+    await render({ client, waiting: [child] });
+    await click(button("Let the agent decide")!);
+    expect(container().textContent).toContain("The service is updating. Try again in a moment.");
+    // The card stays answerable.
+    expect(button("Let the agent decide")).toBeDefined();
   });
 
   test("shares an unsent answer with the sub-session's own page", async () => {
@@ -450,6 +519,43 @@ describe("DescendantRequests", () => {
       { sessionId: "child", approvalId: "approval-1", decision: "approve" },
     ]);
     expect(resolved).toBe(1);
+  });
+
+  test("Approve all sends each of a sub-session's approvals to the sub-session, one decision each", async () => {
+    sequence = 0;
+    const child = summary("child", { title: "Bundle tools" });
+    const approvals = ["push-a", "push-b", "push-c"].map((id) => ({
+      id,
+      name: "projects.update",
+      arguments: { projectId: id },
+    }));
+    const state: { events: Record<string, SessionEvent[]> } = {
+      events: { child: [event("session.requiresAction", { approvals })] },
+    };
+    const { client, calls } = fakeClient(state);
+    // Each decision is recorded on the sub-session, which keeps the rest waiting.
+    (client as unknown as Record<string, unknown>).sendApprovalDecision = async (
+      _workspaceId: string,
+      sessionId: string,
+      body: { approvalId: string; decision: string },
+    ) => {
+      calls.decisions.push({ sessionId, ...body });
+      state.events = {
+        child: [...(state.events.child ?? []), event("user.approvalDecision", body)],
+      };
+      return {};
+    };
+    await render({ client, waiting: [child] });
+    await click(button("Approve all 3")!);
+    await flush(0);
+    await flush(0);
+    expect(calls.decisions).toEqual(
+      approvals.map((approval) => ({
+        sessionId: "child",
+        approvalId: approval.id,
+        decision: "approve",
+      })),
+    );
   });
 
   test("opens the sub-session where it asked", async () => {
@@ -676,6 +782,91 @@ describe("DescendantRequests", () => {
       .map((candidate) => candidate.textContent?.trim())
       .filter(Boolean);
     expect(parentButtons).toEqual(childButtons);
+  });
+
+  test("rapid approvals of one sub-session's parallel calls each land once, with no card asked again", async () => {
+    sequence = 0;
+    const approvals = [
+      { id: "delete-a", name: "deleteConnection", arguments: { connection: "a" } },
+      { id: "delete-b", name: "deleteConnection", arguments: { connection: "b" } },
+    ];
+    const state: { events: Record<string, SessionEvent[]> } = {
+      events: { child: [event("session.requiresAction", { approvals })] },
+    };
+    const { client, calls } = fakeClient(state);
+    // The decision is recorded; the sub-session resumes and keeps the rest.
+    (client as unknown as Record<string, unknown>).sendApprovalDecision = async (
+      _workspaceId: string,
+      sessionId: string,
+      body: { approvalId: string; decision: string },
+    ) => {
+      calls.decisions.push({ sessionId, ...body });
+      state.events = {
+        child: [...(state.events.child ?? []), event("user.approvalDecision", body)],
+      };
+      return {};
+    };
+    // The parent page's own rule: a sub-session resuming from a decision made
+    // on its card stays listed while its other approvals wait.
+    function Host({ nodes }: { nodes: LineageNode[] }) {
+      const [resuming, setResuming] = useState<ReadonlySet<string>>(() => new Set());
+      const onResumingChange = useCallback((sessionId: string, value: boolean) => {
+        setResuming((current) => {
+          if (current.has(sessionId) === value) return current;
+          const next = new Set(current);
+          if (value) next.add(sessionId);
+          else next.delete(sessionId);
+          return next;
+        });
+      }, []);
+      return createElement(DescendantRequests, {
+        client,
+        workspaceId: WORKSPACE,
+        parentSessionId: PARENT,
+        waiting: waitingDescendants(nodes, resuming),
+        onResumingChange,
+      });
+    }
+    const waitingChild = summary("child", { title: "Cleanup worker" });
+    mounted = await renderComponent(createElement(Host, { nodes: [node(waitingChild)] }));
+    await flush(0);
+    await flush(0);
+
+    // Two quick clicks on the first card: one decision.
+    const approveA = button("Approve action")!;
+    await act(async () => {
+      approveA.click();
+      approveA.click();
+      await Promise.resolve();
+    });
+    await flush(0);
+    await flush(0);
+    expect(calls.decisions).toEqual([
+      { sessionId: "child", approvalId: "delete-a", decision: "approve" },
+    ]);
+
+    // The tree re-read shows the sub-session running from that decision.
+    await mounted.rerender(
+      createElement(Host, {
+        nodes: [
+          node({ ...waitingChild, status: "running", lastSequence: waitingChild.lastSequence + 2 }),
+        ],
+      }),
+    );
+    await flush(0);
+    await flush(0);
+    const card = container().querySelector<HTMLElement>('[data-descendant-request="child"]');
+    expect(card).not.toBeNull();
+    // Only the undecided call is shown, and it can be decided right away.
+    expect(card!.querySelector('[data-approval-id="delete-a"]')).toBeNull();
+    expect(card!.querySelector('[data-approval-id="delete-b"]')).not.toBeNull();
+    const approveB = button("Approve action")!;
+    expect(approveB.disabled).toBe(false);
+    await click(approveB);
+    expect(calls.decisions).toEqual([
+      { sessionId: "child", approvalId: "delete-a", decision: "approve" },
+      { sessionId: "child", approvalId: "delete-b", decision: "approve" },
+    ]);
   });
 });
 

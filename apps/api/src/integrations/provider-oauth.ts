@@ -1,5 +1,4 @@
 import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
-import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { Buffer } from "node:buffer";
@@ -8,6 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   integrationDefinitionProviderDomain,
   integrationDefinitionById,
+  CORE_INTEGRATION_DEFINITIONS,
   type IntegrationDefinition,
 } from "@opengeni/capabilities";
 import {
@@ -51,12 +51,21 @@ import {
   microsoftAdminConsentUrl,
   microsoftAuthorizationNotGranted,
 } from "./microsoft-admin-consent";
+import type { ConnectAttempt } from "@opengeni/contracts/connect";
+import {
+  curatedConnectFinishEligible,
+  curatedConnectFinishPermissions,
+  installCuratedConnectTools,
+  resolveCuratedConnectTools,
+  retryUnfinishedCuratedSetup,
+  type CuratedConnectFinishPermission,
+} from "./curated-connect-finish";
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
+  connectOwnerStateFields,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -67,6 +76,7 @@ import {
 } from "./oauth-client";
 
 const PROVIDER_OAUTH_CALLBACK_PATH = "/v1/integrations/provider-oauth/callback";
+const PROVIDER_OAUTH_STATE_KIND = "provider_oauth";
 const PROVIDER_OAUTH_TIMEOUT_MS = 15_000;
 const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
 const MICROSOFT_USERINFO_URL =
@@ -97,6 +107,8 @@ type ProviderOAuthState = {
   connectionId?: string;
   connectionVersion?: number;
   expectedProviderPrincipalId?: string;
+  /** What the person who started setup may do to finish it here (see curated-connect-finish). */
+  finishPermissions?: CuratedConnectFinishPermission[];
   nonce: string;
   iat: number;
 };
@@ -152,6 +164,12 @@ export async function startApiIntegrationProviderOAuth(
     personalOwnershipAllowed: boolean;
     externalContinuation?: ExternalActorContinuation;
     connectAttemptId?: string;
+    /**
+     * The starting request's own permissions that let its callback finish a
+     * built-in integration's setup. Signed into the state, since the callback
+     * has no request of its own; it still re-checks the owner's live authority.
+     */
+    finishPermissions?: CuratedConnectFinishPermission[];
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
   },
@@ -215,13 +233,11 @@ export async function startApiIntegrationProviderOAuth(
     input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
   );
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    ownership,
+    kind: PROVIDER_OAUTH_STATE_KIND,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: input.personalOwnershipAllowed,
+    ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
+    ownership,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
@@ -231,6 +247,9 @@ export async function startApiIntegrationProviderOAuth(
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     returnPath,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.connectAttemptId && input.finishPermissions?.length
+      ? { finishPermissions: [...input.finishPermissions] }
+      : {}),
     ...(input.externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -286,6 +305,8 @@ export async function completeApiIntegrationProviderOAuth(
   let state: ProviderOAuthState | null = null;
   let exactReturnUrl: string | undefined;
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A built-in integration's setup finishes here, not in the app that started it.
+  let curatedAttempt: ConnectAttempt | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
     if (state.connectAttemptId) {
@@ -296,6 +317,7 @@ export async function completeApiIntegrationProviderOAuth(
       )
         throw new ProviderOAuthCallbackError("state_invalid");
       exactReturnUrl = stored.returnUrl;
+      if (curatedConnectFinishEligible(stored.attempt)) curatedAttempt = stored.attempt;
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
@@ -378,6 +400,13 @@ export async function completeApiIntegrationProviderOAuth(
     ) {
       throw new ProviderOAuthCallbackError("client_unavailable");
     }
+    // Read a built-in integration's reviewed tools while the code is
+    // exchanged (they need no token), never inside the commit below.
+    const finishPermissions = state.finishPermissions ?? [];
+    const reviewedTools =
+      connectOperation && curatedAttempt && finishPermissions.length > 0
+        ? resolveCuratedConnectTools(deps, state, definition.id)
+        : Promise.resolve(null);
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
     const redirectUri = `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`;
@@ -495,17 +524,28 @@ export async function completeApiIntegrationProviderOAuth(
     const persist = (database: import("@opengeni/db").Database) =>
       persistProviderOAuthConnection(database, persistenceInput);
     if (connectOperation) {
-      await finishOAuthAcquisition(
+      // Null (unreadable in time) saves the account and finishes it later.
+      const owner = state;
+      const tools = await reviewedTools;
+      let origin: ExternalActorContinuation | null = null;
+      const settled = await finishOAuthAcquisition(
         deps.db,
         state,
         {
           ...connectOperation,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, callbackPermission(state!), origin),
+          authorize: (tx, _attempt, attemptOrigin) => {
+            origin = attemptOrigin;
+            return requireConnectOwnerAuthority(
+              tx,
+              owner,
+              callbackPermission(owner),
+              attemptOrigin,
+            );
+          },
           commit: async (tx, current) => {
             const connection = await persist(tx);
             if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
-            return {
+            const connected: ConnectAttempt = {
               ...current,
               revision: current.revision + 1,
               state: "connected_but_incomplete",
@@ -519,10 +559,51 @@ export async function completeApiIntegrationProviderOAuth(
                 status: "connected",
               },
             };
+            const installed =
+              tools &&
+              curatedConnectFinishEligible(current) &&
+              (await installCuratedConnectTools(tx, {
+                settings: deps.settings,
+                owner,
+                origin,
+                finishPermissions,
+                attempt: connected,
+                connectionId: connection.id,
+                resolved: tools,
+              }));
+            return installed
+              ? {
+                  ...connected,
+                  state: "complete",
+                  integrationInstalled: true,
+                  error: undefined,
+                }
+              : connected;
           },
         },
         definition.id,
       );
+      // The tools could not be read in time: keep trying here, so setup
+      // still finishes with nobody waiting in the app.
+      if (
+        curatedAttempt &&
+        finishPermissions.length > 0 &&
+        !tools &&
+        settled.state === "connected_but_incomplete"
+      )
+        retryUnfinishedCuratedSetup(deps, {
+          owner: {
+            accountId: owner.accountId,
+            workspaceId: owner.workspaceId,
+            subjectId: owner.subjectId,
+            personalOwnerVerified: owner.personalOwnerVerified,
+            ...(owner.externalContinuation
+              ? { externalContinuation: owner.externalContinuation }
+              : {}),
+          },
+          attemptId: settled.id,
+          finishPermissions,
+        });
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
     const connection = await withOrganizationIntegrationAcquisition(
@@ -587,8 +668,9 @@ function providerClientForDefinition(
   settings: Settings,
   definition: IntegrationDefinition,
 ): ProviderOAuthClient {
+  // Google Drive connects through its MCP connection, never provider OAuth.
   if (definition.id === "google-drive")
-    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
+    throw new HTTPException(410, { message: "Google Drive connects through its MCP connection." });
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const candidates = providerClientKeys(definition);
   let entry: IntegrationOAuthClientConfig | undefined;
@@ -626,6 +708,44 @@ export function isApiIntegrationProviderOAuthState(
   }
 }
 
+function configuredClientId(settings: Settings, definition: IntegrationDefinition): string | null {
+  try {
+    return providerClientForDefinition(settings, definition).clientId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The link an organization's administrator opens once to approve every
+ * Microsoft service this workspace connects through the same app (Outlook Mail
+ * and Calendar together), so a person adding another later needs no second
+ * approval. Null for other providers or without a configured client.
+ */
+export function microsoftOrganizationApprovalUrl(
+  settings: Settings,
+  workspaceId: string,
+  definition: IntegrationDefinition,
+  apiBaseUrl: string,
+): string | null {
+  if (definition.provider.id !== "microsoft") return null;
+  const clientId = configuredClientId(settings, definition);
+  if (!clientId) return null;
+  const redirectPath = providerOAuthCallbackPath(definition);
+  return microsoftAdminConsentUrl({
+    clientId,
+    redirectUri: `${apiBaseUrl}${redirectPath}`,
+    definitions: CORE_INTEGRATION_DEFINITIONS.filter(
+      (other) =>
+        other.id === definition.id ||
+        (other.provider.id === "microsoft" &&
+          providerOAuthCallbackPath(other) === redirectPath &&
+          integrationAvailable(settings, workspaceId, other.id) &&
+          configuredClientId(settings, other) === clientId),
+    ),
+  });
+}
+
 /** Microsoft denial with an administrator approval link, or null for other providers. */
 function microsoftDenial(
   settings: Settings,
@@ -635,22 +755,11 @@ function microsoftDenial(
   description: string | undefined,
 ): ReturnType<typeof microsoftAuthorizationNotGranted> | null {
   const definition = integrationDefinitionById(state.definitionId);
-  if (!definition || definition.provider.id !== "microsoft") return null;
-  let clientId: string;
-  try {
-    clientId = providerClientForDefinition(settings, definition).clientId;
-  } catch {
-    return null;
-  }
-  return microsoftAuthorizationNotGranted({
-    error,
-    description,
-    adminConsentUrl: microsoftAdminConsentUrl({
-      clientId,
-      redirectUri: `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`,
-      definition,
-    }),
-  });
+  const adminConsentUrl = definition
+    ? microsoftOrganizationApprovalUrl(settings, state.workspaceId, definition, apiBaseUrl)
+    : null;
+  if (!adminConsentUrl) return null;
+  return microsoftAuthorizationNotGranted({ error, description, adminConsentUrl });
 }
 
 function providerOAuthCallbackPath(definition: IntegrationDefinition): string {
@@ -703,6 +812,11 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     unknown
   > | null;
   if (!payload) throw new ProviderOAuthCallbackError("state_invalid");
+  // Same rule as Fiken: another flow's signed state is never this flow's; a
+  // kind-less state (minted before the kind existed) keeps the full re-check.
+  if (payload.kind !== undefined && payload.kind !== PROVIDER_OAUTH_STATE_KIND) {
+    throw new ProviderOAuthCallbackError("state_invalid");
+  }
   const iat = numberValue(payload.iat);
   const now = Math.floor(Date.now() / 1000);
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
@@ -759,6 +873,9 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     ...(optionalString(payload.expectedProviderPrincipalId)
       ? { expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)! }
+      : {}),
+    ...(Array.isArray(payload.finishPermissions)
+      ? { finishPermissions: curatedConnectFinishPermissions(payload.finishPermissions) }
       : {}),
     nonce: requiredStateString(payload.nonce),
     iat,

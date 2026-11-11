@@ -11,7 +11,6 @@
 import type {
   DesktopComputerCapabilities,
   DesktopComputerSettings,
-  DesktopMeetingDetectionStatus,
   ThisComputerPermission,
   ThisComputerPermissionId,
   ThisComputerStatus,
@@ -33,6 +32,10 @@ import { desktopBridge, desktopCapability } from "@opengeni/react/app/lib/deskto
 import { useDesktopThisComputer } from "@opengeni/react/app/components/desktop/this-computer";
 import { ComputerUseRow } from "@opengeni/react/app/components/desktop/computer-use";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
+import { CalendarRemindersRow } from "./calendar-reminders-row";
+import { useMeetingDetection } from "./use-meeting-detection";
+
+export { connectCalendarPath } from "./use-meeting-detection";
 
 /** What each screen-control permission is for, in a few words. */
 const SCREEN_PERMISSION_ROWS: Record<
@@ -129,14 +132,34 @@ export function foldersHaveOwnAction(status: ThisComputerStatus | null): boolean
 }
 
 const COMPUTER_USE_OFF = "Turn on Computer use first.";
-const MANAGED_ELSEWHERE = "Set in the Opengeni Agent service on this computer.";
+/**
+ * A separately installed Opengeni Agent (or an older one) runs this computer,
+ * so the app can show what is in effect but can't change it.
+ */
+const MANAGED_ELSEWHERE =
+  "Set by the Opengeni Agent installed on its own on this computer, not by this app.";
 const UPDATE_THE_APP = "Update the Opengeni app to change this.";
+const RESTARTS_HERE =
+  "Turning the screen or Chrome on or off restarts Opengeni on this computer and stops what agents are running here.";
 
 function Allowed() {
   return (
     <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-      <CheckIcon className="size-4 text-success" aria-hidden />
+      <CheckIcon className="size-4 text-status-success" aria-hidden />
       Allowed
+    </span>
+  );
+}
+
+/** What is in effect where the app can't switch it: words, not a switch that won't move. */
+function InEffect({ on }: { on: boolean }) {
+  return (
+    <span
+      data-in-effect={on ? "on" : "off"}
+      className="inline-flex items-center gap-1.5 text-sm text-fg-muted"
+    >
+      {on ? <CheckIcon className="size-4 text-status-success" aria-hidden /> : null}
+      {on ? "On" : "Off"}
     </span>
   );
 }
@@ -288,12 +311,57 @@ async function freshStatus(workspaceId: string): Promise<ThisComputerStatus | nu
   return bridge.status(workspaceId).catch(() => null);
 }
 
+/**
+ * Whether agents can use this computer's screen, as the workspace's machine
+ * list says: what is in effect when another agent on this computer, not the
+ * app, decides it. Null until known.
+ */
+function useScreenSharedHere(
+  workspaceId: string,
+  enrollmentId: string | undefined,
+  enabled: boolean,
+): boolean | null {
+  const { client } = useAppContext();
+  const [shared, setShared] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!enabled || !enrollmentId) {
+      setShared(null);
+      return;
+    }
+    let cancelled = false;
+    const read = () => {
+      client
+        .listMachines(workspaceId)
+        .then((result) => {
+          if (cancelled) return;
+          const machine = result.machines.find(
+            (candidate) => candidate.enrollmentId === enrollmentId,
+          );
+          setShared(machine ? machine.hasDisplay && machine.allowScreenControl : null);
+        })
+        .catch(() => undefined);
+    };
+    read();
+    window.addEventListener("focus", read);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", read);
+    };
+  }, [client, enabled, enrollmentId, workspaceId]);
+  return shared;
+}
+
 /** Computer use on this computer: the switch for it, then what agents may do here. */
 export function ThisComputerAgentSettings({ className }: { className?: string }) {
   const desktop = useDesktopThisComputer();
   const caps = useComputerCapabilities();
   const status = desktop?.computer.status ?? null;
   const chrome = useChromeOnThisComputer(desktop?.workspaceId ?? "", status?.enrollmentId);
+  const screenSharedHere = useScreenSharedHere(
+    desktop?.workspaceId ?? "",
+    status?.enrollmentId,
+    screenControlView(status, caps.capabilities).kind === "managedElsewhere",
+  );
   const [turningOn, setTurningOn] = useState(false);
   // Which switches apply follows the computer's state (another agent serving
   // it, a connection made without the screen): read them again when it changes.
@@ -304,6 +372,7 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   if (!desktop || !status || status.state === "unavailable") return null;
   const { computer, platform, workspaceId } = desktop;
   const view = screenControlView(status, caps.capabilities);
+  const managedElsewhere = view.kind === "managedElsewhere";
   const folders = foldersAllowed(status);
   // The app's switches are still being read: the switches wait, nothing to explain yet.
   const loading = caps.bridge !== null && caps.capabilities === null;
@@ -346,9 +415,21 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   const screenError = caps.saving === "screenControl" ? undefined : caps.errorFor("screenControl");
   const screenMissing = view.kind === "on" ? missingScreenPermissions(status) : [];
   const firstMissing = screenMissing[0];
+  // Another agent on this computer decides Chrome too: say what is in effect.
+  const chromeElsewhere =
+    view.kind !== "computerUseOff" &&
+    (status.management === "service" ||
+      Boolean(caps.capabilities?.unavailable.includes("browserExtension")));
+  // Where the switches work, say before someone flips one that it restarts the agent.
+  const switchable = view.kind === "on" || view.kind === "off";
+  const screenOnElsewhere = screenSharedHere ?? screenControlInEffect(view, caps.capabilities);
 
   return (
-    <Section variant="group" className={className}>
+    <Section
+      variant="group"
+      className={className}
+      description={switchable && caps.bridge ? RESTARTS_HERE : undefined}
+    >
       <ComputerUseRow desktop={desktop} />
       <SettingRow
         label="Control the screen"
@@ -359,17 +440,23 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
               : "Agents can see the screen and use apps."
             : view.kind === "off"
               ? "Off. Agents can't see the screen or use apps."
-              : reason
+              : managedElsewhere
+                ? `${screenOnElsewhere ? "Agents can see the screen and use apps." : "Agents can't see the screen or use apps."} ${reason}`
+                : reason
         }
         error={view.kind === "managedElsewhere" ? undefined : screenError}
         control={
-          <Switch
-            checked={loading ? false : screenControlInEffect(view, caps.capabilities)}
-            pending={loading || caps.saving === "screenControl" || turningOn}
-            disabled={reason !== undefined}
-            {...(reason ? { disabledReason: reason } : {})}
-            onCheckedChange={(on) => void setScreenControl(on)}
-          />
+          managedElsewhere ? (
+            <InEffect on={screenOnElsewhere} />
+          ) : (
+            <Switch
+              checked={loading ? false : screenControlInEffect(view, caps.capabilities)}
+              pending={loading || caps.saving === "screenControl" || turningOn}
+              disabled={reason !== undefined}
+              {...(reason ? { disabledReason: reason } : {})}
+              onCheckedChange={(on) => void setScreenControl(on)}
+            />
+          )
         }
       >
         {view.kind !== "on" ? null : firstMissing ? (
@@ -398,12 +485,14 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
       <SettingRow
         label="Google Chrome"
         description={
-          chromeReason ??
-          (!browserOn
-            ? "Off. The Opengeni Browser extension can't reach this computer."
-            : chrome
-              ? `Browser extension connected · ${chrome.name}`
-              : "Agents can use your Chrome with the Opengeni Browser extension.")
+          chromeElsewhere
+            ? `${chrome ? `Browser extension connected · ${chrome.name}.` : "The Opengeni Browser extension isn't connected here."} ${chromeReason ?? MANAGED_ELSEWHERE}`
+            : (chromeReason ??
+              (!browserOn
+                ? "Off. The Opengeni Browser extension can't reach this computer."
+                : chrome
+                  ? `Browser extension connected · ${chrome.name}`
+                  : "Agents can use your Chrome with the Opengeni Browser extension."))
         }
         // Without the extension the switch does nothing yet, so the row says where to get it.
         hint={
@@ -421,13 +510,17 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
             : caps.errorFor("browserExtension")
         }
         control={
-          <Switch
-            checked={!chromeReason && !loading && browserOn}
-            pending={loading || caps.saving === "browserExtension"}
-            disabled={chromeReason !== undefined}
-            {...(chromeReason ? { disabledReason: chromeReason } : {})}
-            onCheckedChange={(on) => void caps.update("browserExtension", on)}
-          />
+          chromeElsewhere ? (
+            <InEffect on={chrome !== null} />
+          ) : (
+            <Switch
+              checked={!chromeReason && !loading && browserOn}
+              pending={loading || caps.saving === "browserExtension"}
+              disabled={chromeReason !== undefined}
+              {...(chromeReason ? { disabledReason: chromeReason } : {})}
+              onCheckedChange={(on) => void caps.update("browserExtension", on)}
+            />
+          )
         }
       />
       {/* Only macOS guards these folders. */}
@@ -457,44 +550,15 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   );
 }
 
-/** Whether the app offers to record when a call starts, kept current while the page is open. */
-function useMeetingDetection() {
-  const bridge = desktopCapability("meetingDetection")?.meetingDetection ?? null;
-  const [status, setStatus] = useState<DesktopMeetingDetectionStatus | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-  const refresh = useCallback(() => {
-    if (!bridge) return;
-    void bridge
-      .status()
-      .then(setStatus)
-      .catch(() => undefined);
-  }, [bridge]);
-  useEffect(() => {
-    if (!bridge) return;
-    refresh();
-    return bridge.onChange(refresh);
-  }, [bridge, refresh]);
-  const update = useCallback(
-    async (enabled: boolean) => {
-      if (!bridge) return;
-      setSaving(true);
-      setFailed(null);
-      try {
-        setStatus(await bridge.update({ enabled }));
-      } catch {
-        setFailed("Couldn't save the change. Try again.");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [bridge],
-  );
-  return { bridge, status, saving, failed, update };
-}
-
 /** The app's own use of the microphone, for dictation, voice chats and meeting recordings. */
-export function ThisComputerMicrophoneSettings({ className }: { className?: string }) {
+export function ThisComputerMicrophoneSettings({
+  className,
+  onConnectCalendar,
+}: {
+  className?: string;
+  /** Opens where a calendar is connected; without it the row doesn't offer to. */
+  onConnectCalendar?: (() => void) | undefined;
+}) {
   const caps = useComputerCapabilities();
   const meetings = useMeetingDetection();
   const platform = desktopBridge?.platform ?? "macos";
@@ -547,7 +611,7 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
           label="Offer to record calls"
           description={
             detection.enabled
-              ? "When Zoom, Teams, Slack, or a meeting in your browser starts using the microphone, a notification asks whether to record it."
+              ? "When Zoom, Teams, Slack, or a meeting in your browser starts using the microphone, a card in the top corner of the screen asks whether to record it."
               : "Off. Start meeting recordings yourself from Meetings."
           }
           error={meetings.saving ? undefined : (meetings.failed ?? detection.problem)}
@@ -555,9 +619,35 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
             <Switch
               checked={detection.enabled}
               pending={meetings.saving}
-              onCheckedChange={(next) => void meetings.update(next)}
+              onCheckedChange={(next) => void meetings.update({ enabled: next })}
             />
           }
+        >
+          {detection.enabled && detection.autoRecord !== undefined ? (
+            <SettingRow
+              label="Record without asking"
+              description={
+                detection.autoRecord
+                  ? "Calls in Zoom, Teams, Slack and other call apps are recorded from the start and stop when the call ends. A card says so, with a button to stop. Meetings in your browser still ask."
+                  : "Ask each time before recording a call."
+              }
+              control={
+                <Switch
+                  checked={detection.autoRecord}
+                  pending={meetings.saving}
+                  onCheckedChange={(next) => void meetings.update({ autoRecord: next })}
+                />
+              }
+            />
+          ) : null}
+        </SettingRow>
+      ) : null}
+      {meetings.bridge && detection && detection.calendarReminders !== undefined ? (
+        <CalendarRemindersRow
+          status={{ ...detection, calendarReminders: detection.calendarReminders }}
+          saving={meetings.saving}
+          onChange={(next) => void meetings.update({ calendarReminders: next })}
+          onConnectCalendar={onConnectCalendar}
         />
       ) : null}
     </Section>

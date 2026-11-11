@@ -18,16 +18,20 @@ import {
   type SandboxBackend,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   isSecretReferenceError,
+  machineAccessNeededMessage,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
+  computeHostHandingOff,
   getEnrollment,
   getSession,
   getLiveEnrollmentConnection,
   getSandbox,
+  isPersonalMachineAccessRefusal,
   listEnrollments,
   listSandboxes,
+  meetingSummarySessionScope,
   nestedPostgresSqlState,
   readActiveSandbox,
   readLease,
@@ -41,12 +45,15 @@ import {
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
+  credentialProfileNoteText,
   prepareSecretExec,
   resolveSecretLiteralText,
   runWithSecretCarry,
+  type CredentialEnvironment,
   type SecretExecCarry,
   selfhostedLiveness,
   SelfhostedSession,
@@ -75,6 +82,8 @@ export type FleetServices = {
    * this to the same viewer/provider verification + rematerialization path; core
    * tests may omit it when exercising pointer mechanics only. */
   ensureSessionGroupReady?: (ctx: FleetContext) => Promise<FleetReadinessHold>;
+  /** Deliver wakes now when a move lets a waiting saved message start. */
+  requestSessionWorkflowWakeDispatch?: () => Promise<void>;
 };
 
 export type FleetReadinessHold = {
@@ -171,6 +180,10 @@ export type FleetSandboxEntry = {
    * be wakeable even while its holderless lease is cold/draining and therefore
    * not an already-live swap target. */
   operationAvailability: FleetOperationAvailability;
+  /** Compute only, and only while it holds: its host is handing it off to
+   * another host, so it cannot start commands for a short while
+   * (`operationAvailability` is then `recovering`). */
+  hostBusy?: "handing_off";
   /** Selfhosted only: whether whole-machine + screen-control consent is acked. */
   consented?: boolean;
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
@@ -288,17 +301,37 @@ function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
 
 export type PersonalMachineRefusalCode =
   | "personal_machine_permission_required"
-  | "personal_machine_not_permitted";
+  | "personal_machine_not_permitted"
+  | "machine_access_required";
 
 /**
  * Plain refusal for a personal ("Only me") Connected Machine that the database
  * admission (`authorize_session_attempt_personal_machine`) turned down. The
  * function raises SQLSTATE 42501 for policy refusals and P0002 when a required
- * owner, authority or enrollment row is not current. Only failures of that
- * admission statement are mapped; anything else is a real failure and stays an
- * error. The raw database error is never shown.
+ * owner, authority or enrollment row is not current. The check right before
+ * the machine is used (`assert_session_attempt_personal_machine`) can still
+ * find this turn's approval used up, revoked or expired; that is
+ * `machine_access_required`, named after the machine when known. Anything else
+ * is a real failure and stays an error. The raw database error is never shown.
  */
 export function personalMachineRefusal(
+  error: unknown,
+  machineName?: string | null,
+): { code: PersonalMachineRefusalCode; reason: string } | null {
+  const admission = personalMachineAdmissionRefusal(error);
+  // Admission's "requires explicit grant" has its own setup card. Otherwise the
+  // exact pre-use refusal wins, even when one statement ran both checks.
+  if (admission?.code === "personal_machine_permission_required") return admission;
+  if (!isPersonalMachineAccessRefusal(error)) return admission;
+  return {
+    code: "machine_access_required",
+    reason:
+      `${machineAccessNeededMessage(machineName)} ` +
+      "This turn's approval for it ended, or the turn lost access to it another way, so trying again won't help during this turn. Keep working where you are, and tell the person that the machine's owner can allow it for this chat.",
+  };
+}
+
+function personalMachineAdmissionRefusal(
   error: unknown,
 ): { code: PersonalMachineRefusalCode; reason: string } | null {
   const sqlState = nestedPostgresSqlState(error);
@@ -315,7 +348,7 @@ export function personalMachineRefusal(
     return {
       code: "personal_machine_permission_required",
       reason:
-        "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
+        "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace. " +
         "To ask them, call capability_authorization_request once with capabilityId api:connected-machine: the card it posts lets them allow it, so do not describe buttons or steps.",
     };
   }
@@ -458,14 +491,19 @@ export async function listFleet(
     // warm lease, observed provider existence, and verified workspace readiness.
     const groupActive = pointer.activeSandboxId === null;
     const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+    // A warm lease is no proof it can start commands: a host handing it off
+    // refuses to wake it for a while.
+    const groupHandingOff = computeHostHandingOff(groupLease);
     const groupOnline = Boolean(
       groupLease?.liveness === "warm" &&
       groupLease.recovery.provider.status === "exists" &&
-      groupLease.recovery.workspace.status === "ready",
+      groupLease.recovery.workspace.status === "ready" &&
+      !groupHandingOff,
     );
     const groupRecovering = Boolean(
       groupLease &&
-      (groupLease.liveness === "warming" ||
+      (groupHandingOff ||
+        groupLease.liveness === "warming" ||
         groupLease.recovery.restore.status === "pending" ||
         groupLease.recovery.restore.status === "restoring" ||
         groupLease.recovery.restore.status === "verifying"),
@@ -495,6 +533,7 @@ export async function listFleet(
       enrollmentId: null,
       attachable: groupOnline,
       operationAvailability: groupOperationAvailability,
+      ...(groupHandingOff ? { hostBusy: "handing_off" as const } : {}),
       providerStatus: groupLease?.recovery.provider.status ?? "not_created",
       leaseLiveness: groupLease?.liveness ?? null,
       routeStatus: groupActive ? "attached" : "detached",
@@ -546,6 +585,11 @@ export async function listFleet(
     ),
     ...scopedSandboxes,
   ];
+  // One running agent can serve several enrollments of the same computer, for
+  // example its owner's personal (Only me) enrollment and the same computer
+  // shared with this workspace. They share the agent's live connection
+  // instance. They are one computer, so they are listed once.
+  const machines = new Map<string, { index: number; shared: boolean }>();
   for (const sandbox of sandboxes) {
     if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
       continue;
@@ -570,7 +614,7 @@ export async function listFleet(
           consented: false,
           hasDisplay: false,
         };
-    entries.push({
+    const entry: FleetSandboxEntry = {
       id: sandbox.id,
       kind: "selfhosted",
       name: sandbox.name,
@@ -605,7 +649,21 @@ export async function listFleet(
       workspaceGeneration: null,
       archiveGeneration: null,
       archiveComplete: false,
-    });
+    };
+    const shared = enrollment.scope !== "user";
+    const instance = liveConnection?.connectionInstanceId ?? null;
+    const twin = instance ? machines.get(instance) : undefined;
+    if (!instance || !twin) {
+      if (instance) machines.set(instance, { index: entries.length, shared });
+      entries.push(entry);
+      continue;
+    }
+    // Keep the entry the chat is already on; otherwise the shared enrollment,
+    // which the chat can use without its owner allowing each chat.
+    const kept = entries[twin.index]!;
+    if (kept.active || (!entry.active && (twin.shared || !shared))) continue;
+    entries[twin.index] = entry;
+    machines.set(instance, { index: twin.index, shared });
   }
 
   return {
@@ -639,7 +697,7 @@ export function fleetAgentNotice(fleet: FleetListResult): string {
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
 
 type ResolvedNamedSandboxTarget =
-  | { ok: true; targetSandboxId: string; workspaceRoot?: string }
+  | { ok: true; targetSandboxId: string; workspaceRoot?: string; name?: string }
   | { ok: false; reason: string; code: BackendUnresolvableCode };
 
 /** Resolve one named sandbox, independent of any existing session pointer. */
@@ -731,6 +789,7 @@ async function resolveNamedSandboxTarget(
   return {
     ok: true,
     targetSandboxId: sandbox.id,
+    name: sandbox.name,
     ...(targetWorkspaceRoot ? { workspaceRoot: targetWorkspaceRoot } : {}),
   };
 }
@@ -790,7 +849,7 @@ async function resolveTarget(
   ctx: FleetContext,
   target: string,
 ): Promise<
-  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string }
+  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string; name?: string }
   | { ok: false; reason: string; code: BackendUnresolvableCode }
 > {
   // The session's own group box → the default pointer (null).
@@ -830,6 +889,16 @@ export async function swapActiveSandbox(
   // never touches it); threaded straight into the epoch-fenced setActiveSandbox CAS.
   workingDir?: string | null,
 ): Promise<FleetSwapResult> {
+  // A built-in meeting-summary chat never gets a machine (docs/recordings.md,
+  // "Built-in summary"); the database refuses the same change.
+  if (
+    await meetingSummarySessionScope(services.db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.sessionId,
+    })
+  ) {
+    throw new HTTPException(409, { message: "A meeting notes chat keeps only its meeting tools." });
+  }
   const resolved = await resolveTarget(services, ctx, target);
   if (!resolved.ok) {
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
@@ -932,7 +1001,7 @@ export async function swapActiveSandbox(
       } catch (error) {
         // The admission refusal rolled the whole CAS transaction back, so the
         // pointer read above is still current.
-        const refusal = personalMachineRefusal(error);
+        const refusal = personalMachineRefusal(error, resolved.name);
         if (!refusal) throw error;
         return {
           swapped: false,
@@ -942,6 +1011,22 @@ export async function swapActiveSandbox(
         };
       }
       if (result.swapped && result.pointer) {
+        // A saved message may have been waiting for a machine its sender may
+        // use. An agent moving its own running turn has nothing waiting.
+        if (!ctx.attemptAuthority) {
+          await releaseAdmissionBlocksAfterAccessChange(
+            {
+              db: services.db,
+              requestSessionWorkflowWakeDispatch: services.requestSessionWorkflowWakeDispatch,
+            },
+            {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              change: "machine",
+              sessionIds: [ctx.sessionId],
+            },
+          );
+        }
         return {
           swapped: true,
           activeSandboxId: result.pointer.activeSandboxId,
@@ -1001,6 +1086,8 @@ export type RunOnResult = {
   /** Typed refusal for a personal (Only me) machine this attempt may not use. */
   code?: PersonalMachineRefusalCode;
   notice?: string;
+  /** Exec only: credential profile variables that were skipped and why (never values). */
+  credentialProfileNote?: string;
   /** Present only after the session command ledger accepted a running exec. */
   commandId?: string;
   state?: "running";
@@ -1048,6 +1135,11 @@ export type RunOnSelfhostedMachine = {
    * nothing. Absent: references pass through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The calling session's credential profile: exec receives its variables
+   * in ExecRequest.env (below the command's own assignments). Absent: none.
+   */
+  credentials?: CredentialEnvironment | null;
 };
 
 /**
@@ -1083,6 +1175,7 @@ export async function createRunOnSecretResolver(
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
   secretResolver?: SecretResolver | null;
+  credentials?: CredentialEnvironment | null;
 };
 
 function runOnOperationAdmission(
@@ -1190,6 +1283,7 @@ export async function executeRunOnSelfhostedMachine(
         resolver: machine.secretResolver,
         dialect: null,
         use: secretUse,
+        credentials: machine.credentials ?? null,
       });
       let res: Awaited<ReturnType<typeof session.exec>> | undefined;
       try {
@@ -1207,6 +1301,9 @@ export async function executeRunOnSelfhostedMachine(
           await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
       }
+      // Read after dispatch: the machine may add a delivery note to the same list.
+      const profileNote = credentialProfileNoteText(prepared?.notes);
+      const credentialProfileNote = profileNote ? { credentialProfileNote: profileNote } : {};
       if (res.backgroundCommandId) {
         return {
           target,
@@ -1221,6 +1318,7 @@ export async function executeRunOnSelfhostedMachine(
           deadlineMs,
           notice:
             "Command is still running. Use command_read or command_wait with this commandId; do not restart it.",
+          ...credentialProfileNote,
         };
       }
       const timedOut = res.timedOut === true;
@@ -1249,6 +1347,7 @@ export async function executeRunOnSelfhostedMachine(
         ...(res.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
+        ...credentialProfileNote,
       };
     }
     if (op.kind === "read") {
@@ -1340,22 +1439,28 @@ export async function runOnEnrollmentDirect(
   );
 }
 
+/** An enrolled machine a `run_on` op may reach, with its live connection. */
+export type RunOnMachine = {
+  sandbox: SandboxRecord & { enrollmentId: string };
+  enrollment: EnrollmentRecord & { connectionInstanceId: string; workspaceRoot: string };
+};
+
+export type RunOnMachineResolution =
+  | { ok: true; machine: RunOnMachine }
+  | { ok: false; reason: string; targetName?: string; code?: PersonalMachineRefusalCode };
+
 /**
- * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
- * (the design `run_on`). Only selfhosted targets are routable as a one-off here
- * (a Modal target is the session's group box, reached via the normal Channel-A /
- * turn path — `run_on` is for reaching a NON-active enrolled machine without
- * swapping). The op is fenced under the target's enrollment, addressed to its
- * agent subject; an offline machine surfaces a clear reason, never a wrong-box
- * landing.
+ * Whether this caller may reach `target` as a one-off, and its live connection:
+ * the access check every `run_on` op makes, and every tool that reads a file
+ * where a `run_on` exec's code runs. Only selfhosted targets qualify, and a
+ * personal machine needs the exact admitted attempt's per-chat permission
+ * (without being the active sandbox).
  */
-export async function runOnSandbox(
-  services: FleetServices,
+export async function resolveRunOnMachine(
+  services: Pick<FleetServices, "db">,
   ctx: FleetContext,
   target: string,
-  op: RunOnOp,
-  options: RunOnOptions = {},
-): Promise<RunOnResult> {
+): Promise<RunOnMachineResolution> {
   const sandbox = await getSandbox(
     services.db,
     ctx.subjectId
@@ -1368,18 +1473,11 @@ export async function runOnSandbox(
     target,
   );
   if (!sandbox) {
-    return {
-      target,
-      kind: op.kind,
-      ok: false,
-      reason: `sandbox ${target} not found in this workspace`,
-    };
+    return { ok: false, reason: `sandbox ${target} not found in this workspace` };
   }
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
     };
@@ -1387,9 +1485,7 @@ export async function runOnSandbox(
   if (sandbox.scope === "user") {
     if (!ctx.subjectId || !ctx.attemptAuthority) {
       return {
-        target,
         targetName: sandbox.name,
-        kind: op.kind,
         ok: false,
         reason: "personal Connected Machine use requires an exact admitted agent attempt",
       };
@@ -1408,19 +1504,15 @@ export async function runOnSandbox(
       });
       if (!authorized) {
         return {
-          target,
           targetName: sandbox.name,
-          kind: op.kind,
           ok: false,
           reason: "personal Connected Machine authority was not admitted for this attempt",
         };
       }
     } catch (error) {
-      const refusal = personalMachineRefusal(error);
+      const refusal = personalMachineRefusal(error, sandbox.name);
       return {
-        target,
         targetName: sandbox.name,
-        kind: op.kind,
         ok: false,
         reason:
           refusal?.reason ?? "personal Connected Machine authority is not live for this attempt",
@@ -1441,22 +1533,59 @@ export async function runOnSandbox(
   );
   if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `sandbox ${target} is not enrolled/active`,
     };
   }
   if (!enrollment.workspaceRoot) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `sandbox ${target} has not reported an absolute workspace root; reconnect it with a current agent`,
     };
   }
+  return {
+    ok: true,
+    machine: {
+      sandbox: { ...sandbox, enrollmentId: sandbox.enrollmentId },
+      enrollment: {
+        ...enrollment,
+        connectionInstanceId: enrollment.connectionInstanceId,
+        workspaceRoot: enrollment.workspaceRoot,
+      },
+    },
+  };
+}
+
+/**
+ * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
+ * (the design `run_on`). Only selfhosted targets are routable as a one-off here
+ * (a Modal target is the session's group box, reached via the normal Channel-A /
+ * turn path — `run_on` is for reaching a NON-active enrolled machine without
+ * swapping). The op is fenced under the target's enrollment, addressed to its
+ * agent subject; an offline machine surfaces a clear reason, never a wrong-box
+ * landing.
+ */
+export async function runOnSandbox(
+  services: FleetServices,
+  ctx: FleetContext,
+  target: string,
+  op: RunOnOp,
+  options: RunOnOptions = {},
+): Promise<RunOnResult> {
+  const resolved = await resolveRunOnMachine(services, ctx, target);
+  if (!resolved.ok) {
+    return {
+      target,
+      ...(resolved.targetName !== undefined ? { targetName: resolved.targetName } : {}),
+      kind: op.kind,
+      ok: false,
+      reason: resolved.reason,
+      ...(resolved.code !== undefined ? { code: resolved.code } : {}),
+    };
+  }
+  const { sandbox, enrollment } = resolved.machine;
   const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission | null> => {
     try {
       const current =
@@ -1518,6 +1647,7 @@ export async function runOnSandbox(
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&
       services.bus?.getOpStreamConnection

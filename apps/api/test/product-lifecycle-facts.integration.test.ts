@@ -150,7 +150,8 @@ describe("product lifecycle facts from managed auth", () => {
     });
     expect(await factsFor(subjectId)).toHaveLength(1);
 
-    const verification = messages.find((message) => message.kind === "email_verification");
+    // Only the newest sign-up's link verifies the address.
+    const verification = messages.findLast((message) => message.kind === "email_verification");
     const link = new URL(verification!.text.match(/https?:\/\/\S+/)![0]);
     const verificationPath = `${link.pathname}${link.search}`;
     const verified = await app.request(verificationPath, { headers: requestHeaders() });
@@ -251,8 +252,8 @@ describe("product lifecycle facts from managed auth", () => {
     const accountId = crypto.randomUUID();
     const email = `social-lifecycle-${accountId}@example.test`;
     google.getUserInfo = async () => ({
-      user: { id: accountId, name: "Provider Human", email, emailVerified: true },
-      data: {},
+      user: { name: "Provider Human", email, emailVerified: true },
+      data: { sub: accountId },
     });
     const start = await app.request("/v1/auth/sign-in/social", {
       method: "POST",

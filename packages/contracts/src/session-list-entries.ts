@@ -21,8 +21,14 @@ export type SessionListEntryInput = Omit<
   | "archived"
   | "archivedAt"
   | "archiveVersion"
-> &
-  Partial<
+  | "description"
+  | "avatar"
+  | "latestTurn"
+> & {
+  /** Absent from older servers' rows and SDK-projected sessions. */
+  description?: string | null | undefined;
+  avatar?: Session["avatar"] | undefined;
+} & Partial<
     Pick<
       Session,
       | "pinned"
@@ -55,6 +61,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     workspaceId: session.workspaceId,
     accountId: session.accountId,
     status: session.status,
+    activeTurnId: session.activeTurnId,
     backgroundCommandActivity: session.backgroundCommandActivity,
     hasSchedules: session.hasSchedules,
     hasUpcomingSchedules: session.hasUpcomingSchedules,
@@ -62,6 +69,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     automationWait: session.automationWait,
     title: session.title,
     titleSource: session.titleSource,
+    description: session.description ?? null,
+    avatar: session.avatar ?? null,
     displayTitle: deriveSessionDisplayTitle(session),
     renameSeed: sessionTitleIsPending(session)
       ? (deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "")
@@ -82,6 +91,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     pinnedAt: session.pinnedAt ?? null,
     pinVersion: session.pinVersion ?? 0,
     unread: session.unread ?? false,
+    ...(session.failureHandled ? { failureHandled: true } : {}),
     activelyWorking: session.activelyWorking ?? false,
     attentionVersion: session.attentionVersion ?? 0,
     archived: session.archived ?? false,

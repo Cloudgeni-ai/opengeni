@@ -1,7 +1,6 @@
 import {
   ClaudeSubscriptionCredential,
   parseClaudeUsageHeaders,
-  withClaudeConnectionCredential,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -30,10 +29,10 @@ import {
   type CoreSubscriptionRequests,
 } from "./agent-turn/subscription-core-requests";
 import {
-  claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeCoreSettingsCredential,
   claudeSubscriptionUpstreamModelIds,
+  withClaudeCoreConnectionCredential,
 } from "./agent-turn/claude-core";
 import { runAuxiliaryProviderDispatch } from "./auxiliary-provider-dispatch";
 import {
@@ -196,9 +195,9 @@ export async function withSessionTitleCustody<T>(
           getToken: () => track(token.getToken),
           refresh: () => track(token.refresh),
           onUsageHeaders: (snapshot) => {
-            guard.observe(snapshot);
             observeQuota(codexUsageHeadersQuotaObservation(snapshot, credentialVersion));
           },
+          onReportedUsage: (usage) => guard.observe(usage),
           resolveModel,
           nextRequestId,
           turnMetadata: { request_kind: "session_title" },
@@ -280,7 +279,12 @@ export async function withSessionTitleCustody<T>(
         const next = await refresh;
         return next.credentialVersion > generation ? next : null;
       },
-      assertDispatch,
+      // The operation's own lease renewal and source read come before its
+      // reservation (the operation reservation does not hold the lease).
+      admit: async (reserve: () => Promise<unknown>) => {
+        await assertDispatch();
+        await reserve();
+      },
       mainLaneAdmitted: () => undefined,
       observeResponse: (response: Response, generation: number, upstreamModelId?: string) => {
         const observation = parseClaudeUsageHeaders(response.headers, new Date(), upstreamModelId);
@@ -295,11 +299,9 @@ export async function withSessionTitleCustody<T>(
           });
       },
     };
-    const claudeSettings = withClaudeConnectionCredential(
+    const claudeSettings = withClaudeCoreConnectionCredential(
       settings,
-      "claude_subscription",
       claudeCoreSettingsCredential(current, operation.connectionId),
-      claudeCoreModelScope(input.productModelId),
       { connectionId: operation.connectionId, credentialVersion: current.credentialVersion },
     );
     return await withClaudeUsageObserver(

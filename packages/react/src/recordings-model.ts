@@ -10,9 +10,10 @@ import {
   type RecordingSpeaker,
   type RecordingTrack,
   type RecordingTranscriptSegment,
+  type RecordingTranscriptionModel,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import type { RecorderSnapshot } from "@opengeni/sdk/recordings";
+import type { RecorderSnapshot, RecordingUploadStatus } from "@opengeni/sdk/recordings";
 import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 const defaultText = createOpenGeniText();
@@ -77,20 +78,38 @@ export function meetingPhase(recording: Recording): MeetingPhase {
  * Stop unless the connection is down or the server refused it. Null when this
  * device isn't recording that meeting, or when capture failed before Stop
  * finished it; the server's {@link meetingPhase} says the rest.
+ *
+ * A meeting recorded here earlier (before a reload, a restart, or a move to
+ * another page) is finished in the background from the audio kept here: it is
+ * `uploading` until the server has it all, then `transcribing`, and
+ * `upload_failed` when the server refused it, keeping the audio here for a retry.
  */
 export type MeetingHereStatus =
   | "recording"
   | "paused"
+  | "uploading"
   | "transcribing"
   | "waiting_for_connection"
   | "upload_failed";
 
 export function meetingHereStatus(
-  recorder: Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> | null,
+  recorder:
+    | (Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
   recordingId: string,
   online = true,
 ): MeetingHereStatus | null {
-  if (!recorder || recorder.recordingId !== recordingId) return null;
+  if (!recorder) return null;
+  if (recorder.recordingId !== recordingId) {
+    const upload = recorder.uploads?.[recordingId];
+    if (!upload || upload.discarded) return null;
+    if (upload.failed) return "upload_failed";
+    if (upload.finalized) return "transcribing";
+    if (!online || upload.retryingAfterError) return "waiting_for_connection";
+    return "uploading";
+  }
   if (recorder.state === "recording") return "recording";
   if (recorder.state === "paused") return "paused";
   if (recorder.state === "idle" || recorder.state === "starting") return null;
@@ -104,6 +123,104 @@ export function meetingHereStatus(
     return "waiting_for_connection";
   }
   return "transcribing";
+}
+
+/** The upload failure this device's recorder holds for a meeting, current or earlier. */
+export function meetingUploadFailure(
+  recorder:
+    | (Pick<RecorderSnapshot, "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
+  recordingId: string,
+): { code: string; message: string } | null {
+  if (!recorder) return null;
+  const upload =
+    recorder.recordingId === recordingId ? recorder.upload : recorder.uploads?.[recordingId];
+  return upload?.failed ?? null;
+}
+
+/** Audio up to this long is usually transcribed in a minute or two. */
+const SHORT_AUDIO_MILLISECONDS = 5 * 60_000;
+
+/**
+ * What to say while a meeting is transcribed: a short one is done in a minute
+ * or two; a long one takes a while (its words may be timed on our side), so
+ * the line says how much audio it is and that the reader needn't wait.
+ */
+export function transcribingText(
+  durationMilliseconds: number,
+  msg: OpenGeniText = defaultText,
+): string {
+  if (durationMilliseconds <= SHORT_AUDIO_MILLISECONDS) {
+    return msg("meetings.detailPage.transcribingThisUsuallyTakesA");
+  }
+  return msg("meetings.detailPage.transcribingLongAudio", {
+    duration: formatDuration(durationMilliseconds, msg),
+  });
+}
+
+/** Refusals that credits, or a model that doesn't use them, fix. */
+export function transcriptNeedsCredits(code: string | null | undefined): boolean {
+  return (
+    code === "insufficient_credits" ||
+    code === "allowance_exhausted" ||
+    code === "monthly_model_cost_limit"
+  );
+}
+
+/** Failures of the provider itself: any other provider may work. */
+const PROVIDER_FAILURES = new Set([
+  "missing_provider_key",
+  "provider_unauthorized",
+  "provider_quota_exceeded",
+  "policy_blocked",
+  "subscription_api_unavailable",
+]);
+/** Failures of the model: another model, even the same provider's, may work. */
+const MODEL_FAILURES = new Set([
+  "provider_too_large",
+  "provider_not_supported",
+  "model_unavailable",
+]);
+
+/**
+ * The model to transcribe a failed meeting with instead, as its one direct
+ * fix: usable here, not the one that failed (nor its provider, when the
+ * provider was the problem), and for a credit refusal one that uses no
+ * credits. A subscription comes first, then a model the deployment covers,
+ * then the workspace's own key. Null when no other model would help.
+ */
+export function transcriptFixModel(
+  code: string | null | undefined,
+  failed: { providerId: string; model: string } | null,
+  models: readonly RecordingTranscriptionModel[],
+): RecordingTranscriptionModel | null {
+  const credits = transcriptNeedsCredits(code);
+  if (!code || (!credits && !PROVIDER_FAILURES.has(code) && !MODEL_FAILURES.has(code))) {
+    return null;
+  }
+  const charged = (entry: RecordingTranscriptionModel) =>
+    entry.chargedInCredits ?? (entry.funding === "deployment" && entry.usdPerHour !== null);
+  const rank = (entry: RecordingTranscriptionModel) =>
+    entry.funding === "workspace_subscription"
+      ? 0
+      : charged(entry)
+        ? 3
+        : entry.usdPerHour === null
+          ? 1
+          : 2;
+  const candidates = models.filter((entry) => {
+    if (!entry.available || !entry.capabilities.batch) return false;
+    if (code === "subscription_api_unavailable" && entry.funding === "workspace_subscription")
+      return false;
+    if (failed && entry.providerId === failed.providerId) {
+      if (!MODEL_FAILURES.has(code) || entry.model === failed.model) return false;
+    }
+    // The server says which models are charged in credits.
+    return !credits || !charged(entry);
+  });
+  return [...candidates].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }
 
 /** The one-word state a list row shows, or null when there is nothing to say. */
@@ -145,6 +262,10 @@ export function transcriptErrorText(
   } | null,
 ): string {
   switch (code) {
+    case "subscription_plan_required":
+      return msg("lib.format.subscriptionUpgradeRequiredHeadline");
+    case "subscription_api_unavailable":
+      return msg("meetings.recordings.errorSubscriptionApiUnavailable");
     case "missing_provider_key": {
       if (!model) return msg("meetings.recordings.errorMissingProviderKey");
       const names = { modelName: model.modelName, providerName: model.providerName };
@@ -172,6 +293,22 @@ export function transcriptErrorText(
       return msg("meetings.recordings.errorInvalidAudio");
     case "storage_unavailable":
       return msg("meetings.recordings.errorStorageUnavailable");
+    case "region_restricted":
+      return msg("inferenceRegion.notSupportedInEu");
+    case "insufficient_credits":
+      return model
+        ? msg("meetings.recordings.errorInsufficientCreditsFor", { modelName: model.modelName })
+        : msg("meetings.recordings.errorInsufficientCredits");
+    case "allowance_exhausted":
+      return msg("meetings.recordings.errorAllowanceExhausted");
+    case "monthly_model_cost_limit":
+      return msg("meetings.recordings.errorMonthlyCostLimit");
+    case "policy_blocked":
+      return msg("meetings.recordings.errorPolicyBlocked");
+    case "timed_out":
+      return msg("meetings.recordings.errorTimedOut");
+    case "worker_stopped":
+      return msg("meetings.recordings.errorWorkerStopped");
     default:
       return msg("meetings.recordings.errorUnknown");
   }
@@ -271,6 +408,8 @@ export type TranscriptTurn = {
 export function groupTranscriptTurns(
   segments: readonly RecordingTranscriptSegment[],
   maxGapMilliseconds = 30_000,
+  /** Times no turn runs across, such as where audio went missing. */
+  breaks: readonly number[] = [],
 ): TranscriptTurn[] {
   const turns: TranscriptTurn[] = [];
   for (const segment of segments) {
@@ -278,7 +417,8 @@ export function groupTranscriptTurns(
     if (
       last &&
       last.speakerLabel === segment.speakerLabel &&
-      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds
+      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds &&
+      !breaks.some((at) => at > last.startMilliseconds && at <= segment.startMilliseconds)
     ) {
       last.segments.push(segment);
       last.endMilliseconds = Math.max(last.endMilliseconds, segment.endMilliseconds);
@@ -293,6 +433,193 @@ export function groupTranscriptTurns(
     });
   }
   return turns;
+}
+
+/** The shortest stretch without audio the transcript marks, as the server keeps them. */
+const UNRECORDED_MIN_MILLISECONDS = 2_000;
+
+/**
+ * Where a meeting has no audio, as the transcript marks it: one track
+ * (`trackNumber`), or every track at once (`trackNumber` null), which is all
+ * of a single-track meeting's stretches.
+ */
+export type TranscriptUnrecordedMark = {
+  key: string;
+  trackNumber: number | null;
+  source: RecordingTrack["source"] | null;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** Every other audio track recorded for all of this one track's stretch. */
+  othersRecorded: boolean;
+};
+
+type Stretch = { start: number; end: number };
+
+/** `from` without any part of `cut`, keeping only pieces long enough to mark. */
+function withoutStretches(from: readonly Stretch[], cut: readonly Stretch[]): Stretch[] {
+  let pieces = [...from];
+  for (const part of cut) {
+    pieces = pieces.flatMap((piece) =>
+      part.end <= piece.start || part.start >= piece.end
+        ? [piece]
+        : [
+            { start: piece.start, end: part.start },
+            { start: part.end, end: piece.end },
+          ],
+    );
+  }
+  return pieces.filter((piece) => piece.end - piece.start >= UNRECORDED_MIN_MILLISECONDS);
+}
+
+/** Where every list has a stretch at once. */
+function overlapOfAll(lists: readonly Stretch[][]): Stretch[] {
+  let shared = lists[0] ?? [];
+  for (const list of lists.slice(1)) {
+    shared = shared.flatMap((left) =>
+      list.flatMap((right) => {
+        const start = Math.max(left.start, right.start);
+        const end = Math.min(left.end, right.end);
+        return end - start >= UNRECORDED_MIN_MILLISECONDS ? [{ start, end }] : [];
+      }),
+    );
+  }
+  return shared;
+}
+
+/**
+ * The stretches of a meeting with no audio, in order on its timeline: where
+ * every track was silent at once (all of a single-track meeting's), then
+ * what each track missed on its own. A stretch running to the end ends at
+ * `durationMilliseconds`, the meeting's length.
+ */
+export function transcriptUnrecordedMarks(
+  tracks: readonly RecordingTrack[],
+  durationMilliseconds: number,
+): TranscriptUnrecordedMark[] {
+  const audio = tracks
+    .filter((track) => track.kind === "audio")
+    .map((track) => ({
+      track,
+      // A server from before tracks said where they have no audio sends none.
+      stretches: (track.unrecorded ?? [])
+        .map((stretch) => ({
+          start: stretch.startMilliseconds,
+          end: Math.max(stretch.startMilliseconds, stretch.endMilliseconds ?? durationMilliseconds),
+        }))
+        .filter((stretch) => stretch.end - stretch.start >= UNRECORDED_MIN_MILLISECONDS),
+    }));
+  const silent = overlapOfAll(audio.map((entry) => entry.stretches));
+  const marks: TranscriptUnrecordedMark[] = silent.map((stretch) => ({
+    key: `all:${stretch.start}`,
+    trackNumber: null,
+    source: null,
+    startMilliseconds: stretch.start,
+    endMilliseconds: stretch.end,
+    othersRecorded: false,
+  }));
+  if (audio.length > 1) {
+    for (const { track, stretches } of audio) {
+      const others = audio
+        .filter((entry) => entry.track !== track)
+        .flatMap((entry) => entry.stretches);
+      for (const stretch of withoutStretches(stretches, silent)) {
+        marks.push({
+          key: `${track.trackNumber}:${stretch.start}`,
+          trackNumber: track.trackNumber,
+          source: track.source,
+          startMilliseconds: stretch.start,
+          endMilliseconds: stretch.end,
+          othersRecorded: others.every(
+            (other) => other.end <= stretch.start || other.start >= stretch.end,
+          ),
+        });
+      }
+    }
+  }
+  return marks.sort(
+    (left, right) =>
+      left.startMilliseconds - right.startMilliseconds ||
+      (left.trackNumber ?? -1) - (right.trackNumber ?? -1),
+  );
+}
+
+export type TranscriptItem =
+  | { kind: "turn"; turn: TranscriptTurn }
+  | { kind: "unrecorded"; mark: TranscriptUnrecordedMark };
+
+/**
+ * The transcript in reading order: each mark goes before the first turn that
+ * starts where its stretch does or later, and after the last turn when none
+ * does. Group the turns with the marks' starts as breaks, so no turn runs
+ * across one.
+ */
+export function interleaveUnrecordedMarks(
+  turns: readonly TranscriptTurn[],
+  marks: readonly TranscriptUnrecordedMark[],
+): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let next = 0;
+  for (const turn of turns) {
+    while (next < marks.length && marks[next]!.startMilliseconds <= turn.startMilliseconds) {
+      items.push({ kind: "unrecorded", mark: marks[next]! });
+      next += 1;
+    }
+    items.push({ kind: "turn", turn });
+  }
+  for (; next < marks.length; next += 1) items.push({ kind: "unrecorded", mark: marks[next]! });
+  return items;
+}
+
+/**
+ * The person a track's audio is, when the transcript hears exactly one
+ * voice on it and someone named it ("Ingrid Solberg"); otherwise null. A
+ * name only suggested from the voice doesn't count until someone confirms it.
+ */
+export function trackSpeakerName(
+  trackNumber: number,
+  segments: readonly RecordingTranscriptSegment[],
+  speakers: readonly RecordingSpeaker[],
+): string | null {
+  const labels = new Set<string>();
+  for (const segment of segments) {
+    if (segment.trackNumber === trackNumber && segment.speakerLabel) {
+      labels.add(segment.speakerLabel);
+    }
+  }
+  const [label, ...others] = [...labels];
+  if (!label || others.length > 0 || !speakerIsNamed(label, speakers)) return null;
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (!speaker || speaker.source === "suggested") return null;
+  return speaker.name.trim() || null;
+}
+
+/**
+ * "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35", in
+ * `msg`'s language. `speakerName` names the microphone's one voice
+ * (`trackSpeakerName`); computer or tab audio is the other people.
+ */
+export function unrecordedMarkText(
+  mark: TranscriptUnrecordedMark,
+  msg: OpenGeniText = defaultText,
+  speakerName: string | null = null,
+): string {
+  const from = formatClock(mark.startMilliseconds);
+  const to = formatClock(mark.endMilliseconds);
+  if (mark.source === "microphone") {
+    if (speakerName) {
+      const values = { name: speakerName, from, to };
+      return mark.othersRecorded
+        ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse", values)
+        : msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", values);
+    }
+    return mark.othersRecorded
+      ? msg("meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople", { from, to })
+      : msg("meetings.transcript.theMicrophoneWasnTRecordingFromTo", { from, to });
+  }
+  if (mark.source === "system" || mark.source === "browser_tab") {
+    return msg("meetings.transcript.otherPeopleWerenTRecordedFromTo", { from, to });
+  }
+  return msg("meetings.transcript.nothingWasRecordedFromTo", { from, to });
 }
 
 /** The segment playing at `milliseconds`, or the last one that started before it. */

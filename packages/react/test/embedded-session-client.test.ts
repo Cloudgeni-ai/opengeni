@@ -1,4 +1,6 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { describe, expect, test } from "bun:test";
+import { OpenGeniClient } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   SessionEvent,
@@ -9,6 +11,28 @@ import type {
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 import type { EmbeddedSessionClientLike } from "../src/client";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+
+test("the embedded adapter preserves the host's explicit response choice", async () => {
+  const accepts: string[] = [];
+  const base = new OpenGeniClient({
+    baseUrl: "https://api.test",
+    fetch: async (_input, init) => {
+      const accept = new Headers(init?.headers).get("accept")!;
+      accepts.push(accept);
+      return Response.json(
+        accept.includes("opengeni-session=chat")
+          ? { id: SESSION_ID }
+          : { id: SESSION_ID, instructions: "Full", skills: [] },
+      );
+    },
+  });
+  const embedded = createEmbeddedSessionClient(base.withSessionResponse("chat"));
+  expect((await embedded.getSession(WORKSPACE_ID, SESSION_ID)).instructions).toBeUndefined();
+  expect(
+    (await createEmbeddedSessionClient(base).getSession(WORKSPACE_ID, SESSION_ID)).instructions,
+  ).toBe("Full");
+  expect(accepts).toEqual(["application/json; opengeni-session=chat", "application/json"]);
+});
 
 const draft = (revision: number, text = ""): ComposerDraft => ({
   revision,
@@ -83,14 +107,15 @@ describe("createEmbeddedSessionClient", () => {
     const originalRequest = request("66666666-6666-4666-8666-666666666666", "ship it");
     const nativeResponse = response(originalRequest, false);
     const calls: SubmitComposerDraftRequest[] = [];
-    const overrides: Partial<EmbeddedSessionClientLike> & { calls: SubmitComposerDraftRequest[] } =
-      {
-        calls,
-        submitComposerDraft: async function (_workspaceId, _sessionId, input) {
-          this.calls.push(input);
-          return nativeResponse;
-        },
-      };
+    const overrides: Partial<EmbeddedSessionClientLike<ChatClient>> & {
+      calls: SubmitComposerDraftRequest[];
+    } = {
+      calls,
+      submitComposerDraft: async function (_workspaceId, _sessionId, input) {
+        this.calls.push(input);
+        return nativeResponse;
+      },
+    };
     const client = createEmbeddedSessionClient(fakeClient({}), { overrides });
 
     const actual = await client.submitComposerDraft(WORKSPACE_ID, SESSION_ID, originalRequest);
@@ -100,7 +125,7 @@ describe("createEmbeddedSessionClient", () => {
   });
 
   test("fails at construction when a required narrow method is absent", () => {
-    expect(() => createEmbeddedSessionClient({} as EmbeddedSessionClientLike)).toThrow(
+    expect(() => createEmbeddedSessionClient({} as EmbeddedSessionClientLike<ChatClient>)).toThrow(
       "Embedded session client method is required: getSession",
     );
   });

@@ -1,5 +1,4 @@
-import { Switch } from "@opengeni/react/ui/switch";
-import { SignupChallenge } from "@/components/signup-challenge";
+import { useSocialSignupChallenge } from "@/components/signup-challenge";
 import { BrowserAccountsApiError, createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,8 +20,33 @@ import {
 import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { readSignInCallbackError } from "@/lib/sign-in-feedback";
 import { signupAttribution } from "@/lib/signup-attribution";
+import { SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE } from "@/lib/signups-paused";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+const ACCOUNT_AUTH_FAILED_MESSAGE =
+  "Authentication did not complete. Check the credentials and try again.";
+
+/**
+ * What the add-account window says when email/password completion fails. A
+ * refusal the server could name gets its own message, because retrying the
+ * same credentials can't help; everything else keeps the generic message.
+ */
+export function accountAuthFailureMessage(error: unknown): string {
+  if (!(error instanceof BrowserAccountsApiError)) return ACCOUNT_AUTH_FAILED_MESSAGE;
+  switch (error.code) {
+    case "sign_in_email_not_allowed":
+      return SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE;
+    case "email_not_verified":
+      return "Verify your email before signing in.";
+    case "sign_in_refused":
+      return "This account can't sign in right now.";
+    case "login_transaction_rate_limited":
+      return "Too many attempts. Wait a while, then try again.";
+    default:
+      return ACCOUNT_AUTH_FAILED_MESSAGE;
+  }
+}
 
 export function AccountAuthRoute({
   transactionId,
@@ -51,12 +75,13 @@ export function AccountAuthRoute({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const socialClick = useRef(0);
   const [challengeSiteKey, setChallengeSiteKey] = useState<string>();
-  const [signupIntent, setSignupIntent] = useState(
-    () => new URLSearchParams(window.location.search).get("error") === "signup_challenge_required",
-  );
-  const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
-  const [challengeReset, setChallengeReset] = useState(0);
+  // Google or GitHub may sign someone in or create their account, so every
+  // click carries a challenge token while new accounts are open.
+  const socialChallenge = useSocialSignupChallenge(challengeSiteKey);
+  // While Cloudflare asks for interaction, the other choices stay usable.
+  const socialLocked = socialBusy !== null && !socialChallenge.interactive;
   const [socialProviders, setSocialProviders] = useState<ManagedSocialProvider[]>([]);
   const [error, setError] = useState<string | null>(
     socialOutcome === "error"
@@ -125,7 +150,9 @@ export function AccountAuthRoute({
       .then((config) => {
         if (!active || config.auth.mode !== "managedSession") return;
         setSocialProviders(config.auth.socialProviders ?? []);
-        setChallengeSiteKey(config.auth.signupChallengeSiteKey);
+        if (config.auth.newSignupsEnabled !== false) {
+          setChallengeSiteKey(config.auth.signupChallengeSiteKey);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -139,6 +166,8 @@ export function AccountAuthRoute({
 
   async function submit() {
     if (!validTransactionId || !email.trim() || !password) return;
+    socialChallenge.cancel();
+    setSocialBusy(null);
     setBusy(true);
     setError(null);
     try {
@@ -169,7 +198,7 @@ export function AccountAuthRoute({
         completionAttempt.current = null;
       }
       setPassword("");
-      setError(caught instanceof Error ? caught.message : "Authentication failed");
+      setError(accountAuthFailureMessage(caught));
     } finally {
       setBusy(false);
     }
@@ -177,24 +206,28 @@ export function AccountAuthRoute({
 
   async function submitSocial(provider: ManagedSocialProvider) {
     if (!validTransactionId) return;
-    if (signupIntent && challengeSiteKey && !signupChallengeToken) {
-      setError("Complete the signup verification.");
-      return;
-    }
+    const click = ++socialClick.current;
     setSocialBusy(provider);
     setError(null);
     try {
-      const projection = await client.getSessionSet();
       const existing = socialStartAttempt.current;
-      const attempt =
-        existing?.provider === provider
-          ? existing
-          : {
-              provider,
-              ...(signupIntent && signupChallengeToken ? { signupChallengeToken } : {}),
-              operationId: crypto.randomUUID(),
-              expectedGeneration: projection.generation,
-            };
+      let attempt = existing?.provider === provider ? existing : null;
+      if (!attempt) {
+        // A retry after an unknown outcome replays its original command instead.
+        const challenge = await socialChallenge.run();
+        if (challenge.status === "cancelled") {
+          // A newer click owns the busy state; otherwise nothing is pending now.
+          if (socialClick.current === click) setSocialBusy(null);
+          return;
+        }
+        const projection = await client.getSessionSet();
+        attempt = {
+          provider,
+          ...(challenge.status === "verified" ? { signupChallengeToken: challenge.token } : {}),
+          operationId: crypto.randomUUID(),
+          expectedGeneration: projection.generation,
+        };
+      }
       socialStartAttempt.current = attempt;
       // First-touch campaign tokens the opener carried into this window's URL;
       // the server counts them only if the provider callback creates an account.
@@ -216,10 +249,8 @@ export function AccountAuthRoute({
         !(caught instanceof BrowserAccountsApiError && caught.code === "operation_outcome_unknown")
       ) {
         socialStartAttempt.current = null;
-        setSignupChallengeToken(undefined);
-        setChallengeReset((value) => value + 1);
       }
-      setError(caught instanceof Error ? caught.message : "Authentication failed");
+      setError(accountAuthFailureMessage(caught));
       setSocialBusy(null);
     }
   }
@@ -271,31 +302,13 @@ export function AccountAuthRoute({
         </div>
         {!invitation ? (
           <>
-            {challengeSiteKey ? (
-              <div className="mb-3">
-                <label className="flex items-center gap-2 text-sm">
-                  <Switch
-                    checked={signupIntent}
-                    onCheckedChange={setSignupIntent}
-                    aria-label="Create a new account"
-                  />
-                  Create a new account
-                </label>
-                {signupIntent ? (
-                  <SignupChallenge
-                    siteKey={challengeSiteKey}
-                    onToken={setSignupChallengeToken}
-                    resetKey={challengeReset}
-                  />
-                ) : null}
-              </div>
-            ) : null}
             <ManagedSocialAuthButtons
               providers={socialProviders}
-              busyProvider={socialBusy}
+              busyProvider={socialLocked ? socialBusy : null}
               disabled={busy}
               onSelect={(provider) => void submitSocial(provider)}
             />
+            {socialProviders.length > 0 ? socialChallenge.element : null}
             {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
           </>
         ) : null}
@@ -310,7 +323,7 @@ export function AccountAuthRoute({
             readOnly={invitation !== null}
             className="mt-2 min-h-11"
             autoFocus
-            disabled={busy || socialBusy !== null}
+            disabled={busy || socialLocked}
           />
         </div>
         <div>
@@ -322,12 +335,12 @@ export function AccountAuthRoute({
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             className="mt-2 min-h-11"
-            disabled={busy || socialBusy !== null}
+            disabled={busy || socialLocked}
           />
         </div>
         {error ? (
           <p role="alert" className="mt-3 text-sm text-status-failed">
-            Authentication did not complete. Check the credentials and try again.
+            {error}
           </p>
         ) : null}
         <div className="mt-5 grid gap-2 sm:grid-cols-2">
@@ -335,7 +348,7 @@ export function AccountAuthRoute({
             type="button"
             variant="outline"
             className="min-h-11"
-            disabled={busy || socialBusy !== null}
+            disabled={busy || socialLocked}
             onClick={() => finish("opengeni-account-auth-cancel")}
           >
             Cancel
@@ -343,7 +356,7 @@ export function AccountAuthRoute({
           <Button
             type="submit"
             className="min-h-11"
-            disabled={busy || socialBusy !== null || !email.trim() || !password}
+            disabled={busy || socialLocked || !email.trim() || !password}
           >
             {busy ? (
               <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />

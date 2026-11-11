@@ -19,9 +19,11 @@ compute-host create <id> --image <the printed image id>
    nodes, each layer checked against the image's `diff_ids`.
 3. Adds `/opengeni/init` (compute-guest), `/opengeni/envd` and
    `/opengeni/image.json` (the image's user, directory, environment,
-   entrypoint and command), points `/sbin/init` at our init, adds a static
-   bash at `/bin/bash` if the image has none, and the `user` account (uid
-   1000, home `/home/user`) if there is none.
+   entrypoint and command), points `/sbin/init` at our init (the host
+   names it on the kernel command line as well, so a package that
+   replaces `/sbin/init` changes nothing), adds a static bash at
+   `/bin/bash` if the image has none, and the `user` account (uid 1000,
+   home `/home/user`) if there is none.
 4. Makes an ext4 file of it with `mkfs.ext4 -d`: the contents plus an
    eighth and 256 MiB, plus `--free-gib` (default 4) of room, at least
    6 GiB; sparse, so unused room costs nothing.

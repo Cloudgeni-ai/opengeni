@@ -89,6 +89,19 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
     listVaults: async (signal?: AbortSignal) =>
       (await json<{ vaults: VaultSummary[] }>("GET", `${base}/vaults`, undefined, {}, signal))
         .vaults,
+    /**
+     * Every organization vault, wherever it works (the organization's owner or an admin).
+     * `complete` is always true; servers before migration 1272 listed only the
+     * ones that work here and sent false.
+     */
+    listOrganizationVaults: (signal?: AbortSignal) =>
+      json<{ vaults: VaultSummary[]; complete: boolean }>(
+        "GET",
+        `${base}/organization-vaults`,
+        undefined,
+        {},
+        signal,
+      ),
     getVault: (vaultId: string, signal?: AbortSignal) =>
       json<VaultSummary>("GET", vault(vaultId), undefined, {}, signal),
     createVault: (request: CreateVaultRequest) =>

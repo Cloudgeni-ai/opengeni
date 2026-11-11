@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
+  adoptConnectedMachineSessionBackgroundCommand,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -12,7 +13,10 @@ import {
   markSessionWorkflowWakeDelivered,
   peekSessionWork,
   sendAgentMessageInTransaction,
+  settleConnectedMachineSessionBackgroundCommand,
+  signalBackgroundCommandWakes,
   waitForSessionInputWithEvent,
+  type SessionWorkflowWake,
   withWorkspaceSessionActivityRls,
 } from "../src/index";
 
@@ -120,10 +124,14 @@ async function settleIdle(
 
 /** The production parent shape: the agent spawned work, called
  * `wait_for_input`, and its turn settled idle behind the durable deadline. */
-async function parkedSession(grant: Grant) {
+async function parkedSession(
+  grant: Grant,
+  beforeWait?: (started: Awaited<ReturnType<typeof startSession>>) => Promise<void>,
+) {
   const started = await startSession(grant, "delegate and wait");
   // The start wake was consumed by the claim long before the agent waits.
   await markWakeDelivered(started.session.id);
+  await beforeWait?.(started);
   const waiting = await waitForSessionInputWithEvent(
     client.db,
     grant.workspaceId,
@@ -327,5 +335,101 @@ describe("internal update wake signal", () => {
     expect(batch.map((update) => update.id).sort()).toEqual(
       [first.updateId, second.updateId].sort(),
     );
+  });
+  test("a background command result into a parked wait returns its wake for an immediate signal", async () => {
+    const grant = await workspace();
+    const command = {
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: grant.workspaceId,
+      enrollmentId: crypto.randomUUID(),
+      connectionInstanceId: crypto.randomUUID(),
+      opId: crypto.randomUUID(),
+    };
+    const adopt = async (started: Awaited<ReturnType<typeof startSession>>) => {
+      await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: started.session.id,
+        turnId: started.turn.id,
+        executionGeneration: started.turn.executionGeneration,
+        attemptId: started.attemptId,
+        command: "bun test",
+        ...command,
+      });
+    };
+    const parked = await parkedSession(grant, adopt);
+    const deadline = await wakeRow(parked.session.id);
+    expect(deadline.reason).toBe("session_input_wait_deadline");
+
+    const settlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: parked.session.id,
+      ...command,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+    });
+    // The settlement hands its caller the committed wake, coalesced into the
+    // deadline revision, instead of leaving it for the periodic dispatcher.
+    const expected: SessionWorkflowWake = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: parked.session.id,
+      temporalWorkflowId: `session-${parked.session.id}`,
+      wakeRevision: deadline.wakeRevision,
+      interruptionRequested: false,
+    };
+    expect(settlement?.wakes).toEqual([expected]);
+    const pulled = await wakeRow(parked.session.id);
+    expect(pulled.reason).toBe("internal_update_batch");
+    expect(pulled.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(await peekSessionWork(client.db, grant.workspaceId, parked.session.id)).toEqual({
+      kind: "runnable",
+    });
+
+    // A failed signal is not a settlement failure: the dispatcher still owns
+    // the undelivered revision.
+    const signalled: SessionWorkflowWake[] = [];
+    await signalBackgroundCommandWakes(settlement!.wakes, async (wake) => {
+      signalled.push(wake);
+      throw new Error("Temporal unavailable");
+    });
+    expect(signalled).toEqual([expected]);
+    expect((await wakeRow(parked.session.id)).deliveredRevision).toBe(deadline.deliveredRevision);
+  });
+
+  test("a background command result for a session that is not waiting returns no wake", async () => {
+    const grant = await workspace();
+    const started = await startSession(grant, "run in the background");
+    const command = {
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: grant.workspaceId,
+      enrollmentId: crypto.randomUUID(),
+      connectionInstanceId: crypto.randomUUID(),
+      opId: crypto.randomUUID(),
+    };
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: started.session.id,
+      turnId: started.turn.id,
+      executionGeneration: started.turn.executionGeneration,
+      attemptId: started.attemptId,
+      command: "bun test",
+      ...command,
+    });
+    await settleIdle(grant, started.session.id, started);
+    const settlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: started.session.id,
+      ...command,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+    });
+    expect(settlement?.command.state).toBe("exited");
+    expect(settlement?.wakes).toEqual([]);
   });
 });

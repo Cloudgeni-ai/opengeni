@@ -4,6 +4,7 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -308,12 +309,13 @@ export function BrowserAccountsSignedOutPanel(props: {
 }
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
+  activeName?: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: (destination?: OnboardingDestination) => void;
 }) {
@@ -366,6 +368,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       supergrokEnabled={props.supergrokEnabled}
       modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
+      activeName={props.activeName ?? null}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
       onUseAnotherAccount={() => authenticate("add")}

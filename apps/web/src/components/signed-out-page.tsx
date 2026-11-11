@@ -1,5 +1,4 @@
 import {
-  ActivityIcon,
   BoxesIcon,
   CloudIcon,
   EraserIcon,
@@ -27,22 +26,25 @@ type Pitch = {
 };
 
 /** Which audience the panel beside the sign-in form speaks to. */
-export type SignedOutPitch = "product" | "excel";
+export type SignedOutPitch = "general" | "excel";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Copy follows the public landing page (opengeni.ai): its headline, its lead
-  // sentence and the platform features it names.
-  product: {
-    headline: "Agents in your product.",
-    emphasis: "Infrastructure out of the box.",
-    lead: "Build AI products without building the infrastructure from scratch.",
+  // Everyone who signs in on the web sees this: one plain promise first, and
+  // developers in the supporting lines.
+  general: {
+    headline: "Get things done,",
+    emphasis: "just by asking.",
+    lead: "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
     highlights: [
+      { icon: MessageSquareTextIcon, text: "Ask anything, on your computer or your phone" },
       {
         icon: CloudIcon,
-        text: "Durable sessions that keep working, even when you close your laptop",
+        text: "Keeps working on long tasks, even when you close your laptop",
       },
-      { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
-      { icon: ActivityIcon, text: "Observability out of the box" },
+      {
+        icon: BoxesIcon,
+        text: "For developers: tools, sandboxes, approvals and observability, ready to use",
+      },
     ],
   },
   // The sign-in window the Excel add-in opens: the person is working in a
@@ -69,12 +71,12 @@ export type SignedOutLegalLinks = {
 export function SignedOutPage({
   children,
   legalLinks,
-  pitch = "product",
+  pitch = "general",
   supportEmail,
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
-  /** Defaults to the product pitch; "excel" when the Excel add-in opened sign-in. */
+  /** Defaults to the general pitch; "excel" when the Excel add-in opened sign-in. */
   pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
@@ -90,7 +92,11 @@ export function SignedOutPage({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
-        <header className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10">
+        <header
+          data-signed-out-column
+          data-window-drag
+          className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
+        >
           <div className="flex items-center gap-2.5 text-fg">
             <BrandMark className="w-[31px]" />
             <Wordmark className="text-[23px]" />
@@ -107,7 +113,10 @@ export function SignedOutPage({
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
-        <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14">
+        <div
+          data-signed-out-column
+          className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14"
+        >
           <div className="grid items-center gap-10 min-[721px]:grid-cols-[minmax(0,1fr)_minmax(0,390px)] min-[721px]:gap-16">
             <section aria-labelledby="signed-out-heading" className="min-w-0">
               <h1
@@ -135,7 +144,10 @@ export function SignedOutPage({
           </div>
         </div>
         <footer className="border-t border-border">
-          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
+          <div
+            data-signed-out-column
+            className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10"
+          >
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <Wordmark className="text-[15px] text-fg-muted" />
               {legal.length > 0 ? (

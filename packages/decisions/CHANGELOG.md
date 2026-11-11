@@ -1,5 +1,77 @@
 # @opengeni/decisions
 
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- c0b9f88: Add workspace-scoped stateless typed decisions with SDK `decide`. Reuse the
+  deployment's configured decision model, chat-completions authority, usage settlement
+  and residency checks. Calls are deployment-funded, independent of customer agent
+  allowances, with optional tenant-label attribution and off-path usage receipts.
+  Preserve typed refusals and reported, estimated and unknown provider costs.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+
+## 6.11.0
+
+## 6.10.0
+
+## 6.9.0
+
+## 6.8.0
+
+## 6.7.0
+
+## 6.6.0
+
+## 6.5.1
+
+## 6.4.0
+
+## 6.3.1
+
+## 6.2.1
+
+## 6.1.1
+
+## 6.0.2
+
+### Patch Changes
+
+- 86c3295: Decision models (tool-search selection and code search) can run on an Azure OpenAI resource that has key sign-in turned off. Set `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` with provider `openai`, the deployment name and the resource's v1 base URL, and requests are signed with a cached Microsoft Entra token for the deployment's own identity. `createHttpDecisionModel` accepts an access-token function in place of a static key, and drops a token the provider rejects.
+- 7148073: Tool search retries its decision model once, after a 250 ms pause, when the provider answers with a rate limit, a server error or an expired sign-in, or the connection drops. Both attempts stay inside the search's 5-second selection deadline, so a brief provider hiccup no longer turns a search into a keyword-only result. Invalid answers, billing and permission refusals are not retried. A dropped connection to a decision provider now carries the error code `request_failed`.
+
+## 5.5.1
+
 ## 5.4.2
 
 ## 5.3.1

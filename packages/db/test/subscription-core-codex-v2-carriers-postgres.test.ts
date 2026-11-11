@@ -2,8 +2,7 @@
 // tasks and their firings, agent messages and Steer (the receiving source),
 // child-result notices (the outbox), and the internal turn that delivers an
 // update — as the restricted application role. Values are copied, never
-// recomputed; non-human acceptance freezes the empty value; nothing is
-// written before the cutover.
+// recomputed; non-human acceptance freezes the empty value.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -39,14 +38,7 @@ const EMPTY: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [] };
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1", {
-    // A Codex-only world: the drained SuperGrok and Claude cutovers would write receipts.
-    withheldMigrations: [
-      "0747_subscription_core_xai_cutover.sql",
-      "0748_subscription_core_claude_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);
@@ -72,13 +64,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex v2 carriers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The seeded organization settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -112,13 +98,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: workspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 /** The owner's personal Codex connection, through the owner-scoped writer. */
@@ -277,14 +256,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("scheduled tasks freeze v2 once at creation; firings copy it, narrowed for another authorizer", async () => {
     const org = await organization();
-    // Before the cutover nothing is written: v1 stays authoritative.
-    const before = await task(org, org.personalWorkspaceId, {
-      kind: "subject",
-      subjectId: org.ownerSubjectId,
-    });
-    expect(await taskAuthority(before.id)).toEqual({ task: null, revision: null });
-
-    await setCutover(org.accountId, true);
     await personalConnection(org);
     // The owner, in their own Personal workspace: their one current generation.
     const own = await task(org, org.personalWorkspaceId, {
@@ -331,16 +302,27 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     ).catch((error: unknown) => error);
     expect(String((rewrite as { cause?: unknown })?.cause ?? rewrite)).toContain("immutable");
     // The revision slot is canonical and its trigger must narrow a foreign
-    // human's edit, not merely rely on the reader's defensive narrowing.
+    // human's edit, not merely rely on the reader's defensive narrowing. A
+    // Personal workspace has no member but its owner, so the guard refuses the
+    // foreign row; the fixture then plants it as legacy data (triggers off) to
+    // prove the revision trigger still narrows if such a row ever existed.
     const otherSubject = `user:other-${crypto.randomUUID()}`;
     const [otherWorkspace] = await shared!.admin`insert into workspaces (account_id, name)
       values (${org.accountId}::uuid, 'Other personal') returning id`;
     await shared!
       .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
       values (${org.accountId}::uuid, ${otherSubject}, 'active', ${otherWorkspace!.id}::uuid)`;
-    await shared!
+    const refused = await shared!
       .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-      values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`;
+      values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`.catch(
+      (error: unknown) => error,
+    );
+    expect(String(refused)).toContain("a Personal workspace has exactly one member, its owner");
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`;
+    });
     await withSessionRlsActorContext({ subjectId: otherSubject }, () =>
       updateScheduledTask(client!.db, org.personalWorkspaceId, own.id, {
         refreshPersonalResourceAuthority: true,
@@ -354,7 +336,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
   test("agent-created schedules inherit their exact causal turn, never fresh personal membership", async () => {
     for (const frozen of [EMPTY, "personal"] as const) {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const source = await session(org, org.personalWorkspaceId);
       const expected = frozen === "personal" ? personal(org) : EMPTY;
       const turnId = await acceptedTurn(
@@ -403,7 +384,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("different frozen Codex values cannot coalesce into the same internal turn", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const target = await session(org, org.personalWorkspaceId);
     const parentTurnId = await acceptedTurn(
       org,
@@ -453,9 +433,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     const org = await organization();
     const target = await session(org, org.personalWorkspaceId);
     await acceptedTurn(org, org.personalWorkspaceId, target.id, org.ownerSubjectId, personal(org));
-    // Before the cutover: nothing.
-    expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toBeNull();
-    await setCutover(org.accountId, true);
     // The owner's own work keeps the owner's frozen entry ...
     expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toEqual(
       personal(org),
@@ -475,7 +452,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("a delivered update's frozen value is copied onto the internal turn", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const cases = [
       { frozen: personal(org), expected: personal(org) },
       { frozen: undefined, expected: EMPTY },
@@ -521,7 +497,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("child-result notices carry the spawning parent turn's value through the outbox", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     // Copying does not depend on visibility; a private child needs a real
     // parent attempt, so the fixture uses workspace-shared sessions.
     const parent = await session(

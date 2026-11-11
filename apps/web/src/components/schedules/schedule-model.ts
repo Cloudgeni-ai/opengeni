@@ -11,9 +11,11 @@ import {
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
 import { t } from "@opengeni/react/app/lib/console-text";
+import { creatorType } from "@opengeni/react/app/lib/creator-initials";
 import {
   AUTOMATION_FREQUENCIES,
   AUTOMATION_NAME_MAX_LENGTH,
+  automationAgentOpeningMessage,
   automationCadence,
   automationDraftFromTemplate,
   automationTemplatesFor,
@@ -200,11 +202,6 @@ export function lastRunState(
   return run ? { kind: "run", run } : { kind: "never" };
 }
 
-/** Knowledge source syncs keep their own small editor and wording. */
-export function isKnowledgeSync(task: ScheduledTask): boolean {
-  return task.action?.kind === "knowledge_source_sync";
-}
-
 export function ownsSchedule(task: ScheduledTask, viewerSubjectId: string): boolean {
   return task.ownerSubjectId === null || task.ownerSubjectId === viewerSubjectId;
 }
@@ -216,6 +213,8 @@ export function ownerName(task: ScheduledTask): string {
     return created.label.trim();
   }
   const subject = task.ownerSubjectId ?? "";
+  // An unnamed API key is just "API key", never its raw id.
+  if (creatorType({ kind: "subject", subjectId: subject }) === "api_key") return "API key";
   const bare = subject.includes(":") ? subject.slice(subject.indexOf(":") + 1) : subject;
   return bare.trim() || "Someone else";
 }
@@ -630,14 +629,9 @@ export function scheduleErrorReference(error: unknown): string | undefined {
 /**
  * The first message of a "Create with Opengeni" chat. The person says what
  * should happen and how often. Setup guidance belongs in the bundled
- * schedules Skill, which the agent reads when this request is relevant.
+ * schedules Skill, which the agent reads when this request is relevant. The
+ * phone app starts the same chat, so the words live in the shared model.
  */
 export function scheduleAgentOpeningMessage(request: string, timeZone: string): string {
-  return [
-    "Help me create an automation in this workspace.",
-    "",
-    request.trim(),
-    "",
-    `My time zone is ${timeZone}.`,
-  ].join("\n");
+  return automationAgentOpeningMessage(request, timeZone);
 }

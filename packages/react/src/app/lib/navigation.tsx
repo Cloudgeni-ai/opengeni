@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { useAppHost } from "./app-host";
+import { OPENED_WINDOW_NAME } from "./desktop";
 
 /** History state the session UI writes and reads. */
 export type NavigationHistoryState = {
@@ -139,7 +140,10 @@ export const browserPage: PageHost = {
   openTab: openBlankTab,
 };
 
-/** An empty new tab with no handle back to this page, or null when blocked. */
+/**
+ * An empty new tab with no handle back to this page, or null when blocked.
+ * Its name tells the page it opens that it is not the app's own window.
+ */
 export function openBlankTab(): Window | null {
   let tab: Window | null = null;
   try {
@@ -147,7 +151,14 @@ export function openBlankTab(): Window | null {
   } catch {
     return null;
   }
-  if (tab) tab.opener = null;
+  if (tab) {
+    tab.opener = null;
+    try {
+      tab.name = OPENED_WINDOW_NAME;
+    } catch {
+      // A blocked or already-navigated tab keeps its name.
+    }
+  }
   return tab;
 }
 

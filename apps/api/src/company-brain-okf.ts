@@ -75,6 +75,8 @@ function instructionPolicyEntries(
 ): { entries: CompanyBrainGuidanceEntry[]; truncated: boolean } {
   const byId = new Map(policies.revisions.map((revision) => [revision.id, revision] as const));
   for (const revision of activeRevisions) byId.set(revision.id, revision);
+  // An empty revision clears its target: it is not guidance, so it is left out.
+  for (const [id, revision] of byId) if (revision.content === "") byId.delete(id);
   const activeIds = new Set(policies.activeHeads.map((head) => head.revisionId));
   const activatedIds = new Set(activatedRevisionIds);
   return {

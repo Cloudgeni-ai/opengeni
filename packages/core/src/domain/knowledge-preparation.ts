@@ -53,6 +53,11 @@ export async function prepareKnowledgeSave(
     return {
       model: current.model,
       dimensions: current.dimensions,
+      // Where texts go (EU-only inference reads these): a local embedder
+      // sends nothing, a remote one sends to its endpoint.
+      ...(current.local !== undefined ? { local: current.local } : {}),
+      ...(current.endpoint !== undefined ? { endpoint: current.endpoint } : {}),
+      ...(current.available !== undefined ? { available: current.available } : {}),
       embedMany: (texts) => current.embedMany(texts),
       embedQuery: (query) => (queryEmbedding ??= current.embedQuery(query)),
     };
@@ -94,6 +99,10 @@ export async function prepareKnowledgeSave(
       ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
     },
     sharedEmbedder,
+    // The query embedding is reused, not sent again, so the second view meters
+    // nothing; it still needs the residency declarations for its region check.
+    undefined,
+    settings,
   );
   const matches = { published, needs_review: needsReview };
   for (const view of ["published", "needs_review"] as const) {

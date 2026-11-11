@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
@@ -6,7 +6,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { alongsideAuthorization, withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import {
+  alongsideAuthorization,
+  requireLiveAgentAttemptGrant,
+  withAccessGrantSessionRlsContext,
+} from "../src/access-grant-rls";
 import { ApiHttpError } from "../src/http/api-error";
 import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
@@ -26,6 +30,14 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
   };
 }
 
+// Agent requests are billed like their chat; its frozen origin is read once.
+let turnOrigin: ReturnType<typeof spyOn<typeof db, "readTurnBillingOrigin">>;
+// Most attempts here belong to sessions no private Slack interaction owns.
+let slackOwner: ReturnType<typeof spyOn<typeof db, "getSlackPrivateSessionOwnerSubjectId">>;
+beforeEach(() => {
+  turnOrigin = spyOn(db, "readTurnBillingOrigin").mockResolvedValue("app");
+  slackOwner = spyOn(db, "getSlackPrivateSessionOwnerSubjectId").mockResolvedValue(null);
+});
 afterEach(() => {
   mock.restore();
 });
@@ -45,9 +57,11 @@ describe("access-grant session RLS context", () => {
       { db: {} } as never,
       grant(),
       async () => {
+        // An unverified person credential (no app sign-in proof) is API use.
         expect(db.currentCreditDebitAttribution()).toEqual({
           kind: "human",
           initiatingHumanSubjectId: "user:access-grant-rls-test",
+          billingOrigin: "api",
         });
         return "ok";
       },
@@ -86,17 +100,50 @@ describe("access-grant session RLS context", () => {
           kind: "turn",
           turnId,
           initiatingHumanSubjectId: "user:owner",
+          billingOrigin: "app",
         });
         return "ok";
       }),
     ).resolves.toBe("ok");
     expect(liveAttempt).toHaveBeenCalledWith({}, access, sessionId);
+    expect(turnOrigin).toHaveBeenCalledWith({}, { accountId, workspaceId, turnId });
     expect(actors).toEqual([
       {
         subjectId: "worker:first-party-mcp",
         initiatingHumanSubjectId: "user:owner",
         privateFileOwnerSubjectId: "user:owner",
       },
+    ]);
+  });
+
+  test("an attempt in a private Slack session produces its owner's files, not workspace files", async () => {
+    const actors: unknown[] = [];
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (actor, fn) => {
+      actors.push(actor);
+      return await fn();
+    });
+    // The Knowledge destination stays the workspace; only file ownership follows Slack.
+    spyOn(db, "freezeAgentLearningPolicy").mockResolvedValue({
+      defaultScope: "workspace",
+      subjectId: null,
+    } as never);
+    slackOwner.mockResolvedValue("user:slack-owner");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      initiatingHumanSubjectId: "user:slack-owner",
+    } as never);
+    const access = grant({
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      metadata: { sessionId },
+    });
+
+    await withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => "ok");
+    expect(slackOwner).toHaveBeenCalledWith({}, workspaceId, sessionId);
+    expect(actors).toEqual([
+      expect.objectContaining({ privateFileOwnerSubjectId: "user:slack-owner" }),
     ]);
   });
 
@@ -136,7 +183,12 @@ describe("access-grant session RLS context", () => {
     expect(caught).toBeInstanceOf(ApiHttpError);
     const error = caught as ApiHttpError;
     expect(error.status).toBe(403);
-    expect(error.message).toBe("agent attempt authority is invalid");
+    expect(error.message).toContain("turn attempt that is no longer active");
+    expect(error.message).toContain("Stop retrying this process");
+    expect(error.message).toContain("start a fresh command from the current live turn");
+    expect(error.message).toContain("check its existing receipt or actual state");
+    expect(error.retryable).toBe(false);
+    expect(error.outcomeUnknown).toBe(false);
     expect(error.details).toEqual({ code: "agent_attempt_caller_stale" });
     expect(
       httpRejectionFactsFromEnvelope(
@@ -146,6 +198,33 @@ describe("access-grant session RLS context", () => {
     ).toBe("agent_attempt_caller_stale");
     expect(context).not.toHaveBeenCalled();
   });
+
+  test.each(["caller_stale", "revoked", "forbidden", "not_found"] as const)(
+    "the lightweight attempt gate preserves the typed %s refusal and only explains stale attempts",
+    async (reason) => {
+      spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+        new core.SessionAuthorizationDeniedError(reason),
+      );
+      const error = await requireLiveAgentAttemptGrant(
+        { db: {} } as never,
+        grant({ principalKind: "agent_attempt", metadata: { sessionId } }),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ApiHttpError);
+      expect(error).toMatchObject({
+        status: 403,
+        code: "forbidden",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: `agent_attempt_${reason}` },
+      });
+      if (reason === "caller_stale") {
+        expect((error as Error).message).toContain("turn attempt that is no longer active");
+        expect((error as Error).message).toContain("start a fresh command");
+      } else {
+        expect((error as Error).message).toBe("agent attempt authority is invalid");
+      }
+    },
+  );
   test("reads the claimed attempt's learning policy while the liveness check runs", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     const attemptId = "55555555-5555-4555-8555-555555555555";
@@ -290,7 +369,10 @@ describe("access-grant session RLS context", () => {
       { db: {} } as never,
       grant({ principalKind: "api_key", subjectId: "key:opaque" }),
       async () => {
-        expect(db.currentCreditDebitAttribution()).toEqual({ kind: "service" });
+        expect(db.currentCreditDebitAttribution()).toEqual({
+          kind: "service",
+          billingOrigin: "api",
+        });
       },
     );
     expect(db.currentCreditDebitAttribution()).toEqual({ kind: "unknown" });

@@ -18,6 +18,7 @@ pub mod vsock;
 pub mod watchdog;
 
 use std::future::Future;
+use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
@@ -25,7 +26,8 @@ pub use cgroup::{MemoryStats, Writes};
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
 pub use spec::{
-    Drive, MemorySource, Network, PagerSpec, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    Drive, GuestMemory, MemorySource, Network, PagerSpec, Region, RestoreFiles, SnapshotFiles,
+    SnapshotKind, VmSpec,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -48,6 +50,19 @@ pub enum Found {
     Paused,
 }
 
+/// What [`Engine::keep_memory_room`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKept {
+    /// Nothing: the reserve is free, nothing limits the VMs together, or a
+    /// drop asked earlier is under way.
+    Free,
+    /// It is dropping this many bytes of the VMs' page cache.
+    Dropping(u64),
+    /// It cannot: the kernel cannot be asked for page cache alone (Linux
+    /// 6.9 and later can). Said once; every later call is `Free`.
+    Unsupported,
+}
+
 /// Whether an engine can load memory images made under some runtime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Readable {
@@ -56,8 +71,28 @@ pub enum Readable {
     /// None of its VMMs ever will, and this says why. Only proof counts:
     /// a refusal alone proves nothing.
     No(String),
+    /// One of its VMMs reads their format, but they were made on another
+    /// kind of host (another processor model or host kernel), and this
+    /// says how it differs. Whether their saved processor state fits this
+    /// host is known only by trying; the host does not change while it
+    /// runs, so a refusal repeated is its answer.
+    Elsewhere(String),
     /// It cannot tell, for instance because a runtime is unnamed.
     Unknown,
+}
+
+/// What a VM's logs last said, for an operator to tell why it was lost
+/// (see [`Engine::last_words`]). Each part is its last few lines, oldest
+/// first, and empty when there was nothing to read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LastWords {
+    /// What its guest last wrote on its console, such as a kernel panic.
+    pub guest: String,
+    /// What its VMM last wrote, other than its answers to the host's
+    /// requests: why it stopped, or its panic.
+    pub vmm: String,
+    /// What the pager serving its memory last wrote, if one did.
+    pub pager: String,
 }
 
 /// What the host needs from a VM program.
@@ -108,8 +143,9 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Whether any VMM this engine keeps can load an image made under
     /// runtime `made_under`, on any processor. A runtime on another
-    /// processor is not a [`Readable::No`]: whether its saved processor
-    /// state fits this one is only known by trying.
+    /// processor or host kernel is not a [`Readable::No`] but a
+    /// [`Readable::Elsewhere`]: whether its saved processor state fits
+    /// this host is only known by trying.
     fn reads(&self, made_under: &str) -> Readable {
         if made_under == self.runtime() && !made_under.is_empty() {
             Readable::Yes
@@ -170,6 +206,25 @@ pub trait Engine: Send + Sync + 'static {
         kind: SnapshotKind,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
 
+    /// What of a paused VM's memory its guest gave back to the host and
+    /// reads as zeros now, as byte ranges of the memory image the VM was
+    /// restored from, whose bytes `memory` says where the VMM holds:
+    /// sorted, apart and whole pages. A [`SnapshotKind::Diff`] leaves such pages
+    /// out, since the guest wrote none of them, so an image merged from one
+    /// holds them as zeros only if they are taken from here. Asked after
+    /// the snapshot, before the VM resumes. Only ranges that certainly read
+    /// as zeros are named; memory the engine cannot account for, such as a
+    /// VM not mapping the file `memory` names, gives none. The future does
+    /// not borrow the VM.
+    fn freed_memory(
+        &self,
+        vm: &Self::Vm,
+        memory: &GuestMemory,
+    ) -> impl Future<Output = Result<Vec<Range<u64>>, EngineError>> + Send + 'static {
+        let _ = (vm, memory);
+        std::future::ready(Ok(Vec::new()))
+    }
+
     /// Ends the VM process and releases its host resources. Its disks and
     /// any snapshot stay on disk. Resolves only once the process has ended,
     /// so that nothing is still using the disks when a replacement starts.
@@ -220,6 +275,27 @@ pub trait Engine: Send + Sync + 'static {
     /// starts or adopts any VM. Blocks briefly.
     fn clean_up_left_behind(&self) -> Result<(), EngineError> {
         Ok(())
+    }
+
+    /// Bytes of memory its VMs may still take together, if the engine
+    /// limits what they hold together: the limit less what they hold now,
+    /// page cache the host can drop at once left out as in
+    /// [`Engine::resident_bytes`]. A new guest gets no more than this
+    /// however much the host has free, so the host counts it as the most
+    /// that is available. `None` where nothing limits them together.
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
+    /// Drops page cache charged to the VMs together, and only cache, while
+    /// less than `reserve` is free under the limit on what they hold
+    /// together, in the background: [`Engine::memory_room`] counts that
+    /// cache as available, so the reserve the host keeps for sandboxes
+    /// growing within their request has to be free memory, not cache the
+    /// first of them to grow would wait to drop. Nothing where nothing
+    /// limits them together.
+    fn keep_memory_room(&self, _reserve: u64) -> RoomKept {
+        RoomKept::Free
     }
 
     /// Bytes of host memory the VM holds right now; with huge-page guest
@@ -274,9 +350,10 @@ pub trait Engine: Send + Sync + 'static {
         )))
     }
 
-    /// The VM's zswap traffic and memory pressure so far. A running VM is
-    /// never compressed, so its `zswpout` grows only while it is paused.
-    /// Engines that cannot tell report an error.
+    /// The VM's zswap traffic and memory pressure so far, and what of its
+    /// memory is compressed now. A running VM is compressed only on a host
+    /// that lets the kernel do so (ADR 24). Engines that cannot tell
+    /// report an error.
     fn memory_stats(&self, vm: &Self::Vm) -> Result<MemoryStats, EngineError> {
         let _ = vm;
         Err(EngineError::new(
@@ -300,6 +377,18 @@ pub trait Engine: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         let _ = vm;
         std::future::ready(Ok(false))
+    }
+
+    /// What `vm`'s logs last said, for an operator to tell why it was lost:
+    /// its process ended on its own, its memory could no longer be served,
+    /// or its guest stopped answering. Read before the VM is torn down,
+    /// which may remove its logs with its sandbox. The future reads the
+    /// ends of a few files off the caller's thread and does not borrow the
+    /// VM; what it cannot read it says so in place of the lines. Engines
+    /// that keep no logs say nothing.
+    fn last_words(&self, vm: &Self::Vm) -> impl Future<Output = LastWords> + Send + 'static {
+        let _ = vm;
+        std::future::ready(LastWords::default())
     }
 
     /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and
@@ -332,6 +421,74 @@ pub trait Engine: Send + Sync + 'static {
             "set_memory_limit",
             "this engine cannot change a VM's memory limit",
         ))
+    }
+
+    /// Marks `vm` its sandbox's only copy, or clears the mark: the
+    /// sandbox has no copy in object storage and the VM makes none, so no
+    /// other host can ever run it, and the host's guard leaves it running
+    /// when the host's lease runs out (ADR 18). The mark stays with the VM
+    /// until it ends or the mark is cleared, and holds only while the
+    /// agent process that set it runs ([`cgroup::OnlyCopy`]): an agent
+    /// that restarts marks the VMs it takes back again. A VM starts
+    /// unmarked, whatever an earlier VM under its name was. An engine
+    /// whose VMs no guard stops has nothing to mark, and does nothing.
+    fn set_only_copy(&self, vm: &Self::Vm, only: bool) -> Result<(), EngineError> {
+        let _ = (vm, only);
+        Ok(())
+    }
+
+    /// Whether a VM left for `spec` is held frozen, as the host's guard
+    /// leaves every VM once the lease has run out (ADR 18): its VMM
+    /// cannot answer until something thaws it, and a VM held frozen runs
+    /// nothing meanwhile. A host whose agent finds one it cannot take back
+    /// lists it when it registers, so the service rules on it before the
+    /// lease lets it run again. No VM left for `spec` is not held frozen,
+    /// and neither is any VM of an engine whose VMs no guard stops.
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        let _ = spec;
+        Ok(false)
+    }
+
+    /// Whether the kernel may compress running VMs' memory (ADR 24): on
+    /// an engine that does not, a running VM's compressed pages are a
+    /// defect worth a warning.
+    fn compresses_running(&self) -> bool {
+        false
+    }
+
+    /// How many VM processes, VMMs and pagers, the kernel's out-of-memory
+    /// killer ended since the engine took the host: a VM it ends this way
+    /// loses its running programs, which the host's memory rule (ADR 24)
+    /// exists to prevent. `None` where the engine cannot tell.
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
+    /// Bounds the running VM's memory as the host's memory rule asks
+    /// (ADR 24): `low` bytes the kernel keeps it from losing to others,
+    /// and `high` bytes past which it waits on its own allocations while
+    /// the kernel compresses its coldest pages, or no such point for
+    /// `None`. A VM starts, resumes and is adopted with its request as its
+    /// low and no high. Applied in the background, the latest asked
+    /// winning; a pause or a resume drops one not yet applied. Returns at
+    /// once. Engines that cannot bound a VM report an error.
+    fn bound_memory(&self, vm: &Self::Vm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        let _ = (vm, low, high);
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "bound_memory",
+            "this engine cannot bound a VM's memory",
+        ))
+    }
+
+    /// Whether the engine is still bringing `vm` down toward the high of
+    /// the latest [`Engine::bound_memory`]: the kernel is at work on it and
+    /// has not shown that it can take no more. A VM whose pages the kernel
+    /// must first age may come down only after many seconds. `false` for
+    /// an engine that applies a bound at once or cannot bound a VM.
+    fn bringing_down(&self, vm: &Self::Vm) -> bool {
+        let _ = vm;
+        false
     }
 
     /// Tells the guest of `vm`, started from `spec`, how long each of its

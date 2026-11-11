@@ -25,6 +25,7 @@ import {
   type RoutedCallScope,
 } from "./routing/routed-call-scope";
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -48,6 +49,11 @@ import type { ChannelASession, ChannelAExecArgs } from "./channel-a";
 import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
 import { isSecretReferenceError, type SecretResolver } from "@opengeni/contracts";
 import {
+  withCredentialProfileNotes,
+  type CredentialEnvironment,
+} from "./credential-profile-delivery";
+import {
+  bindSecretCarryToDispatch,
   prepareSecretExec,
   prepareSecretStdin,
   resolveSecretImagePath,
@@ -56,6 +62,15 @@ import {
   type SecretFilesWriter,
 } from "./secret-delivery";
 
+/**
+ * The shell a wrapper re-executes for a new session. The Opengeni agent sets
+ * `OPENGENI_SYSTEM_SHELL` to the dash or bash it falls back to while the
+ * machine's `/bin/sh` cannot be started, so the command still runs there.
+ */
+const SYSTEM_SHELL_EXPANSION = '"${OPENGENI_SYSTEM_SHELL:-/bin/sh}"';
+/** The macOS fallback for a missing setsid executable, with the same shell. */
+const PYTHON_SESSION_EXEC =
+  'import os,sys; os.setsid(); s=os.environ.get("OPENGENI_SYSTEM_SHELL") or "/bin/sh"; os.execv(s, [s, "-c", sys.argv[1]])';
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
@@ -71,6 +86,22 @@ const TURN_MAX_MODEL_WAIT_MS = 30_000;
  * the next request still reads the cached prefix instead of rewriting it.
  */
 const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
+/**
+ * Finish floor (part of cut polling): an `exec_command` without a TTY that the
+ * model did not explicitly background waits at least this long for its exit,
+ * however short a wait it asked for, and still returns the moment it exits.
+ * Models often ask for a wait of a second or less and then poll the
+ * background handle with `command_read`, each poll a full-context model
+ * request, although most such commands (tests, builds, lint) finish within a
+ * minute. Servers, watchers and deliberate parallel runs pass
+ * `background: true` (or use a TTY) to get the requested short wait. A
+ * floored command that printed and then went quiet returns only once the floor
+ * has passed (CUT_POLLING_OUTPUT_QUIET_MS): test runners commonly print a
+ * header and then stay silent for tens of seconds. Output that ends in an input
+ * prompt still returns after a short silence, and a waiting Steer, Pause or
+ * turn cancellation ends the wait at the next slice as before.
+ */
+export const COMMAND_FINISH_FLOOR_MS = 60_000;
 /**
  * With cut polling a long wait must not hold a dev server, watcher, tail or
  * REPL for minutes after it printed what the model needs. Once the ordinary
@@ -285,6 +316,8 @@ type ActiveRemoteExec = {
   releaseCancellationAuthority(opId: string): void;
   settleNotDispatched(opId: string): void;
   bindTransport(transport: RemoteOperationControl): void;
+  /** End the operation's foreground wait now (a Steer is waiting); see yieldExecCommand. */
+  requestYield(): void;
   observe(): Promise<RemoteOperationObservation | null>;
   cancel(): Promise<void>;
 };
@@ -431,9 +464,37 @@ export function looksLikeInputPrompt(output: string): boolean {
 function foregroundWait(
   value: unknown,
   cutPolling: boolean,
+  options: { finishFloor?: boolean } = {},
 ): { waitMs: number; quietReturnAfterMs?: number } {
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
+  if (options.finishFloor === true) {
+    const requested = modelWaitMs(value, true);
+    const waitMs = Math.max(requested, COMMAND_FINISH_FLOOR_MS);
+    // A wait the model itself asked to make longer than the ordinary window
+    // keeps its ordinary quiet return; only a raised short wait delays it to
+    // the floor.
+    return requested > TURN_MAX_MODEL_WAIT_MS
+      ? { waitMs, quietReturnAfterMs: modelWaitMs(value, false) }
+      : { waitMs, quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS };
+  }
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
+}
+
+/**
+ * The model-facing wait of one `exec_command` call. With the finish floor on
+ * (`finishFloor`, set only where the model is offered `background`), a command
+ * without a TTY that is not explicitly backgrounded waits at least
+ * COMMAND_FINISH_FLOOR_MS; `tty: true` and `background: true` keep the
+ * requested wait.
+ */
+export function execCommandForegroundWait(
+  args: { yield_time_ms?: unknown; tty?: unknown; background?: unknown },
+  cutPolling: boolean,
+  finishFloor: boolean,
+): { waitMs: number; quietReturnAfterMs?: number } {
+  return foregroundWait(args.yield_time_ms, cutPolling, {
+    finishFloor: finishFloor && args.tty === false && args.background !== true,
+  });
 }
 
 function execOutput(raw: string): string {
@@ -558,8 +619,11 @@ function singleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function shellMarkerPath(token: string): string {
-  return `${SHELL_MARKER_DIR}/${token}`;
+function shellMarkerPath(token: string, directory = SHELL_MARKER_DIR): string {
+  if (!posix.isAbsolute(directory) || directory.includes("\0")) {
+    throw new Error("Sandbox temporary directory must be absolute");
+  }
+  return `${directory}/${token}`;
 }
 
 function shellCancellationPath(markerPath: string): string {
@@ -605,7 +669,7 @@ function processInspectionCommandLines(): string[] {
 
 function cancellableGroupLeaderCommand(command: string, markerPath: string): string {
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   return [
     ...processInspectionCommandLines(),
     `__opengeni_marker=${marker}`,
@@ -656,13 +720,13 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} "$${capture.variable}"`,
     "fi",
     `eval "$${capture.variable}"`,
   ].join("\n");
@@ -735,7 +799,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
   const sourceVariable = `__opengeni_sync_source_${token}`;
   const bodyVariable = `__opengeni_sync_body_${token}`;
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   const groupLeaderCommand = [
     ...processInspectionCommandLines(),
     `[ "\${${sourceVariable}+x}" = x ] || exit 125`,
@@ -787,11 +851,11 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c ${singleQuote(groupLeaderCommand)}`,
     "  fi",
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");
@@ -800,7 +864,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
 function pendingShellCancellationCommand(state: PendingShellStart): string {
   const marker = singleQuote(state.markerPath);
   const cancellation = singleQuote(state.cancellationPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath));
   const token = singleQuote(state.token);
   return [
     ...processInspectionCommandLines(),
@@ -850,7 +914,7 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
   const marker = singleQuote(state.markerPath!);
   const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath!));
   const token = singleQuote(state.token!);
   return [
     ...processInspectionCommandLines(),
@@ -1102,15 +1166,22 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly finishFloor: boolean;
+  private readonly shellMarkerDirectory: string;
   private readonly secretResolver: SecretResolver | null;
+  private readonly credentials: CredentialEnvironment | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
   /** Routed-call scopes of this attempt's `exec_command` calls, by call id. */
   private readonly commandCallScopes = new Map<string, RoutedCallScope>();
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
+    const temporaryDirectory = options.sandboxTemporaryDirectory || "/tmp";
+    this.shellMarkerDirectory = posix.join(temporaryDirectory, "opengeni-turn-shell");
     this.cutPolling = options.cutPolling === true;
+    this.finishFloor = this.cutPolling && options.finishFloor === true;
     this.secretResolver = options.secretResolver ?? null;
+    this.credentials = options.credentials ?? null;
     if (signal?.aborted) {
       this.cancel(signal.reason);
     } else {
@@ -1144,6 +1215,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   setForegroundWaitYield(active: boolean): void {
     this.foregroundWaitYield = active;
+    // A remote operation waits in its provider in one block: ask it to return
+    // its background handle now instead of at the end of its window.
+    if (active) for (const remoteExec of this.remoteExecs) remoteExec.requestYield();
   }
 
   settleCommandCallsNotStarted(): string[] {
@@ -1169,15 +1243,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   async clearSecretFiles(): Promise<void> {
-    let failure: unknown = null;
-    for (const session of this.secretFileSessions) {
-      try {
-        await session.clearSecretFilesForAttempt!();
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    if (failure !== null) throw failure;
+    const sessions = [...this.secretFileSessions];
+    this.secretFileSessions.clear();
+    // One unavailable backend must not prevent cleanup on the others. Observe
+    // every rejection even when another provider never answers.
+    await Promise.all(sessions.map(async (session) => await session.clearSecretFilesForAttempt!()));
   }
 
   runSandboxCommand(
@@ -1264,7 +1334,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       };
       const invokeExec: FunctionToolInvoke = async (_runContext, input) =>
         nativeCommandBanner(await invokeExecNative(input));
-      const invokeWrite: FunctionToolInvoke | null =
+      // `signal` stops only this runner's own eager reads when the turn is
+      // cancelled. The registered shell's control reads (the writer drain's
+      // exit proof) must never carry it: after a cancellation it is always
+      // aborted, and a command that exited on its own, whose wrapper already
+      // removed its identity marker, could then never be proven settled.
+      const lifecycleWrite = (signal?: AbortSignal): FunctionToolInvoke | null =>
         session.writeStdin || session.writeStdinForProcessControl
           ? async (_runContext, input) => {
               const parsed = parsedObject(input);
@@ -1273,7 +1348,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               }
               const directArgs = {
                 sessionId: parsed.session_id,
-                signal: this.observationCancellation.signal,
+                ...(signal ? { signal } : {}),
                 ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
                 ...(typeof parsed.yield_time_ms === "number"
                   ? { yieldTimeMs: parsed.yield_time_ms }
@@ -1296,15 +1371,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return await session.writeStdin!(directArgs);
             }
           : null;
+      const invokeWrite = lifecycleWrite(this.observationCancellation.signal);
+      const controlWrite = lifecycleWrite();
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
       if (this.cancelled) throw cancellationError(this.reason);
       const interactive = args.tty ?? !lossless;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
-          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`)
+          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`, {
+              // A lifecycle command always reports its own exit, never a handle.
+              yieldsToSteer: false,
+            })
           : null;
-      const markerPath = shellMarkerPath(crypto.randomUUID());
+      const markerPath = shellMarkerPath(
+        crypto.randomUUID(),
+        useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+      );
       const command = useRemoteOpCancellation
         ? args.cmd
         : lossless
@@ -1374,7 +1457,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             interactive,
             runContext: lifecycleRunContext,
             execInvoke: invokeExec,
-            writeInvoke: invokeWrite,
+            writeInvoke: controlWrite,
             processSession,
             typedHandleLoss: hasTypedExecHandleLoss(session, retainedProcess.providerSessionId),
             identity: null,
@@ -1510,7 +1593,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         interactive,
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
-        writeInvoke: invokeWrite,
+        writeInvoke: controlWrite,
         processSession: retainedProcessSession(session, sessionId),
         typedHandleLoss: hasTypedExecHandleLoss(session, sessionId),
         identity: null,
@@ -1718,6 +1801,246 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     return wrapped as unknown as T[];
   }
 
+  /** The body of the wrapped `exec_command` (see wrapFunctionTool). */
+  private async invokeExecCommand(
+    tool: FunctionTool,
+    cancellationSession: CommandCancellationSession | undefined,
+    runContext: Parameters<FunctionToolInvoke>[0],
+    input: Parameters<FunctionToolInvoke>[1],
+    details: Parameters<FunctionToolInvoke>[2],
+    reportProfileNotes: (notes: string[]) => void,
+  ): Promise<Awaited<ReturnType<FunctionToolInvoke>>> {
+    const parsed = parsedObject(input);
+    if (!parsed || typeof parsed.cmd !== "string") {
+      return await this.correlatedInvoke(tool.invoke, runContext, input, details);
+    }
+    // `background` only selects this call's model-facing wait; no inner layer
+    // reads it, so it is removed before the arguments are forwarded.
+    const execWait = execCommandForegroundWait(parsed, this.cutPolling, this.finishFloor);
+    const backgroundArgumentPresent = Object.hasOwn(parsed, "background");
+    delete parsed.background;
+    const token = crypto.randomUUID();
+    const correlationId = details?.toolCall?.callId ?? `turn_exec_${token}`;
+    const cancelExecCommand = cancellationSession?.cancelExecCommand;
+    // Connected-machine exec is already a durable process-tree op and
+    // may run on Windows/macOS/Linux. Its OpCancel needs no POSIX shell
+    // wrapper and preserves the user's command byte-for-byte. PTY-backed
+    // cloud/local sessions use the portable SDK session + POSIX marker.
+    const useRemoteOpCancellation = await usesRemoteOperationCancellation(cancellationSession);
+    const markerPath = shellMarkerPath(
+      token,
+      useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+    );
+    if (this.cancelled) throw cancellationError(this.reason);
+    // Secret references: managed sandboxes always parse the command in
+    // POSIX sh (the wrapper below), so splice now; connected machines
+    // splice in their own dialect at delivery. Resolution failures are
+    // the tool result and nothing is dispatched or recorded.
+    let secret: Awaited<ReturnType<typeof prepareSecretExec>>;
+    try {
+      secret = await prepareSecretExec(parsed.cmd, {
+        resolver: this.secretResolver,
+        dialect: useRemoteOpCancellation ? null : "posix",
+        use: {
+          surface: "shell",
+          toolName: "exec_command",
+          ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
+        },
+        credentials: this.credentials,
+      });
+    } catch (error) {
+      if (isSecretReferenceError(error)) return error.toModelOutput();
+      throw error;
+    }
+    if (secret?.notes) reportProfileNotes(secret.notes);
+    if (this.cancelled) throw cancellationError(this.reason);
+    const commandText = secret?.text ?? parsed.cmd;
+    const interactive = parsed.tty !== false;
+    const remoteExec =
+      cancelExecCommand && useRemoteOpCancellation
+        ? this.registerRemoteExec(cancellationSession!, `${sanitizeOpIdToken(correlationId)}:0`, {
+            yieldsToSteer: true,
+          })
+        : null;
+    const wrappedCommand = useRemoteOpCancellation
+      ? null
+      : cancellableShellCommand(commandText, markerPath);
+    // A carry with only profile variables matches just this exact dispatch,
+    // never a helper command run in the same call.
+    const secretCarry = bindSecretCarryToDispatch(
+      secret?.carry ?? null,
+      wrappedCommand ?? commandText,
+    );
+    // A remote operation waits in the provider for its own yield, so it is
+    // sent the effective wait: a finish floor, or the ordinary cap when cut
+    // polling is off. Connected Machines cap it at the floor and end it early
+    // for a Steer (yieldExecCommand); OpenSandbox has no early yield yet.
+    const remoteYieldMs = parsed.yield_time_ms === execWait.waitMs ? null : execWait.waitMs;
+    const cancellableInput = useRemoteOpCancellation
+      ? commandText === parsed.cmd && !backgroundArgumentPresent && remoteYieldMs === null
+        ? input
+        : JSON.stringify({
+            ...parsed,
+            cmd: commandText,
+            ...(remoteYieldMs === null ? {} : { yield_time_ms: remoteYieldMs }),
+          })
+      : JSON.stringify({
+          ...parsed,
+          cmd: wrappedCommand,
+          // Preserve an explicit pipe-mode request. When tty is omitted,
+          // retain the historical PTY default and Ctrl-C fast path. Every
+          // mode keeps the process marker plus TERM/KILL escalation, and
+          // the short yield exposes the provider session promptly.
+          tty: interactive,
+          yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
+        });
+    const pendingStart = useRemoteOpCancellation
+      ? null
+      : this.registerPendingShellStart({
+          markerPath,
+          token,
+          runContext,
+          execInvoke: tool.invoke,
+          session: cancellationSession ?? null,
+          cancelProviderStart: cancellationSession?.cancelPendingExecCommand
+            ? cancellationSession.cancelPendingExecCommand.bind(cancellationSession)
+            : null,
+        });
+    const startedAt = performance.now();
+    let output: Awaited<ReturnType<FunctionToolInvoke>>;
+    try {
+      output = await runWithSecretCarry(secretCarry, () =>
+        runWithToolCallCorrelation(
+          correlationId,
+          async () =>
+            await withPendingCommandSupervision(pendingStart?.supervision, () =>
+              tool.invoke(runContext, cancellableInput, details),
+            ),
+          {
+            onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
+            onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
+            onDurableOpOwnershipTransferred: (opId) =>
+              remoteExec?.releaseCancellationAuthority(opId),
+            onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
+            onRemoteOperationTransportSelected: (transport) => remoteExec?.bindTransport(transport),
+          },
+        ),
+      );
+    } catch (error) {
+      if (isSecretReferenceError(error)) {
+        // Delivery-time refusal (e.g. cmd.exe on a machine), before dispatch.
+        pendingStart?.settle();
+        return error.toModelOutput();
+      }
+      const retainedProcess =
+        !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
+          ? error.retainedProcess
+          : null;
+      const processSession =
+        retainedProcess === null
+          ? null
+          : retainedProcessSession(cancellationSession, retainedProcess.providerSessionId);
+      if (retainedProcess && processSession) {
+        // The provider output remains rejected. DB promotion may be
+        // durable already or pending after an ambiguous persistence
+        // failure; the exact routing session owns that distinction and
+        // retries promotion before any process control. Preserve only
+        // its safe locator so turn finalization can drain it, and never
+        // invoke a helper through the mutable current route.
+        this.shellSessions.set(retainedProcess.providerSessionId, {
+          sessionId: retainedProcess.providerSessionId,
+          command: parsed.cmd,
+          markerPath,
+          token,
+          interactive,
+          runContext,
+          execInvoke: tool.invoke,
+          writeInvoke: this.rawWriteInvoke,
+          processSession,
+          typedHandleLoss: hasTypedExecHandleLoss(
+            cancellationSession,
+            retainedProcess.providerSessionId,
+          ),
+          identity: null,
+          identityValidated: false,
+          cancellation: null,
+        });
+        pendingStart?.settle(retainedProcess.providerSessionId);
+      }
+      pendingStart?.settle();
+      if (remoteExec && !remoteExec.settled) {
+        const observed = await remoteExec.observe();
+        if (observed?.status === "completed") {
+          if (this.cancelled) throw cancellationError(this.reason);
+          if (observed.failure) throw observed.failure;
+          output = observed.result;
+        } else if (this.cancelled) {
+          throw cancellationError(this.reason);
+        } else if (error instanceof RoutingMutationOutcomeUnknownError) {
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        } else {
+          throw error;
+        }
+      } else if (error instanceof RoutingMutationOutcomeUnknownError) {
+        return renderRoutingMutationOutcomeUnknownToolResult(error);
+      } else {
+        throw error;
+      }
+    }
+    if (typeof output !== "string") {
+      if (remoteExec && !remoteExec.ownershipTransferred) {
+        const terminal = nativeCommandResult(output).exitCode !== null;
+        if (terminal) remoteExec.settle();
+        if (terminal && this.cancelled) throw cancellationError(this.reason);
+      }
+      pendingStart?.settle();
+      return output;
+    }
+    if (remoteExec && !remoteExec.ownershipTransferred) {
+      const terminal = nativeCommandResult(output).exitCode !== null;
+      if (terminal) remoteExec.settle();
+      if (terminal && this.cancelled) throw cancellationError(this.reason);
+    }
+    const sessionId = parseExecBannerSessionId(output);
+    if (sessionId !== null) {
+      const state: ActiveShellSession = {
+        sessionId,
+        command: parsed.cmd,
+        markerPath: useRemoteOpCancellation ? null : markerPath,
+        token: useRemoteOpCancellation ? null : token,
+        interactive,
+        runContext,
+        execInvoke: tool.invoke,
+        writeInvoke: this.rawWriteInvoke,
+        processSession: retainedProcessSession(cancellationSession, sessionId),
+        typedHandleLoss: hasTypedExecHandleLoss(cancellationSession, sessionId),
+        identity: null,
+        identityValidated: false,
+        cancellation: null,
+      };
+      // Provider retention preserves the physical process but does not
+      // transfer it to the session. Keep it turn-owned and cancellable
+      // throughout eager waiting; successful adoption removes it below
+      // immediately before the running receipt is returned.
+      this.shellSessions.set(sessionId, state);
+      pendingStart?.settle(sessionId);
+      // A provider-specific numeric session is not an op-stream
+      // terminal result. Transfer its cancellation fence to the
+      // already-registered shell-session proof path instead.
+      remoteExec?.settle();
+      return await this.awaitModelFacingShellResult({
+        state,
+        initialOutput: output,
+        startedAt,
+        ...execWait,
+        maxOutputTokens:
+          typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
+      });
+    }
+    pendingStart?.settle();
+    return output;
+  }
+
   private wrapFunctionTool(
     tool: FunctionTool,
     cancellationSession?: CommandCancellationSession,
@@ -1727,212 +2050,20 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ...tool,
         invoke: (runContext, input, details) =>
           this.track(async () => {
-            const parsed = parsedObject(input);
-            if (!parsed || typeof parsed.cmd !== "string") {
-              return await this.correlatedInvoke(tool.invoke, runContext, input, details);
-            }
-            const token = crypto.randomUUID();
-            const markerPath = shellMarkerPath(token);
-            const correlationId = details?.toolCall?.callId ?? `turn_exec_${token}`;
-            const cancelExecCommand = cancellationSession?.cancelExecCommand;
-            // Connected-machine exec is already a durable process-tree op and
-            // may run on Windows/macOS/Linux. Its OpCancel needs no POSIX shell
-            // wrapper and preserves the user's command byte-for-byte. PTY-backed
-            // cloud/local sessions use the portable SDK session + POSIX marker.
-            const useRemoteOpCancellation =
-              await usesRemoteOperationCancellation(cancellationSession);
-            if (this.cancelled) throw cancellationError(this.reason);
-            // Secret references: managed sandboxes always parse the command in
-            // POSIX sh (the wrapper below), so splice now; connected machines
-            // splice in their own dialect at delivery. Resolution failures are
-            // the tool result and nothing is dispatched or recorded.
-            let secret: Awaited<ReturnType<typeof prepareSecretExec>>;
-            try {
-              secret = await prepareSecretExec(parsed.cmd, {
-                resolver: this.secretResolver,
-                dialect: useRemoteOpCancellation ? null : "posix",
-                use: {
-                  surface: "shell",
-                  toolName: "exec_command",
-                  ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
-                },
-              });
-            } catch (error) {
-              if (isSecretReferenceError(error)) return error.toModelOutput();
-              throw error;
-            }
-            if (this.cancelled) throw cancellationError(this.reason);
-            const commandText = secret?.text ?? parsed.cmd;
-            const interactive = parsed.tty !== false;
-            const remoteExec =
-              cancelExecCommand && useRemoteOpCancellation
-                ? this.registerRemoteExec(
-                    cancellationSession!,
-                    `${sanitizeOpIdToken(correlationId)}:0`,
-                  )
-                : null;
-            const cancellableInput = useRemoteOpCancellation
-              ? commandText === parsed.cmd
-                ? input
-                : JSON.stringify({ ...parsed, cmd: commandText })
-              : JSON.stringify({
-                  ...parsed,
-                  cmd: cancellableShellCommand(commandText, markerPath),
-                  // Preserve an explicit pipe-mode request. When tty is omitted,
-                  // retain the historical PTY default and Ctrl-C fast path. Every
-                  // mode keeps the process marker plus TERM/KILL escalation, and
-                  // the short yield exposes the provider session promptly.
-                  tty: interactive,
-                  yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
-                });
-            const pendingStart = useRemoteOpCancellation
-              ? null
-              : this.registerPendingShellStart({
-                  markerPath,
-                  token,
-                  runContext,
-                  execInvoke: tool.invoke,
-                  session: cancellationSession ?? null,
-                  cancelProviderStart: cancellationSession?.cancelPendingExecCommand
-                    ? cancellationSession.cancelPendingExecCommand.bind(cancellationSession)
-                    : null,
-                });
-            const startedAt = performance.now();
-            let output: Awaited<ReturnType<FunctionToolInvoke>>;
-            try {
-              output = await runWithSecretCarry(secret?.carry ?? null, () =>
-                runWithToolCallCorrelation(
-                  correlationId,
-                  async () =>
-                    await withPendingCommandSupervision(pendingStart?.supervision, () =>
-                      tool.invoke(runContext, cancellableInput, details),
-                    ),
-                  {
-                    onDurableOpOwnershipTransferStarted: (opId) =>
-                      remoteExec?.startOwnershipTransfer(opId),
-                    onDurableOpOwnershipTransferFailed: (opId) =>
-                      remoteExec?.failOwnershipTransfer(opId),
-                    onDurableOpOwnershipTransferred: (opId) =>
-                      remoteExec?.releaseCancellationAuthority(opId),
-                    onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
-                    onRemoteOperationTransportSelected: (transport) =>
-                      remoteExec?.bindTransport(transport),
-                  },
-                ),
-              );
-            } catch (error) {
-              if (isSecretReferenceError(error)) {
-                // Delivery-time refusal (e.g. cmd.exe on a machine), before dispatch.
-                pendingStart?.settle();
-                return error.toModelOutput();
-              }
-              const retainedProcess =
-                !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
-                  ? error.retainedProcess
-                  : null;
-              const processSession =
-                retainedProcess === null
-                  ? null
-                  : retainedProcessSession(cancellationSession, retainedProcess.providerSessionId);
-              if (retainedProcess && processSession) {
-                // The provider output remains rejected. DB promotion may be
-                // durable already or pending after an ambiguous persistence
-                // failure; the exact routing session owns that distinction and
-                // retries promotion before any process control. Preserve only
-                // its safe locator so turn finalization can drain it, and never
-                // invoke a helper through the mutable current route.
-                this.shellSessions.set(retainedProcess.providerSessionId, {
-                  sessionId: retainedProcess.providerSessionId,
-                  command: parsed.cmd,
-                  markerPath,
-                  token,
-                  interactive,
-                  runContext,
-                  execInvoke: tool.invoke,
-                  writeInvoke: this.rawWriteInvoke,
-                  processSession,
-                  typedHandleLoss: hasTypedExecHandleLoss(
-                    cancellationSession,
-                    retainedProcess.providerSessionId,
-                  ),
-                  identity: null,
-                  identityValidated: false,
-                  cancellation: null,
-                });
-                pendingStart?.settle(retainedProcess.providerSessionId);
-              }
-              pendingStart?.settle();
-              if (remoteExec && !remoteExec.settled) {
-                const observed = await remoteExec.observe();
-                if (observed?.status === "completed") {
-                  if (this.cancelled) throw cancellationError(this.reason);
-                  if (observed.failure) throw observed.failure;
-                  output = observed.result;
-                } else if (this.cancelled) {
-                  throw cancellationError(this.reason);
-                } else if (error instanceof RoutingMutationOutcomeUnknownError) {
-                  return renderRoutingMutationOutcomeUnknownToolResult(error);
-                } else {
-                  throw error;
-                }
-              } else if (error instanceof RoutingMutationOutcomeUnknownError) {
-                return renderRoutingMutationOutcomeUnknownToolResult(error);
-              } else {
-                throw error;
-              }
-            }
-            if (typeof output !== "string") {
-              if (remoteExec && !remoteExec.ownershipTransferred) {
-                const terminal = nativeCommandResult(output).exitCode !== null;
-                if (terminal) remoteExec.settle();
-                if (terminal && this.cancelled) throw cancellationError(this.reason);
-              }
-              pendingStart?.settle();
-              return output;
-            }
-            if (remoteExec && !remoteExec.ownershipTransferred) {
-              const terminal = nativeCommandResult(output).exitCode !== null;
-              if (terminal) remoteExec.settle();
-              if (terminal && this.cancelled) throw cancellationError(this.reason);
-            }
-            const sessionId = parseExecBannerSessionId(output);
-            if (sessionId !== null) {
-              const state: ActiveShellSession = {
-                sessionId,
-                command: parsed.cmd,
-                markerPath: useRemoteOpCancellation ? null : markerPath,
-                token: useRemoteOpCancellation ? null : token,
-                interactive,
-                runContext,
-                execInvoke: tool.invoke,
-                writeInvoke: this.rawWriteInvoke,
-                processSession: retainedProcessSession(cancellationSession, sessionId),
-                typedHandleLoss: hasTypedExecHandleLoss(cancellationSession, sessionId),
-                identity: null,
-                identityValidated: false,
-                cancellation: null,
-              };
-              // Provider retention preserves the physical process but does not
-              // transfer it to the session. Keep it turn-owned and cancellable
-              // throughout eager waiting; successful adoption removes it below
-              // immediately before the running receipt is returned.
-              this.shellSessions.set(sessionId, state);
-              pendingStart?.settle(sessionId);
-              // A provider-specific numeric session is not an op-stream
-              // terminal result. Transfer its cancellation fence to the
-              // already-registered shell-session proof path instead.
-              remoteExec?.settle();
-              return await this.awaitModelFacingShellResult({
-                state,
-                initialOutput: output,
-                startedAt,
-                ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
-                maxOutputTokens:
-                  typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
-              });
-            }
-            pendingStart?.settle();
-            return output;
+            // Credential profile notes (variables skipped and why) end the
+            // command's result; they never change what was run or recorded.
+            let profileNotes: string[] | undefined;
+            const output = await this.invokeExecCommand(
+              tool,
+              cancellationSession,
+              runContext,
+              input,
+              details,
+              (notes) => {
+                profileNotes = notes;
+              },
+            );
+            return withCredentialProfileNotes(output, profileNotes);
           }),
       };
     }
@@ -2724,17 +2855,26 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
   }
 
-  private registerRemoteExec(session: CommandCancellationSession, opId: string): ActiveRemoteExec {
+  private registerRemoteExec(
+    session: CommandCancellationSession,
+    opId: string,
+    options: { yieldsToSteer: boolean },
+  ): ActiveRemoteExec {
     let resolveSettled!: () => void;
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
     let cancellation: Promise<void> | null = null;
     let cancellationRequest: Promise<void> | null = null;
+    let abandonmentRequest: Promise<void> | null = null;
     let observation: Promise<RemoteOperationObservation | null> | null = null;
     let ownershipTransferPending = false;
     let transport: RemoteOperationControl | null =
       session.requiresPinnedRemoteOperationControl?.() === true ? null : session;
+    const requestYield = () => {
+      if (!options.yieldsToSteer || entry.settled || entry.ownershipTransferred) return;
+      transport?.yieldExecCommand?.(opId);
+    };
     const entry: ActiveRemoteExec = {
       settled: false,
       ownershipTransferred: false,
@@ -2748,7 +2888,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       },
       bindTransport: (selected) => {
         if (selected.cancelExecCommand || selected.observeExecCommand) transport = selected;
+        // A Steer that arrived before the provider selected this operation.
+        if (this.foregroundWaitYield) requestYield();
       },
+      requestYield,
       observe: async () => {
         if (entry.observation?.status === "completed") return entry.observation;
         if (ownershipTransferPending) return null;
@@ -2804,9 +2947,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     cancellationRequest = null;
                   });
               }
+              if (!abandonmentRequest && exactTransport.abandonExecCommand) {
+                abandonmentRequest = exactTransport
+                  .abandonExecCommand(opId)
+                  .then((committed) => {
+                    if (committed) entry.releaseCancellationAuthority(opId);
+                  })
+                  .catch(() => undefined)
+                  .finally(() => {
+                    abandonmentRequest = null;
+                  });
+              }
               // Reconcile only the original operation. readExisting is
               // observation-only and never OpStarts or final-ACKs its output.
-              await entry.observe();
+              // A stuck transport read cannot prevent independent durable
+              // custody from committing. observe() already coalesces reads;
+              // keep the registration until exit proof or committed handoff.
+              void entry.observe().catch(() => undefined);
             }
             await Promise.race([entry.settledPromise, delay(SHELL_POLL_MS)]);
           }
@@ -3122,6 +3279,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 }
 
 export type TurnToolCancellationControllerOptions = {
+  /** The sandbox manifest's TMPDIR, not the worker's temporary directory.
+   * Resolve once so launch, reads and cancellation retain the same literal
+   * marker identity even if the environment changes later. */
+  sandboxTemporaryDirectory?: string;
   /**
    * Honor long model-requested foreground waits (settings.experimentCutPolling,
    * OPENGENI_EXPERIMENT_CUT_POLLING; on by default in production settings).
@@ -3129,12 +3290,25 @@ export type TurnToolCancellationControllerOptions = {
    */
   cutPolling?: boolean;
   /**
+   * With cut polling, wait at least COMMAND_FINISH_FLOOR_MS for an
+   * `exec_command` without a TTY or `background: true`. Set only where the
+   * model's `exec_command` schema offers `background` and describes the floor
+   * (the lean schema), so the model always has a way to keep a short wait.
+   */
+  finishFloor?: boolean;
+  /**
    * The attempt's secret resolver. Commands, stdin, patches and image paths
    * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below
    * every recorder (design §10.3). Omitted, or `enabled: false`, passes
    * references through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The attempt's credential profile: its variables are added to the
+   * environment of every `exec_command` (including commands that keep
+   * running in the background), below the command's own assignments.
+   */
+  credentials?: CredentialEnvironment | null;
 };
 
 export function createTurnToolCancellationController(

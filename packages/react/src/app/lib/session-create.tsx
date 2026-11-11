@@ -257,6 +257,12 @@ export type SessionDraftSubmission = {
   omitWorkspaceResources: boolean;
 };
 
+/** The agent a new chat starts with, and the icon the chat shows for it. */
+export type NewSessionAgent = {
+  id: string;
+  avatar: import("@opengeni/sdk").SessionAvatar;
+};
+
 export type BuildCreateSessionRequestInput = {
   currentResources: ResourceRef[];
   submission: TurnSubmission;
@@ -264,6 +270,8 @@ export type BuildCreateSessionRequestInput = {
   instructions?: string | undefined;
   /** Installed session-selected Skills to freeze onto the new session. */
   installedSkillIds?: string[] | undefined;
+  /** Start the chat with an agent: it follows the agent's Instructions and shows its icon. */
+  agent?: NewSessionAgent | undefined;
   startMode?: "realtime" | undefined;
   visibility?: "private" | "workspace" | undefined;
   omitWorkspaceResources?: boolean | undefined;
@@ -380,6 +388,7 @@ export function buildCreateSessionRequest(
     visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
     ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
+    ...(input.agent ? { agentId: input.agent.id, profile: { avatar: input.agent.avatar } } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
     ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined

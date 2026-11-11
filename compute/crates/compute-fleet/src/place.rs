@@ -26,12 +26,19 @@
 //!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,
-//! then the one with more free memory, then the one with more it could
-//! free. Drawing two keeps load even without herding every request onto the
-//! single emptiest host, and costs the same at five thousand hosts as at
-//! five. A sandbox that asks to reach private destinations hosts offer
-//! goes only to a host that offers all of them; where few hosts do, the
-//! draws miss and placement walks the pool for one.
+//! then the one with the larger share of its room still free, then the one
+//! with more free memory, then the one with more it could free. A host's
+//! share free is the smaller of the shares of its memory and of its
+//! processor time it can still promise: what an awake sandbox is
+//! guaranteed. Comparing shares rather than amounts fills hosts of
+//! different sizes evenly; by amount, every sandbox would go to the
+//! largest host until it had no more free than the next, however busy
+//! its processors, while a smaller host sat idle. Drawing two keeps load
+//! even without herding every request onto the single emptiest host, and
+//! costs the same at five thousand hosts as at five. A sandbox that asks
+//! to reach private destinations hosts offer goes only to a host that
+//! offers all of them; where few hosts do, the draws miss and placement
+//! walks the pool for one.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -75,10 +82,13 @@ pub struct Capacity {
     /// Memory in MiB it frees at once for a wake that needs it, by ending
     /// idle VM processes whose state is saved.
     pub reclaimable_memory_mib: u64,
+    /// Processor time in millicores it guarantees sandboxes at once now.
+    pub cpu_millis: u64,
     /// Processor time in millicores it can still promise to sandboxes
     /// that wake.
     pub free_cpu_millis: u64,
-    /// Disk in MiB it can still promise.
+    /// Disk in MiB it can still promise, what it frees by disk relief
+    /// among it.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
     pub ready: Vec<(ShapeKey, u32)>,
@@ -445,6 +455,7 @@ impl Fleet {
             self.slots[slot as usize].as_ref().map(|entry| {
                 (
                     has_ready(entry, demand),
+                    share_free(&entry.capacity),
                     entry.capacity.free_memory_mib,
                     entry.capacity.reclaimable_memory_mib,
                 )
@@ -513,6 +524,21 @@ fn has_ready(entry: &Slot, demand: &Demand) -> bool {
             .iter()
             .any(|(key, count)| *key == shape && *count > 0)
     })
+}
+
+/// The share of its room a host can still promise, in millionths: the
+/// smaller of the shares of its memory and of its processor time free. A
+/// host that reports none of either has no share free.
+fn share_free(capacity: &Capacity) -> u64 {
+    let share = |free: u64, all: u64| {
+        if all == 0 {
+            return 0;
+        }
+        let millionths = u128::from(free.min(all)) * 1_000_000 / u128::from(all);
+        u64::try_from(millionths).unwrap_or(1_000_000)
+    };
+    share(capacity.free_memory_mib, capacity.memory_mib)
+        .min(share(capacity.free_cpu_millis, capacity.cpu_millis))
 }
 
 #[cfg(test)]

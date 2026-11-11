@@ -1,5 +1,4 @@
 import type { OpenGeniText } from "@opengeni/react/messages";
-import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 
 /** What the composer's single trailing control does right now. */
 export type ComposerTrailingMode = "send" | "pause" | "resume" | "call" | "idle";
@@ -41,15 +40,33 @@ export function composerAlternateSend(input: {
 }
 
 /**
- * The loading copy beside the orb: a host's own phrases replace both phases',
- * as the web timeline's loading `phrases` option does; otherwise the built-in
- * preparing or waiting copy.
+ * One calm status across startup phases; hosts may supply their own wording.
  */
 export function nativeLoadingPhrases(
   t: OpenGeniText,
   hostPhrases: readonly string[],
-  phase: "preparing" | "waiting",
+  _phase: "preparing" | "waiting",
 ): readonly string[] {
   if (hostPhrases.length > 0) return hostPhrases;
-  return phase === "waiting" ? GENIE_WAITING_PHRASES(t) : GENIE_PREPARING_PHRASES(t);
+  return [t("native.timeline.messages.working")];
+}
+
+/**
+ * Selection colors for a text field. Android paints `selectionColor` as the
+ * highlight itself, behind the text, so it takes the translucent
+ * `text-selection` token while the caret and handles keep the solid accent.
+ * iOS derives the caret and highlight from one tint, and a translucent tint
+ * would fade the caret, so iOS uses the app's tint (system blue by default),
+ * which is always visible.
+ */
+export function textFieldSelectionColors(
+  colors: { accent: string; "text-selection": string },
+  os: string,
+): { selectionColor?: string; cursorColor?: string; selectionHandleColor?: string } {
+  if (os !== "android") return {};
+  return {
+    selectionColor: colors["text-selection"],
+    cursorColor: colors.accent,
+    selectionHandleColor: colors.accent,
+  };
 }

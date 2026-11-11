@@ -1,12 +1,7 @@
-import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
-  correctWorkspaceMemory,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -18,29 +13,18 @@ import {
   listTaskNotes,
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
-  saveWorkspaceMemory,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
-  withWorkspaceRls,
-  dbSql,
   type DbClient,
 } from "../src";
 
-const migrationPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0259_company_brain_context_selection_receipts.sql",
-);
-const inspectionMigrationPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0266_company_brain_context_receipt_inspection.sql",
-);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquirePreKnowledgeTestDatabase("company-brain-context-selection");
+  shared = await acquireSharedTestDatabase("company-brain-context-selection");
   if (!shared && requireRealDatabase) {
     throw new Error("[company-brain-context-selection] real PostgreSQL is required");
   }
@@ -265,51 +249,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("accepted-turn Company Brain context selection", () => {
-  test("declares a read-only, content-free, target-schema-safe inspection capability", async () => {
-    const sql = await readFile(inspectionMigrationPath, "utf8");
-    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(sql).toContain("company_brain_inspect_context_receipts");
-    expect(sql).toContain("p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()");
-    expect(sql).toContain("turn_row.initiating_human_subject_id");
-    expect(sql).toContain("session_reference_visible(");
-    expect(sql).toContain("SET search_path = pg_catalog, %I, pg_temp");
-    expect(sql).toContain("REVOKE ALL ON FUNCTION");
-    expect(sql).not.toMatch(
-      /\b(?:INSERT|UPDATE|DELETE)\s+(?:INTO|FROM)?\s*company_brain_context/iu,
-    );
-    expect(sql).not.toContain("legacy_workspace_instructions");
-    expect(sql).not.toContain("memory_text");
-    expect(sql).not.toContain("memory_selections) AS");
-  });
-
-  test("declares a bounded content-free rolling receipt and target-schema-safe function", async () => {
-    const sql = await readFile(migrationPath, "utf8");
-    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(sql).toContain("SET LOCAL lock_timeout = '5s'");
-    expect(sql).toContain("SET LOCAL statement_timeout = '10min'");
-    expect(sql).toContain("jsonb_array_length(value) > 50");
-    expect(sql).toContain("octet_length(value::text) > 16384");
-    expect(sql).toContain("FORCE ROW LEVEL SECURITY");
-    expect(sql).toContain("session_visibility_isolation");
-    expect(sql).toContain("company_brain_turn_context_snapshots");
-    expect(sql).toContain("session_turns_capture_company_brain_context_snapshot");
-    expect(sql).toContain("legacy workspace instructions truncated; original UTF-8 bytes=");
-    expect(sql).toContain("rendered_memory_selections");
-    expect(sql).toContain("ALTER FUNCTION %1$I.company_brain_context_get_or_create_selection");
-    expect(sql).not.toContain("memory.text'\n");
-    expect(sql).not.toContain("task_notes note");
-    if (shared) {
-      const [installed] = await shared.admin<{ function_schema: string; current_schema: string }[]>`
-        select routine_schema as function_schema, current_schema() as current_schema
-        from information_schema.routines
-        where routine_schema = current_schema()
-          and routine_name = 'company_brain_context_get_or_create_selection'
-      `;
-      expect(installed?.function_schema).toBe(installed?.current_schema);
-    }
-  });
-
-  test("keeps the 0259 definer hardening after migration 0271 replaces both resolution functions", async () => {
+  test("keeps both context-selection routines security definer with a pinned search path", async () => {
     if (!shared) return;
     const routines = await shared.admin<
       Array<{ name: string; securityDefiner: boolean; settings: string[] | null }>
@@ -340,170 +280,6 @@ describe("accepted-turn Company Brain context selection", () => {
       expect(routine.settings).toEqual([`search_path=${schema}, pg_catalog`]);
     }
   });
-
-  test("defaults an absent memoryPromptMode to retrieval_only at turn acceptance", async () => {
-    if (!shared || !client) return;
-    const f = await fixture({ child: true, mode: "absent" });
-    await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "Standing memory that must not be injected by default.",
-      kind: "semantic",
-      pinned: true,
-    });
-    const rootAttempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    const childAttempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.child!.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    const [snapshot] = await shared.admin<Array<{ mode: string; source: string }>>`
-      select memory_prompt_mode as "mode", snapshot_source as "source"
-      from company_brain_turn_context_snapshots
-      where workspace_id = ${f.grant.workspaceId} and turn_id = ${rootAttempt.turnId}
-    `;
-    expect(snapshot).toEqual({ mode: "retrieval_only", source: "accepted_turn" });
-    await prepareSnapshots(rootAttempt);
-    await prepareSnapshots(childAttempt);
-    const root = await resolve(rootAttempt);
-    expect(root.receipt).toMatchObject({
-      sessionRole: "root",
-      memoryEnabled: true,
-      memoryPromptMode: "retrieval_only",
-      companyProfileIncluded: true,
-      selectedMemoryCount: 0,
-      renderedMemoryCount: 0,
-    });
-    expect(root.workspaceMemory).toBeNull();
-    const child = await resolve(childAttempt);
-    expect(child.receipt).toMatchObject({
-      sessionRole: "child",
-      memoryPromptMode: "retrieval_only",
-      companyProfileIncluded: false,
-      selectedMemoryCount: 0,
-    });
-    expect(child.workspaceMemory).toBeNull();
-  }, 180_000);
-
-  test("defaults an absent memoryPromptMode to retrieval_only on the pre-0259 legacy first-claim path", async () => {
-    if (!shared || !client) return;
-    const f = await fixture({ mode: "absent" });
-    await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "Pre-migration turns must not regain standing injection.",
-      kind: "semantic",
-      pinned: true,
-    });
-    const attempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    // Simulate a turn accepted before migration 0259: remove its insert-time
-    // snapshot with triggers bypassed so the first claim must freeze a
-    // `legacy_first_claim` projection from current workspace settings.
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`
-        delete from company_brain_turn_context_snapshots
-        where workspace_id = ${f.grant.workspaceId} and turn_id = ${attempt.turnId}
-      `;
-    });
-    await prepareSnapshots(attempt);
-    const selected = await resolve(attempt);
-    expect(selected.receipt).toMatchObject({
-      memoryEnabled: true,
-      memoryPromptMode: "retrieval_only",
-      turnContextSnapshotSource: "legacy_first_claim",
-      selectedMemoryCount: 0,
-    });
-    expect(selected.workspaceMemory).toBeNull();
-
-    // Explicit legacy_standing remains the opt-out on the same path.
-    const legacy = await fixture({ mode: "legacy_standing" });
-    await saveWorkspaceMemory(client.db, {
-      accountId: legacy.grant.accountId,
-      workspaceId: legacy.grant.workspaceId,
-      text: "Explicit legacy standing keeps injection.",
-      kind: "semantic",
-      pinned: true,
-    });
-    const legacyAttempt = await seedAttempt({
-      accountId: legacy.grant.accountId,
-      workspaceId: legacy.grant.workspaceId,
-      sessionId: legacy.root.id,
-      ownerSubjectId: legacy.ownerSubjectId,
-    });
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`
-        delete from company_brain_turn_context_snapshots
-        where workspace_id = ${legacy.grant.workspaceId} and turn_id = ${legacyAttempt.turnId}
-      `;
-    });
-    await prepareSnapshots(legacyAttempt);
-    const legacySelected = await resolve(legacyAttempt);
-    expect(legacySelected.receipt).toMatchObject({
-      memoryPromptMode: "retrieval_only",
-      turnContextSnapshotSource: "legacy_first_claim",
-      // Retired: a stored opt-out no longer selects or renders anything.
-      selectedMemoryCount: 0,
-    });
-    // The mode is still recorded on the receipt as a historical fact, but the
-    // standing block itself is retired: nothing is composed into the prompt.
-    expect(legacySelected.workspaceMemory).toBeNull();
-  }, 180_000);
-
-  test("freezes mode and bounded legacy workspace instructions when the turn is accepted", async () => {
-    if (!shared || !client) return;
-    const f = await fixture();
-    const acceptedInstructions = `Accepted instructions ${"🧠".repeat(40_000)}`;
-    await shared.admin`
-      update workspaces set settings = ${shared.admin.json({
-        memoryEnabled: true,
-        memoryPromptMode: "retrieval_only",
-      })}::jsonb, agent_instructions = ${acceptedInstructions}
-      where id = ${f.grant.workspaceId}
-    `;
-    const attempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    await shared.admin`
-      update workspaces set settings = ${shared.admin.json({
-        memoryEnabled: false,
-        memoryPromptMode: "retrieval_only",
-      })}::jsonb, agent_instructions = 'Changed after acceptance'
-      where id = ${f.grant.workspaceId}
-    `;
-    await prepareSnapshots(attempt);
-    const selected = await resolve(attempt);
-    expect(selected.receipt).toMatchObject({
-      memoryEnabled: true,
-      memoryPromptMode: "retrieval_only",
-      turnContextSnapshotSource: "accepted_turn",
-      legacyWorkspaceInstructionsOriginalUtf8Bytes: Buffer.byteLength(acceptedInstructions, "utf8"),
-      legacyWorkspaceInstructionsTruncated: true,
-    });
-    expect(selected.legacyWorkspaceInstructions).toStartWith("Accepted instructions");
-    expect(selected.legacyWorkspaceInstructions).toContain(
-      "legacy workspace instructions truncated; original UTF-8 bytes=",
-    );
-    expect(Buffer.byteLength(selected.legacyWorkspaceInstructions!, "utf8")).toBeLessThanOrEqual(
-      131_072,
-    );
-    expect(selected.legacyWorkspaceInstructions).not.toContain("Changed after acceptance");
-  }, 180_000);
 
   test.each(["user", "compaction"] as const)(
     "recovery reuses accepted legacy workspace instructions for %s turns",
@@ -536,115 +312,6 @@ describe("accepted-turn Company Brain context selection", () => {
     },
     180_000,
   );
-
-  test("reuses one logical-turn selection across attempt replacement and shrinks on revocation or hash drift", async () => {
-    if (!shared || !client) return;
-    const f = await fixture();
-    const firstMemory = await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "Pinned architecture discovery.",
-      kind: "semantic",
-      pinned: true,
-    });
-    const secondMemory = await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "Secondary implementation discovery.",
-      kind: "decision",
-    });
-    const firstAttempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "Created after turn acceptance and before first selection.",
-      kind: "semantic",
-    });
-    await prepareSnapshots(firstAttempt);
-    const first = await resolve(firstAttempt);
-    expect(first.receipt).toMatchObject({
-      sessionRole: "root",
-      memoryPromptMode: "retrieval_only",
-      companyProfileIncluded: true,
-      selectedMemoryCount: 0,
-      renderedMemoryCount: 0,
-      visibleMemoryCount: 0,
-      omittedMemoryCount: 0,
-    });
-    // Candidate selection, ordering and the budget are still exercised through
-    // the receipt above; the standing block they used to render into is gone.
-    expect(first.workspaceMemory).toBeNull();
-    const [durableReceipt] = await shared.admin<
-      Array<{ memorySelections: Array<Record<string, unknown>> }>
-    >`
-      select memory_selections as "memorySelections"
-      from company_brain_context_selection_receipts
-      where workspace_id = ${f.grant.workspaceId} and turn_id = ${firstAttempt.turnId}
-    `;
-    expect(JSON.stringify(durableReceipt?.memorySelections)).not.toContain(
-      "Pinned architecture discovery.",
-    );
-    // Nothing is composed, so nothing is recorded as selected. The receipt
-    // stays content-free either way, which is what the assertion above pins.
-    expect(durableReceipt!.memorySelections).toEqual([]);
-
-    await saveWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      text: "A newer row must not move an accepted logical turn.",
-      kind: "semantic",
-    });
-    await shared.admin`
-      update workspaces set settings = ${shared.admin.json({
-        memoryEnabled: false,
-        memoryPromptMode: "retrieval_only",
-      })}::jsonb
-      where id = ${f.grant.workspaceId}
-    `;
-    const recovery = await seedAttempt({
-      ...firstAttempt,
-      turnId: firstAttempt.turnId,
-      generation: 2,
-    });
-    await prepareSnapshots(recovery);
-    const replay = await resolve(recovery);
-    expect(replay.receipt.id).toBe(first.receipt.id);
-    expect(replay.receipt.selectionHash).toBe(first.receipt.selectionHash);
-    expect(replay.receipt.memoryEnabled).toBe(true);
-    expect(replay.receipt.memoryPromptMode).toBe("retrieval_only");
-    expect(replay.receipt.selectedMemoryCount).toBe(0);
-    expect(replay.workspaceMemory).toBeNull();
-
-    await correctWorkspaceMemory(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      id: firstMemory.memory.id,
-      reason: "revoked during recovery",
-    });
-    await withWorkspaceRls(client.db, f.grant.workspaceId, async (tx) => {
-      await tx.execute(dbSql`
-        update knowledge_memories set text = 'Hash-drifted content'
-        where workspace_id = ${f.grant.workspaceId}::uuid and id = ${secondMemory.memory.id}::uuid
-      `);
-    });
-    const shrunk = await resolve(recovery);
-    expect(shrunk.receipt.id).toBe(first.receipt.id);
-    expect(shrunk.receipt).toMatchObject({
-      selectedMemoryCount: 0,
-      renderedMemoryCount: 0,
-      visibleMemoryCount: 0,
-      budgetOmittedMemoryCount: 0,
-      authorizationOmittedMemoryCount: 0,
-      omittedMemoryCount: 0,
-    });
-    // Revocation and hash drift still shrink the visible set on the receipt.
-    expect(shrunk.workspaceMemory).toBeNull();
-  }, 180_000);
 
   test("derives root and child containment and denies cross-session, cross-tenant, and direct runtime table access", async () => {
     if (!shared || !client) return;
@@ -953,60 +620,5 @@ describe("accepted-turn Company Brain context selection", () => {
     } finally {
       await app.end();
     }
-  }, 180_000);
-
-  test("selects and renders nothing even with many candidates and a stored opt-out", async () => {
-    if (!shared || !client) return;
-    const f = await fixture();
-    const writes = Array.from({ length: 52 }, (_, index) =>
-      saveWorkspaceMemory(client!.db, {
-        accountId: f.grant.accountId,
-        workspaceId: f.grant.workspaceId,
-        text: `bounded-${String(index).padStart(2, "0")}-${"x".repeat(700)}`,
-        kind: "semantic",
-        pinned: index === 0,
-      }),
-    );
-    const saved = await Promise.all(writes);
-    const orderingBase = Date.now() - 120_000;
-    await Promise.all(
-      saved.map(
-        (result, index) =>
-          shared!.admin`
-          update knowledge_memories
-          set updated_at = ${new Date(orderingBase + index * 1_000)}
-          where account_id = ${f.grant.accountId}
-            and workspace_id = ${f.grant.workspaceId}
-            and id = ${result.memory.id}
-        `,
-      ),
-    );
-    const attempt = await seedAttempt({
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-    });
-    await prepareSnapshots(attempt);
-    const selected = await resolve(attempt);
-    // This workspace has many candidate memories and stores the retired
-    // opt-out, which is the shape that used to produce the largest standing
-    // block. Nothing is selected, nothing is rendered, and the receipt says so
-    // rather than recording a subset that was never composed.
-    expect(selected.receipt).toMatchObject({
-      memoryPromptMode: "retrieval_only",
-      selectedMemoryCount: 0,
-      renderedMemoryCount: 0,
-      visibleMemoryCount: 0,
-      budgetOmittedMemoryCount: 0,
-      authorizationOmittedMemoryCount: 0,
-      omittedMemoryCount: 0,
-    });
-    expect(selected.workspaceMemory).toBeNull();
-    // The rows themselves are untouched and still reachable through search.
-    const [remaining] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from knowledge_memories
-      where workspace_id = ${f.grant.workspaceId} and status = 'active'`;
-    expect(remaining!.count).toBeGreaterThanOrEqual(50);
   }, 180_000);
 });

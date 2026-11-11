@@ -15,7 +15,6 @@ import {
   buildSubscriptionCoreCodexOperationFetch,
   getWorkspace,
   listSubscriptionCoreCodexOperationCandidates,
-  readCodexCutoverDisposition,
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   type Database,
@@ -27,6 +26,7 @@ import {
   coreTranscriptionResult,
   coreTranscriptionUnavailable,
   withoutFallback,
+  assertSubscriptionTranscriptionAllowed,
 } from "./subscription-core";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
@@ -57,6 +57,7 @@ async function transcribeOnCore(
     ) => Promise<Response>;
   },
 ): Promise<{ text: string; languages: string[] }> {
+  await assertSubscriptionTranscriptionAllowed({ ...input, accountId: request.accountId });
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: request.accountId,
@@ -175,23 +176,13 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         context.accountId ?? (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
-      const disposition = await readCodexCutoverDisposition(
-        input.db,
+      const candidates = await listSubscriptionCoreCodexOperationCandidates(input.db, {
+        kind: "workspace",
         accountId,
-        context.workspaceId,
-      );
-      // A disabled cutover row is maintenance: unavailable, no legacy read.
-      if (disposition === "maintenance") return false;
-      if (disposition === "core") {
-        const candidates = await listSubscriptionCoreCodexOperationCandidates(input.db, {
-          kind: "workspace",
-          accountId,
-          workspaceId: context.workspaceId,
-          subjectId: context.subjectId ?? "service:subscription-core",
-        });
-        return candidates.length > 0;
-      }
-      return false;
+        workspaceId: context.workspaceId,
+        subjectId: context.subjectId ?? "service:subscription-core",
+      });
+      return candidates.length > 0;
     });
   return {
     id: "codex-subscription",
@@ -219,9 +210,6 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         requestId,
       } = requireScope(request);
       const signal = request.signal;
-      const disposition = await readCodexCutoverDisposition(input.db, organizationId, workspaceId);
-      if (disposition === "maintenance") throw coreTranscriptionUnavailable();
-
       return textTranscriptionResult(
         await transcribeOnCore(
           { settings: input.settings, db: input.db, fetch: fetchImpl },

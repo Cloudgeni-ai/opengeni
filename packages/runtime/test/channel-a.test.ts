@@ -24,6 +24,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -37,6 +38,7 @@ import {
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   createMockSelfhostedOpStream,
   MockAgentResponder,
@@ -1409,6 +1411,10 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(
       svc.fsList({ path: "external-dir", depth: 1, maxEntries: 10, includeHidden: true }),
     ).rejects.toThrow(/symbolic link/);
+    // Typed, so repository skill discovery can skip a symlinked search path.
+    await expect(
+      svc.fsList({ path: "external-dir", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toBeInstanceOf(ChannelASymlinkPathError);
     await expect(svc.gitStatus({ path: "external-dir" })).rejects.toThrow(/symbolic link/);
 
     const outsideAfter = await svc.terminalExec({
@@ -2482,8 +2488,9 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     });
 
     const commands = await Bun.file(surface.log).text();
-    expect(commands).toContain("sha256sum");
-    expect(commands).toContain("shasum");
+    // The capture transport hashes through Python, independent of GNU/BSD CLI flags.
+    expect(commands).not.toContain("sha256sum");
+    expect(commands).not.toContain("shasum");
     expect(commands).not.toContain("lsof");
     expect(commands).toContain("stat -f %i");
     expect([...enteredProducers].sort()).toEqual(["numstat", "patch", "untracked"]);
@@ -2668,6 +2675,96 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     });
     expect(diff.files.some((file) => file.path === "notes.txt")).toBe(true);
     expect(Number(await Bun.file(count).text())).toBe(1);
+  });
+
+  test("a multi-chunk producer is captured once, verified and removed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-exit-42-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(root, "git init -q && printf 'notes\\n' > notes.txt");
+    writeFileSync(join(root, "notes.txt"), "chunk line\n".repeat(100_000));
+    const spoolRoot = mkdtempSync(join(tmpdir(), "opengeni-git-spool-test-"));
+    temporaryRoots.push(spoolRoot);
+    const bin = join(root, "producer-bin");
+    const count = join(root, "ls-files-count");
+    const realGit = requireHostExecutable("git");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      [
+        "#!/bin/bash",
+        'if [[ " $* " == *" ls-files "* ]]; then',
+        '  n=0; [ ! -f "$OPENGENI_GIT_COUNT" ] || n=$(<"$OPENGENI_GIT_COUNT")',
+        '  n=$((n + 1)); printf "%s" "$n" > "$OPENGENI_GIT_COUNT"',
+        `  ${JSON.stringify(realGit)} "$@"`,
+        "  status=$?",
+        '  if [ "$n" -ge 2 ]; then exit 42; fi',
+        '  exit "$status"',
+        "fi",
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: bin,
+      env: { OPENGENI_GIT_COUNT: count, TMPDIR: spoolRoot },
+    });
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 2 * 1024 * 1024,
+    });
+    expect(diff.files.some((file) => file.path === "notes.txt")).toBe(true);
+    expect(Number(await Bun.file(count).text())).toBe(1);
+    expect(diff.files.find((file) => file.path === "notes.txt")?.additions).toBe(100_000);
+    expect(modalLike.truncatedResponses()).toBe(0);
+    expect(readdirSync(spoolRoot)).toEqual([]);
+  });
+
+  test("a changed multi-chunk spool is rejected and removed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-spool-corrupt-"));
+    const spoolRoot = mkdtempSync(join(tmpdir(), "opengeni-git-spool-private-"));
+    temporaryRoots.push(root, spoolRoot);
+    runFixtureCommand(root, "git init -q");
+    writeFileSync(join(root, "notes.txt"), "chunk line\n".repeat(100_000));
+    let corrupted = false;
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      env: { TMPDIR: spoolRoot },
+      beforeExec: ({ cmd }) => {
+        if (corrupted || !cmd.includes('\\"action\\":\\"read\\"')) return;
+        const directory = cmd.match(/opengeni-git-capture-[0-9a-f-]+/)?.[0];
+        if (!directory) return;
+        const path = join(spoolRoot, directory, "output");
+        const bytes = readFileSync(path);
+        bytes[600_000] = bytes[600_000] === 65 ? 66 : 65;
+        chmodSync(path, 0o600);
+        writeFileSync(path, bytes);
+        corrupted = true;
+      },
+    });
+    const svc = new SandboxChannelAService({ session: modalLike.session, workspaceRoot: root });
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 2 * 1024 * 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(corrupted).toBe(true);
+    expect(readdirSync(spoolRoot)).toEqual([]);
   });
 
   test("a complete bounded producer has no measure-to-read drift window", async () => {

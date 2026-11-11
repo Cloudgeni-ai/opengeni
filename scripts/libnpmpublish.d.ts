@@ -2,7 +2,7 @@ declare module "libnpmpublish" {
   type PublishOptions = {
     registry: string;
     forceAuth: { token: string };
-    defaultTag: "canary";
+    defaultTag: "canary" | "canary-backfill";
     access: "public";
     provenance: boolean;
     provenanceFile?: string;

@@ -41,7 +41,6 @@ describe("exact personal authority in shared chats", () => {
   function sharedChoice(): PlacementInput {
     const state = input({
       connections: [personal("own", "codex"), personal("other", "codex")],
-      personalFallbackOptIn: true,
       session: {
         ownerMembershipId: "chat-owner",
         personalAuthority: [
@@ -60,10 +59,7 @@ describe("exact personal authority in shared chats", () => {
         },
       },
     });
-    state.people = [
-      ...state.people,
-      { membershipId: "chat-owner", active: true, personalFallbackOptIn: true },
-    ];
+    state.people = [...state.people, { membershipId: "chat-owner", active: true }];
     return state;
   }
 
@@ -77,11 +73,17 @@ describe("exact personal authority in shared chats", () => {
     expect(checkPlacementDecision(state, result)).toEqual([]);
   });
 
-  test("automatic selection, foreign sessions, absent authority, policy off and inactive owners refuse", () => {
+  test("without a pin the accepted account serves automatically, ahead of shared accounts (D-53)", () => {
+    const state = sharedChoice();
+    state.session.binding = null;
+    state.connections = [...state.connections, connection("org", "codex")];
+    const result = decidePlacement(state);
+    expect(result).toMatchObject({ kind: "run", connectionId: "own", personal: true });
+    expect(checkPlacementDecision(state, result)).toEqual([]);
+  });
+
+  test("foreign sessions, absent authority, policy off and inactive owners refuse", () => {
     for (const mutate of [
-      (state: PlacementInput) => {
-        state.session.binding = null;
-      },
       (state: PlacementInput) => {
         state.session.id = "other-session";
       },
@@ -165,7 +167,6 @@ function input(patch: {
   session?: Partial<PlacementInput["session"]>;
   workspace?: Partial<PlacementInput["workspace"]>;
   connections?: SubscriptionConnection[];
-  personalFallbackOptIn?: boolean;
   now?: number;
 }): PlacementInput {
   return {
@@ -196,7 +197,6 @@ function input(patch: {
       {
         membershipId: "member-a",
         active: true,
-        personalFallbackOptIn: patch.personalFallbackOptIn ?? false,
       },
     ],
     models: [
@@ -277,7 +277,6 @@ describe("provider switches", () => {
         visibility: "shared",
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
       },
-      personalFallbackOptIn: true,
       settings: { personalFallbackAllowed: true },
       connections: [
         connection("org", "codex"),
@@ -383,7 +382,6 @@ describe("eligibility", () => {
     const privateWork = input({
       session: { visibility: "private" },
       connections: [own],
-      personalFallbackOptIn: true,
     });
     expect(authorizationIneligibility(privateWork, own)).toEqual(["personal_authority_missing"]);
     expect(decidePlacement(privateWork)).toMatchObject({ kind: "wait" });
@@ -393,9 +391,25 @@ describe("eligibility", () => {
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
       },
       connections: [own],
-      personalFallbackOptIn: true,
     });
-    expect(decidePlacement(withAuthority)).toMatchObject({
+    // Authorized for an explicit choice, but not turned on in this shared
+    // workspace: automatic selection does not use it (SUB-SEL-02, D-53).
+    expect(authorizationIneligibility(withAuthority, own)).toEqual([]);
+    expect(decidePlacement(withAuthority)).toMatchObject({ kind: "wait" });
+    const turnedOn = input({
+      session: {
+        visibility: "private",
+        personalAuthority: [
+          {
+            provider: "codex",
+            ownerMembershipId: "member-a",
+            sharedSessionChoice: { sessionId: "session-1", connectionId: "codex-mine" },
+          },
+        ],
+      },
+      connections: [own],
+    });
+    expect(decidePlacement(turnedOn)).toMatchObject({
       kind: "run",
       connectionId: "codex-mine",
       personal: true,
@@ -407,7 +421,6 @@ describe("eligibility", () => {
         personalAuthority: [{ provider: "claude", ownerMembershipId: "member-a" }],
       },
       connections: [own],
-      personalFallbackOptIn: true,
     });
     expect(authorizationIneligibility(otherProvider, own)).toEqual(["personal_authority_missing"]);
   });
@@ -847,7 +860,6 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
     const mine = personal("codex-mine", "codex");
     const owned = input({
       connections: [connection("codex-org", "codex"), mine],
-      personalFallbackOptIn: true,
       session: {
         visibility: "private",
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
@@ -981,6 +993,156 @@ describe("placement", () => {
   });
 });
 
+describe("whose account pays: own, then pinned, then the workspace's, then the organization's (D-53)", () => {
+  const turnedOn = (connectionId: string, ownerMembershipId = "member-a") => ({
+    provider: "codex",
+    ownerMembershipId,
+    sharedSessionChoice: { sessionId: "session-1", connectionId },
+  });
+  const workspaces = (id: string, patch: Partial<SubscriptionConnection> = {}) =>
+    connection(id, "codex", {
+      ownership: {
+        kind: "shared",
+        scope: { kind: "workspaces", workspaceIds: ["ws-team"], allowPersonalWorkspaces: false },
+        managedByWorkspaceId: "ws-team",
+      },
+      ...patch,
+    });
+
+  test("SUB-SEL-01: this workspace's own account comes before the organization's", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ kind: "run", connectionId: "codex-team" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-SEL-01: another workspace's account shared here ranks with the organization's", () => {
+    const elsewhere = workspaces("codex-other", {
+      ownership: {
+        kind: "shared",
+        scope: {
+          kind: "workspaces",
+          workspaceIds: ["ws-team", "ws-other"],
+          allowPersonalWorkspaces: false,
+        },
+        managedByWorkspaceId: "ws-other",
+      },
+    });
+    const world = input({ connections: [elsewhere, workspaces("codex-team")] });
+    expect(decidePlacement(world)).toMatchObject({ connectionId: "codex-team" });
+  });
+
+  test("SUB-SEL-03: an administrator's primary comes before this workspace's own account", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+      settings: {
+        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-org" } },
+      },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-SEL-01: the turn person's own subscription turned on here comes before the primary and the workspace's", () => {
+    const world = input({
+      connections: [
+        connection("codex-org", "codex"),
+        workspaces("codex-team"),
+        personal("codex-mine", "codex"),
+      ],
+      settings: {
+        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-org" } },
+      },
+      session: { personalAuthority: [turnedOn("codex-mine")] },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-mine", personal: true });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+    // Passing over it is a violation the reference names.
+    if (decision.kind !== "run") throw new Error("expected a run");
+    expect(
+      checkPlacementDecision(world, { ...decision, connectionId: "codex-org", personal: false }),
+    ).toContainEqual(expect.objectContaining({ requirement: "SUB-SEL-01" }));
+  });
+
+  test("SUB-SEL-01: passing over this workspace's own account is a violation unless the primary served", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+    });
+    const decision = decidePlacement(world);
+    if (decision.kind !== "run") throw new Error("expected a run");
+    expect(
+      checkPlacementDecision(world, { ...decision, connectionId: "codex-org" }),
+    ).toContainEqual(expect.objectContaining({ requirement: "SUB-SEL-01" }));
+  });
+
+  test("SUB-CREDITS-01: included allowance elsewhere comes before the own account's paid credits", () => {
+    const world = input({
+      connections: [
+        connection("codex-org", "codex"),
+        personal("codex-mine", "codex", {
+          extraCreditsEnabled: true,
+          quota: quota({
+            windows: [
+              { id: "primary", usedPercent: 100, resetsAt: NOW + 3_600_000, status: "exhausted" },
+            ],
+          }),
+        }),
+      ],
+      session: { personalAuthority: [turnedOn("codex-mine")] },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-STICK-02: a warm shared binding is kept when the sender's own account is turned on", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), personal("codex-mine", "codex")],
+      session: {
+        personalAuthority: [turnedOn("codex-mine")],
+        binding: {
+          connectionId: "codex-org",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW - 1_000,
+        },
+      },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org", switch: "sticky" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-STICK-01, SUB-STICK-03: another sender's turn leaves the previous sender's own account, even warm", () => {
+    const theirs = connection("codex-theirs", "codex", {
+      ownership: { kind: "personal", ownerMembershipId: "member-b" },
+    });
+    const world = input({
+      connections: [connection("codex-org", "codex"), theirs, personal("codex-mine", "codex")],
+      session: {
+        // This turn is member-a's: their consent, none for member-b's account.
+        personalAuthority: [turnedOn("codex-mine")],
+        binding: {
+          connectionId: "codex-theirs",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW - 1_000,
+        },
+      },
+    });
+    world.people = [...world.people, { membershipId: "member-b", active: true }];
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-mine", personal: true });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+});
+
 describe("package boundary", () => {
   test("the policy package imports nothing but its own modules and uses no clock or randomness", () => {
     const source = join(import.meta.dir, "..", "src");
@@ -1067,12 +1229,14 @@ describe("explicit choices, personal fallback and explained waits", () => {
     });
   });
 
-  test("SUB-STICK-02, SUB-STICK-03, SUB-STICK-07: a warm personal account is kept in its owner's private session after fallback is turned off (D-27), left at the next cold re-selection, and left when the session is shared or personal connections are disabled (SUB-OWN-05)", () => {
+  test("SUB-STICK-02, SUB-STICK-03, SUB-STICK-07: a warm personal account is kept in its owner's private session after it is turned off here (D-27, D-53), left at the next cold re-selection, and left when the session is shared or personal connections are disabled (SUB-OWN-05)", () => {
     const mine = personal("codex-mine", "codex");
     const base = {
       connections: [connection("codex-org", "codex"), mine],
       session: {
         visibility: "private" as const,
+        // Accepted while not turned on here: authority for an explicit
+        // choice only.
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
         binding: {
           connectionId: "codex-mine",
@@ -1083,25 +1247,15 @@ describe("explicit choices, personal fallback and explained waits", () => {
         },
       },
     };
-    expect(decidePlacement(input({ ...base, personalFallbackOptIn: false }))).toMatchObject({
+    expect(decidePlacement(input({ ...base }))).toMatchObject({
       connectionId: "codex-mine",
       switch: "sticky",
     });
+    // The deprecated organization fallback switch no longer affects placement.
     expect(
       decidePlacement(
         input({
           ...base,
-          personalFallbackOptIn: false,
-          settings: { personalFallbackAllowed: false },
-        }),
-      ),
-    ).toMatchObject({ connectionId: "codex-mine", switch: "sticky" });
-    // The organization switch alone, with the owner still opted in.
-    expect(
-      decidePlacement(
-        input({
-          ...base,
-          personalFallbackOptIn: true,
           settings: { personalFallbackAllowed: false },
         }),
       ),
@@ -1111,7 +1265,6 @@ describe("explicit choices, personal fallback and explained waits", () => {
       decidePlacement(
         input({
           ...base,
-          personalFallbackOptIn: true,
           settings: { personalConnectionsAllowed: false },
         }),
       ),
@@ -1120,9 +1273,10 @@ describe("explicit choices, personal fallback and explained waits", () => {
       ...base.session,
       binding: { ...base.session.binding, lastModelCallAt: NOW - 2 * DEFAULT_IDLE_CUTOFF_MS },
     };
-    expect(
-      decidePlacement(input({ ...base, session: cold, personalFallbackOptIn: false })),
-    ).toMatchObject({ connectionId: "codex-org", personal: false });
+    expect(decidePlacement(input({ ...base, session: cold }))).toMatchObject({
+      connectionId: "codex-org",
+      personal: false,
+    });
     expect(
       decidePlacement(input({ ...base, session: { ...base.session, visibility: "shared" } })),
     ).toMatchObject({ connectionId: "codex-org", personal: false });
@@ -1527,6 +1681,129 @@ describe("Codex credit consent", () => {
         ),
       ).toMatchObject({ kind: "wait" });
     }
+  });
+
+  // A provider quota refusal without a reset gets the adapter's five-hour
+  // fallback. While the weekly window is spent, that fallback is not when the
+  // account serves again, not even on extra credits: the provider applies
+  // credits itself, so its refusal says they did not serve either.
+  const HOUR = 3_600_000;
+  const FALLBACK = 5 * HOUR;
+  const weekly = (resetsAt: number) => ({
+    id: "secondary",
+    usedPercent: 100,
+    resetsAt,
+    status: "exhausted" as const,
+  });
+  const refusal = (observedAt: number) =>
+    quota({
+      windows: [],
+      exhaustedUntil: observedAt + FALLBACK,
+      exhaustedKind: "quota",
+      observedAt,
+      source: "refusal",
+    });
+
+  test("a refusal on a credit account whose weekly window is spent holds until the weekly reset, not the five-hour fallback", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    const stored = quota({ windows: [weekly(weeklyReset)], observedAt: NOW - 1_000 });
+    const held = applyQuotaObservation({ refreshGeneration: 1, quota: stored }, refusal(NOW))!;
+    expect(held.exhaustedUntil).toBe(weeklyReset);
+    expect(held.exhaustedKind).toBe("quota");
+    // An unexplained refusal stays unexplained: no claim to end it early.
+    expect(held.exhaustedClaim).toBeUndefined();
+
+    // Another account's weekly window resets sooner, but after the fallback
+    // passes. The wait names that reset, and the credit account is not
+    // retried when its fallback ends.
+    const sooner = NOW + 14 * HOUR;
+    const world = (now: number) =>
+      input({
+        now,
+        session: { onlyThisModel: true },
+        connections: [
+          connection("credits", "codex", { extraCreditsEnabled: true, quota: held }),
+          connection("weekly", "codex", {
+            quota: quota({ windows: [weekly(sooner)], observedAt: NOW - 1_000 }),
+          }),
+        ],
+      });
+    expect(decidePlacement(world(NOW))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: sooner,
+    });
+    // The reported time passes without capacity coming back: still a wait, on
+    // the real reset, never a resumption onto the refused credits.
+    expect(decidePlacement(world(NOW + FALLBACK + 1))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: sooner,
+    });
+    expect(decidePlacement(world(sooner))).toMatchObject({ kind: "run", connectionId: "weekly" });
+  });
+
+  test("a weekly window a usage reading reports after the refusal holds the refusal too", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    // The refusal came first, while no window was known to be spent.
+    const refused = applyQuotaObservation(
+      { refreshGeneration: 1, quota: quota({ observedAt: NOW - 60_000 }) },
+      refusal(NOW - 30_000),
+    )!;
+    expect(refused.exhaustedUntil).toBe(NOW - 30_000 + FALLBACK);
+    // A complete usage reading then shows the weekly allowance spent.
+    const reading = quota({ windows: [weekly(weeklyReset)], observedAt: NOW });
+    const held = applyQuotaObservation({ refreshGeneration: 1, quota: refused }, reading, {
+      usageReadingsComplete: true,
+    })!;
+    expect(held.exhaustedUntil).toBe(weeklyReset);
+    const only = (now: number) =>
+      input({
+        now,
+        session: { onlyThisModel: true },
+        connections: [connection("credits", "codex", { extraCreditsEnabled: true, quota: held })],
+      });
+    expect(decidePlacement(only(NOW + FALLBACK))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: weeklyReset,
+    });
+    // A window that is not spent never extends the deadline (ending it early
+    // is the store's authoritative usage read, not this merge).
+    const open = applyQuotaObservation(
+      { refreshGeneration: 1, quota: refused },
+      quota({
+        observedAt: NOW,
+        windows: [{ ...weekly(weeklyReset), usedPercent: 40, status: "ok" }],
+      }),
+      { usageReadingsComplete: true },
+    )!;
+    expect(open.exhaustedUntil).toBe(NOW - 30_000 + FALLBACK);
+  });
+
+  test("a claimed quota block held by a spent window names that window too; rate limits and ended deadlines are not held", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    const stored = quota({ windows: [weekly(weeklyReset)], observedAt: NOW - 1_000 });
+    const claimed = applyQuotaObservation(
+      { refreshGeneration: 1, quota: stored },
+      quota({
+        ...refusal(NOW),
+        exhaustedClaim: { until: NOW + FALLBACK, observedAt: NOW, windowIds: ["five_hour"] },
+      }),
+    )!;
+    expect(claimed.exhaustedUntil).toBe(weeklyReset);
+    expect(claimed.exhaustedClaim).toEqual({
+      until: weeklyReset,
+      observedAt: NOW,
+      windowIds: ["five_hour", "secondary"],
+    });
+    expect(quotaBlockClaim(claimed, null)).toEqual(claimed.exhaustedClaim!);
+
+    const limited = applyQuotaObservation(
+      { refreshGeneration: 1, quota: stored },
+      quota({ ...refusal(NOW), exhaustedKind: "rate_limit", exhaustedUntil: NOW + 60_000 }),
+    )!;
+    expect(limited.exhaustedUntil).toBe(NOW + 60_000);
   });
 });
 

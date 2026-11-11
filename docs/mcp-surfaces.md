@@ -13,7 +13,7 @@ page exists so you pick the right one in one read.
 | **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `site_data_*` and `site_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `site_sql_*` tools (`site_sql_inspect`, `site_sql_enable`, `site_sql_migrate`, `site_sql_define_query`, `site_sql_query`, `site_sql_run`, `site_sql_execute`, `site_sql_export`, `site_sql_import`, `site_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `site_publication_get`, `site_publication_update`, `site_publication_apply_fix` (applies a readiness warning's safe fix) and `site_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
-| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
+| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Hosted Slack MCP supports personal or workspace ownership; Gmail, Google Drive and Google Calendar connections are personal only. Personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
 
@@ -109,11 +109,6 @@ workspace, or selected ones). The connection then acts as that person:
   one way a route validates input, so an invalid request answers 400 or 422
   with `validation_failed`, a message naming each bad field
   (`Invalid Skill request: stableKey: …; scope: …`) and `details.issues`.
-- A route retired in favour of another answers 410 with code `gone` and
-  `details.replacement` (`routeRetired` in `apps/api/src/http/deprecation.ts`).
-  Its action is marked `retired`: search never returns it, and describe or
-  call names the replacement action without running anything. App actions in
-  chat count it as a read, so it never asks the person for a confirmation.
 - A call result holds at most 256 KiB. A JSON list larger than that keeps as
   many whole items as fit (a top-level array, or the largest array in the
   top-level object) with `truncated` counts and a hint naming the `offset`,
@@ -127,7 +122,99 @@ Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (the person, or an agent with their
 Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
-`deleteOrganizationMcpConnection`). Migration `0601` is rolling.
+`deleteOrganizationMcpConnection`). Owners and admins also see everyone's and
+disconnect them, except that only an owner disconnects an owner's (each listed
+agent carries `canDisconnect`); only the person changes what their agent can
+do. Migration `0601` is rolling.
+
+#### Auto-connect (Enterprise-Managed Authorization)
+
+An organization can trust an identity issuer so that members are connected to
+`/v1/mcp` the first time an MCP client uses it, with no Opengeni sign-in or
+consent screen. This implements the MCP
+[Enterprise-Managed Authorization](https://modelcontextprotocol.io/extensions/auth/enterprise-managed-authorization)
+extension: the client redeems an Identity Assertion JWT Authorization Grant
+(ID-JAG, `draft-ietf-oauth-identity-assertion-authz-grant`) at `/oauth/token`
+with the RFC 7523 JWT bearer grant. The issuer is either:
+
+- **Claude** (`provider: "claude"`): Claude's per-organization issuer,
+  `https://identity.anthropic.com/issuers/<id>`, on Claude Team and
+  Enterprise. The admin adds `/v1/mcp` as a custom connector in Claude, picks
+  Claude-issued managed authorization, enters the organization ID as the
+  tenant ID and pastes Claude's issuer URL into Opengeni.
+- **An identity provider** (`okta` or `other`), such as Okta Cross App
+  Access, whose issuer signs ID-JAGs for people signed in through it.
+
+The authorization server metadata advertises the grant:
+`grant_types_supported` includes `urn:ietf:params:oauth:grant-type:jwt-bearer`,
+`authorization_grant_profiles_supported` is
+`["urn:ietf:params:oauth:grant-profile:id-jag"]`, and
+`client_id_metadata_document_supported` is `true`. A client may be named by
+its Client ID Metadata Document URL at both `/oauth/authorize` and
+`/oauth/token`; the document is fetched through the public-address fetcher,
+stored as an `mcp_oauth_clients` row and fetched again after a day, or sooner
+when a request uses a redirect URI it lacks. Dynamic registration is
+unchanged. An ID-JAG may also name a client ID its issuer registered itself
+(Claude's own client); that client is stored usable with the JWT bearer grant
+only. A document declaring a `token_endpoint_auth_method` other than `none`
+is refused (`invalid_client`): Opengeni never downgrades a client that says
+it authenticates. A registration saved before its document changed keeps no
+grant from then on, so no API instance serves it until the document is public
+again.
+
+A redemption is accepted only when every check passes, in this order, and
+otherwise answers `invalid_grant` (`invalid_client` or `invalid_target` where
+the spec says so) with an `error_description`:
+
+1. `iss` is an active trusted issuer. When several organizations trust the
+   same issuer, `aud_tenant` (or `tenant`) must name the organization ID;
+   Opengeni's tenant ID is always the organization ID.
+2. The header `typ` is `oauth-id-jag+jwt`, `alg` is ES256 or RS256, and the
+   signature verifies against the issuer's keys (its configured key set URL,
+   or OIDC/RFC 8414 discovery; cached, and fetched again for an unknown
+   `kid`). Nothing unverified is recorded beyond the trust it names.
+3. `aud` is exactly Opengeni's issuer; `resource` (claim and request), when
+   present, is the organization MCP resource only.
+4. The claim `client_id` matches the request's, and is in the trust's allowed
+   client IDs when the admin set any.
+5. `exp`, `iat` (60 s skew, at most an hour's lifetime), `sub` and `jti` are
+   present; each `jti` is redeemed once per issuer
+   (`mcp_oauth_assertion_replays`).
+6. The person is matched on every redemption by the assertion's `email`
+   (unless `email_verified` is false) against an `email_verified` Opengeni
+   account with an active membership; a `sub` seen before never stands in for
+   an email the assertion carries. An identity provider (not Claude, whose
+   `sub` is opaque) may leave `email` out: its `(iss, sub)` then finds the
+   member an earlier email match linked it to. An email never creates an
+   account or a membership.
+
+Redemption and turning an issuer off or removing it take the same per-issuer
+lock (redemption before touching any row that references the issuer), so no
+token is issued after the admin's change commits.
+
+The response is an access token with scope `mcp:access` and no refresh
+token: the client redeems a fresh ID-JAG when it runs out. Each trust, person
+and client make one connection, listed in Connected agents as
+**Auto-connected**, with the access the trust sets for everyone it connects
+(`organizationAccess`). Changing the trust's access applies to its live
+connections; changing an auto-connected agent's own access is refused.
+Disconnecting one revokes it until the client redeems again, and turning the
+issuer off or removing it disconnects everyone it connected.
+
+Owners and admins manage issuers at
+`/v1/organizations/:id/mcp-trusted-issuers` (SDK `listMcpTrustedIssuers`,
+`checkMcpTrustedIssuer`, `createMcpTrustedIssuer`, `updateMcpTrustedIssuer`,
+`deleteMcpTrustedIssuer`, `listMcpTrustedIssuerEvents`). `check` reads an
+issuer URL's keys before it is saved; `events` lists recent attempts with
+their refusal reason (`McpAutoConnectRefusalReason`, for example
+`no_matching_member` or `wrong_audience`) so an admin can fix a setup without
+logs. The web app shows them under Organization settings → Connected agents →
+Auto-connect. The routes answer `404` unless MCP OAuth and a public base URL
+are configured. Migrations `1263`, `1264` and `1265` are rolling.
+
+The other direction, Opengeni connecting members to an outside MCP app the
+same way, is an organization connector with `login: "auto_connect"`; see
+[Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
 
 ### App actions in chat
 
@@ -143,10 +230,11 @@ exactly their access, and each change waits for them to confirm it in the chat.
   child or service session). Their descriptions never change with the
   session's access. A host that embeds Opengeni turns them off by leaving them
   out of its tool selection.
-- Each call resolves, live, as whom it runs. With full access (below): the
-  person who gave it, as before. Otherwise: the person who sent this turn's
-  message. Scheduled, goal, inbox and other turns nobody sent run nothing, and
-  neither do API-key and service turns, or child and service sessions.
+- Each call resolves, live, as whom it runs. With full access (below), in a
+  turn the person who gave it caused: that person. Otherwise: the person who
+  sent this turn's message. Scheduled, goal, inbox and other turns nobody sent
+  run nothing, and neither do API-key and service turns, or child and service
+  sessions.
 - When the API accepts a person's message it freezes, with that turn, what the
   message may do (`session_turn_app_action_grants`): who sent it, whether they
   can confirm changes from where they sent it, and the most it may do, which
@@ -229,11 +317,21 @@ or admin manages.
   the title or the same menu (`DELETE`; `GET` returns the state and what the
   viewer may do).
 - While it is on, the app-action tools are listed whatever the session's tool
-  selection, changes run without a confirmation, in any workspace the granter
-  can use, and every call checks again, so turning it off, the organization
-  turning it off, or the granter leaving the session's workspace (or losing
-  the owner or admin role that gave them access to it) applies to the very
-  next call.
+  selection (the listing follows the session, so it never changes between
+  turns of one chat), and every call checks again, so turning it off, the
+  organization turning it off, or the granter leaving the session's workspace
+  (or losing the owner or admin role that gave them access to it) applies to
+  the very next call.
+- Each call runs as the granter only in a turn the granter caused: their own
+  message (sent with their own sign-in, so the grant frozen with the turn is
+  theirs) or a continuation whose recorded causal person
+  (`initiating_human_subject_id`) is them, such as their goals, schedules and
+  child results. There, changes run without a confirmation, in any workspace
+  the granter can use. In a turn anyone else caused in the same shared chat
+  (another member's message, their schedule or agent, a workspace key), app
+  actions run exactly as if the session had no full access, as that sender
+  with their own confirmations, and session tools given another workspace's
+  `workspaceId` are refused.
 - They cover exactly the organization MCP server's catalog and run each
   action in process as the granter, capped by the granter's own live access
   (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
@@ -271,8 +369,10 @@ OAuth consent grants MCP access; it does not silently satisfy a tool's separate
 one-shot human-approval classification. HTTP/SDK approval capabilities bind a
 private provider-authority revision as well as the public catalog identity and
 arguments. Their connection preflight never refreshes credentials or records
-provider usage, and an approval-required connection-backed adapter without that
-seam is omitted until it can fail before capability issuance. An unconsumed
+provider usage. The current-human gateway gives every connection-backed server
+that seam (an exact, non-refreshing credential lookup), so an approval-required
+connection tool stays listed and fails before capability issuance when its
+connection needs attention. An unconsumed
 capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
@@ -288,6 +388,15 @@ under a versioned hash domain. A mismatch returns `tool_definition_stale` before
 approval admission or execution. A selected MCP server may still need its own
 paginated `tools/list`; no provider revision atomicity is promised between that
 listing and its physical call.
+
+Site calls that need approval are confirmed by the viewer in the Opengeni frame:
+`tools/invoke` answers 409 (`tool_gateway_approval_required`,
+`site_tool_account_required` or `site_tool_connection_required`), the host reads
+`POST tools/site-consent` for the viewer's own accounts and the provider's own
+review of the exact arguments (for Gmail, the message as it would be sent), then mints
+`tools/target-approvals` (optionally `rememberForSite`) and retries the same
+operation. See "Host-native consent" in
+`docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and
@@ -403,7 +512,9 @@ authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
 `opengeni_tool_gateway_preparation_duration_seconds` expose the
 preparation/execution split without content.
 
-First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Pins, order and profiles (description and avatar, see [Bots](bots.md#project-profiles)) belong to the project, not to one person. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model.
+
+A project has a chat's two audiences (migration 1161). Shared projects are seen by the whole workspace, as every project was before. An Only me project (`visibility: "private"`) has an immutable owner; row-level security shows it only to that owner and to agent turns acting for them, and its name is unique only among that owner's Only me projects, so it neither blocks nor reveals a shared name. It holds only the owner's own Only me chats and Sites: filing anything else is refused with 422, a chat that later becomes shared leaves it, and a Site shared later leaves it for its chat's project. A person's new project is shared unless they choose Only me (offered where Only me chats are; never in a Personal workspace, where projects stay shared). `project_create` from an Only me chat makes an Only me project for the chat's owner, so that chat fits it; from any other chat it is shared. Only the owner, signed in to the app, can share an Only me project (`PATCH` with `visibility: "workspace"`); agents, keys and services cannot, and nothing makes a shared project Only me.
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
@@ -471,16 +582,27 @@ query clause; ranking is not certainty. Native Responses routes retain hosted
 client `tool_search` and real loaded function definitions. Generic routes return
 compact alternatives in `suggestions`. Exact ties, operation-only queries and
 no matches return no loaded schemas; generic results still include compact candidates.
+Native search outputs carry only loaded definitions, so when a search neither
+names a tool nor matches one clearly, its close candidates (compact name and
+description preview) and any requested names no tool has follow the result as
+a developer note, frozen on the search call like its selection.
 An optional decision model selects from a wider shortlist for ambiguous searches;
 strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
 means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
 inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
+Exact names and named query tokens resolve a tool by its full model name, its
+dotted form (`server.tool_name`), or the name its server publishes
+(`projects.search` or `projects_search` for a digest-aliased
+`mcp_<digest>__projects_search`); the published name selects the exact tool
+even where aliases shortened two names to the same part.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-view, group and optional literal `namePrefix` filter. An invalid cursor requires restarting
+view, group and optional `namePrefix` filter, which matches the full name or the
+part after the server separator (`projects.` or `projects_`). Digest aliases sort by
+that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
 
@@ -638,13 +760,13 @@ The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party Opengeni MCP company-profile tools (separate organization policy):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Settings > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by an organization owner or admin. The separate owner/admin-managed organization policy (set on Settings > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live owner/admin admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party Opengeni MCP session monitoring tools (`sessions:read`):
 
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. Each `sessions_list` row and `session_get` result (and `session_create`'s receipt `facts.chatUrl`) carries the chat's canonical `chatUrl`, built from `webBaseUrl` (falling back to `publicBaseUrl`) and the chat's own workspace, so agents never build links themselves; it is omitted when neither is configured. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
 - `session_wait` - one blocking call for a short in-turn wait (a sessionless caller waits on its targets only). It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
-- `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
+- `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Both wait while the command runs (defaults 30 and 45 seconds, at most 50; `waitSeconds: 0` reads at once) and return when it finishes, not on new output alone; `command_wait` can wait on up to eight `commandIds` with `waitFor: "all"` or `"any"`. Output over the byte budget, read without a cursor, returns its start and end with the omitted middle's approximate size and cursor; a read with a cursor pages on from there, and `endCursor` reads only newer output. The model sees a plain-text projection; programmatic callers keep the structured receipt (see [run lifecycle](run-lifecycle.md)). A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
 - `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. Its optional `reply` is the agent's complete message for the person: the worker shows it verbatim as the turn's answer once the wait is accepted (see [run lifecycle](run-lifecycle.md)). The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use
@@ -800,8 +922,9 @@ authorization and receive credential-free attribution. Git, sandbox, and run
 credential ports are separate authorities and are not covered by migration 0264.
 Activated Atlassian is omitted from direct turns, and scheduled tasks reject
 activated MCP, Google Drive, and Atlassian selections, until their dedicated
-acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack,
-social, and scheduled knowledge-source surfaces remain explicit successors;
+acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack and
+social surfaces remain explicit successors (scheduled knowledge-source sync was
+removed);
 workspace and `legacy_user` connections remain on their bounded compatibility
 path rather than being silently upgraded.
 

@@ -22,6 +22,11 @@ const BROWSER_PROTOCOL: &str = "opengeni.browser.v1";
 const COMPUTER_PROTOCOL: &str = "opengeni.computer.v1";
 const BROWSER_AUTH_PREFIX: &str = "opengeni.auth.";
 const MAX_BROWSER_FRAME_BYTES: usize = 24 * 1024 * 1024 + 64 * 1024 + 4;
+/// The payload of the ping browserd sends once it has opened a frame
+/// subscription, before its first frame: a page that is busy when its view
+/// opens sends that frame only once it answers. A browserd without it is
+/// ready at its first frame, as before.
+pub const FRAMES_SUBSCRIBED_PING: &[u8] = b"opengeni.frames.subscribed";
 
 type BrowserSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -93,11 +98,16 @@ async fn connect_source(
 
 /// Copies complete canonical browser frame messages to the relay. A relay blip
 /// reconnects and retries the unsent frame; the browserd subscription stays live.
+/// `ready` is signalled once browserd has opened the subscription (its
+/// subscribed ping, else its first frame); when its receiver is dropped first
+/// (the caller stopped waiting), the pump closes the browserd socket, which
+/// ends the subscription, and returns.
 ///
 /// # Errors
 ///
 /// Returns a typed protocol error for malformed browser frames, or a transport
-/// error when either the local frame socket or relay cannot recover.
+/// error when either the local frame socket or relay cannot recover, or the
+/// caller stopped waiting for it to be ready.
 pub async fn run(
     mut socket: BrowserSocket,
     channel: &mut RelayChannel,
@@ -109,16 +119,27 @@ pub async fn run(
         enum Event {
             Source(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
             Relay(Result<Option<RelayMessage>, StreamError>),
+            Abandoned,
         }
         let event = if receive_relay {
             tokio::select! {
                 source = socket.next() => Event::Source(source),
                 relay = channel.recv() => Event::Relay(relay),
+                () = abandoned(&mut ready) => Event::Abandoned,
             }
         } else {
-            Event::Source(socket.next().await)
+            tokio::select! {
+                source = socket.next() => Event::Source(source),
+                () = abandoned(&mut ready) => Event::Abandoned,
+            }
         };
         let message = match event {
+            Event::Abandoned => {
+                let _ = socket.close(None).await;
+                return Err(StreamError::Transport(
+                    "browser frame stream was not ready in time".to_string(),
+                ));
+            }
             Event::Relay(Ok(Some(RelayMessage::Close(_)))) | Event::Source(None) => return Ok(()),
             Event::Relay(Ok(Some(_))) => continue,
             // A transport drop is still recovered by the established outbound
@@ -145,10 +166,17 @@ pub async fn run(
                     let _ = sender.send(());
                 }
             }
-            Message::Ping(payload) => socket
-                .send(Message::Pong(payload))
-                .await
-                .map_err(|error| StreamError::Transport(format!("browser frame pong: {error}")))?,
+            Message::Ping(payload) => {
+                let subscribed = &payload[..] == FRAMES_SUBSCRIBED_PING;
+                socket.send(Message::Pong(payload)).await.map_err(|error| {
+                    StreamError::Transport(format!("browser frame pong: {error}"))
+                })?;
+                if subscribed {
+                    if let Some(sender) = ready.take() {
+                        let _ = sender.send(());
+                    }
+                }
+            }
             Message::Close(frame) => {
                 if ready.is_some() {
                     let reason = frame
@@ -167,6 +195,15 @@ pub async fn run(
                 ));
             }
         }
+    }
+}
+
+/// Resolves once the caller waiting for `ready` has stopped waiting; never
+/// while it waits, or once the pump was ready.
+async fn abandoned(ready: &mut Option<oneshot::Sender<()>>) {
+    match ready {
+        Some(sender) => sender.closed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -570,5 +607,170 @@ mod tests {
             .expect("computer frame socket");
         assert_eq!(message.into_data(), b"canonical-computer-frame");
         server.await.expect("browserd computer double");
+    }
+
+    /// Accepts one browserd frame socket on `listener`.
+    #[allow(clippy::result_large_err)] // tungstenite's test handshake callback owns this type.
+    async fn accept_browserd(listener: &TcpListener) -> WebSocketStream<TcpStream> {
+        let (tcp, _) = listener.accept().await.expect("accept browserd client");
+        accept_hdr_async(tcp, |_: &Request, mut response: Response| {
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(BROWSER_PROTOCOL),
+            );
+            Ok(response)
+        })
+        .await
+        .expect("browserd websocket handshake")
+    }
+
+    fn browser_request() -> v1::BrowserFramesOpenRequest {
+        v1::BrowserFramesOpenRequest {
+            browser_session_id: "session".to_string(),
+            controller_generation: "controller".to_string(),
+            target_id: "target".to_string(),
+            view_token: "v".repeat(32),
+            expires_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis()
+                .saturating_add(60_000)
+                .try_into()
+                .expect("expiry"),
+            format: "jpeg".to_string(),
+            quality: 70,
+            max_width: 1_440,
+            max_height: 900,
+            every_nth_frame: 1,
+            ..Default::default()
+        }
+    }
+
+    fn mock_channel() -> (RelayChannel, MockTransport) {
+        let (agent_side, relay_side) = MockTransport::pair();
+        let config = ChannelConfig {
+            channel: v1::StreamChannel {
+                channel_id: "browser-channel".to_string(),
+                workspace_id: "workspace".to_string(),
+                agent_id: "agent".to_string(),
+                kind: v1::StreamKind::Browser as i32,
+                port: 20_002,
+                relay_route: None,
+            },
+            credential: crate::RelayCredential::fixed(
+                "wss://relay.invalid/stream",
+                "producer-token",
+            ),
+            activity: crate::ActivityStamp::untracked(),
+        };
+        (
+            RelayChannel::with_transport(config, Box::new(agent_side)),
+            relay_side,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_browserd_opened_is_ready_before_its_first_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let (send_frame_tx, send_frame_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_browserd(&listener).await;
+            // The subscription is open; the busy page answers only later.
+            socket
+                .send(Message::Ping(FRAMES_SUBSCRIBED_PING.to_vec()))
+                .await
+                .expect("send subscribed ping");
+            let pong = socket.next().await.expect("pong").expect("pong frame");
+            assert!(matches!(pong, Message::Pong(_)));
+            send_frame_rx.await.expect("frame trigger");
+            socket
+                .send(Message::Binary(b"first-frame".to_vec()))
+                .await
+                .expect("send frame");
+            let _ = socket.next().await;
+        });
+        let socket = connect(port, &browser_request()).await.expect("connect");
+        let (mut channel, mut relay_side) = mock_channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let pump = tokio::spawn(async move { run(socket, &mut channel, Some(ready_tx)).await });
+
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .expect("ready before any frame")
+            .expect("pump readiness");
+        send_frame_tx.send(()).expect("trigger frame");
+        let relayed = tokio::time::timeout(Duration::from_secs(2), relay_side.recv())
+            .await
+            .expect("relay receive timeout")
+            .expect("relay receive")
+            .expect("relay message");
+        let RelayMessage::Frame(frame) = relayed else {
+            panic!("expected relay frame");
+        };
+        assert_eq!(frame.data, Bytes::from_static(b"first-frame"));
+        pump.abort();
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_keepalive_ping_is_not_readiness() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_browserd(&listener).await;
+            socket
+                .send(Message::Ping(Vec::new()))
+                .await
+                .expect("send keepalive ping");
+            while socket.next().await.is_some() {}
+        });
+        let socket = connect(port, &browser_request()).await.expect("connect");
+        let (mut channel, _relay_side) = mock_channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let pump = tokio::spawn(async move { run(socket, &mut channel, Some(ready_tx)).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), ready_rx)
+                .await
+                .is_err(),
+            "a keepalive ping must not signal readiness"
+        );
+        pump.abort();
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pump_its_caller_stopped_waiting_for_closes_its_browserd_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        // A browserd stream that never becomes ready (no ping, no frame).
+        let server = tokio::spawn(async move {
+            let mut socket = accept_browserd(&listener).await;
+            loop {
+                match socket.next().await {
+                    None | Some(Err(_) | Ok(Message::Close(_))) => {
+                        return std::time::Instant::now()
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+        });
+        let socket = connect(port, &browser_request()).await.expect("connect");
+        let (mut channel, _relay_side) = mock_channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let pump = tokio::spawn(async move { run(socket, &mut channel, Some(ready_tx)).await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let gave_up = std::time::Instant::now();
+        drop(ready_rx);
+        let ended = tokio::time::timeout(Duration::from_secs(2), pump)
+            .await
+            .expect("the pump ends once its caller stops waiting")
+            .expect("pump task");
+        assert!(ended.is_err(), "an abandoned pump reports it was not ready");
+        let closed = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("browserd sees its stream closed")
+            .expect("browserd double");
+        assert!(closed.duration_since(gave_up) < Duration::from_secs(1));
     }
 }

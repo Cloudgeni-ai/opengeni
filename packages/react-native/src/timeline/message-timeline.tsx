@@ -5,25 +5,31 @@ import type {
   TimelineAnnotationSource,
 } from "@opengeni/sdk";
 import {
+  automationRunOutcomesOnly,
   buildTimeline,
   groupTimeline,
+  useTimelinePauses,
   type AgentMessageItem,
   type AuthNeededItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
   type TimelineItem,
+  type TimelineLivePause,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import {
   agentWorkHumanInputSummary,
+  automationRunLine,
   compactedLandmarkCount,
   durationBetween,
   flattenActivityItems,
   formatClockTime,
   formatRelativeTime,
   isAgentWorkHumanInput,
+  isAutomationRunBatch,
   isPreparingWork,
+  timelineTurnsWithOutput,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -31,12 +37,15 @@ import {
   recordedWaitSummaryText,
   questionNavTarget,
   readableWorkDefaultOpen,
+  readableWorkIsEmpty,
   readableWorkShowsPreview,
   readableWorkStatus,
   SESSION_STATUS_PRESENTATION,
+  sessionStatusItemDisplayStatus,
   timelineGroupContainsPresentedImage,
   timelineGroupIndexAtSequence,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react/timeline-model";
 import {
   useCallback,
@@ -68,6 +77,7 @@ import { Icon } from "./icon";
 import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
 import { NativeAuthNeededRow } from "./in-chat-connect";
 import { humanInputAnswerLines } from "./secret-field-model";
+import { answerReadingOffset } from "./reading-position";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
   ActivityRail,
@@ -81,6 +91,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
@@ -131,7 +142,28 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   items?: TimelineItem[] | undefined;
   events?: SessionEvent[] | undefined;
   status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause (`timelineLivePause(session.effectiveControl)`).
+   * A turn still open under a pause reads "Paused" with its clock stopped.
+   */
+  pause?: TimelineLivePause | null | undefined;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  /**
+   * Show how the agent works on each turn row. Defaults to true. With `false`
+   * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
+   * step under it and no step facets (yours included). The steps stay behind
+   * the row for anyone who opens it. An object reads only its `turnDetail`
+   * switch. `NativeSessionScreen` passes its own `agentSignals` here.
+   */
+  agentSignals?: AgentSignals | undefined;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20pt); it is hidden from screen readers, so the row's words
+   * still say what is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   /** Replace the preparing visual (the web orb) — e.g. a product character. */
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
@@ -205,17 +237,31 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
-  const items = useMemo(
-    () => props.items ?? buildTimeline(t, props.events ?? []),
-    [t, props.items, props.events],
+  const turnDetail = resolveAgentSignals(props.agentSignals).turnDetail;
+  const items = useMemo(() => {
+    const built = props.items ?? buildTimeline(t, props.events ?? []);
+    // A person who never sees the agent's work reads an automation run as
+    // its line and its answer only.
+    return turnDetail ? built : automationRunOutcomesOnly(built);
+  }, [t, props.items, props.events, turnDetail]);
+  const pauses = useTimelinePauses(props.events, props.pause);
+  const groups = useMemo(
+    () => groupTimeline(t, items, { readableTurns: true, pauses }),
+    [t, items, pauses],
   );
-  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Opening on a moment starts away from the tip; the landing decides where.
   const following = useRef(!props.focusSequence);
+  const followTail = useRef(false);
+  const latestPrompt = useRef<string | null>(null);
+  const latestPromptGroup = groups.findLast(
+    (group) => group.kind === "item" && group.item.kind === "user-message",
+  );
+  latestPrompt.current = latestPromptGroup ? groupKey(latestPromptGroup) : null;
   // Only reader gestures change follow intent; layout-driven scroll events
   // (content growing before the first scroll-to-end) must not unstick it.
   const readerScrolling = useRef(false);
@@ -233,9 +279,6 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const scrollY = useRef(0);
   const sourceNodes = useRef(new Map<string, AnnotationSourceNode>()).current;
   const [flash, setFlash] = useState<AnnotationFlash | null>(null);
-  // Read when a reveal lands, after the keyboard has gone and the composer settled.
-  const overlayInsetBottom = useRef(0);
-  overlayInsetBottom.current = props.overlayInsetBottom ?? 0;
   const registerSource = useCallback(
     (sourceKey: string, node: AnnotationSourceNode | null) => {
       if (node) sourceNodes.set(sourceKey, node);
@@ -272,7 +315,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
             // Center the message in the space the composer leaves; a message
             // taller than that centers the quote instead, or shows its top.
             const y = scrollY.current + top - scrollTop;
-            const visible = (viewportHeight.current || 600) - overlayInsetBottom.current;
+            const visible = viewportHeight.current || 600;
             const first = anchor?.boxes[0];
             const last = anchor?.boxes[anchor.boxes.length - 1];
             const span =
@@ -308,8 +351,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       if (!node || !scroller) return;
       scroller.measureInWindow((_scrollX, scrollTop, _scrollWidth, scrollHeight) => {
         node.measureInWindow((_x, top, _width, height) => {
-          const bottom =
-            Math.min(scrollTop + scrollHeight, keyboard.screenY) - overlayInsetBottom.current - 12;
+          const bottom = Math.min(scrollTop + scrollHeight, keyboard.screenY) - 12;
           const above = scrollTop + INLINE_INPUT_CONTEXT_PX;
           let delta = 0;
           if (top + height > bottom) delta = Math.min(top + height - bottom, top - scrollTop - 8);
@@ -440,6 +482,26 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   // offset by the added height (UIKit's maintainVisibleContentPosition fights
   // the reader's drag while live rows re-lay out, so it isn't used).
   const contentHeight = useRef(0);
+  const followAnswer = useCallback(
+    (animated = false) => {
+      if (!following.current) return;
+      const prompt = latestPrompt.current ? promptFrames.get(latestPrompt.current) : undefined;
+      // A durable prompt replacing its pending row lays out just after content
+      // size changes. Keep the current position until its frame is known.
+      if (!followTail.current && latestPrompt.current && !prompt) return;
+      const y = answerReadingOffset({
+        contentHeight: contentHeight.current,
+        viewportHeight: viewportHeight.current,
+        prompt,
+        followTail: followTail.current,
+      });
+      scrollY.current = y;
+      readerScrolling.current = false;
+      scrollRef.current?.scrollTo({ y, animated });
+      setShowJump(contentHeight.current - viewportHeight.current - y > 240);
+    },
+    [promptFrames],
+  );
   const firstGroupKey = useRef<string | null>(null);
   const prepended = useRef(false);
   const nextFirstKey = groups[0] ? groupKey(groups[0]) : null;
@@ -481,7 +543,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       const distance = measure(event);
       // Mid-drag only releases follow; the drag's end decides whether to resume it.
       if (readerScrolling.current && distance >= 48) following.current = false;
-      setShowJump(distance > 240 && !following.current);
+      setShowJump(distance > 240 && (!following.current || !followTail.current));
       const { contentOffset, layoutMeasurement } = event.nativeEvent;
       scrollY.current = contentOffset.y;
       // The reader is approaching the oldest loaded row: fetch the window before it.
@@ -501,8 +563,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const onScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      // UIKit also reports momentum completion for our animated scrolls. Only
+      // a person's gesture can switch from reading the answer to following its tail.
+      if (!readerScrolling.current) return;
       following.current = measure(event) < 48;
-      readerScrolling.current = false;
+      followTail.current = following.current;
     },
     [measure],
   );
@@ -526,20 +591,21 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
         }
       }
-      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+      followAnswer();
       // A short window can't be scrolled, so it could never reach the top: keep loading.
       if (viewportHeight.current > 0 && height < viewportHeight.current + OLDER_HISTORY_PREFETCH_PX)
         requestOlder();
     },
-    [requestOlder],
+    [requestOlder, followAnswer],
   );
   const followLatestSignal = props.followLatestSignal ?? 0;
   useEffect(() => {
     if (!followLatestSignal) return;
     following.current = true;
+    followTail.current = false;
     setShowJump(false);
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, [followLatestSignal]);
+    followAnswer(true);
+  }, [followLatestSignal, followAnswer]);
   // Landing on a moment: each group's offset, read as it lays out.
   const groupTops = useRef(new Map<string, number>()).current;
   const landed = useRef<number | null>(null);
@@ -586,7 +652,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     ],
   );
   const context: GroupContext = {
-    facets: props.facets,
+    turnsWithOutput,
+    // Without turn detail a turn row is only its status ("Working · 8s").
+    facets: turnDetail ? props.facets : STATUS_ONLY_FACETS,
+    agentSignals: turnDetail,
+    renderLiveMark: props.renderLiveMark,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
@@ -603,9 +673,19 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           <FoldMemoryProvider value={foldMemory}>
             <StickyWorkHeaderProvider value={registerSticky}>
               <ReleaseFollowProvider value={releaseFollow}>
-                <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
+                <View
+                  style={[
+                    {
+                      flex: 1,
+                      backgroundColor: theme.colors.bg,
+                      paddingBottom: props.overlayInsetBottom ?? 0,
+                    },
+                    props.style,
+                  ]}
+                >
                   <ScrollView
                     ref={scrollRef}
+                    style={{ flex: 1 }}
                     onScroll={onScroll}
                     onScrollBeginDrag={() => {
                       readerScrolling.current = true;
@@ -615,10 +695,13 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       following.current = false;
                     }}
                     onScrollEndDrag={onScrollEnd}
-                    onMomentumScrollEnd={onScrollEnd}
+                    onMomentumScrollEnd={(event) => {
+                      onScrollEnd(event);
+                      readerScrolling.current = false;
+                    }}
                     onLayout={(event: LayoutChangeEvent) => {
                       viewportHeight.current = event.nativeEvent.layout.height;
-                      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+                      followAnswer();
                     }}
                     scrollEventThrottle={32}
                     onContentSizeChange={onContentSizeChange}
@@ -628,7 +711,10 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       paddingTop: props.contentInsetTop ?? 16,
                       paddingHorizontal: 16,
                       paddingBottom:
-                        (props.contentInsetBottom ?? 24) + (inlineInput?.keyboard ?? 0),
+                        Math.max(
+                          0,
+                          (props.contentInsetBottom ?? 24) - (props.overlayInsetBottom ?? 0),
+                        ) + (inlineInput?.keyboard ?? 0),
                       gap: ROW_GAP_PX,
                       flexGrow: 1,
                     }}
@@ -662,7 +748,10 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                           style={folded ? { display: "none" } : undefined}
                           onLayout={(event) => {
                             const { y, height } = event.nativeEvent.layout;
-                            if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                            if (prompt) {
+                              promptFrames.set(key, { top: y, bottom: y + height });
+                              followAnswer();
+                            }
                             if (liveNote && !folded && height > 0) {
                               liveNoteHeights.set(noteId, height);
                             }
@@ -695,20 +784,17 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       {stickyHeaders.get(pinned.key)!.render()}
                     </View>
                   ) : null}
-                  {/* Web timeline navigation: two identical small round arrow buttons at
-              fixed, centered spots that never dodge the content beneath them. */}
-                  {questionNav && !editingInline ? (
-                    <View
-                      pointerEvents="box-none"
-                      style={{
-                        position: "absolute",
-                        // Below a pinned work header so that strip stays a full-width target.
-                        top: pinned ? pinned.height + pinned.offset + 8 : 12,
-                        left: 0,
-                        right: 0,
-                        alignItems: "center",
-                      }}
-                    >
+                  {/* Navigation owns a lane outside the reading viewport, above the composer. */}
+                  <View
+                    style={{
+                      height: 44,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 12,
+                    }}
+                  >
+                    {questionNav && !editingInline ? (
                       <NavButton
                         icon="arrow-up"
                         label={m.backToYourMessage}
@@ -722,29 +808,19 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                           });
                         }}
                       />
-                    </View>
-                  ) : null}
-                  {showJump && !editingInline ? (
-                    <View
-                      pointerEvents="box-none"
-                      style={{
-                        position: "absolute",
-                        bottom: (props.overlayInsetBottom ?? 0) + 12,
-                        left: 0,
-                        right: 0,
-                        alignItems: "center",
-                      }}
-                    >
+                    ) : null}
+                    {showJump && !editingInline ? (
                       <NavButton
                         icon="arrow-down"
                         label={m.jumpToLatest}
                         onPress={() => {
                           following.current = true;
-                          scrollRef.current?.scrollToEnd({ animated: true });
+                          followTail.current = true;
+                          followAnswer(true);
                         }}
                       />
-                    </View>
-                  ) : null}
+                    ) : null}
+                  </View>
                 </View>
               </ReleaseFollowProvider>
             </StickyWorkHeaderProvider>
@@ -793,8 +869,13 @@ function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPr
   );
 }
 
+const STATUS_ONLY_FACETS: TurnSummaryFacetConfiguration = { replace: [] };
+
 type GroupContext = {
+  turnsWithOutput: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
+  agentSignals: boolean;
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
@@ -842,8 +923,23 @@ function TimelineGroupView({
   const t = useOpenGeniText();
   switch (group.kind) {
     case "activity": {
+      const startupDismissed =
+        insideTurn ||
+        group.items.some((item) => item.turnId && context.turnsWithOutput.has(item.turnId));
+      if (
+        !insideTurn &&
+        startupDismissed &&
+        group.items.every(
+          (item) =>
+            item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled",
+        )
+      )
+        return null;
       if (group.work) {
-        if (isPreparingWork(group, { startupDetails: false, startupDismissed: insideTurn })) {
+        if (!context.agentSignals && readableWorkIsEmpty(group)) return null;
+        if (isPreparingWork(group, { startupDetails: false, startupDismissed })) {
           return (
             <ActivityRail
               items={group.items}
@@ -859,22 +955,27 @@ function TimelineGroupView({
                 kind: "working",
                 since: base.since,
                 label: base.label,
-                preview: readableWorkShowsPreview(group) ? (
-                  <RollingActivity items={group.items} showCount={false} />
-                ) : undefined,
+                preview:
+                  context.agentSignals && readableWorkShowsPreview(group) ? (
+                    <RollingActivity items={group.items} showCount={false} />
+                  ) : undefined,
               }
             : base.kind === "waiting"
               ? {
                   kind: "waiting",
                   since: base.since,
                   label: base.label,
+                  waitingOn: base.waitingOn,
                   preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
                 }
-              : { kind: "worked", durationMs: base.durationMs, label: base.label };
+              : base.kind === "paused"
+                ? { kind: "paused", durationMs: base.durationMs, label: base.label }
+                : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary
             items={group.items}
             status={status}
+            renderLiveMark={context.renderLiveMark}
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
@@ -910,7 +1011,13 @@ function TimelineGroupView({
             item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
         );
       if (preparationOnly) {
-        return <ActivityRail items={group.items} renderPreparing={context.renderPreparing} />;
+        return (
+          <ActivityRail
+            items={group.items}
+            startupActive={startupDismissed ? false : undefined}
+            renderPreparing={context.renderPreparing}
+          />
+        );
       }
       if (insideTurn) {
         return <ActivityRail items={group.items} startupActive={false} />;
@@ -923,7 +1030,9 @@ function TimelineGroupView({
           failureText={group.failureText}
           defaultOpen={group.outcome === "failed" || image ? true : undefined}
           liveHeader={
-            !image && !group.outcome ? <RollingActivity items={group.items} /> : undefined
+            context.agentSignals && !image && !group.outcome ? (
+              <RollingActivity items={group.items} />
+            ) : undefined
           }
           foldKey={group.id}
           facets={context.facets}
@@ -1017,7 +1126,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
         />
       );
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[sessionStatusItemDisplayStatus(item)];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
@@ -1067,9 +1176,55 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       // An agent's connect request becomes a card the person can finish
       // here; anything else (a lapsed account, unavailable tools) is a row.
       return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
+    case "machine-input-batch":
+      // An automation that acted here says what happened in one line; other
+      // machine updates stay out of the native chat.
+      return isAutomationRunBatch(item.members) ? <AutomationRunRow item={item} /> : null;
     default:
       return null;
   }
+}
+
+/**
+ * An automation acted in this chat: one quiet line saying what happened,
+ * above the agent's answer, never the automation's instructions. As on web.
+ */
+function AutomationRunRow({
+  item,
+}: {
+  item: Extract<TimelineItem, { kind: "machine-input-batch" }>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const line = automationRunLine(t, item.members);
+  const event = item.members.some((member) => (member.automation?.eventCount ?? 0) > 0);
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${line}, ${t("messageTimeline.receivedClocktime", { clockTime: nativeClockTime(t, item.occurredAt) })}`}
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        gap: 6,
+        paddingHorizontal: 12,
+      }}
+    >
+      <Icon name={event ? "zap" : "calendar-clock"} size={14} color={theme.colors["fg-subtle"]} />
+      <Text
+        numberOfLines={2}
+        style={{
+          ...fontStyle(theme),
+          flexShrink: 1,
+          textAlign: "center",
+          fontSize: theme.size.sm,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {line}
+      </Text>
+    </View>
+  );
 }
 
 /**
@@ -1086,8 +1241,9 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
-  // discloses the reason, as on web.
-  if (item.recordedOutcome) {
+  // discloses the reason, as on web. So is an attempt a Retry reopened: the
+  // turn's outcome carries the failure that still matters.
+  if (item.recordedOutcome || item.retriedAttempt) {
     return (
       <Pressable
         accessibilityRole="button"
@@ -1099,8 +1255,15 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
           <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
+          {item.retriedAttempt ? (
+            <View
+              style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: c["status-failed"] }}
+            />
+          ) : null}
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
+            {item.retriedAttempt
+              ? t("messageTimeline.attemptFailedRetried")
+              : recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -1114,7 +1277,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
               color: c["fg-muted"],
             }}
           >
-            {item.text}
+            {item.retriedAttempt && typeof item.details?.value === "string"
+              ? `${noticeDisplayText(t, item)}\n\n${item.details.value}`
+              : item.retriedAttempt
+                ? noticeDisplayText(t, item)
+                : item.text}
           </Text>
         ) : null}
       </Pressable>
@@ -1554,7 +1721,9 @@ function HumanInputRow({
     item.response.outcome === "answered"
       ? m.humanInputOutcome.answered
       : item.response.outcome === "skipped"
-        ? m.humanInputOutcome.skipped
+        ? item.response.agentDecides
+          ? (m.humanInputOutcome.agentDecides ?? m.humanInputOutcome.skipped)
+          : m.humanInputOutcome.skipped
         : item.response.outcome === "expired"
           ? m.humanInputOutcome.expired
           : m.humanInputOutcome.cancelled;

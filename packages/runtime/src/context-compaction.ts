@@ -26,21 +26,30 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
+  agentInstructionsContextItem,
   collapseRepeatedSessionGoalContexts,
   expandUnchangedSessionGoalContexts,
   formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
+  latestAgentInstructionsContext,
   latestSkillCatalogContext,
   latestWorkspaceGovernanceContext,
+  readAgentInstructionsContext,
   readSkillCatalogContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import { toJsonSafeValue } from "@opengeni/contracts/json-safe";
+import {
+  isHostedSearchEvidenceRecord,
+  projectHostedSearchEvidence,
+  withSearchRecordsAfterOpenCalls,
+} from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -61,11 +70,18 @@ export const SUMMARY_BUFFER_TOKENS = 20_000;
 export function compactionSummaryOutputTokens(contextWindowTokens: number): number {
   return Math.min(SUMMARY_BUFFER_TOKENS, Math.max(1, Math.floor(contextWindowTokens / 4)));
 }
-// A single cumulative budget for all retained real user messages, matching
-// Codex core's build_compacted_history_with_limit (not a per-message allowance).
+// A single cumulative budget for all retained input messages, matching Codex
+// core's build_compacted_history_with_limit (not a per-message allowance).
+// Portable and remote v2 compaction share it: the Codex CLI's larger remote v2
+// budget assumes short typed messages, while Opengeni's recent input is mostly
+// platform updates the checkpoint already summarizes.
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
-/** Codex CLI remote compaction v2 retained-message budget (codex-rs). */
-export const REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
+/**
+ * Starts every runtime notice that applies only to the execution turn it was
+ * added to. Compaction keeps such a notice verbatim only for the turn running
+ * the compaction (or as the newest input); older ones are left to the summary.
+ */
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
 export const REMOTE_COMPACTION_V2_IMPLEMENTATION = "responses_compaction_v2" as const;
 export const REMOTE_COMPACTION_V2_BETA_FEATURE = "remote_compaction_v2" as const;
 // 0.9: compact as LATE as possible — retained context is worth more than early
@@ -1022,11 +1038,16 @@ export function estimateSerializedValueTokens(value: unknown): number {
 }
 
 function materializedJson(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) {
-    throw new TypeError("value has no JSON representation");
+  // A token estimate must never fail a turn: a value the native serializer
+  // refuses (bigint, cycle, throwing toJSON) is estimated from its converted
+  // JSON-safe form instead.
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    serialized = JSON.stringify(toJsonSafeValue(value, { copy: true }));
   }
-  return serialized;
+  return serialized ?? "null";
 }
 
 export type CompleteModelInputFootprint = {
@@ -1314,6 +1335,10 @@ export class EmptyCompactionSummaryError extends Error {
  * than a successful response with an empty assistant message. Diagnostics are
  * deliberately bounded and content-free so this error can be persisted on a
  * turn without copying provider messages or conversation input into events.
+ * The provider's own error message is kept apart in {@link providerMessage}:
+ * it can quote conversation input, so it is recorded only on the session's
+ * own events (which the conversation's readers can already see), never in
+ * diagnostics, logs or metrics.
  */
 export class CompactionProviderResponseError extends Error {
   readonly diagnostics: Record<string, unknown>;
@@ -1322,9 +1347,19 @@ export class CompactionProviderResponseError extends Error {
   readonly type?: string;
   /** Provider-named request field that was rejected (`error.param`), bounded. */
   readonly param?: string;
+  /**
+   * The provider's error message, bounded and single-line; null when it sent
+   * none. Not enumerable, like `cause`, so serializers that dump error fields
+   * never carry it.
+   */
+  declare readonly providerMessage: string | null;
   override readonly cause?: unknown;
 
-  constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown) {
+  /**
+   * `messageSource` is where the provider's message is read from when it is
+   * not the cause, such as a failed response object.
+   */
+  constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown, messageSource?: unknown) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
     const rejection = compactionProviderRejectionFromDiagnostics(diagnostics);
     super(
@@ -1340,10 +1375,58 @@ export class CompactionProviderResponseError extends Error {
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
     if (typeof diagnostics.param === "string") this.param = diagnostics.param;
+    Object.defineProperty(this, "providerMessage", {
+      value: compactionProviderMessage(messageSource ?? cause),
+      enumerable: false,
+    });
     if (cause !== undefined) {
       Object.defineProperty(this, "cause", { value: cause, enumerable: false });
     }
   }
+}
+
+/** Longest provider error message recorded for a failed compaction request. */
+export const COMPACTION_PROVIDER_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * The provider's own error message for a failed compaction request: the error
+ * body's `error.message` (or a bare string `error`) anywhere in the cause
+ * chain, or the message an earlier {@link CompactionProviderResponseError}
+ * already captured. SDK, transport and runtime error text is never taken.
+ * Control characters and runs of whitespace become single spaces, and the
+ * result is cut to {@link COMPACTION_PROVIDER_MESSAGE_MAX_CHARS} characters.
+ */
+export function compactionProviderMessage(source: unknown): string | null {
+  let current = source;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (current instanceof CompactionProviderResponseError && current.providerMessage) {
+      return current.providerMessage;
+    }
+    const record = current as Record<string, unknown>;
+    const nested = record.error;
+    const bodyMessage =
+      typeof nested === "string"
+        ? nested
+        : nested && typeof nested === "object"
+          ? (nested as Record<string, unknown>).message
+          : undefined;
+    const fromBody = typeof bodyMessage === "string" ? boundProviderMessage(bodyMessage) : null;
+    if (fromBody) return fromBody;
+    current = record.cause;
+  }
+  return null;
+}
+
+function boundProviderMessage(message: string): string | null {
+  // eslint-disable-next-line no-control-regex
+  const flat = message.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
+  if (!flat) return null;
+  return flat.length > COMPACTION_PROVIDER_MESSAGE_MAX_CHARS
+    ? `${flat.slice(0, COMPACTION_PROVIDER_MESSAGE_MAX_CHARS - 1).trimEnd()}…`
+    : flat;
 }
 
 /**
@@ -1601,8 +1684,10 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
-    projectHostedSearchEvidence(item),
+  let history = withSearchRecordsAfterOpenCalls(
+    omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+      projectHostedSearchEvidence(item),
+    ),
   );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
@@ -1660,7 +1745,9 @@ function minimalToolResultForCompaction(item: CompactionItem): CompactionItem {
 function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
   const userMessageIndexes: number[] = [];
   for (let index = 0; index < items.length; index += 1) {
-    if (isUserMessage(items[index])) userMessageIndexes.push(index);
+    // A search record is runtime input inside a unit, not a person's message.
+    if (isUserMessage(items[index]) && !isHostedSearchEvidenceRecord(items[index]))
+      userMessageIndexes.push(index);
   }
   const cuts: number[] = [];
   if (userMessageIndexes.length === 0) {
@@ -1673,7 +1760,13 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 }
 
 /**
- * Shared preparation for both retention builders.
+ * Compaction `implementation` of the portable rebuild that replaces a Codex
+ * remote compaction checkpoint when its chat switches to another model.
+ */
+export const PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION = "portable_model_switch" as const;
+
+/**
+ * Preparation for the retention rebuild shared by both compaction modes.
  *
  * - `source` has every "unchanged goal" stand-in restored to its full goal
  *   context, so whichever message ends up oldest in the retained window can
@@ -1685,6 +1778,9 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
  *   progress, goal nudges) are not retained verbatim once newer input exists:
  *   the summary already carries them. The newest input is always retained,
  *   and it carries the current goal context.
+ * - Turn-scoped operational notices apply only to their own turn, so only the
+ *   notices of the turn running the compaction are retained verbatim (and the
+ *   newest input, whatever it is). Older notices are left to the summary.
  */
 function prepareRetainedInputs(
   items: readonly CompactionItem[],
@@ -1707,10 +1803,16 @@ function prepareRetainedInputs(
     }
   }
   const replies = finishedTurnReplies(source, turns);
+  const activeTurnId = turns?.activeTurnId ?? null;
+  const isEarlierTurnNotice = (index: number) =>
+    isTurnOperationalNotice(source[index]!) &&
+    (activeTurnId === null || knownTurnId(turns, index) !== activeTurnId);
   return {
     source,
     charged,
-    skip: (index) => index !== newest && isTransientSessionSystemUpdateBatch(source[index]!),
+    skip: (index) =>
+      index !== newest &&
+      (isTransientSessionSystemUpdateBatch(source[index]!) || isEarlierTurnNotice(index)),
     goalAllowanceTokens: (index) =>
       source[index] === charged[index]
         ? 0
@@ -1745,6 +1847,15 @@ export type CompactionTurnContext = {
   itemTurnIds: readonly (string | null | undefined)[];
   /** The turn running this compaction. It may still be working, so its requests stay open. */
   activeTurnId?: string | null;
+  /**
+   * Agent chats only, when the turn running this compaction continues after
+   * it: the agent revision its system prompt carries, or null when its prompt
+   * has no agent layer. Compaction drops agent instruction items, because the
+   * newest revision is folded into the next turn's system prompt; this turn's
+   * prompt cannot change, so a newer edit is re-added for the rest of it.
+   * Omitted: never re-added.
+   */
+  agentPromptRevision?: number | null;
 };
 
 /** A rebuilt history plus the turn each item belongs to (null for compaction-made items). */
@@ -1855,7 +1966,31 @@ function retainedReply(
 }
 
 function isPortableRetentionCandidate(item: CompactionItem): boolean {
-  return isPortableInputMessage(item) && !isCompactionSummary(item) && !isAttachmentCatalog(item);
+  return (
+    isPortableInputMessage(item) &&
+    !isCompactionSummary(item) &&
+    !isAttachmentCatalog(item) &&
+    readAgentInstructionsContext(item) === null
+  );
+}
+
+/**
+ * The newest agent instruction edit, re-added only while the continuing turn's
+ * system prompt still shows something else (see
+ * {@link CompactionTurnContext.agentPromptRevision}).
+ */
+function carriedAgentInstructionsContext(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext | undefined,
+): CompactionItem | undefined {
+  if (turns?.agentPromptRevision === undefined) return undefined;
+  const latest = latestAgentInstructionsContext(items);
+  if (!latest) return undefined;
+  const current =
+    latest.context.kind === "revision"
+      ? latest.context.revision !== turns.agentPromptRevision
+      : turns.agentPromptRevision !== null;
+  return current ? agentInstructionsContextItem(latest.text) : undefined;
 }
 
 function hasAttachmentRefs(item: CompactionItem): boolean {
@@ -1884,6 +2019,7 @@ function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): Comp
     const stripped: CompactionItem = { ...item };
     delete stripped[MODEL_ATTACHMENT_REFS_FIELD];
     delete stripped[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+    delete stripped[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD];
     return stripped;
   });
 }
@@ -1933,22 +2069,202 @@ export function buildCompactionReplacement(
   attachmentUploadTimes: AttachmentUploadTimes = new Map(),
   turns?: CompactionTurnContext,
 ): CompactionReplacement {
+  return rebuildAroundCheckpoint(items, buildSummaryItem(summaryBody), {
+    isCandidate: isPortableRetentionCandidate,
+    budgetTokens: Math.max(
+      0,
+      Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
+    ),
+    retainedItemTokens,
+    attachmentUploadTimes,
+    turns,
+  });
+}
+
+/**
+ * `session.context.compacted` implementation of a checkpoint installed without
+ * a summary, because the chat's model could not produce one.
+ */
+export const DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION = "deterministic_trim";
+
+/** First paragraph of a trimmed checkpoint (model-visible). */
+export const TRIMMED_CONTEXT_NOTICE =
+  "Earlier parts of this conversation were removed to free up context. A summary of them could not be produced, so this note stands in for one. The most recent requests are kept above, each followed by a shortened copy of its reply where there was one. Before relying on anything from the removed part, check the current state (files, repositories, tool results) or ask the user.";
+
+/** Heading of an earlier checkpoint's summary carried into a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING = "Summary from an earlier checkpoint:";
+
+/** Heading of the current turn's latest assistant text kept in a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING =
+  "Your latest message in the current turn, before the removal:";
+
+/** Lead-in of the current turn's tool-call tally in a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_TOOL_CALLS_LEAD = "Tool calls made earlier in the current turn:";
+
+/** Most tokens of an earlier summary a trimmed checkpoint carries forward. */
+export const TRIMMED_CONTEXT_EARLIER_SUMMARY_MAX_TOKENS = 8_000;
+/** Most tokens of the current turn's latest assistant text a trimmed checkpoint keeps. */
+export const TRIMMED_CONTEXT_LATEST_MESSAGE_MAX_TOKENS = 1_000;
+const TRIMMED_CONTEXT_MAX_TOOL_NAMES = 20;
+
+/**
+ * The same rebuild as {@link buildCompactionReplacement}, for when the chat's
+ * model could not summarize the history: the newest requests (with their
+ * shortened replies) and platform context are kept exactly as a summarized
+ * checkpoint keeps them, and a deterministic note takes the summary's place.
+ * No model is called. See {@link buildTrimmedContextCheckpointItem}.
+ */
+export function buildTrimmedCompactionReplacement(
+  items: readonly CompactionItem[],
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
+): CompactionReplacement {
+  return rebuildAroundCheckpoint(items, buildTrimmedContextCheckpointItem(items, turns), {
+    isCandidate: isPortableRetentionCandidate,
+    budgetTokens: Math.max(
+      0,
+      Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
+    ),
+    retainedItemTokens,
+    attachmentUploadTimes,
+    turns,
+  });
+}
+
+/**
+ * The checkpoint item of a trimmed history: {@link TRIMMED_CONTEXT_NOTICE},
+ * then, when present, the newest earlier checkpoint's summary (bounded), the
+ * tools the current turn has called so far, and the current turn's latest
+ * assistant text (bounded). It is marked like a summary, so a later compaction
+ * reads it as one.
+ */
+export function buildTrimmedContextCheckpointItem(
+  items: readonly CompactionItem[],
+  turns?: CompactionTurnContext,
+): CompactionItem {
+  const sections = [TRIMMED_CONTEXT_NOTICE];
+  const earlier = latestEarlierSummaryBody(items);
+  if (earlier) {
+    sections.push(
+      `${TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING}\n${truncateMiddleByEstimatedTokens(
+        earlier,
+        TRIMMED_CONTEXT_EARLIER_SUMMARY_MAX_TOKENS,
+      )}`,
+    );
+  }
+  const activeTurnId = turns?.activeTurnId ?? null;
+  if (activeTurnId) {
+    const toolCalls = new Map<string, number>();
+    let latestMessage = "";
+    items.forEach((item, index) => {
+      if (turns?.itemTurnIds[index] !== activeTurnId) return;
+      const tool = toolCallName(item);
+      if (tool) toolCalls.set(tool, (toolCalls.get(tool) ?? 0) + 1);
+      if (itemType(item) === "message" && itemRole(item) === "assistant") {
+        const text = messageText(item).trim();
+        if (text) latestMessage = text;
+      }
+    });
+    if (toolCalls.size > 0) {
+      const names = [...toolCalls]
+        .slice(0, TRIMMED_CONTEXT_MAX_TOOL_NAMES)
+        .map(([name, count]) => (count > 1 ? `${name} (${count})` : name));
+      const more = toolCalls.size - names.length;
+      sections.push(
+        `${TRIMMED_CONTEXT_TOOL_CALLS_LEAD} ${names.join(", ")}${more > 0 ? `, and ${more} more` : ""}.`,
+      );
+    }
+    if (latestMessage) {
+      sections.push(
+        `${TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING}\n${truncateMiddleByEstimatedTokens(
+          latestMessage,
+          TRIMMED_CONTEXT_LATEST_MESSAGE_MAX_TOKENS,
+        )}`,
+      );
+    }
+  }
+  return {
+    type: "message",
+    role: "user",
+    content: sections.join("\n\n"),
+    [COMPACTION_SUMMARY_MARKER]: true,
+  };
+}
+
+/**
+ * The summary text of the newest earlier checkpoint in the history: a model
+ * summary without its fixed prefix, or the summary an earlier trimmed
+ * checkpoint carried. Null when there is none.
+ */
+function latestEarlierSummaryBody(items: readonly CompactionItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (!isCompactionSummary(item)) continue;
+    const text = messageText(item);
+    if (text.startsWith(TRIMMED_CONTEXT_NOTICE)) {
+      const start = text.indexOf(`\n\n${TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING}\n`);
+      if (start < 0) return null;
+      const body = text.slice(start + TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING.length + 3);
+      // The carried summary ends where this checkpoint's own sections begin.
+      const end = [
+        `\n\n${TRIMMED_CONTEXT_TOOL_CALLS_LEAD} `,
+        `\n\n${TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING}\n`,
+      ]
+        .map((marker) => body.lastIndexOf(marker))
+        .filter((position) => position >= 0);
+      return (end.length > 0 ? body.slice(0, Math.min(...end)) : body).trim() || null;
+    }
+    const body = text.startsWith(SUMMARY_PREFIX) ? text.slice(SUMMARY_PREFIX.length) : text;
+    return body.trim() || null;
+  }
+  return null;
+}
+
+/** The tool a model-generated call item invoked, for the trimmed checkpoint's tally. */
+function toolCallName(item: CompactionItem): string | null {
+  const type = itemType(item);
+  if (!type || !type.endsWith("_call") || type === "context_compaction") return null;
+  const name = (item as { name?: unknown }).name;
+  if (typeof name === "string" && name.trim()) return name.trim().slice(0, 80);
+  if (type === "hosted_tool_call") {
+    const providerType = (item as { providerData?: { type?: unknown } }).providerData?.type;
+    return typeof providerType === "string" ? providerType.replace(/_call$/, "") : "hosted_tool";
+  }
+  return type.slice(0, -"_call".length);
+}
+
+/**
+ * The rebuild both compaction modes share: the current Skill index and
+ * workspace governance, an attachment catalog for files no longer inline, the
+ * newest retention candidates that fit the budget (each answered person's
+ * message followed by its turn's short reply), then the checkpoint and the
+ * latest reasoning configuration.
+ */
+function rebuildAroundCheckpoint(
+  items: readonly CompactionItem[],
+  checkpoint: CompactionItem,
+  options: {
+    isCandidate: (item: CompactionItem) => boolean;
+    budgetTokens: number;
+    retainedItemTokens: (item: CompactionItem) => number;
+    attachmentUploadTimes: AttachmentUploadTimes;
+    turns: CompactionTurnContext | undefined;
+  },
+): CompactionReplacement {
+  const { isCandidate, retainedItemTokens, turns } = options;
   const retainedReversed: CompactionItem[] = [];
   const retainedTurnIdsReversed: (string | null)[] = [];
-  let remaining = Math.max(
-    0,
-    Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
-  );
+  let remaining = options.budgetTokens;
   const prepared = prepareRetainedInputs(
     withOnlyNewestAttachmentsInline(items),
-    isPortableRetentionCandidate,
+    isCandidate,
     turns,
   );
   for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = prepared.charged[index]!;
-    if (!isPortableRetentionCandidate(item) || prepared.skip(index)) {
-      continue;
-    }
+    if (!isCandidate(item) || prepared.skip(index)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
     if (nonTextTokens >= remaining) continue;
@@ -1956,7 +2272,7 @@ export function buildCompactionReplacement(
       prepared.source[index]!,
       remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
     );
-    remaining = Math.max(0, remaining - textTokens - nonTextTokens);
+    remaining = Math.max(0, remaining - Math.max(1, textTokens + nonTextTokens));
     const turnId = knownTurnId(turns, index);
     const reply = prepared.reply(index);
     if (reply) {
@@ -1971,18 +2287,26 @@ export function buildCompactionReplacement(
   }
   const currentCatalog = latestSkillCatalogContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
+  const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
-  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
-  const prefix = [currentCatalog, currentGovernance, attachmentCatalog].filter(
-    (item): item is CompactionItem => Boolean(item),
+  const attachmentCatalog = buildAttachmentCatalogItem(
+    items,
+    retained,
+    options.attachmentUploadTimes,
   );
+  const prefix = [
+    currentCatalog,
+    currentGovernance,
+    carriedAgentInstructions,
+    attachmentCatalog,
+  ].filter((item): item is CompactionItem => Boolean(item));
   const history = [...prefix, ...retained];
   // Platform context items before the retained messages belong to no turn.
   const turnIds: (string | null)[] = [
     ...prefix.map(() => null),
     ...retainedTurnIdsReversed.reverse(),
   ];
-  history.push(buildSummaryItem(summaryBody));
+  history.push(checkpoint);
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   while (turnIds.length < history.length) turnIds.push(null);
@@ -2013,8 +2337,8 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
 
 /**
  * Build the active history after Codex remote compaction v2:
- * newest retained user/system/developer messages within the CLI 64k budget plus the
- * opaque `{ type: "compaction", encrypted_content }` item.
+ * newest retained user/system/developer messages within the same budget as the
+ * portable rebuild, plus the opaque `{ type: "compaction", encrypted_content }` item.
  * As in the portable rebuild, a retained person's message from another known
  * turn is followed by that turn's last reply, charged to the same budget.
  *
@@ -2050,66 +2374,42 @@ export function buildRemoteV2Replacement(
       stage: "remote_v2_compaction_item",
     });
   }
-  const retainedReversed: CompactionItem[] = [];
-  const retainedTurnIdsReversed: (string | null)[] = [];
-  let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
-  const prepared = prepareRetainedInputs(
-    withOnlyNewestAttachmentsInline(items),
-    (item) => !isSessionContextSnapshot(item) && isRetainedRemoteV2Message(item),
-    turns,
+  return rebuildAroundCheckpoint(
+    items,
+    {
+      type: "compaction",
+      encrypted_content: compactionItem.encrypted_content,
+      ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
+    },
+    {
+      isCandidate: (item) => !isSessionContextSnapshot(item) && isRetainedRemoteV2Message(item),
+      budgetTokens: COMPACT_USER_MESSAGE_MAX_TOKENS,
+      retainedItemTokens,
+      attachmentUploadTimes,
+      turns,
+    },
   );
-  for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const item = prepared.charged[index]!;
-    if (isSessionContextSnapshot(item)) continue;
-    if (!isRetainedRemoteV2Message(item)) continue;
-    if (prepared.skip(index)) continue;
-    const textTokens = estimateTextTokens(messageText(item));
-    const chargeTokens = Math.max(1, retainedItemTokens(item));
-    const nonTextTokens = Math.max(0, chargeTokens - textTokens);
-    if (nonTextTokens >= remaining) continue;
-    const full = prepared.source[index]!;
-    const allowance = prepared.goalAllowanceTokens(index);
-    const message = compactRetainedMessage(full, remaining - nonTextTokens + allowance);
-    remaining = Math.max(0, remaining - chargeTokens);
-    const turnId = knownTurnId(turns, index);
-    const reply = prepared.reply(index);
-    if (reply) {
-      const kept = retainedReply(reply, turnId);
-      retainedReversed.push(kept.item);
-      retainedTurnIdsReversed.push(null);
-      remaining = Math.max(0, remaining - kept.tokens);
-    }
-    retainedReversed.push(message);
-    retainedTurnIdsReversed.push(turnId);
-    if (remaining === 0) break;
-  }
-  const currentCatalog = latestSkillCatalogContext(items);
-  const currentGovernance = latestWorkspaceGovernanceContext(items);
-  const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
-  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
-  const prefix = [currentCatalog, currentGovernance, attachmentCatalog].filter(
-    (item): item is CompactionItem => Boolean(item),
-  );
-  const history = [...prefix, ...retained];
-  // Platform context items before the retained messages belong to no turn.
-  const turnIds: (string | null)[] = [
-    ...prefix.map(() => null),
-    ...retainedTurnIdsReversed.reverse(),
-  ];
-  history.push({
-    type: "compaction",
-    encrypted_content: compactionItem.encrypted_content,
-    ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
-  });
-  const reasoning = latestReasoningConfiguration(items);
-  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
-  while (turnIds.length < history.length) turnIds.push(null);
-  return { history, turnIds };
 }
 
-/** Skill catalog and workspace governance snapshots are re-added as the latest copy only. */
+/** A runtime notice that applies only to the execution turn it was added to. */
+function isTurnOperationalNotice(item: CompactionItem): boolean {
+  return (
+    itemType(item) === "message" &&
+    itemRole(item) === "system" &&
+    messageText(item).startsWith(TURN_OPERATIONAL_NOTICE_PREFIX)
+  );
+}
+
+/**
+ * Skill catalog and workspace governance snapshots are re-added as the latest
+ * copy only; agent instruction edits are folded into the system prompt.
+ */
 function isSessionContextSnapshot(item: CompactionItem): boolean {
-  return readSkillCatalogContext(item) !== null || readWorkspaceGovernanceContext(item) !== null;
+  return (
+    readSkillCatalogContext(item) !== null ||
+    readWorkspaceGovernanceContext(item) !== null ||
+    readAgentInstructionsContext(item) !== null
+  );
 }
 
 function isAttachmentCatalog(item: unknown): boolean {
@@ -2317,6 +2617,14 @@ function isImageContentPart(part: unknown): boolean {
   if (!part || typeof part !== "object") return false;
   const type = (part as { type?: unknown }).type;
   return type === "input_image" || type === "image_url";
+}
+
+/**
+ * A summary held to an output cap after it was produced without one: kept
+ * whole when it fits, otherwise cut from the middle with the usual marker.
+ */
+export function truncateCompactionSummary(summary: string, maxTokens: number): string {
+  return truncateMiddleByEstimatedTokens(summary, maxTokens);
 }
 
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {

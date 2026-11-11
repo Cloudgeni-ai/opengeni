@@ -1,5 +1,17 @@
-import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
+import {
+  CalendarIcon,
+  CheckIcon,
+  CloudIcon,
+  ContactIcon,
+  FilesIcon,
+  InfoIcon,
+  MailIcon,
+  ShieldCheckIcon,
+  XIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { Dialog } from "radix-ui";
+import type { IntegrationExperienceIcon } from "../integration-presentation";
 import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
@@ -11,9 +23,25 @@ export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
-  /** A short kind label beside the name; empty shows none. */
+  /**
+   * The service's kind of content, drawn when it has no logo, so a reviewed
+   * service never reads as two letters of its name.
+   */
+  icon?: IntegrationExperienceIcon | undefined;
+  /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
+  /**
+   * A quiet label beside the name, only where it tells a person what they are
+   * trusting (a server someone added by hand). Reviewed services show none.
+   */
+  badge?: string | undefined;
   description: string;
+  /**
+   * The description is the agent's reason for asking: keep it to two lines so
+   * a long rationale never pushes the action down. State and guidance copy
+   * stays whole.
+   */
+  clampDescription?: boolean | undefined;
   skill: boolean;
   expanded: boolean;
   complete: boolean;
@@ -42,14 +70,45 @@ export type SessionCapabilityFrameProps = {
   inlineSetup?: ReactNode;
 };
 
-function Mark({ src, name }: { src: string | null; name: string }) {
+const MARK_ICONS: Readonly<Record<IntegrationExperienceIcon, LucideIcon>> = {
+  calendar: CalendarIcon,
+  cloud: CloudIcon,
+  contacts: ContactIcon,
+  files: FilesIcon,
+  mail: MailIcon,
+};
+
+/** "Google Calendar" reads as GC, a one-word name keeps its first two letters. */
+export function capabilityMarkInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const initials =
+    words.length > 1 ? words.map((word) => [...word][0]).join("") : [...(words[0] ?? "")].join("");
+  return [...initials].slice(0, 2).join("").toUpperCase();
+}
+
+function Mark({
+  src,
+  name,
+  icon,
+}: {
+  src: string | null;
+  name: string;
+  icon?: IntegrationExperienceIcon | undefined;
+}) {
   const [failed, setFailed] = useState<string | null>(null);
+  const Icon = icon ? MARK_ICONS[icon] : null;
   return (
-    <span className="og-session-capability-logo" aria-hidden>
+    <span
+      className="og-session-capability-logo"
+      data-mark={src && failed !== src ? "image" : Icon ? "icon" : "initials"}
+      aria-hidden
+    >
       {src && failed !== src ? (
         <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
+      ) : Icon ? (
+        <Icon size={18} strokeWidth={1.75} />
       ) : (
-        name.trim().slice(0, 2).toUpperCase()
+        capabilityMarkInitials(name)
       )}
     </span>
   );
@@ -61,8 +120,11 @@ export function SessionCapabilityFrame({
   name,
   subtitle,
   logo,
+  icon,
   typeLabel,
+  badge,
   description,
+  clampDescription = false,
   skill,
   expanded,
   complete,
@@ -87,14 +149,16 @@ export function SessionCapabilityFrame({
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
   const portalStyle = usePortalTokenStyle(sectionRef.current);
+  // A row without a better name is titled by its domain; never say it twice.
+  const shownSubtitle = subtitle.trim().toLowerCase() === name.trim().toLowerCase() ? "" : subtitle;
   const identity = (
     <>
-      <Mark src={logo} name={name} />
+      <Mark src={logo} name={name} icon={icon} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        <span>{subtitle}</span>
+        {shownSubtitle ? <span>{shownSubtitle}</span> : null}
       </div>
-      {typeLabel ? <span className="og-session-capability-type">{typeLabel}</span> : null}
+      {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
   );
   return (
@@ -113,7 +177,8 @@ export function SessionCapabilityFrame({
           {complete ? <CheckIcon size={16} aria-hidden /> : null}
         </div>
         {complete ? (
-          <p role="status" className="og-session-capability-copy">
+          // Focusable so a card that just finished can keep keyboard focus.
+          <p role="status" tabIndex={-1} className="og-session-capability-copy">
             {completeLabel ??
               (skill
                 ? t("sessionCapabilityFrame.installedWorkspace")
@@ -121,7 +186,13 @@ export function SessionCapabilityFrame({
           </p>
         ) : (
           <>
-            <p className="og-session-capability-copy">{description}</p>
+            <p
+              className="og-session-capability-copy"
+              data-clamp={clampDescription ? "" : undefined}
+              title={clampDescription ? description : undefined}
+            >
+              {description}
+            </p>
             {inlineSetup ? (
               <div className="og-session-capability-setup">{inlineSetup}</div>
             ) : actionUnavailable ? (
@@ -180,15 +251,16 @@ export function SessionCapabilityFrame({
               const target = buttonRef.current?.isConnected
                 ? buttonRef.current
                 : sectionRef.current;
-              if (target?.isConnected) target.focus();
+              // Keep the view where the conversation is; focus alone must not scroll.
+              if (target?.isConnected) target.focus({ preventScroll: true });
             }}
           >
             <div className="og-session-capability-dialog-header">
-              <Mark src={logo} name={name} />
+              <Mark src={logo} name={name} icon={icon} />
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {[typeLabel, subtitle].filter(Boolean).join(" · ")}
+                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (

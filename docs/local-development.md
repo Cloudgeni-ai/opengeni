@@ -357,6 +357,17 @@ Document indexing depends on:
 - `OPENGENI_DOCUMENT_EMBEDDING_MODEL`
 - `OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS`
 
+For an Azure OpenAI resource with key sign-in turned off, set
+`OPENGENI_DOCUMENT_EMBEDDING_BASE_URL` to its
+`https://<resource>.openai.azure.com/openai/v1` URL, the model to the
+embedding deployment's name, and `OPENGENI_DOCUMENT_EMBEDDING_AUTH=deployment_identity`.
+Requests are then signed with a cached Microsoft Entra token for the deployment's
+own identity (`AZURE_TENANT_ID` and `AZURE_CLIENT_ID` with
+`AZURE_FEDERATED_TOKEN_FILE` or `AZURE_CLIENT_SECRET`), which needs an Azure OpenAI
+user role on the resource. Without that identity or base URL, embeddings report
+themselves unavailable and no other key is tried. Curation inherits the token
+only when it uses the same base URL.
+
 Typical uploads include PDF, Word, PowerPoint, Excel, OpenDocument,
 plain-text/structured-text, email, and common image formats. The standalone API
 queues parsing to the existing control worker through Temporal. Only the worker

@@ -14,7 +14,7 @@ agent" in the context of a session means the AI agent driving it.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Moving a running
+approval by the organization's owner or an admin. Only the owner may attach a user machine. Moving a running
 chat is explicit owner consent for that logical turn, even when another person,
 a schedule, or an agent started it. The route changes immediately; the next tool
 operation uses the new machine. Already dispatched work is not moved or replayed.
@@ -40,11 +40,27 @@ generation and invalidates existing grants.
 
 ### Control transport recovery
 
+An accepted command's output reattaches from its contiguous received sequence
+when the same runner announces its ready connection, or the controller's shared
+NATS transport reconnects. The existing silence probe remains the fallback, not
+the first opportunity to recover. Reattachment never restarts the command or
+extends its execution deadline. A successor runner has a different subject and
+cannot recover work by impersonating the original process.
+
 The API/worker uses its shared NATS connection for control RPC, operation frames,
-and acknowledgements. The native supervisor treats either control- or bulk-lane
-loss, including scheduled five-minute user-JWT expiry, as a transport-generation
-change: it reconnects, authenticates again, resubscribes, and detaches rather than
-restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+and acknowledgements. The broker's five-minute credential bounds established
+access after enrollment revocation; fresh admission checks enrollment authority.
+Ordinary enrollment-token renewal updates the next-dial bearer and the
+relay's future registrations in place, leaving accepted operations and healthy
+sockets untouched. Authority, consent, endpoint or authentication-state changes
+still replace the link.
+
+The native supervisor treats either control- or bulk-lane loss as a
+transport-generation change: it reconnects, authenticates again, resubscribes, and
+detaches rather than restarts accepted commands. Each generation owns both NATS
+connection tasks and closes them on every exit, including partial setup and
+cancelled dials. Retained RPC client clones cannot keep an old socket reconnecting
+alongside its replacement. The WebSocket/QUIC relay is a separate stream plane;
 it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
@@ -156,7 +172,15 @@ once the ledger has recorded that stop. A turn records it through its own
 adoption; a direct terminal or file request records it in the same ledger
 without a turn. If recording fails, the caller keeps custody and goes on
 stopping it, as for a machine that stopped answering, and the text claims no
-stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+stop. For an attempt-owned command whose foreground consumer has ended without
+terminal proof, finalization retries this exact-operation ledger handoff,
+including after protocol failures not classified as offline. Its cancellation
+and observation requests do not block the independent ledger commit. A pending
+live foreground adoption still owns the command; cleanup cannot take it over
+until that consumer ends. Failed ledger writes retain the physical writer,
+while a committed stop request transfers it to the existing reconciler without
+replaying the command or acknowledging output.
+A direct terminal exec whose own deadline passes meanwhile ends with that
 same answer, not exit 124: it reports 124 only when its deadline provably ended
 the command. The reconciler alone decides the outcome: it delivers the stop if the old
 runner answers again, and settles the command as lost once the enrollment
@@ -322,6 +346,15 @@ optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
 `/workspace` has no special meaning on a machine.
+
+The machine's own Git identity applies to commits. Only on a machine where Git
+cannot derive an address from the hostname (typically a fresh container, whose
+hostname has no domain) and whose agent environment has no `EMAIL` do commands
+receive `EMAIL=agent@opengeni.invalid`, Git's last-resort commit email;
+`GIT_*_EMAIL` and any `user.email` setting still win. The agent asks Git once
+per process. The author name still comes from the account, so a container
+running as a uid with no passwd entry has no name and its commits still need
+`user.name`.
 
 The Files surface advertises that effective path as `FileSystem.root`, including
 Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
@@ -493,21 +526,47 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+A profile id is announced by the machine and stored per workspace, so the same
+id can be visible from more than one enrollment. Copies collapse into one
+profile only when their enrollments share the machine's key (one computer
+enrolled in two workspaces), and then your own Only me enrollment's copy is the
+one addressed. Copies announced by different machines are each listed; a
+device id without a pinned profile workspace resolves to the copy on your own
+Only me machine, and otherwise is not found until a session pins the copy's
+workspace.
+
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
-inventory must name the exact live port. `stateGeneration` is created once per
-extension worker lifetime and reused by every native reconnect in it; Chrome
-keeps the tab ids, pages and debugger attachments that the worker owns for
-exactly that long. The agent reports `stateGeneration` as the profile's
+inventory must name the exact live port. `stateGeneration` names the
+extension's live state: the tab ids, pages and the extension's debugger
+attachments. Chrome keeps those while it stops and restarts the extension's
+background worker, which it does whenever it likes; it drops the attachments
+when the extension reloads or updates, and everything when Chrome restarts.
+The extension keeps `stateGeneration` in `chrome.storage.session`, which lives
+exactly as long, together with the tabs it has attached. A new worker reads
+them, probes each recorded attachment with a debugger command that changes
+nothing, carries on with the ones that answer, and only then reports the same
+`stateGeneration`. The agent reports `stateGeneration` as the profile's
 inventory `connectionGeneration` (the placement instance above), so a
-native-host exit, an agent restart or an agent update reconnects in place and
-the profile's sessions stay live; if the agent restarted, the next action
-re-creates the controller session. A restarted worker, a reloaded or updated
-extension, or a restarted Chrome reports a new `stateGeneration` and ends the
-sessions as above. Extensions that do not send `stateGeneration` keep the
-per-port behavior, and the agent's update gate waits while one of them backs a
-live attached controller, because restarting would end its sessions. A
-quiescent attached session does not otherwise hold back an agent update.
+native-host exit, an agent restart or update, or a restarted extension worker
+reconnects in place and the profile's sessions stay live; if the agent
+restarted, the next action re-creates the controller session. A reloaded or
+updated extension, or a restarted Chrome, starts a new `stateGeneration` and
+ends the sessions as above. Extensions that do not send `stateGeneration`, or
+that keep it per worker (older versions), keep that narrower behavior, and the
+agent's update gate waits while one without it backs a live attached
+controller, because restarting would end its sessions. A quiescent attached
+session does not otherwise hold back an agent update.
+
+The debugger event buffer does not survive a worker restart, and its sequence
+numbers start again. Every `debugger.poll` result names the worker's event
+`stream`; browserd treats a different stream as lost history and
+resynchronizes, re-attaching each tab when it is next used. Commands that were
+in flight on the old worker fail on the closed native port, so their outcome
+is unknown and nothing replays them; once a new stream appears, a tab whose
+input was in flight is usable again. Each time a worker carries on an earlier
+worker's state, the extension adds `{at, attachmentsKept, attachmentsEnded,
+tabsClosed}` to `stateResumptions` in `chrome.storage.local` (the latest 20).
 
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
@@ -566,6 +625,23 @@ index is built through the sandbox before the first model call: a typed
 offline/timeout control error during that discovery degrades to a short
 "repository skills unavailable" instruction for that run instead of failing the
 turn, and the next run discovers again.
+
+### Bundled rg and jq
+
+Release agents embed SHA-256-pinned builds of ripgrep and jq for their own
+platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x64 and
+arm64): the official release builds, except on Linux, where jq is a static musl
+build of the official jq source, so it runs on any Linux distribution. At start
+the agent writes them to `/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+(so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
+and appends that directory to the end of every command's PATH, including the
+PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
+Nothing is downloaded. A tool file that was changed is replaced with the
+agent's own copy. Generations no agent has started with for 14 days are
+removed by the agent holding the instance lock. Exceptions: a command that starts a login shell may have
+PATH reset by the machine's profile, other architectures get no tools, and
+an agent built without them (development builds, or older releases until
+they update) leaves PATH unchanged.
 
 ## Create a session on a machine
 
@@ -723,23 +799,25 @@ as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
 Workspace- and organization-scoped machines run any schedule. A user-scoped
-(personal) machine runs only an **Only me** schedule owned by the machine's
-owner:
+(personal) machine runs only schedules owned by the machine's owner, **Only
+me** or **Workspace** alike, because a schedule runs as its owner:
 
-- Saving is the consent. Create and update accept a personal machine only when
-  the final audience is Only me; widening such a schedule to Workspace, or
-  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
-  personal machine to its owner alone, so nobody else can select it.
+- Picking the machine on the schedule is the consent. The scoped sandbox
+  lookup returns a personal machine to its owner alone, so nobody else can
+  select it, and only a schedule's owner changes or runs it. A schedule never
+  uses a personal machine by following the workspace default (422).
 - Each run attaches the machine through the owner's scoped authorization and
   then issues a `session`-mode `connected_machine.use` grant (context
-  `user_private`) for exactly that run's chat. No standing `always` grant is
-  created, so the owner's other chats keep asking.
+  `user_private` or `workspace_shared`, like the run's chat) for exactly that
+  run's chat. No standing `always` grant is created.
 - Every attempt goes through the same database admission as an interactive
   turn (`admit_session_attempt_personal_machine`): the run's causal human must
   be the machine's owner and still an active member with access to the
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+- Other people can see a Workspace schedule's runs and write in its chats.
+  Their messages wait for the owner, as in any chat on a personal machine.
 
 In a chat on a personal machine, only the owner's own messages start work. A
 message somebody else sends there (through the API, an agent acting for them,
@@ -951,20 +1029,100 @@ the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
-valid higher OOM-score bias over the live supervisor: neutral `0` when the
-supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+unprivileged user manager may clamp it. A pre-exec hook gives commands a higher
+OOM-score bias than the live supervisor: neutral `0` when the supervisor is
+negative, otherwise the kernel maximum `1000`. Raising a score needs no
+privilege, while lowering one needs `CAP_SYS_RESOURCE`, which containers lack by
+default; the supervisor then stays at `0`, and only the maximum bias (the whole
+memory limit added to every command process's score) keeps a small command
+process ahead of the supervisor's mostly file-backed resident memory. A bias of
+`+1` was worth about a thousandth of the limit, less than the supervisor itself.
+A human terminal's shell gets the same bias. If the supervisor is already at
 the kernel maximum, no relative preference is representable and both remain 1000.
+On a machine where a user service manager clamps the supervisor to `0`, this
+also makes the agent's commands the first victims of a machine-wide OOM, ahead
+of the person's other processes; that is deliberate, since a killed command
+fails visibly while a killed supervisor takes the machine offline.
+
+A foreground `opengeni-agent run` on Linux (a container, a CI job, a terminal)
+has no service manager to start it again, so it runs as a small keeper process
+whose child is the real agent. When the agent is killed (`SIGKILL`, as from the
+out-of-memory killer) or crashes, the keeper starts it again after a back-off of
+1 s doubling to 30 s, reset after a minute of healthy running; the new agent
+reconnects with a new connection instance, and the commands of the agent that
+died ended with it. Stop signals (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`) are
+passed on and stop it for good, `SIGUSR1` and `SIGUSR2` are passed on, an agent
+that exits by itself is not started again and the keeper exits with its status,
+and a killed keeper takes the agent with it. A signal ignored at start (`nohup`)
+stays ignored. The agent that starts again logs why in `agent.log`. The generated
+services, the desktop app and compute sandboxes already start the agent again and
+run it without a keeper; an in-place update keeps the agent's process, and so its
+keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
+runs the agent itself without a keeper, as before.
+
+The generated services start a stopped agent again however often it stops, for
+example when a command kills it. The systemd unit has no start limit
+(`StartLimitIntervalSec=0`); units from agent 0.1.150 and older allowed five
+starts a minute and then left the agent stopped until someone started it by hand.
+On systemd 254 and newer it restarts after 2 s, backing off to 30 s over five
+restarts (`RestartSteps=`, `RestartMaxDelaySec=`); systemd resets that count only
+when the service is started by hand, `systemctl reset-failed` runs or the machine
+boots, so after several stops the agent comes back within 30 s. Older systemd
+restarts after a fixed 5 s. The macOS LaunchAgent (`KeepAlive`) has no start limit
+either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
+task's one-minute repetition starts an exited agent within a minute, with no limit;
+a process that keeps the agent's hidden console host open after the agent exits
+delays that start until it ends, because the task skips a tick while its previous
+run is still going. Commands run on hidden consoles of their own, so they do not
+hold it open.
+
+A command cannot stop the agent by signalling a process group. Each command runs
+in a process group of its own (on Windows a job object and a hidden console of its
+own), so `kill 0`, `kill -TERM -<its group>` or a console control event to its own
+console reach only that command and what it started, never the agent or other
+commands. `kill -1` in a command signals every process of the user, the agent
+included. On Linux the agent therefore keeps running when one of its own
+commands sends it `SIGTERM` or `SIGINT`. It tells a command from other senders
+by the sending process: a descendant of the agent, or a process in the process
+group, session or operation cgroup of one of its commands. A short-lived sender
+(`/bin/kill`, `sh -c 'kill …'`) has often exited before the agent can look it
+up; while a command runs (an open Opengeni terminal or a background command
+counts as running), or within 5 seconds after one ended, such a sender counts as
+that command. Nothing is blocked: the command still receives every
+signal, and a stop signal from anywhere else (the service manager, the desktop
+app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
+commands) stops the agent as before. Because of that rule, a `/bin/kill` or
+`pkill` from outside, sent while a command runs, may be ignored; the ways just
+listed always work. A foreground agent's keeper also starts the agent again
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in
+an Opengeni terminal counts as a command, including a `kill` typed there by a
+person.
+
+Other signals still end the agent, and it is started again. A foreground
+agent's keeper ignores stop signals from the agent's commands, passes on one
+whose sender already exited (under that sender's name, so the agent decides),
+and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`).
+A `--system` service, the macOS LaunchAgent and a compute sandbox's guest init
+restart the agent after any signal, `SIGKILL` (`kill -9 -1`) included; a
+foreground agent's keeper dies with it then. Some cases still leave the agent
+offline after `kill -1`: under a systemd user service it also stops the user's
+own service manager, which stops its services until the user logs in again, and
+an agent hosted by the desktop app ends with the app.
+
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
 must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
-installer never resets them with runtime `set-property`. A verified self-update
-migrates only the byte-identical old generated unit after proving its live MainPID,
-canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
-left untouched with an actionable diagnostic. The default operation leaf has no
+installer never resets them with runtime `set-property`. The agent never rewrites
+a custom unit: at startup it warns when the live unit is custom or systemd did not
+place it in the `supervisor` subgroup, and `service install --restart` adopts the
+generated unit. The one rewrite it makes on its own is of an unchanged unit an
+earlier release generated (agent 0.1.150 and older, marker `v3` or
+`v3-compatible`): it replaces it with the current unit of the same cgroup shape and
+reloads systemd, which applies the new restart policy without restarting the
+agent. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1162,6 +1320,29 @@ to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
 offline. See [Transactional file edits](#transactional-file-edits).
 
+### Machines whose shell or working directory was removed
+
+The agent starts every shell command, and each exec's containment anchor,
+through `/bin/sh`. When `/bin/sh` is missing or not executable (a command ran
+`mv /bin/sh …`), agent 0.1.153 and later start the first of `/bin/dash`,
+`/usr/bin/dash`, `/bin/bash` or `/usr/bin/bash` instead, and, running as root
+on Linux, point `/bin/sh` back at it with a symlink (only an empty path or a
+symlink is replaced, never a file or directory). With no shell at all, the start
+fails with the note "the shell /bin/sh is missing and no dash or bash was found",
+which Opengeni reports as a machine that cannot start programs. A missing
+workspace root or home directory used as a command's working directory is
+created again and the command runs. The workspace root gets mode 0755 and stays
+owned by the agent; a home gets mode 0700 inside an existing parent and belongs
+to its user. On Linux and macOS the folder is made under a private name in the
+same parent, given its owner and mode, and only then moved into place, so no
+command starts in a half-made folder; when a home cannot be given to its user,
+it is removed again and that command fails as not found. Placeholder homes such
+as `/nonexistent` and `/var/empty` are never created, and any other missing
+working directory is still a not-found error.
+When the agent uses a fallback shell, it passes the shell's path to commands as
+`OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
+`/bin/sh`.
+
 ### Streaming exec (op-stream)
 
 Connected Machine exec requires a runner that advertises the `op_stream`
@@ -1275,6 +1456,47 @@ and re-attaches to the runner's authoritative retention log; it never limits or
 truncates command output. Completed stdout/stderr are assembled once for the
 tool result, and source frame references are then released.
 
+### Git review fanout and command-backlog recovery
+
+A large Git review can exceed the combined capture size or require per-file
+fallback when patch sections and metadata do not match. The fallback must read
+all selected files under the existing per-file content contract, with bounded
+physical concurrency. `SandboxChannelAService` admits four file reads per
+fallback, preserves result order, and stops admitting queued reads on failure
+or cancellation while joining those already dispatched. Turn-end capture passes
+its owner/deadline AbortSignal into Git read admission: superseding the capture
+stops queued files even when the provider itself keeps answering successfully.
+Already-started file reads retain their chunk collection and exact spool cleanup. This is scheduling,
+not a limit on the agent's work or the number of files reviewed. Eagerly
+constructing one command promise per changed file can flood the runner and
+command ledger before cancellation takes effect. This inherited bug can be
+activated by a large diff; a shared command preview is not evidence of a retry
+loop. Inspect full command contents and exact operation identities.
+
+Terminal command settlement uses the lightweight write-admission control
+projection under the canonical workspace/session locks. It must not compute
+UI settlement summaries or recount the stopping backlog there: doing that once
+per command makes recovery quadratic and extends the locks that other requests
+need. Pause, ancestor pause and workspace pause still govern completion wakes.
+
+When investigating congestion, correlate stopping-command count and oldest age,
+settlement throughput, PostgreSQL lock waits and API readiness. Group commands
+by their exact session, launch attempt and provider connection; distinguish a
+large set of distinct Git reads from replay of one operation. A growing backlog
+with falling settlement throughput needs investigation even when node CPU and
+memory have spare capacity.
+
+Contain the source with the normal session Pause action before draining its
+backlog. Reconcile against the recorded provider/enrollment, connection and op
+identity through the normal command lifecycle. Settle only with exact terminal
+exit or typed loss proof; preserve output-custody requirements and audit events.
+A temporary disconnect, timeout or expired claim is not process-death proof.
+Do not bulk-edit commands to `exited`/`lost`, fabricate exit codes, query a
+replacement connection as proof for its predecessor, or delete the ledger.
+Confirm that the backlog and lock waits fall and normal API reads recover before
+resuming the workload. Restarting API replicas alone does not remove either the
+queued commands or their settlement cost.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
@@ -1331,12 +1553,34 @@ every enrollment and per-machine write):
   keeps needing `enrollments:manage`, so a read-only delegation never connects
   a machine; keys, services and agents acting as themselves are refused.
 - **This workspace**: `enrollments:manage`.
-- **Organization**: `enrollments:manage` and `account:admin`.
+- **Organization**: `enrollments:manage`, and the caller is the organization's
+  owner or an admin signed in as themselves (or a credential holding
+  `account:admin`). Being an admin of one organization grants nothing in another.
 
 The same rule covers declining a pairing code and, for an existing machine,
 removal, command policy, screen control, macOS privacy panes and agent updates.
 `list_scoped_enrollments` returns an Only me machine only to its owner, so a
 teammate reaches only their own. Refusals are plain sentences.
+
+An organization's owners and admins can also turn off **Members connect their
+own machines** (Organization settings > Security & data > Machines;
+`membersConnectOwnMachines` on `/v1/organizations/:organizationId/privacy-settings`,
+column `organization_privacy_preferences.members_connect_own_machines`,
+migration 1148; on by default). Off, only the organization's owners and admins
+connect a new machine of their own: an Only me machine anywhere, or any machine
+in a Personal workspace, whose This workspace is still only its owner.
+Workspace permissions don't lift it, since a Personal workspace's owner manages
+machines there and an Only me machine follows its owner into every workspace.
+Approving a pairing code and minting a connect command check it before anything
+is created (`requireOwnMachineConnectAllowed`); declining a code never does.
+Shared-workspace and organization machines keep the rule above. It is
+acquisition policy only: machines already connected keep working and stay
+their owners' to change or remove, and a command minted before the change
+works until it expires (an hour). Connecting such a machine again is a new
+connection. `GET /v1/workspaces/:workspaceId/machines` reports
+`canConnectOwnMachine` for a person, so the connect dialog disables Only me
+(and This workspace in a Personal workspace), skips the desktop app's
+this-computer path, and mints nothing when nothing is left.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1400,10 +1644,7 @@ private to the user, and ends the agent's process tree only if it does not stop
 within 45 seconds. The agent stays paused across sign-ins until `start`.
 `status` prints `opengeni-agent background task: running`, `paused`, `stopped`
 or `not installed`, read from the agent's own instance lock. The agent does not
-run while nobody is signed in to Windows. Earlier releases
-registered an `OpengeniAgent` Windows Service that could never start; `start`
-deletes it when allowed, and otherwise prints the one elevated command that
-removes it.
+run while nobody is signed in to Windows.
 
 The agent also never treats a filesystem root or the Windows system directory
 as its workspace, so an older service definition needs no manual step: when
@@ -1490,7 +1731,9 @@ renewal itself cannot change ownership, scope or screen-control consent. Who can
 use a machine changes in place through **Who can use it?** (see
 [Change who can use a machine](#change-who-can-use-a-machine)), and screen
 control through its own request below; neither needs a reconnect. Updated
-credentials load into the existing process, preserving host operations.
+credentials load into the existing process. Renewal of the same credential family
+updates login/relay tokens without replacing its live NATS connections; changes
+to authority or other connection settings still reconcile through link replacement.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
@@ -1611,6 +1854,12 @@ Two refusals are registered today:
   attempt get no card. Only these API tools emit it today; the worker poster
   passes no requested machine, so an interaction tool that emitted it would get
   a machine card that names no machine.
+  `machine_access_required` is also a plain refusal: the move or `run_on` got
+  past admission, but the check right before the machine is used found this
+  turn's approval used up, revoked or expired. Its reason starts with the same
+  "Machine access needed" sentence a failed turn shows
+  (`machineAccessNeededMessage`, `packages/contracts`), and the chat stays
+  where it was.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`
@@ -1661,7 +1910,9 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   Mobile browsers direct the person to the computer they want to connect;
 - inside the desktop app, the same dialog is **Connect a machine**: for the
   computer the app runs on it shows the **Computer use** switch (off, turning
-  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  on, on, waiting on a macOS permission, or a problem with one fix; turning on
+  that hasn't connected after a minute becomes a problem saying why, with
+  **Try again**), and never
   offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
   command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
@@ -1706,7 +1957,7 @@ machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
 (the scope rule above: the owner for an Only me machine, `enrollments:manage`
-for a workspace machine, also `account:admin` for organization machines; no body)
+for a workspace machine, also the organization's owner or an admin for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -1723,9 +1974,8 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `agent_update_required`: the agent predates the `credential_renew`
   capability. Update it, and the successor's Hello applies it.
 - `renewal_failed`: retry the request.
-- `reconnect_required`: the machine's connection predates in-place renewal
-  (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on. The chat card's **Connect again** opens the
+- `reconnect_required`: the machine's saved connection can't be renewed in
+  place. Run the connect command on it again with screen control on. The chat card's **Connect again** opens the
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
@@ -1766,14 +2016,20 @@ place. The machine keeps its enrollment id, sandbox id, credentials and live
 connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
-**Who can use it?**. Organization machines are shared with the whole
-organization and cannot be changed here.
+**Who can use it?**. Organization machines belong to the organization and
+cannot be changed here. The organization's owner or an admin chooses which
+workspaces they work in instead (see
+[Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 
 - Narrowing to **Only me** is done by the person who will own the machine, or by
   a workspace admin who picks that owner. The owner must be an active member who
   can use the workspace.
 - Widening to **This workspace** needs `workspace:admin`, and is done by the
-  machine's owner, so nobody exposes another person's Only me machine.
+  machine's owner, so nobody exposes another person's Only me machine. In a
+  Personal workspace, where This workspace is still only its owner, the verified
+  owner acting as themselves may widen it without `workspace:admin` (the same
+  check as the workspace's other settings). Making a machine Only me for
+  someone else still needs `workspace:admin`.
 - Both need `enrollments:manage`. An agent cannot change it.
 
 The dialog shows what one confirmation will do, as counts in plain sentences
@@ -1794,9 +2050,9 @@ Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
   cancelled (`authority_changed`): turns in chats that move off, and turns
   someone other than the owner started in the owner's shared chats. The agent's
   commands still running in chats that move off are stopped too.
-- **Schedules** that target the machine: the owner's Workspace schedules become
-  Only me schedules when the owner may have Only me schedules, and pause
-  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Schedules** that target the machine: the new owner's schedules keep running
+  with no change, Only me or Workspace, because a schedule runs as its owner.
+  Everyone else's pause.
 - **Notices**: each affected person other than the one switching gets one
   inbox notification saying what moved, paused or stopped, and that they can
   choose another machine to continue.
@@ -1825,8 +2081,9 @@ The API is the same flow:
 - `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
   `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
   `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
-  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
-  machine's `generation`.
+  `pause` or `remove_first`; `make_only_me` and `summary.schedulesMadeOnlyMe`
+  are no longer produced), whether it is `ready`, and the machine's
+  `generation`.
 - `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
   plus `expectedGeneration` applies it and returns the counts and the chats it
   moved off. It answers `409` with `details.reason: "stale"` when the machine
@@ -1839,6 +2096,61 @@ they gave their full access: a session with admin access or a connected agent
 with full access calls the same two routes as them (the `previewMachineAudience`
 and `changeMachineAudience` admin actions). An agent acting as itself, or one
 with less than the person's full access, is refused.
+
+### Choose where an organization machine works
+
+An organization machine works in the organization's workspaces that an
+organization owner or admin picks, like the organization's model keys and connectors:
+every shared workspace, or chosen ones, plus a separate switch for members'
+Personal workspaces. The workspace it was connected from always has it,
+because its rows live there. A machine connected before this keeps working
+everywhere it did: every shared workspace and every Personal workspace.
+
+On the Machines page, an organization machine shows **Available in** with a
+short summary. Organization owners and admins see **Change** next to it, which
+opens the shared **Available in** picker. Taking workspaces away warns that chats and
+schedules there stop using the machine from their next turn. Nothing is moved
+or rebuilt: the machine list, the fleet
+tools, attempt resolution and direct attaches all check where the machine works
+on every call, so a workspace it no longer works in simply stops seeing it.
+
+`PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+sets it (`null` means every shared workspace) and answers `{ reach }`, the same
+shape the machine list reports as `reach` for organization machines
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+`enrollments:manage`, and the caller is the organization's owner or an admin
+signed in as themselves (or a credential holding `account:admin`), the same
+rule as changing the machine. The connecting workspace is dropped
+from the list, since it always has the machine, and any id that is not a shared
+workspace of the organization answers `400` with `details.workspaceIds`. A
+workspace machine or an Only me machine answers `409`: those already work only
+in their workspace, or wherever their owner uses them. As with who can use a
+machine, a person makes this change, directly or through an agent they gave
+their full access. Each change records a `connected_machine.reach.changed`
+audit event with the previous and new reach.
+
+`GET /v1/workspaces/:ws/organization-machines` lists every organization
+machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
+complete }` (`id` is the enrollment), for Organization settings › Shared. It
+needs `enrollments:read` and an organization owner or admin, from a person or
+an agent acting as them; an agent acting as itself gets `403` and sees only
+what works in its workspace. `complete` is always `true`; servers before
+migration 1272 could list only the organization machines that work in this
+workspace and sent `false`.
+
+### Where your own machine works
+
+An **Only me** machine runs its owner's own messages, and only in the
+workspaces where it is on. It starts on in the owner's Personal workspace and
+in the workspace it was connected from. Opening the machine on the Machines
+page shows **Where it works** under **Who can use it?**: every workspace the
+owner belongs to in the organization, with a switch for each. Turning it on
+in a workspace is the owner's standing `always` `connected_machine.use` grant
+there, for private and shared chats; turning it off revokes it, including in
+the Personal workspace. Other people's messages never run on it. The list and
+switches use the same own-resources reach routes as personal logins (see
+`docs/remote-mcp-credentials.md`).
 
 ### Zero-click token (fleet / headless)
 
@@ -1868,8 +2180,12 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
-`scope` chooses who can use the machine: `"workspace"` (the default, shared with
-the workspace) or `"user"` (only the person who minted the token). A personal
+`scope` chooses who can use the machine: `"workspace"` (shared with the
+workspace) or `"user"` (only the person who minted the token). Omitted, it is
+`"workspace"` for callers that may connect workspace machines
+(`enrollments:manage`), keys and services, and `"user"` for a signed-in
+teammate without `enrollments:manage`, who can only connect their own machine.
+A personal
 token can be minted only for a verified person: a signed-in human session, or a
 credential acting as that person (a personal API key, or an organization key or
 organization MCP client acting as them), the same canonical-actor rule as
@@ -1898,7 +2214,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
-    scope: "user", // only me; "workspace" (the default) shares it
+    scope: "user", // only me; "workspace" shares it with the workspace
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );
@@ -2214,9 +2530,29 @@ a few seconds for it. A tab blocked by a dialog its page opened while no agent
 held the browser is left as it is for the person, and the session continues in
 a new tab.
 
-An attached tab's debugger disconnect invalidates its cached target, document,
-frame and element authority without restarting Chrome or changing other tabs.
-A later read can reattach the same surviving tab with fresh fences. Chrome's
+An attached tab's debugger disconnect ends that attachment's commands and
+controls without restarting Chrome or changing other tabs. A later call can
+reattach the same surviving tab: if it still shows the same document (same
+main-frame frame and loader ids), its target, document, frame and element
+authority carry over, so an observation made just before still holds; a new
+document gets fresh fences. Chrome ends debugging of a tab whenever another
+extension adds a frame of its own page (a password manager's inline menu); the
+extension removes such frames. A frame created blank and then loaded with the
+other extension's page, which its address does not show, is removed only when
+it is the one place the tab can hold that page. Chrome's debugging targets
+show other extensions' pages only for the whole browser, not per tab, and
+Chrome does not list every frame of a page to the extension (`webNavigation`
+omits other extensions' pages and some of the page's own, such as a data: page
+a blank frame was pointed at by script). So the frame must be the tab's only
+frame the extension cannot see into, hold no frames of its own, and every
+frame Chrome does list must have run the extension's script; the page must
+add no frame while the extension searches, hold no other extension's page
+found by its address, and Chrome's targets must hold another extension's page.
+Otherwise (the page also holds an error page, say, a data: frame of its own, a
+site the person took the extension's access from, or keeps adding frames) no
+frame is removed, the call fails saying the frame could not be
+removed, and the tab can be debugged again once the menu closes, still holding
+earlier observations of the same document. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never
 silently overridden. Detachment during pending input or other possible effects preserves an unknown
 outcome and blocks automatic reattachment until the profile reconnects. A late

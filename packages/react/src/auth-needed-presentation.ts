@@ -36,6 +36,35 @@ const UNAVAILABLE_REASONS = new Set<AuthNeededItem["reason"]>([
   "resource_scope_unavailable",
 ]);
 
+/** Plain words for access a reviewed connector asks for later (incremental consent). */
+type AdditionalAccessKey =
+  | "messageTimeline.accessDraftAndSendEmail"
+  | "messageTimeline.accessOrganizeMailbox";
+const ADDITIONAL_ACCESS_KEYS: Record<string, AdditionalAccessKey> = {
+  "https://www.googleapis.com/auth/gmail.compose": "messageTimeline.accessDraftAndSendEmail",
+  "https://www.googleapis.com/auth/gmail.modify": "messageTimeline.accessOrganizeMailbox",
+};
+
+/** Service names for connection identities whose domain says nothing to a person. */
+const KNOWN_PROVIDER_NAMES: Record<string, string> = {
+  "gmailmcp.googleapis.com": "Gmail",
+  "drivemcp.googleapis.com": "Google Drive",
+  "calendarmcp.googleapis.com": "Google Calendar",
+};
+
+/**
+ * The connection an agent's capability card asks to reconnect: one of the
+ * person's accounts that stopped working (its provider rejected the saved
+ * sign-in). Undefined for a first connection.
+ */
+export function capabilityReconnectConnectionId(item: AuthNeededItem): string | undefined {
+  return item.capability &&
+    item.connectionId &&
+    (item.reason === "expired" || item.reason === "refresh_failed")
+    ? item.connectionId
+    : undefined;
+}
+
 /**
  * Present one auth notice. `setupUnavailable`: this person cannot set an
  * agent's request up from here, so say so instead of offering a review.
@@ -55,28 +84,54 @@ export function authNeededPresentation(
   const unavailable = UNAVAILABLE_REASONS.has(item.reason);
   const missing = item.reason === "missing_connection";
   // An agent's request to set something up is a first connection: never
-  // "reconnect", which only fits an account that was connected before.
-  const request = recommendation ?? item.setupRequest ?? null;
-  const actionLabel = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connect")
-      : t("messageTimeline.review")
-    : missing || request
-      ? t("messageTimeline.connect")
-      : t("messageTimeline.reconnect");
-  const title = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connectProvider", { provider })
-      : recommendation.action === "add_credentials"
+  // "reconnect", which only fits an account that was connected before; unless
+  // the agent asked to reconnect one exact account that stopped working.
+  const reconnect = capabilityReconnectConnectionId(item) !== undefined;
+  const request = reconnect ? null : (recommendation ?? item.setupRequest ?? null);
+  // A connected account that needs more access is asked to allow it, not to
+  // "reconnect": nothing lapsed.
+  const moreAccess = !request && item.reason === "insufficient_scope" && !!item.connectionId;
+  const accessKeys = moreAccess
+    ? [...new Set(item.scopes.flatMap((scope) => ADDITIONAL_ACCESS_KEYS[scope] ?? []))]
+    : [];
+  // A plugin is installed for the workspace, not connected to an account.
+  const plugin = recommendation?.kind === "plugin";
+  const actionLabel = reconnect
+    ? t("messageTimeline.reconnect")
+    : recommendation
+      ? recommendation.action === "connect"
+        ? t("messageTimeline.connect")
+        : t("messageTimeline.review")
+      : missing || request
+        ? t("messageTimeline.connect")
+        : moreAccess
+          ? t("messageTimeline.allowAccess")
+          : t("messageTimeline.reconnect");
+  const title = reconnect
+    ? `${actionLabel} ${provider}`
+    : recommendation
+      ? plugin
+        ? t("messageTimeline.installProvider", { provider })
+        : recommendation.action === "connect"
+          ? t("messageTimeline.connectProvider", { provider })
+          : recommendation.action === "add_credentials"
+            ? t("messageTimeline.setUpProvider", { provider })
+            : t("messageTimeline.enableProvider", { provider })
+      : item.setupRequest
         ? t("messageTimeline.setUpProvider", { provider })
-        : t("messageTimeline.enableProvider", { provider })
-    : item.setupRequest
-      ? t("messageTimeline.setUpProvider", { provider })
-      : unavailable
-        ? t("messageTimeline.providerToolsUnavailable", { provider })
-        : `${actionLabel} ${provider}`;
+        : unavailable
+          ? t("messageTimeline.providerToolsUnavailable", { provider })
+          : moreAccess
+            ? t("messageTimeline.giveProviderMoreAccess", { provider })
+            : `${actionLabel} ${provider}`;
   const reasonLine =
-    recommendation?.rationale ?? item.setupRequest?.rationale ?? authReasonLine(t, item.reason);
+    recommendation?.rationale ??
+    item.setupRequest?.rationale ??
+    (accessKeys.length > 0
+      ? t("messageTimeline.itNeedsPermissionTo", {
+          access: accessKeys.map((key) => t(key)).join(t("messageTimeline.accessJoin")),
+        })
+      : authReasonLine(t, item.reason));
   const hostManaged = item.authoritySource === "host";
   const firstTime = missing || !!request;
   return {
@@ -96,13 +151,20 @@ export function authNeededPresentation(
     footnote: unavailable
       ? null
       : request && options.setupUnavailable
-        ? t("messageTimeline.setupUnavailableHere", { provider })
+        ? t(
+            plugin
+              ? "messageTimeline.pluginSetupUnavailableHere"
+              : "messageTimeline.setupUnavailableHere",
+            { provider },
+          )
         : request
           ? t("messageTimeline.noAccessHasBeenGranted")
           : t(
               missing
                 ? "messageTimeline.toolCallNotReplayedAfterConnecting"
-                : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+                : moreAccess
+                  ? "messageTimeline.agentCarriesOnAfterAllowing"
+                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
             ),
     unavailable,
     missing: firstTime,
@@ -127,6 +189,8 @@ export function providerLabel(t: OpenGeniText, domain: string): string {
       .replace(/^https?:\/\//, "")
       .replace(/^www\./, "")
       .split("/")[0] ?? "";
+  const known = KNOWN_PROVIDER_NAMES[host.toLowerCase()];
+  if (known) return known;
   const first = host.split(".")[0] ?? host;
   if (!first) {
     return t("messageTimeline.thisService");

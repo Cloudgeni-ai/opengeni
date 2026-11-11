@@ -1,5 +1,326 @@
 # @opengeni/codex
 
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/network@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/network@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [913e2b4]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/network@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- a0b081b: A session switched to another Responses provider (for example from a Codex model to an xAI model, including a turn that was waiting for capacity) now continues instead of failing with "Could not decrypt the provided encrypted_content". Encrypted reasoning can be read only by the provider that issued it, so each such reasoning item now records its issuing provider, and a request to any other provider carries the readable summary in its place ("[Historical reasoning from another model]", as Claude and Chat models already got) instead of the ciphertext. The issuing provider still receives exactly the same request bytes as before. Reasoning stored before this change has no record; if a provider refuses it, that request is sent once more with the summaries, and later requests to that provider send the summaries directly. `classifyEncryptedArtifactRejection` recognizes that refusal from any provider.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/network@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- 232e713: Subscription voice no longer refuses to start when the Codex realtime remote configuration advertises a protocol version other than V3. That version is the desktop client's preference, not a requirement of the call endpoint, so the call now uses the pinned V3 model and architecture (as the Codex CLI does). A refused realtime negotiation now writes one server log line with the provider status, the failing stage, identifier-shaped provider error fields, and the call parameters with their source; the client still gets only the safe message.
+- 2a27f11: Subscription voice calls are created at `/wham/realtime/calls`, with a per-call voice session id in the `Voice-Session-Id` header and `session.voice_session_id`, as the official Codex desktop app does. The fallback model used when the remote configuration is unavailable is now `gpt-live-1.1-codex`.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b5201d5]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/network@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/network@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- feaecf8: Send never does nothing without saying why. The new chat and open chat composers share one Send guard; whenever it blocks Send and no other notice already explains it, one short line under the composer says why, with at most one action. A model choice whose reasoning level or speed the account can't run (for example a saved Ultrafast speed after connecting a ChatGPT Free account, which offers GPT-6 Luna only) shows "This model can't run with the selected reasoning level or speed." with "Use supported settings". When an unavailable model is replaced automatically, the speed now follows the replacement. A Codex refusal of a model the ChatGPT account can't use ("not supported when using Codex with a ChatGPT account") is now treated as a plan refusal: that account skips the model for a while and the chat shows the plan error. Connecting a Codex account now lists the Opengeni models it offers, and warns when it offers none (`CodexConnectPoll.models`). A new chat the server refuses to start now keeps the reason under the composer until the message, model, reasoning level or speed changes, instead of only a passing toast, and the reason is specific (the model policy, an unavailable model, or a speed the model can't run) rather than "Check your input and try again". Session create refusals keep a typed `details.code` for an unavailable model and are logged with their reason and a message fingerprint instead of "unclassified". A device-code sign-in that has waited a minute now shows "Still waiting?" on every Codex and SuperGrok connect surface, not only onboarding; for ChatGPT it names the "Enable device code sign-in for Codex" setting under Settings → Security and login, which ChatGPT checks on its own page without telling Opengeni. A refused new chat words the refusals a person can hit instead of showing developer text: a model that isn't available to them (including "model is not selectable", now typed `details.code: "model_unavailable"`), and the workspace model policy (new `details.code: "model_policy"` with `reason` "credits", "provider" or "model", from the new `ModelPolicyRefusedError` in `@opengeni/contracts`). A refusal that arrives after the composer changed (more typing, or a voice link that set the model) falls back to the toast, so it is never silent, and a model policy refusal no longer offers a retry that would be refused again: every API route now types it as a nonretryable 422 with `details.code: "model_policy"`, including Send in an open chat.
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/network@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/network@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/network@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/network@6.5.0
+
+## 6.4.0
+
+### Patch Changes
+
+- Updated dependencies [1f918a4]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/network@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [c35704f]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/network@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/network@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/network@6.1.0
+
+## 6.0.2
+
+### Patch Changes
+
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/network@6.0.0
+
+## 5.5.1
+
+### Patch Changes
+
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/network@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

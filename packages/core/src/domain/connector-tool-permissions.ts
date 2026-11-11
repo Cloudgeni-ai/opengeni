@@ -2,6 +2,10 @@ import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
 import {
+  personalWorkspaceExtensionApiIntegrations,
+  personalWorkspaceExtensionMcpServers,
+} from "./personal-workspace-connectors";
+import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
   assertMcpToolListWithinBounds,
@@ -130,13 +134,38 @@ export function connectorToolPermissionReference(
 
 async function resolveTarget(input: Input) {
   if (input.capabilityId.startsWith("api:")) {
-    const integrations = (
-      await listInstalledApiIntegrations(
-        input.db,
-        input.workspaceId,
-        input.personalOwnerVerified ? input.grant.subjectId : undefined,
-      )
-    ).filter((integration) => integration.capabilityId === input.capabilityId);
+    const own = await listInstalledApiIntegrations(
+      input.db,
+      input.workspaceId,
+      input.personalOwnerVerified ? input.grant.subjectId : undefined,
+    );
+    // An API Integration a Personal workspace carries for its verified owner
+    // is configured here like its own, with the same derived instance the
+    // session runs with. Its account stays in its origin workspace.
+    const carried = input.personalOwnerVerified
+      ? await personalWorkspaceExtensionApiIntegrations(input.db, {
+          workspaceId: input.workspaceId,
+          accountId: input.grant.accountId,
+          subjectId: input.grant.subjectId,
+          ownIntegrations: own,
+          takenServerIds: async () => [
+            ...input.settings.mcpServers.map((server) => server.id),
+            ...(await listEnabledMcpCapabilityServers(input.db, input.workspaceId)).map(
+              (server) => server.id,
+            ),
+            ...own.map((integration) => integration.serverId),
+          ],
+        })
+      : [];
+    const originWorkspaceIdByServerId = new Map(
+      carried.map((integration) => [
+        integration.serverId,
+        integration.personalExtension.originWorkspaceId,
+      ]),
+    );
+    const integrations = [...own, ...carried].filter(
+      (integration) => integration.capabilityId === input.capabilityId,
+    );
     const accountId = (integration: (typeof integrations)[number]) =>
       integration.connectionRef?.connectionId ??
       sessionMcpApprovalConnectionId(integration.serverId, integration.baseUrl);
@@ -155,7 +184,7 @@ async function resolveTarget(input: Input) {
     const connection = integration.connectionRef?.connectionId
       ? await getConnectionMetadata(
           input.db,
-          input.workspaceId,
+          originWorkspaceIdByServerId.get(integration.serverId) ?? input.workspaceId,
           integration.connectionRef.connectionId,
           input.grant.subjectId,
         )
@@ -195,7 +224,14 @@ async function resolveTarget(input: Input) {
         ),
     };
   }
-  const catalog = await buildCapabilityCatalog(input);
+  const catalog = await buildCapabilityCatalog({
+    db: input.db,
+    workspaceId: input.workspaceId,
+    settings: input.settings,
+    accountId: input.grant.accountId,
+    // Only the verified owner sees connectors carried into their Personal workspace.
+    subjectId: input.personalOwnerVerified ? input.grant.subjectId : null,
+  });
   const item = catalog.items.find((candidate) => candidate.id === input.capabilityId);
   if (
     !item ||
@@ -207,7 +243,18 @@ async function resolveTarget(input: Input) {
     throw new HTTPException(404, { message: "Connected MCP connector not found" });
   }
   const enabled = await listEnabledMcpCapabilityServers(input.db, input.workspaceId);
-  const settings = settingsWithMcpCapabilityServers(input.settings, enabled);
+  // A connector a Personal workspace carries for its owner is configured here
+  // like its own, with the same derived definition the session runs with.
+  const carried =
+    input.personalOwnerVerified && !enabled.some((server) => server.id === item.runtime.mcpServerId)
+      ? await personalWorkspaceExtensionMcpServers(input.db, {
+          workspaceId: input.workspaceId,
+          accountId: input.grant.accountId,
+          subjectId: input.grant.subjectId,
+          ownServers: enabled,
+        })
+      : [];
+  const settings = settingsWithMcpCapabilityServers(input.settings, [...enabled, ...carried]);
   const server = settings.mcpServers.find((candidate) => candidate.id === item.runtime.mcpServerId);
   if (!server || server.url !== item.endpointUrl)
     throw new HTTPException(409, { message: "Connector configuration is unavailable" });
@@ -393,15 +440,16 @@ export async function getConnectorToolPermissions(
   input: Input,
 ): Promise<ConnectorToolPermissionsResponse> {
   const target = await resolveTarget(input);
+  const policyWorkspaceId = connectorToolPolicyWorkspaceId(input, target.connection);
   const policies = await listConnectorToolPermissionPolicies(input.db, {
     accountId: input.grant.accountId,
-    workspaceId: input.workspaceId,
+    workspaceId: policyWorkspaceId,
     connectionId: target.connectionId,
   });
   const changedTools = new Set(
     await listChangedConnectorToolPermissions(input.db, {
       accountId: input.grant.accountId,
-      workspaceId: input.workspaceId,
+      workspaceId: policyWorkspaceId,
       connectionId: target.connectionId,
       serverId: target.server.id,
     }),
@@ -459,6 +507,19 @@ export async function getConnectorToolPermissions(
   };
 }
 
+/**
+ * Where a login's tool choices are kept. A personal login's choices belong to
+ * the login, so they live in the workspace it was connected from and follow
+ * it to every workspace where its owner uses it. A workspace login's, or a
+ * credential-free server's, belong to this workspace.
+ */
+function connectorToolPolicyWorkspaceId(
+  input: Pick<Input, "workspaceId">,
+  connection: { workspaceId: string; subjectId: string | null } | null,
+): string {
+  return connection?.subjectId ? connection.workspaceId : input.workspaceId;
+}
+
 function canManageConnectorPermissions(grant: AccessGrant): boolean {
   return (
     hasPermission(grant.permissions, "capabilities:manage") &&
@@ -494,7 +555,7 @@ export async function updateConnectorToolPermissions(
   try {
     await updateConnectorToolPermissionPolicies(input.db, {
       accountId: input.grant.accountId,
-      workspaceId: input.workspaceId,
+      workspaceId: connectorToolPolicyWorkspaceId(input, target.connection),
       subjectId: input.grant.subjectId,
       connectionId: target.connectionId,
       serverId: target.server.id,

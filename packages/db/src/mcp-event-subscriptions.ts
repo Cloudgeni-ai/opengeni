@@ -1,3 +1,4 @@
+import type { BillingOrigin } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import { automationsListenTo } from "./event-trigger-listening";
@@ -18,6 +19,12 @@ type SubscriptionRow = typeof schema.mcpEventSubscriptions.$inferSelect;
 
 export type McpEventSubscriptionMode = "poll" | "webhook";
 
+/**
+ * Why a subscription polls: the type (or this deployment) offered no webhook
+ * delivery when last checked, or a webhook subscription was tried and failed.
+ */
+export type McpEventSubscriptionPollReason = "not_offered" | "callback_failed";
+
 export type McpEventSubscriptionRecord = {
   id: string;
   accountId: string;
@@ -27,6 +34,9 @@ export type McpEventSubscriptionRecord = {
   eventName: string;
   arguments: Record<string, unknown>;
   mode: McpEventSubscriptionMode | null;
+  /** Null when it does not poll, or when an older release moved it to polling. */
+  pollReason: McpEventSubscriptionPollReason | null;
+  pollReasonAt: Date | null;
   cursor: string | null;
   gapPending: boolean;
   routeId: string | null;
@@ -52,6 +62,8 @@ function mapSubscription(row: SubscriptionRow): McpEventSubscriptionRecord {
     eventName: row.eventName,
     arguments: row.arguments,
     mode: (row.mode as McpEventSubscriptionMode | null) ?? null,
+    pollReason: (row.pollReason as McpEventSubscriptionPollReason | null) ?? null,
+    pollReasonAt: row.pollReasonAt,
     cursor: row.cursor,
     gapPending: row.gapPending,
     routeId: row.routeId,
@@ -125,6 +137,8 @@ export async function claimMcpEventSubscription(
 export type McpEventSubscriptionStepResult = {
   /** Undefined keeps the stored value. */
   mode?: McpEventSubscriptionMode;
+  /** Why it polls and since when; null clears both. Undefined keeps the stored value. */
+  pollReason?: { reason: McpEventSubscriptionPollReason; since: Date } | null;
   cursor?: string | null;
   gapPending?: boolean;
   serverSubscriptionId?: string | null;
@@ -146,6 +160,12 @@ export async function finishMcpEventSubscriptionStep(
       .update(schema.mcpEventSubscriptions)
       .set({
         ...(result.mode !== undefined ? { mode: result.mode } : {}),
+        ...(result.pollReason !== undefined
+          ? {
+              pollReason: result.pollReason?.reason ?? null,
+              pollReasonAt: result.pollReason?.since ?? null,
+            }
+          : {}),
         ...(result.cursor !== undefined ? { cursor: result.cursor } : {}),
         ...(result.gapPending !== undefined ? { gapPending: result.gapPending } : {}),
         ...(result.serverSubscriptionId !== undefined
@@ -242,6 +262,10 @@ export async function ensureMcpEventSubscriptionWebhook(
         })
         .returning({ routeId: schema.eventIngressRoutes.routeId });
       if (!route) throw new Error("MCP event webhook route was not created");
+      // Webhook mode before the subscribe call, so the server id its
+      // verification POST carries can be stored. A polling subscription keeps
+      // its poll reason until the subscription succeeds, and a failed attempt
+      // returns it to polling.
       await tx
         .update(schema.mcpEventSubscriptions)
         .set({
@@ -256,12 +280,17 @@ export async function ensureMcpEventSubscriptionWebhook(
   );
 }
 
-/** Leave webhook mode: drop the route and secret so the subscription polls instead. */
+/**
+ * Leave webhook mode: drop the route and secret so the subscription polls
+ * instead, and record why. Returns the subscription as it now is, with the
+ * cursor any webhook deliveries meanwhile advanced.
+ */
 export async function dropMcpEventSubscriptionWebhook(
   db: Database,
   workspaceId: string,
   subscriptionId: string,
-): Promise<void> {
+  pollReason: { reason: McpEventSubscriptionPollReason; since: Date },
+): Promise<McpEventSubscriptionRecord | null> {
   await withWorkspaceRls(db, workspaceId, async (scoped) =>
     scoped.transaction(async (tx) => {
       const [row] = await tx
@@ -280,6 +309,8 @@ export async function dropMcpEventSubscriptionWebhook(
         .update(schema.mcpEventSubscriptions)
         .set({
           mode: "poll",
+          pollReason: pollReason.reason,
+          pollReasonAt: pollReason.since,
           routeId: null,
           secretEncrypted: null,
           serverSubscriptionId: null,
@@ -294,6 +325,7 @@ export async function dropMcpEventSubscriptionWebhook(
       }
     }),
   );
+  return await getMcpEventSubscription(db, workspaceId, subscriptionId);
 }
 
 /** The subscription a webhook route belongs to, including its encrypted secret. */
@@ -365,6 +397,13 @@ export type RecordMcpEventDeliveryInput = {
   cursor?: string | null;
   /** The server skipped events before this delivery. */
   truncated?: boolean;
+  /**
+   * What the automations this delivery fires bill as when an API caller set
+   * the subscription's source up (`event_sources.secret_billing_origin` is
+   * api): the caller passes `fundedBillingOrigin(accountId, "api")`, which is
+   * app for a legacy account. The mark is read in the delivery's transaction.
+   */
+  apiSourceBillingOrigin?: BillingOrigin;
 };
 
 export type RecordMcpEventDeliveryResult = RecordEventDeliveryResult & {
@@ -400,8 +439,26 @@ export async function recordMcpEventDelivery(
         streamKey: row.streamKey,
         gapBefore: event.gapBefore || (gap && index === 0),
       }));
+      const apiSource =
+        input.apiSourceBillingOrigin !== undefined &&
+        input.delivery.billingOrigin === undefined &&
+        events.length > 0
+          ? await tx
+              .select({ holder: schema.eventSources.secretBillingOrigin })
+              .from(schema.eventSources)
+              .where(
+                and(
+                  eq(schema.eventSources.workspaceId, row.workspaceId),
+                  eq(schema.eventSources.id, row.sourceId),
+                ),
+              )
+              .limit(1)
+          : [];
       const recorded = await recordEventDeliveryInTransaction(tx, {
         ...input.delivery,
+        ...(apiSource[0]?.holder === "api" && input.apiSourceBillingOrigin
+          ? { billingOrigin: input.apiSourceBillingOrigin }
+          : {}),
         accountId: row.accountId,
         workspaceId: row.workspaceId,
         sourceId: row.sourceId,

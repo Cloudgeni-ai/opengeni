@@ -79,8 +79,14 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
-    bytes: 248_409,
-    sha256: "6e8f4da503bdd91d8d16b91cb97bd5d14c21249a3bca247debac7271cb9b6157",
+    bytes: 249_245,
+    sha256: "97c5235a12b36015a27ec1876e2d8878c4ad0f2e1fb6642bb7c36746966ffbaf",
+    offsets: "all",
+  },
+  // Lucide's SVG path data for the bot avatar icons; its move-to commands look like labels.
+  "apps/api/src/integrations/session-avatar-icons.ts": {
+    bytes: 5_842,
+    sha256: "59a94eb77fd96ef62a6624e8eb2dfddf812c43ad4eaae12dcdac65f8cd9ecc43",
     offsets: "all",
   },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
@@ -94,14 +100,14 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "agent/vendor/async-nats/src/lib.rs": {
-    bytes: 61_798,
-    sha256: "d87f015a7be4c3abffa9df0366e59e2b6dfd64c89bee26d2437f50f280f296fe",
+    bytes: 61_891,
+    sha256: "f453d8de7e2dfc7bf479e63c24485a45e489472ed4520e5ff5d52b2f00943572",
     // Only the signed-byte field primitive, not a string or comment.
     offsets: [9_379],
   },
 };
-// Preserve the four published copyright contacts from agentkeepalive, fastq,
-// follow-redirects and isomorphic-ws. Only these personal-mail matches are
+// Preserve the five published copyright contacts from agentkeepalive, fastq,
+// follow-redirects, isomorphic-ws and yaml. Only these personal-mail matches are
 // suppressed, at this exact notices path, UTF-8 size, hash and string offsets.
 // Every other rule still runs; changed license bytes require renewed review.
 const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
@@ -109,9 +115,9 @@ const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
   { bytes: number; sha256: string; offsets: readonly number[] }
 > = {
   "packages/runtime/THIRD_PARTY_NOTICES": {
-    bytes: 153_257,
-    sha256: "9707320e0eb9229ed6689610215129d10463c91a79e15d8a65ad748265e62870",
-    offsets: [84_593, 101_439, 102_325, 124_221],
+    bytes: 153_969,
+    sha256: "30d9bdbf27f1f06272f2cb8ffe49bfd737c7eecb3ce842b9d442b5b1ea2c5a17",
+    offsets: [84_471, 101_317, 102_203, 124_099, 153_247],
   },
 };
 const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");
@@ -131,36 +137,6 @@ const RETIRED_DESIGN_RECORD_PATH = new RegExp(
   "gi",
 );
 const MACHINE_NIX_STORE_PATH = /\/nix\/store\/[a-z0-9]{20,}-/gi;
-const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
-  "packages/db/drizzle/0017_sandbox_leases.sql",
-  "packages/db/drizzle/0018_sandbox_os.sql",
-  "packages/db/drizzle/0019_session_stream_acknowledgments.sql",
-  "packages/db/drizzle/0020_session_recordings.sql",
-  "packages/db/drizzle/0021_sandbox_pty_sessions.sql",
-  "packages/db/drizzle/0024_sandboxes_enrollments_metrics.sql",
-  "packages/db/drizzle/0025_device_enrollment_requests.sql",
-  "packages/db/drizzle/0045_workspace_captures.sql",
-  "packages/db/drizzle/0053_codex_credential_leases.sql",
-  "packages/db/drizzle/0057_durable_queue_control.sql",
-  "packages/db/drizzle/0061_session_workflow_wake_outbox.sql",
-  "packages/db/drizzle/0062_session_list_snapshot_reaper.sql",
-  "packages/db/drizzle/0063_session_control_mega_foundation.sql",
-  "packages/db/drizzle/0064_rotation_strategy_sharded_backfill.sql",
-  "packages/db/drizzle/0067_session_event_payload_bounds.sql",
-  "packages/db/drizzle/0068_workspace_control_event_bounds.sql",
-  "packages/db/drizzle/0069_session_event_history_backfill.sql",
-  "packages/db/drizzle/0074_session_activity_revisions.sql",
-  "packages/db/drizzle/0120_durable_goal_wake.sql",
-]);
-// This already-released migration cannot be rewritten. Retain only its exact
-// historical issue marker; edited bytes, other paths and all other rules remain
-// checked. Unlike the older filename allowlist, this grants no future exemption.
-const FROZEN_MIGRATION_ISSUE = {
-  file: "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql",
-  bytes: 16960,
-  sha256: "663c19d4e7935d043f3483d76363085ed188dec133817cc295a2c0f6c02a37f3",
-  offset: 35,
-};
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");
 const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
@@ -180,6 +156,7 @@ export function auditPublicText(file: string, source: string): Finding[] {
   collectMatches(file, source, PRIVATE_ISSUE_REFERENCE, "private issue reference", findings);
   collectMatches(file, source, INTERNAL_WORK_LABEL, "internal work label", findings);
   const reviewedLabels = reviewedUpstreamLabelOffsets(file, source);
+  const pathData = svgPathDataRanges(file, source);
   collectMatches(
     file,
     source,
@@ -188,42 +165,27 @@ export function auditPublicText(file: string, source: string): Finding[] {
     findings,
     (match) =>
       reviewedLabels === "all" ||
+      insideRanges(pathData, match.index ?? -1) ||
       (match[0] === RUST_SIGNED_BYTE_TYPE && reviewedLabels?.includes(match.index ?? -1) === true),
   );
   collectMatches(file, source, MACHINE_NIX_STORE_PATH, "machine-specific Nix store path", findings);
   collectMatches(file, source, PERSONAL_NAME, "personal name", findings);
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_PATH,
-      "retired internal design-record path",
-      findings,
-    );
-  }
-
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    const frozenMigrationMatches =
-      file === FROZEN_MIGRATION_ISSUE.file &&
-      Buffer.byteLength(source, "utf8") === FROZEN_MIGRATION_ISSUE.bytes &&
-      createHash("sha256").update(source, "utf8").digest("hex") === FROZEN_MIGRATION_ISSUE.sha256;
-    collectMatches(
-      file,
-      source,
-      INTERNAL_ISSUE_REFERENCE,
-      "internal issue reference",
-      findings,
-      (match) => frozenMigrationMatches && match.index === FROZEN_MIGRATION_ISSUE.offset,
-    );
-    collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_TERM,
-      "retired internal design-record terminology",
-      findings,
-    );
-  }
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_PATH,
+    "retired internal design-record path",
+    findings,
+  );
+  collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
+  collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_TERM,
+    "retired internal design-record terminology",
+    findings,
+  );
 
   PRIVATE_PROJECT_CODENAME.lastIndex = 0;
   for (const match of source.matchAll(PRIVATE_PROJECT_CODENAME)) {
@@ -526,6 +488,37 @@ function collectMatches(
     if (ignore?.(match)) continue;
     findings.push({ file, line: lineAt(source, match.index ?? 0), reason });
   }
+}
+
+// SVG path data is drawing commands: a move-to command followed by its
+// coordinate can read like a retired label (vendored brand marks are full of them).
+// Only the values of a `.svg` file's `d` and `points` attributes are skipped,
+// and only for that rule; text, titles and every other attribute still run.
+const SVG_PATH_DATA_ATTRIBUTE = /\s(?:d|points)\s*=\s*("[^"]*"|'[^']*')/g;
+// Android vector drawables draw with the same path syntax.
+const ANDROID_PATH_DATA_ATTRIBUTE = /\sandroid:pathData\s*=\s*("[^"]*"|'[^']*')/g;
+
+/** Where an SVG or an Android vector drawable keeps its path coordinates. */
+function svgPathDataRanges(file: string, source: string): Array<[number, number]> {
+  const extension = extname(file).toLowerCase();
+  const attribute =
+    extension === ".svg"
+      ? SVG_PATH_DATA_ATTRIBUTE
+      : extension === ".xml" && /(?:^|\/)res\/drawable[^/]*\//u.test(file)
+        ? ANDROID_PATH_DATA_ATTRIBUTE
+        : null;
+  if (!attribute) return [];
+  const ranges: Array<[number, number]> = [];
+  for (const match of source.matchAll(attribute)) {
+    const value = match[1]!;
+    const start = (match.index ?? 0) + match[0].length - value.length;
+    ranges.push([start, start + value.length]);
+  }
+  return ranges;
+}
+
+function insideRanges(ranges: Array<[number, number]>, index: number): boolean {
+  return ranges.some(([start, end]) => index > start && index < end);
 }
 
 function reviewedUpstreamLabelOffsets(

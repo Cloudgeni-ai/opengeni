@@ -89,6 +89,7 @@ fn capacity(free_memory_mib: u64, sandboxes: u32, rng: &mut Rng) -> Capacity {
         memory_mib: HOST_MEMORY_MIB,
         free_memory_mib,
         reclaimable_memory_mib: 0,
+        cpu_millis: 1_000_000,
         free_cpu_millis: 1_000_000,
         free_disk_mib: 2_000_000,
         ready,
@@ -225,7 +226,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     pass.check("recovery: one pass over all hosts");
 
     // A host coming back lists what it has: one decision per sandbox, and
-    // losing one clears every sandbox it owned.
+    // declaring one gone clears every sandbox it owned.
     let mut back = Timings::default();
     let mut lose = Timings::default();
     for id in 0..200_u64 {
@@ -241,7 +242,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
         let verdicts: Vec<Verdict> = back.time(|| {
             owned
                 .iter()
-                .map(|sandbox| reconcile(host, OwnerEpoch::FIRST, rows.get(sandbox).copied()))
+                .map(|sandbox| reconcile(host, OwnerEpoch::FIRST, rows.get(sandbox).copied(), None))
                 .collect()
         });
         // Nobody took them since: the host gets each back.

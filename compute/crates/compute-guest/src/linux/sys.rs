@@ -220,6 +220,56 @@ pub fn reseed_random(urandom: &File) -> io::Result<()> {
     check(unsafe { libc::ioctl(urandom.as_raw_fd(), RNDRESEEDCRNG) })
 }
 
+/// Fills `bytes` from the kernel's random number generator with
+/// `getrandom(2)`, which needs no device node: a guest whose
+/// `/dev/urandom` was removed still gets random bytes.
+pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let rest = &mut bytes[filled..];
+        // SAFETY: a valid, writable buffer of `rest.len()` bytes that
+        // outlives the call.
+        let read = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        if let Ok(read) = usize::try_from(read) {
+            filled += read;
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `mknod(2)` of a character device `major:minor` at `path`, with `mode`
+/// before the umask.
+pub fn make_char_device(path: &str, mode: u32, major: u32, minor: u32) -> io::Result<()> {
+    let path = c_string(path)?;
+    // SAFETY: a valid NUL-terminated string that outlives the call.
+    check(unsafe {
+        libc::mknod(
+            path.as_ptr(),
+            libc::S_IFCHR | mode,
+            libc::makedev(major, minor),
+        )
+    })
+}
+
+/// The `major:minor` of a device number.
+#[must_use]
+pub fn device_numbers(rdev: u64) -> (u32, u32) {
+    (libc::major(rdev), libc::minor(rdev))
+}
+
+/// Whether this process is root.
+#[cfg(test)]
+#[must_use]
+pub fn is_root() -> bool {
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// `sync(2)`.
 pub fn sync() {
     // SAFETY: no arguments.
@@ -305,6 +355,57 @@ pub fn alive(pid: i32) -> bool {
     // SAFETY: no pointers; signal 0 only checks.
     let found = unsafe { libc::kill(pid, 0) } == 0;
     found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// `pidfd_open(2)`: a descriptor that names process `pid` for as long as
+/// it is open, even once the number passes to another process.
+pub fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
+    // SAFETY: no pointers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let fd = i32::try_from(fd).map_err(|_| io::Error::other("descriptor out of range"))?;
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just returned this descriptor, and nothing else
+    // owns it.
+    Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+}
+
+/// Sends `SIGKILL` to the process `pidfd` names (`pidfd_send_signal(2)`).
+pub fn pidfd_kill(pidfd: &OwnedFd) -> io::Result<()> {
+    // SAFETY: a descriptor this process owns; the kernel takes a null
+    // `siginfo` to mean an ordinary signal from this process.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Waits at most `limit` for the process `pidfd` names to end; whether it
+/// did.
+pub fn wait_ended(pidfd: &OwnedFd, limit: Duration) -> io::Result<bool> {
+    let mut poll = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(limit.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: one pollfd that lives through the call.
+    let ready = unsafe { libc::poll(&raw mut poll, 1, millis) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ready > 0)
 }
 
 /// Sends `signal` to every process but this one (`kill(-1, …)`).

@@ -8,8 +8,11 @@ import {
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  RuntimeDatabasePostureError,
+  runtimeDatabaseReadyCheck,
 } from "../src/runtime-posture";
 import {
   loadRuntimePostureBaseline,
@@ -75,6 +78,64 @@ realTest("readiness inspects both namespaces once without caching posture", asyn
     driver.options.debug = originalDebug;
   }
 });
+
+realTest(
+  "readiness stays up on a revoked required EXECUTE grant and still fails on excess privilege",
+  async () => {
+    const admin = database!.admin;
+    const sweep = "opengeni_private.list_due_recording_retention_v1(integer)";
+    const reader = "opengeni_private.read_sender_connection(uuid, uuid, uuid, text)";
+    const missing =
+      "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)";
+    const reported: (readonly string[])[] = [];
+    const ready = runtimeDatabaseReadyCheck(client!.db, options, (degraded) =>
+      reported.push(degraded),
+    );
+    await ready();
+    expect(reported.at(-1)).toEqual([]);
+    try {
+      // One background sweep loses its grant: only that sweep breaks.
+      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${sweep} FROM opengeni_app`);
+      await ready();
+      expect(reported.at(-1)).toEqual([missing]);
+      expect((await assertRuntimeDatabaseReadiness(client!.db, options)).degraded).toEqual([
+        missing,
+      ]);
+      // Release and CI gates keep the strict finding.
+      await expect(assertRuntimeDatabasePosture(client!.db, options)).rejects.toThrow(missing);
+
+      // Excess privilege is fatal, also next to the degraded finding.
+      await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${reader} TO opengeni_app`);
+      const error = await ready().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(RuntimeDatabasePostureError);
+      expect((error as RuntimeDatabasePostureError).violations).toEqual([
+        "runtime or PUBLIC can call the internal sender connection reader",
+      ]);
+      expect(reported.at(-1)).toEqual([missing]);
+      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${reader} FROM opengeni_app`);
+      await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${sweep} TO PUBLIC`);
+      await expect(ready()).rejects.toThrow(
+        "PUBLIC can execute runtime definer list_due_recording_retention_v1(integer)",
+      );
+    } finally {
+      await admin.unsafe(`
+        REVOKE EXECUTE ON FUNCTION ${reader} FROM opengeni_app;
+        REVOKE EXECUTE ON FUNCTION ${sweep} FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION ${sweep} TO opengeni_app;
+      `);
+    }
+    await ready();
+    expect(reported.at(-1)).toEqual([]);
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
+    ).toEqual([]);
+  },
+  180_000,
+);
 
 realTest(
   "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
@@ -362,7 +423,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947 and 0950 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272 and 1274 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -371,12 +432,39 @@ realTest(
         options,
       );
     expect(await current()).toEqual([]);
+    for (const signature of [
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
+      "summarize_queued_turns_by_hold()",
+    ]) {
+      try {
+        await admin.unsafe(
+          `REVOKE EXECUTE ON FUNCTION opengeni_private.${signature} FROM opengeni_app`,
+        );
+        expect(await current()).toContain(
+          `runtime role lacks EXECUTE on private routine ${signature}`,
+        );
+      } finally {
+        await admin.unsafe(
+          `GRANT EXECUTE ON FUNCTION opengeni_private.${signature} TO opengeni_app`,
+        );
+      }
+    }
     try {
       await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
       expect(await current()).toContain(
         "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
       );
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_agent_held_browser_sessions(integer, bigint)",
+      );
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO opengeni_app`;
       await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
       expect(await current()).toContain(
         "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
@@ -385,10 +473,46 @@ realTest(
       expect(await current()).toContain(
         "table event_ingress_routes lacks required runtime privileges: DELETE",
       );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
+      );
+      await admin`REVOKE DELETE ON TABLE auth_passkeys FROM opengeni_app`;
+      expect(await current()).toContain(
+        "table auth_passkeys lacks required runtime privileges: DELETE",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks target-schema capability mutate_managed_passkey(text, text, jsonb)",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_organization_vaults_v1(uuid, jsonb)",
+      );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_organization_compute_v1(uuid, uuid, text)",
+      );
     } finally {
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
       await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO opengeni_app`;
+      await admin`GRANT DELETE ON TABLE auth_passkeys TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text) TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

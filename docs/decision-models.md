@@ -6,12 +6,17 @@ the conversational model picker. A model judges common input against named
 `@opengeni/decisions` owns the interface and OpenAI/OpenRouter HTTP adapters.
 `@opengeni/jev` adapts its existing TypeSafe client to that interface.
 
-Two consumers use it:
+Three consumers use it:
 
-- Tool discovery judges the wider lexical shortlist, then resolves only exact
-  authorized candidate identities. Exact names and strong lexical matches bypass
-  inference. Unconfigured, invalid or unavailable judgments recover through the
-  normal best-match-first lexical path. Cancellation propagates.
+- The public [stateless decisions API](model-inference.md) exposes the same typed
+  interface to authorized products, using the deployment's configured model.
+
+- Tool discovery judges a candidate list built from keywords and, when an
+  embedding model is configured, meaning, then resolves only exact authorized
+  candidate identities. Only searches that are nothing but tool names bypass
+  inference. Unconfigured, invalid, late or unavailable judgments recover through
+  the best-match-first path with the other candidates shown. Cancellation
+  propagates. See [tool search](tool-search.md).
 - `code_search` uses the same interface for file, passage, symbol and evidence
   judgments. Its existing rubrics, workspace access and session-frozen offering
   remain. It does **not** silently substitute keyword scores after a refusal or
@@ -19,7 +24,7 @@ Two consumers use it:
 
 ## Deployment configuration
 
-Configure all three explicitly, on API and worker servers:
+Configure the shared model explicitly, on API and worker servers:
 
 ```dotenv
 OPENGENI_DECISION_MODEL_PROVIDER=openrouter
@@ -33,6 +38,14 @@ model is configured by default. No customer key or subscription is borrowed.
 Partial explicit configuration is unavailable; it never falls back to a different
 credential. Configure the category as one deployment change.
 
+Public API calls can select a separate deployment-owned category through
+`OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER/ID/API_KEY/BASE_URL/AUTH` on the API
+process. It uses these same adapters and residency rules without changing tool
+discovery or code search. When every public setting is unset, public calls use
+the shared category above. An explicit public category is complete and independent;
+it never borrows missing credentials or endpoint settings from the shared category.
+See [public decision configuration](model-inference.md#authority-funding-and-configuration).
+
 | Provider | Model example | Endpoint | Optional base URL |
 | --- | --- | --- | --- |
 | `jev` | `jev-latest` (existing client alias) | Existing TypeSafe `/v1/systemone` | `https://api.typesafe.ai` |
@@ -43,6 +56,33 @@ The override is `OPENGENI_DECISION_MODEL_BASE_URL`; adapters append their endpoi
 path. Leave it unset for official endpoints. Model IDs are provider-native IDs,
 not IDs resolved through the ordinary chat-model registry. OpenRouter's Decisions
 models need not appear in its normal chat `/models` response.
+
+### Azure OpenAI
+
+An Azure OpenAI resource serves the same typed endpoint on its v1 API. Use provider
+`openai`, the deployment name as the model ID, and the resource's v1 base URL:
+
+```dotenv
+OPENGENI_DECISION_MODEL_PROVIDER=openai
+OPENGENI_DECISION_MODEL_ID=<deployment name>
+OPENGENI_DECISION_MODEL_BASE_URL=https://<resource>.openai.azure.com/openai/v1
+OPENGENI_DECISION_MODEL_AUTH=deployment_identity
+```
+
+`OPENGENI_DECISION_MODEL_AUTH=deployment_identity` signs each request with a
+Microsoft Entra token for the deployment's own identity, so resources with key
+sign-in turned off work. The identity is the standard `AZURE_TENANT_ID` and
+`AZURE_CLIENT_ID` with `AZURE_FEDERATED_TOKEN_FILE` (a workload identity) or
+`AZURE_CLIENT_SECRET`, the same one the deployment's Azure OpenAI chat route can
+use, and it needs an Azure OpenAI user role on the resource. Tokens are cached and
+renewed before they expire; a rejected token is dropped so the next request signs
+in again. Without a usable identity, the decision model is not configured. The
+default, `api_key`, sends `OPENGENI_DECISION_MODEL_API_KEY` as before.
+
+Give the selector its own deployment rather than sharing one that serves the
+agents' own model calls: a tool-search selection with 40 candidates is roughly
+10 to 20 thousand input tokens, and a selection slower than 2.5 seconds sends a
+second identical request, so its rate limit should be sized for that.
 
 Legacy `OPENGENI_JEV_API_KEY/BASE_URL/MODEL/REQUEST_TIMEOUT_MS` still serve existing
 code-search deployments when **no** shared category setting is present. They never
@@ -57,8 +97,8 @@ and the same instance as `runCodeSearch({decisionModel, ...})`.
   both Jev and Luna. Tool-discovery evals ran on returned versions
   `typesafe/jev-1.13-20260917` and `openai/gpt-6-luna-decisions-20261006`.
   Jev was the stronger and cheaper selector on these catalogs; it is the recommended
-  optional backend. No-model remains the free default. See the
-  [complete measurements and limitations](../scripts/tool-discovery-eval/README.md).
+  optional backend. No-model remains the free default. Measure a deployment's own
+  catalog with the [tool search evaluation harness](../scripts/tool-discovery-eval/README.md).
 - **Direct TypeSafe:** existing client is reused and mocked end to end; no direct
   key was available for this evaluation. OpenRouter Jev results are not a direct
   TypeSafe latency or billing measurement.

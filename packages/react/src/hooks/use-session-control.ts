@@ -1,18 +1,41 @@
-import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type { McpElicitationAnswer, SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 
-export type UseSessionControlOptions = EmbeddedSessionClientOverride;
+export type UseSessionControlOptions = EmbeddedSessionClientOverride<ChatClient>;
+
+/** How one approval decision reports a refusal. */
+export type ApprovalDecisionOptions = {
+  /**
+   * Reject with the refusal instead of resolving `null`, so a caller deciding
+   * several approvals can tell which ones failed and why. `error` is set either way.
+   */
+  throwOnError?: boolean | undefined;
+};
 
 export type UseSessionControlResult = {
   pause: (reason?: string) => Promise<SessionControlResponse | null>;
   resume: (reason?: string) => Promise<SessionControlResponse | null>;
   controlling: boolean;
-  /** Approve a pending `requires_action` approval. */
-  approve: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
+  /**
+   * Approve a pending `requires_action` approval. An approval whose MCP server
+   * asked a question (`elicitation`) sends `answer`: the answers and the
+   * round they answer.
+   */
+  approve: (
+    approvalId: string,
+    message?: string,
+    answer?: McpElicitationAnswer,
+    options?: ApprovalDecisionOptions,
+  ) => Promise<SessionEvent | null>;
   /** Reject a pending `requires_action` approval. */
-  reject: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
+  reject: (
+    approvalId: string,
+    message?: string,
+    options?: ApprovalDecisionOptions,
+  ) => Promise<SessionEvent | null>;
   /** True while an approval decision is in flight. */
   responding: boolean;
   error: Error | null;
@@ -80,11 +103,13 @@ export function useSessionControl(
       approvalId: string,
       decision: "approve" | "reject",
       message?: string,
+      answer?: McpElicitationAnswer,
+      decisionOptions: ApprovalDecisionOptions = {},
     ): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
       }
-      const decisionKey = JSON.stringify([approvalId, decision, message ?? null]);
+      const decisionKey = JSON.stringify([approvalId, decision, message ?? null, answer ?? null]);
       if (pendingApproval.current?.decisionKey !== decisionKey) {
         pendingApproval.current = {
           targetKey: approvalTargetKey,
@@ -93,14 +118,22 @@ export function useSessionControl(
         };
       }
       const clientEventId = pendingApproval.current.clientEventId;
-      const accepted = await runApproval(() =>
-        client.sendApprovalDecision(workspaceId, sessionId, {
-          approvalId,
-          decision,
-          ...(message !== undefined ? { message } : {}),
-          clientEventId,
-        }),
-      );
+      let refusal: { cause: unknown } | null = null;
+      const accepted = await runApproval(async () => {
+        try {
+          return await client.sendApprovalDecision(workspaceId, sessionId, {
+            approvalId,
+            decision,
+            ...(message !== undefined ? { message } : {}),
+            ...(answer !== undefined ? answer : {}),
+            clientEventId,
+          });
+        } catch (cause) {
+          refusal = { cause };
+          throw cause;
+        }
+      });
+      if (decisionOptions.throwOnError && refusal) throw (refusal as { cause: unknown }).cause;
       if (
         accepted !== null &&
         pendingApproval.current?.targetKey === approvalTargetKey &&
@@ -114,11 +147,17 @@ export function useSessionControl(
   );
 
   const approve = useCallback(
-    async (approvalId: string, message?: string) => await decide(approvalId, "approve", message),
+    async (
+      approvalId: string,
+      message?: string,
+      answer?: McpElicitationAnswer,
+      decisionOptions?: ApprovalDecisionOptions,
+    ) => await decide(approvalId, "approve", message, answer, decisionOptions),
     [decide],
   );
   const reject = useCallback(
-    async (approvalId: string, message?: string) => await decide(approvalId, "reject", message),
+    async (approvalId: string, message?: string, decisionOptions?: ApprovalDecisionOptions) =>
+      await decide(approvalId, "reject", message, undefined, decisionOptions),
     [decide],
   );
 

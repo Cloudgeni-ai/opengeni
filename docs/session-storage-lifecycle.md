@@ -58,9 +58,69 @@ Operators can drain the backlog faster with the same code path:
 OPENGENI_DATABASE_URL=... bun run --cwd packages/db compact-session-content --batch-size=200
 ```
 
+### Collecting unreferenced blobs
+
+An attempt keeps one model-request snapshot, and every later request of the
+attempt replaces it. Each request writes the body chunks the session does not
+hold yet, so the chunks only a replaced snapshot named are left behind. In a
+long attempt that is most of what `session_content_blobs` holds, and before
+migration 1359 it stayed until the session was archived.
+
+The same session storage maintenance pass now collects them after legacy
+compaction, within the same deadline. Discovery is the SECURITY DEFINER
+`opengeni_private.session_content_garbage_candidates_v1(limit)`, which returns
+routing ids of live sessions whose snapshots changed since their last
+collection (never-collected sessions first, each revisited at most every ten
+minutes). For each one the worker calls
+`opengeni_private.collect_session_content_garbage_v1(workspace, session, limit)`
+in the session's workspace scope. It deletes up to `limit` blobs of the live
+session that no model-context snapshot (`instructions`, `layers`, `tools`,
+`skills`, `body` chunks) or tool catalog entry of the session names and that
+are older than ten minutes, and records how far the session is collected in
+`opengeni_private.session_content_collections` once a call deletes fewer than
+`limit` rows.
+
+Collection is lossless. Every blob writer and every snapshot reader holds the
+session's content advisory lock shared for its whole transaction; the collector
+takes it exclusively, and only if it is free, otherwise it returns 0 and tries
+again on a later pass. A writer that found a blob present therefore always
+commits its reference before the blob can be judged unreferenced, and a reader
+never sees a snapshot whose blobs were deleted between two statements. Archived
+and archiving sessions are skipped; their blobs leave with the archive purge.
+
+Migration 1359 creates both routines without runtime `EXECUTE`, because the
+previous release rejects a grant on a definer it does not know. Until a later
+migration grants them, the maintenance pass reports the collector unavailable
+and collects nothing. An operator can run the same routines as the table owner,
+one transaction per call, for example:
+
+```sql
+DO $$
+DECLARE
+  c record;
+  n integer;
+BEGIN
+  FOR c IN SELECT * FROM opengeni_private.session_content_garbage_candidates_v1(200) LOOP
+    LOOP
+      PERFORM set_config('opengeni.account_id', c.account_id::text, true),
+        set_config('opengeni.workspace_id', c.workspace_id::text, true);
+      n := opengeni_private.collect_session_content_garbage_v1(c.workspace_id, c.session_id, 2000);
+      COMMIT;
+      EXIT WHEN n < 2000;
+    END LOOP;
+  END LOOP;
+END
+$$;
+```
+
+Run it outside an explicit transaction (it commits per call) with the
+database's data schema first on `search_path`, and repeat until a run finds no
+candidates. Deleted rows free space inside the table for later blob writes; see
+below for returning it to the operating system.
+
 ### Returning disk space
 
-Compaction frees space inside PostgreSQL; it does not shrink table files. Plain
+Compaction and collection free space inside PostgreSQL; they do not shrink table files. Plain
 `VACUUM` (autovacuum) makes the freed TOAST pages reusable for new writes. To
 return the space to the operating system, rewrite the two tables after the
 backlog is drained, for example with `pg_repack`, which rewrites online and
@@ -82,10 +142,64 @@ Schedule runs it after content compaction; each pass keeps archiving batches
 of eligible sessions until its ten-minute budget ends or none remain, so a
 backlog drains steadily after the archive is first enabled.
 
+### Archiving a chat
+
+The chat Archive action is the same archive, started at once instead of after
+the idle period. `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive`
+with `{ "archived": true }` (session control; `updateSessionArchive` in the SDK)
+sets `sessions.archived_at` and `archive_requested_by` on the root chat and its
+sub-chats. From then on the chat is listed as archived for everyone
+(`archiveStatus=archived`), and new messages, steers and agent sends to it are
+refused. `{ "archived": false }` within ten seconds (a few seconds' grace for
+the request itself) undoes it exactly; after that it restores the chat (see
+"Restoring an archived chat"). Archive answers 409 `session_archive_blocked`,
+with `blockers` and a message saying what to change, while keep-live, a
+repeating automation, or a site sign-in keeps the chat live. One-time
+automations do not block: they are retired when the window ends. The older
+`mode`, `confirmPause`, `expectedVersion` and `clientEventId` fields are
+accepted and ignored.
+
+Archive also refuses while a sub-chat is still in use, because archiving the
+root stops every sub-chat with it. A sub-chat is in use when it is running
+(an active turn, queued work or a running background command), waiting for
+input or a person's answer, working on an active goal, or was messaged
+directly by a person in the last 14 days (a prompt sent through the web app,
+Slack, the API and the like; an agent's message does not count). Then the
+409 `session_archive_blocked` lists one blocker per such sub-chat,
+`{ "kind": "active_sub_chat", "sessionId", "title", "reason": "running" |
+"waiting" | "goal" | "messaged" }`, and the message names them with how many.
+Repeating the request with `confirmActiveSubChats` listing every one of those
+ids archives them with the chat; a list that misses one is refused again with
+all of them named. Finished sub-chats that only agents used never block.
+Keeping a live sub-chat under an archived root is not offered: an archived
+root hides its whole tree from the list, a sub-chat's results go to its
+parent, and moving sub-chats to a new root would rewrite who they belong to.
+
+When the Undo window ends, a delayed workflow stops the chat (one-time
+automations retired, goals paused, running work cancelled) and stores it with
+the steps below. An archived chat qualifies as soon as nothing runs in it: the
+idle period, the age limit and recent activity no longer apply, and a sub-chat
+blocks it only while it runs. The maintenance pass is the backstop: its listing
+also returns archived chats that still have work running, and the worker stops
+that work first, so a chat whose workflow was lost is stored on a later pass.
+
+Cancelling the running work leaves the session status `cancelled`, recorded
+with the reason `SESSION_ARCHIVE_STOP_REASON` (`@opengeni/contracts/session-history`).
+That status is internal: clients present an archived chat (`archived`, or a
+`retention.archive`) as Archived on every surface through `sessionDisplayStatus`,
+and a timeline reads that status change as archived, never as cancelled.
+Compact `session_get` reports the `archive` (state `archiving` until stored) as
+soon as the chat is archived.
+
+Migration 1213 replaced the earlier personal archive (a member hiding a chat
+from their own list, with Restore). Chats people had hidden that way were
+archived for real, unless keep-live, a scheduled task, or a site sign-in
+keeps them live; those came back to the list.
+
 ### What qualifies
 
-Each session is judged on its own, not by its tree. A session qualifies when
-all of these hold for the idle period:
+Each session is judged on its own, not by its tree. A session that was not
+archived by a person qualifies when all of these hold for the idle period:
 
 - it is older than the idle period, no turn was created or updated in it, and
   the session is `idle`, `failed` or `cancelled` with no active turn. Activity
@@ -137,7 +251,10 @@ all of these hold for the idle period:
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
-     internal tables to interpret.
+     internal tables to interpret. It is made from the event rows the bundle
+     export reads, so kept events are not read a second time. Kept events
+     added while the session archives, after the bundle read its events, are
+     not in the bundle but still appear in the transcript.
 3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
    and the state becomes `archived`.
 4. Only then are the bulky tables purged in bounded batches: realtime entries,
@@ -146,6 +263,13 @@ all of these hold for the idle period:
    executing session or a debugger needs (streamed fragments, model-request
    telemetry, update bookkeeping, startup phases, credential selection and
    late-rejected events).
+   Each step resumes at the table the previous step left unfinished, and the
+   purge is recorded complete only after one pass over every table finds
+   nothing left.
+   Every foreign key into these tables has an index led by its key columns,
+   so the check each deleted row fires is an index seek rather than a scan of
+   the referencing table across all workspaces (enforced by
+   `packages/db/test/session-archive-postgres.test.ts`).
 
 What stays in PostgreSQL: the session row, turns, attempts, goals and every
 readable timeline event, so the web app, `session_events` and the SDK read an
@@ -155,10 +279,10 @@ unchanged. Small per-turn audit snapshots also stay, as do a scheduled run's
 delivered occurrence updates (immutable schedule evidence) and the history
 items they delivered.
 
-Archiving is one-way: there is no restore to an executable state. Start a new
-session to continue the work. A late machine input for an archived session (a
-child result, schedule or media completion) is settled like input to a
-cancelled session.
+An archived session can be restored (below), or its work continued in a new
+session. A late machine input for an archived session (a child result,
+schedule or media completion) is settled like input to a cancelled session,
+and is not replayed by a restore.
 
 Purging leaves holes in an archived session's event sequence. Event streams
 report them as covered: each SSE frame's `id` (its covered-through sequence)
@@ -166,30 +290,90 @@ extends to just before the next stored event, or to the session's last
 sequence, so stream clients never try to backfill an intentional hole. Raw
 event pages simply skip the missing sequences.
 
+### Restoring an archived chat
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
+`{ "archived": false }` restores a root chat at any time (session control).
+Within the Undo window it is the exact undo. After it, the chat and the
+sub-chats this same Archive took (those whose `archived_at` equals the
+root's) come back:
+
+- a chat whose content was not stored yet is live again at once;
+- a stored chat gets `content_restore_requested_at` and stays read-only, with
+  `retention.archive.restoring: true`, while the
+  `sessionArchiveRestoreWorkflow` puts its content back. For each chat the
+  worker downloads the bundle, verifies its size and SHA-256 against the
+  manifest, its header against the session and each table's rows against the
+  footer counts, then, in one transaction, returns the session to live and
+  re-inserts the purged rows exactly as they were (rows still present are
+  kept). Only that transaction may leave the archived state: it marks itself
+  with the transaction-local `opengeni.session_content_restore` setting, which
+  the session guard checks. Either every row is back and the chat is live, or
+  nothing changed and the workflow retries.
+
+The stored objects of a restored chat are queued for deletion in the same
+transaction, and a later Archive stores it again under new keys. A restored
+chat counts as active for the idle period, so the idle archiver does not take
+it back on its next pass. If the workflow is lost, the maintenance pass
+finishes any restore requested more than five minutes earlier.
+
+A restored chat takes new messages again. Stopping an archived chat's work is
+a Cancel with the reason `Archived`, which leaves the chat and its sub-chats
+`cancelled` and paused. Once a chat is live again (at once, or when its
+content is back), each chat that Cancel stopped (its last
+`session.status.changed` is `cancelled` with reason `Archived`) records
+`session.status.changed` `{ "status": "idle", "reason": "restored" }` and
+becomes `idle`, and the topmost chat the Archive paused is resumed (a
+`session.control.resumed` by the person who restored it, or by the
+`service:session-archive-restore` service when the maintenance pass finishes
+the restore), which lifts the pause on its sub-chats too. The turn the Archive
+cut off stays cancelled and reads as interrupted. A chat that was cancelled
+for another reason before the Archive stays cancelled. Repeating
+`{ "archived": false }` on a live chat finishes this step if an earlier
+attempt could not.
+
+Restoring a sub-chat on its own answers 409 `session_archive_restore_root`
+with the `rootSessionId` to restore instead; a chat that is being stored right
+now, or whose stopped turn is still settling, answers 409
+`session_archive_busy` (try again a moment later). A sub-chat that was stored
+on its own before the root was archived stays stored.
+
+What a restore does not bring back: purged event types (streamed text and
+output fragments, model-request telemetry, update bookkeeping, startup
+phases, credential selection and late-rejected events), which only a running
+turn or a debugger reads; the turn and queued messages the stop step
+cancelled; goals it paused (they stay paused, so the agent does not start
+again on its own); and one-time automations it retired.
+
 ### Keep-live
 
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
 `{ "keepLive": true }`, `keepLive: true` on session create, or the SDK's
 `updateSessionRetention`, exempts a session permanently. It is workspace-wide
-and independent of a member's personal rail archive. It cannot change once a
+and keeps the chat Archive action from starting. It cannot change once a
 session is archived.
 
 ### In the web app
 
-The web app calls an archived session "read-only" and its storage "long-term
-storage", so it is never confused with the personal Archive action, which only
-hides a chat from one member's list.
-
-- A read-only chat opens normally with a notice above its timeline that says
-  when it was stored and offers a new chat; the composer is not shown.
-- The chat's Agent tab has a "Keep this chat active" switch (keep-live) under
+- Archive (in a chat's row, menu, header and the command menu) takes the chat
+  out of the list at once and shows a notice with Undo for ten seconds, saying
+  the chat moves to long-term storage and can be restored from Archived. When
+  sub-chats are still in use, nothing is archived: a notice says how many and
+  names them, and "Archive all" archives them with the chat.
+- An archived chat opens normally with a notice above its timeline that it is
+  archived, a "Restore chat" button for a root chat the person can archive,
+  and a "Continue in a new chat" button, which opens a new chat with a message
+  pointing at it; the composer is not shown. While a restore runs, the notice
+  says the content is coming back, and the chat opens for new messages once
+  it is live.
+- The chat's Settings tab has a "Keep this chat active" switch (keep-live) under
   Storage, shown only when the deployment archives idle sessions
   (`ClientConfig.sessionArchive`, present when archiving is enabled and object
   storage is configured).
-- The session list's view menu links to a "Read-only chats" page that lists
-  every read-only root chat in the workspace, including chats a member
-  archived personally, with title search, a project filter and sorting. It is
-  backed by the session list's `contentArchivedOnly` filter.
+- The session list's view menu links to the Archived page
+  (`/workspaces/:id/archived`; the old `read-only-chats` path redirects), which
+  lists every archived root chat in the workspace with title search, a project
+  filter and sorting. Command-menu search finds archived chats too.
 
 ### Recovery and deletion
 
@@ -199,6 +383,39 @@ deletion in the same transaction. An `archived` session whose purge did not
 finish resumes purging on the next pass. Deleting an archived session queues
 its objects for deletion in the deleting transaction, and the maintenance
 worker removes them, so a deleted session never leaves its bundle behind.
+
+### Removing secrets from the archive
+
+The secret history scrub (docs/secrets.md, "Removing secrets from stored
+history") also covers sessions in long-term storage. The database copies that
+stay (session row, turns, goals, readable events) are rewritten in place; the
+archive's read-only guard lets the scrub's updates through (it marks its
+transaction) for content columns only and still refuses every other write.
+Then the bundle and transcript are downloaded and verified against the
+manifest, rewritten line by line, and uploaded under a fresh archive id, so a
+published key is never overwritten. Each bundle row is redacted column by
+column, through the column's lossless codec where it has one, and its other
+bytes (numbers included) stay exact. A model-request snapshot is hydrated
+from the bundle's own blob rows, redacted whole and re-encoded; its new blob
+rows are added in digest order, blob rows nothing refers to any more are
+dropped, and the footer's and manifest's content-blob row count follow. A
+matched blob row a tool catalog still refers to stays, and the run reports
+it as `cell_not_rewritten`. The
+session's manifest is swapped to the new keys, sizes and SHA-256 digests only
+while it is still the manifest that was read; nothing else in it may change.
+The replaced objects are queued for deletion in the same transaction. An
+object with no match is kept as it is. A dry run only reads and counts, as
+`archive_bundle` and `archive_transcript`.
+
+Any error from the swap is treated as an unknown outcome (the connection may
+have dropped while it could still commit, or after it did), and the uploaded
+objects are kept, because deleting them could leave the manifest naming
+objects that are gone. If the swap did not in fact commit, such an object is
+already redacted, but nothing refers to it, so neither the deletion queue nor
+deleting the session removes it; it stays in object storage until removed by
+hand. The uploaded objects are deleted only when the swap was never attempted
+(an upload failed), lost its compare-and-swap (the manifest changed
+meanwhile), or the session is gone.
 
 ## Streamed text deltas
 

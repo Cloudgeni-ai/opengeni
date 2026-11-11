@@ -8,12 +8,16 @@
 //! it in the task that acts on the request, so no adopt, drop or new owner
 //! can come between the check and the act.
 //!
-//! A hand-off keeps nothing on disk until its last step: while it runs the
-//! sandbox takes no wake, and once its latest state is archived and its VM
-//! gone, one record write begins a removal that keeps the store's copy,
-//! which a restarted agent finishes. An agent that restarts before that
-//! write has handed nothing off: the sandbox is still this host's, wakes
-//! as before, and the service, which has had no answer, asks again.
+//! A hand-off keeps nothing on disk until its last step: for a while (see
+//! [`HostConfig::hand_off_unwakeable`]) the sandbox takes no wake, and
+//! once its latest state is archived and its VM gone, one record write
+//! begins a removal that keeps the store's copy, which a restarted agent
+//! finishes. An agent that restarts before that write has handed nothing
+//! off: the sandbox is still this host's, wakes as before, and the
+//! service, which has had no answer, asks again. A wake that comes later
+//! than that while, as on a slow store, its copy is still on its way,
+//! cancels the hand-off the same way: the sandbox stays here and runs
+//! again from its local copy, its newest.
 //!
 //! An adopt after the last owner was lost takes up the store's copy from
 //! its files alone: it deletes the copy's memory image as it claims it, so
@@ -24,21 +28,24 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, SandboxId};
+use compute_core::{Durability, Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::layout::{Images, Paths, sync_parent};
 use crate::observe::{Alarm, Observer, alarm_event};
 use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
-use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
+use crate::store::{Claimed, MadeAt, Owned, OwnerEpoch, Stamp, Store};
 
-use super::disk::{AfterReading, Room};
+#[cfg(doc)]
+use super::HostConfig;
+use super::disk::{AfterReading, Room, unwanted};
 use super::remove::unmake;
-use super::requests::first_wake_by_ms;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 
@@ -58,7 +65,37 @@ pub(super) struct Then {
 }
 
 /// Hand-offs under way, with who waits for each.
-pub(super) type HandOffs = HashMap<SandboxId, Vec<Reply<()>>>;
+pub(super) type HandOffs = HashMap<SandboxId, HandOff>;
+
+/// One hand-off under way: since when, and who waits for it.
+#[derive(Debug, Default)]
+pub(super) struct HandOff {
+    /// When it began; `None` only for one taken out of the map empty.
+    since: Option<Instant>,
+    waiters: Vec<Reply<()>>,
+}
+
+impl HandOff {
+    fn new(reply: Reply<()>) -> Self {
+        Self {
+            since: Some(Instant::now()),
+            waiters: vec![reply],
+        }
+    }
+
+    fn push(&mut self, reply: Reply<()>) {
+        self.waiters.push(reply);
+    }
+}
+
+impl IntoIterator for HandOff {
+    type Item = Reply<()>;
+    type IntoIter = std::vec::IntoIter<Reply<()>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.waiters.into_iter()
+    }
+}
 
 /// Adopts waiting for an earlier ownership's copy to go.
 pub(super) type Adopts = HashMap<SandboxId, Then>;
@@ -71,6 +108,7 @@ impl Command {
             | Self::Remove { id, .. }
             | Self::Touch { id, .. }
             | Self::Sleep { id, .. }
+            | Self::Restart { id, .. }
             | Self::Capture { id, .. }
             | Self::Hold { id, .. }
             | Self::Unhold { id, .. }
@@ -94,6 +132,7 @@ impl Command {
             Self::Create { reply, .. }
             | Self::Remove { reply, .. }
             | Self::Sleep { reply, .. }
+            | Self::Restart { reply, .. }
             | Self::Unhold { reply, .. }
             | Self::Check { reply, .. }
             | Self::Adopt { reply, .. }
@@ -370,18 +409,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // claimed the wake is checked and booked without it; its disk is
         // judged by the copy's own then (see `Self::adopted_room`).
         let unclaimed = self.size(&config, Some(0));
-        match self.can_create(id, &config, unclaimed, true) {
-            Ok(Room::Now) => {}
-            Ok(Room::AfterReading) => {
+        let policy = match self.can_create(id, &config, unclaimed, true) {
+            Ok((Room::Now, policy)) => policy,
+            Ok((Room::AfterReading, policy)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
+                // Booked meanwhile, so disk relief frees it.
+                self.want_disk(id.0, Host::first_wake_disk(unclaimed, policy, true));
                 return;
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
                 return;
             }
-        }
+        };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -398,8 +439,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.preparing.insert(id.0);
-        let by_ms = first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, true, by_ms));
+        let by_ms = self.first_wake_by_ms();
+        self.inputs([
+            unwanted(id.0),
+            self.first_wake(id, unclaimed, policy, true, by_ms),
+        ]);
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);
@@ -431,7 +475,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    files_only(&*store, &observer, id, owner, claimed, from_files).await
+                    let why = FilesOnly::of(&claimed, &record.config, from_files);
+                    files_only(&*store, &observer, id, owner, claimed, why).await
                 }
             };
             let event = match claimed {
@@ -465,9 +510,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// before it is admitted and its files are whole.
     pub(super) fn copy_claimed(&mut self, record: Record, claimed: Claimed, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
-        if let Err(refused) = self.adopted_room(&record) {
-            self.prepared(id, ordinal, Err(refused), reply, None, None);
-            return;
+        match self.adopted_room(&record) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                let waiting = AfterReading::Claimed(Box::new(record), Box::new(claimed), reply);
+                self.after_reading(waiting);
+                return;
+            }
+            Err(refused) => {
+                self.prepared(id, ordinal, Err(refused), reply, None, None);
+                return;
+            }
         }
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
@@ -588,6 +641,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             waiting.push(reply);
             return;
         }
+        // A restart under way ends its programs where it is; it is handed
+        // off once that is done.
+        if self.restarting.contains_key(&id.0) {
+            let _ = reply.send(Err(HostError::Busy(id)));
+            return;
+        }
         let Some(view) = self.core.sandbox(id.0) else {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
@@ -599,9 +658,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        if let Err(error) = self.request_sleep(id, Level::Archived) {
-            let _ = reply.send(Err(error));
-            return;
+        match self.request_sleep(id, Level::Archived) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                // Only the next disk reading can tell whether its save
+                // fits: nothing of it has changed, and the hand-off is
+                // asked again then.
+                self.after_reading(AfterReading::HandOff(id, owner, awake, reply));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         }
         if wanted {
             // Whoever waits for it to wake here asks again and finds it on
@@ -613,17 +682,43 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             self.input(Input::LetGo { sandbox: id.0 });
         }
-        self.handing_off.insert(id.0, vec![reply]);
+        self.handing_off.insert(id.0, HandOff::new(reply));
+        self.tell_link(id);
         self.continue_hand_off(id);
     }
 
-    /// Refuses to wake sandbox `id` while it is being handed off.
+    /// Refuses sandbox `id` while it is being handed off, as a capture is.
     pub(super) fn not_handing_off(&self, id: Id) -> Result<(), HostError> {
         if self.handing_off.contains_key(&id.0) {
             Err(HostError::HandingOff(id))
         } else {
             Ok(())
         }
+    }
+
+    /// Lets a wake of sandbox `id` through a hand-off under way: refused
+    /// while the hand-off is younger than
+    /// [`HostConfig::hand_off_unwakeable`], and later cancelling it, as an
+    /// agent restart before its last step does. Its waiters hear why; the
+    /// wake that follows cancels any archive under way, and the sandbox
+    /// runs again here from its local copy.
+    pub(super) fn wake_past_hand_off(&mut self, id: Id) -> Result<(), HostError> {
+        let Some(hand_off) = self.handing_off.get(&id.0) else {
+            return Ok(());
+        };
+        let ran = hand_off
+            .since
+            .map_or(Duration::ZERO, |since| since.elapsed());
+        if ran < self.hand_off_unwakeable {
+            return Err(HostError::HandingOff(id));
+        }
+        tracing::warn!(
+            %id,
+            ran_s = ran.as_secs(),
+            "a wake cancels a hand-off that is still storing the sandbox's copy"
+        );
+        self.fail_hand_off(id, &HostError::HandOffCancelled(id));
+        Ok(())
     }
 
     /// Moves a hand-off of sandbox `id` on once its latest state is in the
@@ -662,9 +757,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Ends any hand-off of sandbox `id` with `error`, as when it broke.
     pub(super) fn fail_hand_off(&mut self, id: Id, error: &HostError) {
-        for waiter in self.handing_off.remove(&id.0).unwrap_or_default() {
+        let Some(hand_off) = self.handing_off.remove(&id.0) else {
+            return;
+        };
+        for waiter in hand_off {
             let _ = waiter.send(Err(error.clone()));
         }
+        self.tell_link(id);
     }
 
     /// Drops this host's copy of sandbox `id`, keeping the store's, then
@@ -691,6 +790,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = then.reply.send(Err(HostError::Busy(id)));
             }
         }
+    }
+
+    /// Removes `record`'s sandbox as a ruling to drop it says, keeping this
+    /// host's copy aside if `aside`; `done` is answered once it is gone.
+    /// Returns whether there was anything here to remove.
+    fn drop_ruled(&mut self, record: &Record, aside: bool, frozen: bool, done: Reply<()>) -> bool {
+        let id = record.id;
+        if let Some(removers) = self.destroying.get_mut(&id.0) {
+            // A removal already under way goes on as it began.
+            removers.push(done);
+        } else if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.removers.push(done);
+            slot.set_aside |= aside;
+            self.drop_copy(id, None);
+        } else if frozen {
+            self.hand_away_frozen(record, vec![done], aside);
+        } else {
+            return false;
+        }
+        true
     }
 
     /// A removal of sandbox `id` ended: an adopt that waited for it goes
@@ -726,10 +845,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// the rest, keeping the store's copies, and adopts again those whose
     /// copy here is behind the store's. Answers once every drop is done, so
     /// the new lease lets only what the service gave this host run.
+    ///
+    /// A sandbox whose VM recovery found held frozen (see
+    /// [`Self::frozen_owner`]) is ruled on too: one dropped or adopted
+    /// again has its VM ended before the answer, as any other; one kept
+    /// under any epoch stays blocked, and is taken back once the lease
+    /// lets the guard thaw it. So nothing the service gave another host
+    /// runs here again, and only what it gave this host thaws.
     pub(super) fn reconcile(&mut self, rulings: Vec<Ruling>, reply: Reply<()>) {
-        if let Some((&id, _)) = self.blocked.first_key_value() {
+        if let Some(id) = self.unruled_blocked() {
             let _ = reply.send(Err(HostError::Blocked {
-                id: Id(id),
+                id,
                 reason: "a sandbox the host does not manage may still run a VM another host now \
                          runs; remove it before the host registers"
                     .into(),
@@ -747,12 +873,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let id = record.id;
             let (verdict, link) = rulings.remove(&id).unwrap_or((Verdict::Drop, None));
+            let frozen = self.frozen_owner(id.0).is_some();
             let (done, answer) = oneshot::channel();
             match verdict {
                 Verdict::Keep { owner_epoch } => {
                     let owner = OwnerEpoch(owner_epoch);
                     if record.removing {
                         continue;
+                    }
+                    if frozen {
+                        self.take_back_on_thaw(id.0);
                     }
                     if owner == record.owner() {
                         // Kept as it was, unless its link changed.
@@ -774,13 +904,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     );
                     self.take_owner(id, Change::new().owner(owner).link(link), done);
                 }
-                Verdict::Drop => {
-                    if let Some(removers) = self.destroying.get_mut(&id.0) {
-                        removers.push(done);
-                    } else if let Some(slot) = self.slots.get_mut(&id.0) {
-                        slot.removers.push(done);
-                        self.drop_copy(id, None);
-                    } else {
+                verdict @ (Verdict::Drop | Verdict::SetAside) => {
+                    let aside = verdict == Verdict::SetAside;
+                    if !self.drop_ruled(&record, aside, frozen, done) {
                         continue;
                     }
                 }
@@ -794,7 +920,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         reply: done,
                         under: None,
                     };
-                    self.drop_copy(id, Some(then));
+                    if frozen {
+                        // The adopt goes on once its VM is gone.
+                        self.then_adopt.insert(id.0, then);
+                        self.hand_away_frozen(&record, Vec::new(), false);
+                    } else {
+                        self.drop_copy(id, Some(then));
+                    }
                 }
             }
             waits.push((id, answer));
@@ -848,22 +980,53 @@ async fn adopted_files(
     .map_err(io::Error::other)?
 }
 
-/// The copy `claimed` names, taken up from its files alone with
-/// `from_files`: its memory image is deleted from the store first, as the
-/// claim's next save, so a later adopt or wake never restores it. A try
-/// whose answer was lost finds the change done; an adopt tried again
-/// claims the copy without the image and leaves it be. Deleting the image
-/// raises [`Alarm::ProgramsLost`], as a VM that died does: the sandbox
-/// boots fresh from its disk, and whatever ran in it is gone.
+/// Why an adopted copy is taken up from its files alone, if it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilesOnly {
+    /// Its memory image is restored.
+    No,
+    /// The service does not vouch for the copy as the sandbox's latest
+    /// state: its last owner was lost, so its memory image may be stale.
+    Stale,
+    /// Its memory image was saved from a machine of another shape than
+    /// the sandbox is given now (it was resized), which a restore would
+    /// bring back instead.
+    Reshaped,
+}
+
+impl FilesOnly {
+    /// Why `claimed`, adopted for a sandbox of `config`, is taken up from
+    /// its files alone, with `from_files` as the adopt asked.
+    fn of(claimed: &Claimed, config: &SandboxConfig, from_files: bool) -> Self {
+        if !claimed.memory {
+            Self::No
+        } else if claimed.made_at.differs(config) {
+            Self::Reshaped
+        } else if from_files {
+            Self::Stale
+        } else {
+            Self::No
+        }
+    }
+}
+
+/// The copy `claimed` names, taken up from its files alone when `why`
+/// says: its memory image is deleted from the store first, as the claim's
+/// next save, so a later adopt or wake never restores it. A try whose
+/// answer was lost finds the change done; an adopt tried again claims the
+/// copy without the image and leaves it be. The sandbox boots fresh from
+/// its disk, and whatever ran in it is gone: for a stale image that raises
+/// [`Alarm::ProgramsLost`], as a VM that died does, while a resize, which
+/// asked for it, is only logged.
 async fn files_only<S: Store>(
     store: &S,
     observer: &Observer,
     id: Id,
     owner: OwnerEpoch,
     claimed: Claimed,
-    from_files: bool,
+    why: FilesOnly,
 ) -> Result<Claimed, HostError> {
-    if !from_files || !claimed.memory {
+    if why == FilesOnly::No {
         return Ok(claimed);
     }
     let change = Stamp {
@@ -879,30 +1042,37 @@ async fn files_only<S: Store>(
         }),
         Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
         Ok(Owned::Done(Some(receipt))) => {
-            tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
-            let what =
-                "running programs lost: adopted from its files, its memory image may be stale";
-            observer.alarm(
-                Alarm::ProgramsLost,
-                alarm_event(what).with("compute.sandbox.id", id.to_string()),
-            );
+            if why == FilesOnly::Reshaped {
+                tracing::info!(%id, made_at = ?claimed.made_at, "adopted from its files: it was resized, and its memory image restores the machine it was saved from");
+            } else {
+                tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
+                let what =
+                    "running programs lost: adopted from its files, its memory image may be stale";
+                observer.alarm(
+                    Alarm::ProgramsLost,
+                    alarm_event(what).with("compute.sandbox.id", id.to_string()),
+                );
+            }
             Ok(Claimed {
                 save: change.save,
                 receipt,
                 memory: false,
                 disk_bytes: claimed.disk_bytes,
+                made_at: MadeAt::default(),
             })
         }
     }
 }
 
 /// Makes `record` that of a sandbox kept only in the store, as `claimed`
-/// left it, owned under `owner`.
+/// left it, owned under `owner`. Its disk is booked at the length its
+/// config asks for, if longer than the copy's: its first fetch makes it
+/// that long.
 fn remote_record(record: &mut Record, owner: OwnerEpoch, claimed: &Claimed) {
     record.disk = Disk::Remote;
     record.image = claimed.memory;
     record.archived = true;
     record.owner_epoch = owner.0;
     record.saves = claimed.save;
-    record.allocation.disk_bytes = Some(claimed.disk_bytes);
+    record.allocation.disk_bytes = Some(record.config.disk_bytes(claimed.disk_bytes));
 }

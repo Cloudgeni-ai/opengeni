@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+pub mod command_activity;
 mod continuous_clock;
 mod desktop;
 mod error;
@@ -38,10 +39,17 @@ mod error;
 mod exec_handover;
 mod native;
 #[cfg(unix)]
+mod null_device;
+#[cfg(unix)]
 mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+mod shell_tools;
+#[cfg(target_os = "linux")]
+pub mod signal_sender;
+#[cfg(unix)]
+mod system_shell;
 pub mod transactional_write;
 mod work_scope;
 
@@ -79,8 +87,8 @@ pub use desktop::{
 #[cfg(target_os = "linux")]
 pub use desktop::{
     linux_layout_text_keysyms, linux_named_key_chord_keys, validate_linux_named_key_chord,
-    CompositorKey, CompositorLayout, KeymapNames, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
-    LinuxWindowRect, X11Display, XServerCheck,
+    CompositorKey, CompositorLayout, KeymapNames, LinuxDesktop, LinuxPasteOffer, LinuxPasteOutcome,
+    LinuxPreviousClipboard, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, X11Display, XServerCheck,
 };
 pub use error::{PlatformError, PlatformResult};
 #[cfg(unix)]
@@ -92,6 +100,7 @@ pub use native::{
     NativePlatform,
 };
 pub use pty::{spawn_pty, PtyProcess};
+pub use shell_tools::{path_with_shell_tools, set_shell_tools_directory, shell_tools_directory};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
 /// Recording + Accessibility + Input Monitoring state without prompting ([`desktop_grants`])
@@ -733,13 +742,135 @@ fn host_arch() -> v1::Arch {
     }
 }
 
+/// The commit email Git falls back to for commands this agent runs when
+/// nothing else names one (the same address the sandbox and desktop images
+/// configure at Git's system level).
+pub const DEFAULT_GIT_EMAIL: &str = "agent@opengeni.invalid";
+
+/// The `EMAIL` a child process receives: [`DEFAULT_GIT_EMAIL`] only when
+/// neither the request nor the agent's own environment sets `EMAIL` and Git
+/// cannot guess an address on this machine. Git reads `EMAIL` after
+/// `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every `user.email` setting
+/// (system, global, repository), so an identity the machine, its user or a
+/// repository configures always wins, and a machine whose hostname gives Git a
+/// usable address (a typical laptop) keeps committing with it. Without it,
+/// `git commit` fails in a container whose hostname has no domain.
+#[must_use]
+pub(crate) fn default_git_email<'a>(
+    request_env: impl IntoIterator<Item = &'a String>,
+) -> Option<&'static str> {
+    default_git_email_with(
+        request_env.into_iter().any(|name| names_email(name)),
+        std::env::var_os("EMAIL").as_deref(),
+        git_guesses_email,
+    )
+}
+
+/// Environment names are case-insensitive on Windows.
+fn names_email(name: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case("EMAIL")
+    } else {
+        name == "EMAIL"
+    }
+}
+
+fn default_git_email_with(
+    request_sets_email: bool,
+    ambient: Option<&std::ffi::OsStr>,
+    git_guesses_email: impl FnOnce() -> Option<bool>,
+) -> Option<&'static str> {
+    if request_sets_email || ambient.is_some() {
+        return None;
+    }
+    (git_guesses_email() == Some(false)).then_some(DEFAULT_GIT_EMAIL)
+}
+
+/// A discarded stdio stream: the agent's retained null device on Unix, so a
+/// machine whose `/dev/null` was removed can still start the program. Use it
+/// for every stream a program the agent starts does not need, including stdin
+/// before `Command::output`, which otherwise opens `/dev/null` by path.
+#[must_use]
+pub fn discarded_stdio() -> std::process::Stdio {
+    #[cfg(unix)]
+    {
+        null_device::null_stdio()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Stdio::null()
+    }
+}
+
+/// Whether Git, with no identity configured anywhere, derives a usable commit
+/// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
+/// and every email source removed fails exactly when the hostname guess is
+/// unusable. Asked once per process; `None` (Git is not installed) is not
+/// remembered, so a Git installed later is still asked. On macOS without the
+/// command-line developer tools Git is never run (see below).
+pub(crate) fn git_guesses_email() -> Option<bool> {
+    static GUESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(guesses) = GUESSES.get() {
+        return Some(*guesses);
+    }
+    // Without the developer tools, macOS's `/usr/bin/git` is a placeholder that
+    // opens an install dialog; `xcode-select -p` only reports. With no working
+    // Git there is nothing to commit with, so `EMAIL` stays unset.
+    #[cfg(target_os = "macos")]
+    {
+        static DEVELOPER_TOOLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let installed = *DEVELOPER_TOOLS.get_or_init(|| {
+            std::process::Command::new("xcode-select")
+                .arg("-p")
+                .stdin(discarded_stdio())
+                .stdout(discarded_stdio())
+                .stderr(discarded_stdio())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !installed {
+            return None;
+        }
+    }
+    let unconfigured = std::env::temp_dir().join("opengeni-git-identity-probe-unconfigured");
+    let mut probe = std::process::Command::new("git");
+    probe
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_COMMITTER_NAME", "Opengeni identity probe")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &unconfigured)
+        .env("HOME", &unconfigured)
+        .env("XDG_CONFIG_HOME", &unconfigured)
+        .env("USERPROFILE", &unconfigured)
+        .env_remove("EMAIL")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .stdin(discarded_stdio())
+        .stdout(discarded_stdio())
+        .stderr(discarded_stdio());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        probe.creation_flags(CREATE_NO_WINDOW);
+    }
+    let guesses = probe.status().ok()?.success();
+    Some(*GUESSES.get_or_init(|| guesses))
+}
+
 /// The platform's default login-shell argv (used when a PTY open names no
 /// command): `$SHELL` (or `/bin/sh`) on unix, `cmd.exe` on Windows.
 #[must_use]
 pub(crate) fn default_shell() -> Vec<String> {
     #[cfg(unix)]
     {
-        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
+        // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+        vec![system_shell::environment_shell()
+            .to_string_lossy()
+            .into_owned()]
     }
     #[cfg(windows)]
     {
@@ -772,8 +903,35 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         // A generic POSIX fallback for any other unix-like target.
-        let mut cmd = tokio::process::Command::new("/bin/sh");
+        let mut cmd = tokio::process::Command::new(system_shell::environment_shell());
         cmd.arg("-c").arg(parts.join(" "));
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn default_git_email_fills_only_an_unset_email_git_cannot_guess() {
+        let unguessable = || Some(false);
+        assert_eq!(
+            default_git_email_with(false, None, unguessable),
+            Some(DEFAULT_GIT_EMAIL)
+        );
+        assert_eq!(default_git_email_with(true, None, unguessable), None);
+        assert_eq!(
+            default_git_email_with(false, Some(OsStr::new("me@example.com")), unguessable),
+            None
+        );
+        // A machine whose hostname gives Git an address keeps it.
+        assert_eq!(default_git_email_with(false, None, || Some(true)), None);
+        // Without Git there is nothing to commit with.
+        assert_eq!(default_git_email_with(false, None, || None), None);
+        assert!(names_email("EMAIL"));
+        assert_eq!(names_email("Email"), cfg!(windows));
+        assert_eq!(DEFAULT_GIT_EMAIL, "agent@opengeni.invalid");
     }
 }

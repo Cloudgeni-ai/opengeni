@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { readFile } from "node:fs/promises";
+
 import type { SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   listingDatabase,
@@ -51,56 +51,6 @@ async function parity(request: Record<string, postgres.JSONValue>, f = fixture) 
 }
 
 describe("Knowledge group-only summary", () => {
-  test("rolling replacement preserves embedded-schema metadata and rejects a changed source", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0914_knowledge_group_summary_projection.sql", import.meta.url),
-      "utf8",
-    );
-    const schema = `Knowledge_projection_${crypto.randomUUID().replaceAll("-", "")}`;
-    const rollback = new Error("rollback embedded-schema fixture");
-    try {
-      await shared.admin.begin(async (tx) => {
-        await tx`CREATE SCHEMA ${tx(schema)}`;
-        await tx`SET LOCAL check_function_bodies = off`;
-        const [source] =
-          await tx`SELECT pg_get_functiondef('knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure) AS definition,
-          format('%I',${schema}::text) AS quoted_schema`;
-        await tx.unsafe(
-          source!.definition
-            .replace(
-              "FUNCTION public.knowledge_entry_read(",
-              `FUNCTION ${source!.quoted_schema}.knowledge_entry_read(`,
-            )
-            .replace(narrow, full),
-        );
-        await tx`ALTER FUNCTION ${tx(schema)}.knowledge_entry_read(uuid,uuid,jsonb,jsonb) SET search_path = ${tx(schema)}, pg_catalog, pg_temp`;
-        await tx`REVOKE ALL ON FUNCTION ${tx(schema)}.knowledge_entry_read(uuid,uuid,jsonb,jsonb) FROM PUBLIC`;
-        await tx`SET LOCAL search_path = ${tx(schema)}, public`;
-        const before =
-          await tx`SELECT p.proowner,p.proacl,p.proconfig,p.provolatile,p.prosecdef FROM pg_proc p
-          WHERE p.oid='knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure`;
-        await tx.unsafe(migration);
-        expect(
-          await tx`SELECT p.proowner,p.proacl,p.proconfig,p.provolatile,p.prosecdef FROM pg_proc p
-          WHERE p.oid='knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure`,
-        ).toEqual(before);
-        const [after] =
-          await tx`SELECT pg_get_functiondef('knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure) AS definition`;
-        expect(after!.definition).toContain(narrow);
-        // The ledger executes each migration once. An incompatible source must
-        // fail visibly, not silently succeed without applying its replacement.
-        await expect(
-          tx.savepoint(async (nested) => {
-            await nested.unsafe(migration);
-          }),
-        ).rejects.toMatchObject({ code: "P0001" });
-        throw rollback;
-      });
-    } catch (error) {
-      if (error !== rollback) throw error;
-    }
-  }, 180_000);
-
   test("read capability retains owner, grants, volatility and hardened path", async () => {
     const rows = await shared.admin`SELECT p.prosecdef,p.provolatile,p.proconfig,p.proowner,p.proacl
       FROM pg_proc p WHERE p.oid IN ('knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure,

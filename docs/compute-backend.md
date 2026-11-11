@@ -196,7 +196,14 @@ skips sandbox enrollments, and machine routes list machines only.
   reconciler's claim settles it by runner retirement.
 - **Restart**: when a sandbox's VM dies, the host boots it fresh on its disk
   (programs lost, files kept), and its agent comes back on a new connection
-  instance. A request still bound to the old instance ends as soon as the new
+  instance. A restart the server asks for because the agent stopped
+  answering is the same: the host ends the VM where it is, forgets any saved
+  memory image and boots it fresh on its disk, with no archive first (ADR
+  33). While a host hands a sandbox off it tells the gateway so over the
+  agent link (`busy: "handing_off"`); the server then reports the host as
+  busy instead of restarting the agent, and a wake that comes after the
+  hand-off has stored for two minutes cancels it, so the sandbox runs on from
+  its local copy. A request still bound to the old instance ends as soon as the new
   one is live, as on a Connected Machine ("Control transport recovery" in
   `docs/connected-machines.md`): a command that started, or may have, is
   handed to the session's command ledger with a stop request and reported
@@ -210,8 +217,11 @@ skips sandbox enrollments, and machine routes list machines only.
   the sandbox and the deletion waits for that. A terminal exec whose own
   deadline passes meanwhile gives that same unknown outcome: it reports exit
   124 only when its deadline provably ended the command.
-- **Host loss**: compute never brings an agent back rewound. After a host
-  loss the sandbox boots fresh on another host from its newest stored copy's
+- **Host loss**: compute never brings an agent back rewound. A host that
+  stops answering keeps its sandboxes: their wakes fail as unavailable,
+  saying they wait for the host, until it comes back with them or is
+  declared gone. After a host is declared gone the sandbox boots fresh on
+  another host from its newest stored copy's
   files (programs end; the guest flushes its disk before each capture, so the
   files are as the guest last wrote them before that copy), and its agent is a
   new process on a new connection instance, exactly as after a VM crash (see
@@ -338,6 +348,7 @@ change to compute.
 | `OPENGENI_COMPUTE_LINK_URL` | The gateway's public `wss://` URL, also the JWT audience |
 | `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (control service default when unset) |
 | `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB` (all of the memory when unset) and `..._CPU_REQUEST_MILLIS` (a tenth of each vCPU when unset), what each sandbox is guaranteed while awake |
+| `OPENGENI_COMPUTE_DISK_MIB` | How long each new sandbox's disk is (its image's length when unset). Its host books the whole length while the sandbox runs; at rest the disk holds only what its files use. Sandboxes made before a change keep their length |
 | `OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS` | How long create and wake wait for the agent |
 
 Defaults are unchanged. Boot fails with a list of the missing settings only
@@ -360,7 +371,8 @@ configured side by side and move new chats between them with one setting:
   their parent's. A schedule that starts a new chat on each run follows the
   setting as it is at that run, unless the schedule names a backend.
 - An API client can still pick a backend for one chat with `sandboxBackend`
-  on session create.
+  on session create, when the deployment serves it: its default or a backend
+  whose settings are configured. Any other value is refused with 422.
 
 Keep both backends' settings in place for as long as chats on either exist:
 removing compute's or Modal's settings stops those chats, not only new ones.

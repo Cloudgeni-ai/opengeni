@@ -70,11 +70,13 @@ test.skipIf(!real)(
       connectedBySubjectId: subject,
     });
     expect(connected.kind).toBe("connected");
-    await shared!.admin`update subscription_settings set personal_fallback_allowed = true
-    where account_id = ${accountId}::uuid and workspace_id is null`;
-    await shared!
-      .admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-    values (${accountId}::uuid, ${membership!.id}::uuid, true)`;
+    // The owner turned their own subscription on in this shared workspace (D-53).
+    await shared!.admin`insert into organization_user_resource_grants (
+        account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+      )
+      select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+        ${workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+      from subscription_connections connection where connection.id = ${connected.id}::uuid`;
     const model = "codex/gpt-5.5";
     const settings = withCodexCatalogProvider(
       testSettings({

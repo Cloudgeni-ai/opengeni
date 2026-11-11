@@ -1,4 +1,5 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { modelIdListIncludes } from "@opengeni/contracts/claude-subscription-model-ids";
 import { rawRows, type Database } from "./database";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { SUBSCRIPTION_CORE_XAI_PROVIDER } from "./subscription-core-xai-adapter";
@@ -12,11 +13,15 @@ import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
   readSubscriptionCoreModelConnectionAccess,
+  removeSubscriptionCoreModelConnectionFromWorkspace,
   updateSubscriptionCoreModelConnectionAccess,
   withModelConnectionAccessScope,
   type ModelConnectionAccess,
 } from "./subscription-core/access-editor";
-import type { SubscriptionCoreAccess } from "./subscription-core/access";
+import {
+  listSubscriptionCoreAdministeredWorkspaceIds,
+  type SubscriptionCoreAccess,
+} from "./subscription-core/access";
 
 // The policy shape, its errors and the route scope are shared with the
 // provider-neutral core editor; the public names stay exported from here.
@@ -35,7 +40,9 @@ export type ModelConnectionKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  /** An organization's own OpenAI-compatible endpoint; always named by its connection id. */
+  | "openai_compatible";
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -48,7 +55,8 @@ export function connectionModelAllowed(
   allowedModels: readonly string[] | null | undefined,
   modelId: string,
 ): boolean {
-  return allowedModels == null || allowedModels.includes(modelId);
+  // A model listed under any of its id forms is the same model.
+  return allowedModels == null || modelIdListIncludes(allowedModels, modelId);
 }
 
 /**
@@ -69,6 +77,11 @@ export function assignedConnectionDefault(
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
   if (subscriptionCoreProviderOfKind(target.kind))
     throw new Error("Subscription access policies use the shared core");
+  if (
+    target.kind === "openai_compatible" &&
+    (target.workspaceId !== null || target.connectionId === "current")
+  )
+    throw new Error("An OpenAI-compatible endpoint's access is set on its organization connection");
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
@@ -77,7 +90,11 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
     };
   // Workspace OpenAI and Azure OpenAI keep their exact direct-connection rail;
   // only the organization connection has an access policy of this kind.
-  if (target.kind === "openai" || target.kind === "azure_openai")
+  if (
+    target.kind === "openai" ||
+    target.kind === "azure_openai" ||
+    target.kind === "openai_compatible"
+  )
     throw new Error("OpenAI access policies exist only for organization connections");
   return {
     table: sql.identifier("connections"),
@@ -174,6 +191,31 @@ export async function updateSubscriptionCoreProviderModelConnectionAccess(
   const provider = subscriptionCoreProviderOfKind(target.kind);
   if (!provider) throw new Error("This connection kind is not written to the core");
   return await updateSubscriptionCoreModelConnectionAccess(db, provider, target, policy);
+}
+
+/**
+ * Removes another workspace's own subscription connection from the workspace
+ * in `target` (D-52), for a kind whose provider is on the core. True when
+ * removed; null when no such connection serves the workspace.
+ */
+export async function removeSubscriptionCoreProviderModelConnectionFromWorkspace(
+  db: Database,
+  target: ModelConnectionTarget & { workspaceId: string },
+): Promise<true | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not written to the core");
+  return await removeSubscriptionCoreModelConnectionFromWorkspace(db, provider, target);
+}
+
+/**
+ * The workspaces the person in `target` administers, which a workspace's own
+ * subscription connection can be given to from that workspace's route (D-52).
+ */
+export async function listModelConnectionAdministeredWorkspaceIds(
+  db: Database,
+  target: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<string[]> {
+  return await listSubscriptionCoreAdministeredWorkspaceIds(db, target);
 }
 
 /**

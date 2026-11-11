@@ -10,7 +10,7 @@
 import type { RequestHumanInputToolInput } from "./index";
 import { parseSecretReference, secretNameKey, type SecretReference } from "./secret-references";
 import { totpCodeAtDispatch, type SecretClock, type TotpParams } from "./secret-totp";
-import type { VaultSource } from "./vaults";
+import type { VaultFieldKind, VaultSource } from "./vaults";
 
 export type SecretPrincipal =
   | {
@@ -89,6 +89,8 @@ export interface ResolvedSecretValue {
   itemName: string;
   fieldId: string | null;
   fieldName: string;
+  /** The field's kind when the vault reports it. */
+  fieldKind?: VaultFieldKind | null;
   version: number | null;
   material: SecretMaterial;
 }

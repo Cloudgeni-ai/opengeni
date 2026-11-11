@@ -116,30 +116,33 @@ callbacks that persist one — Integration Definition OAuth, MCP OAuth,
 Google Drive, and social — require it; retired Atlassian callbacks retain the
 same check before settling historical attempts. A state minted before the
 claim existed simply lacks it and fails closed, which closes the one
-`oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
+`oauthStateTtlMs` in-flight window across a rolling deploy.
+
+Workspace-owned connectors (Fiken, the Slack bot, GitHub App Connect) sign the
+same claim. Their callbacks re-check the starting person through
+`requireConnectOwnerAuthority`, and a managed human's Personal workspace has
+no membership row, so the claim is the only way that re-check finds its owner
+there. Every owner-bound start mints the owner fields through
+`connectOwnerStateFields` (the claim is a required argument), the
+`ConnectOwner` type makes the claim required on every re-check, and
+`apps/api/test/connect-owner-state-surface.test.ts` keeps new states on the
+helper and keeps callbacks off bare `getWorkspaceGrant` lookups. Fiken and the
+Slack bot once omitted the claim and the legacy social callback re-checked
+through a bare membership lookup; each failed only in Personal workspaces,
+after provider consent. This is also why the
 MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
 machine-owned row. Callback refusals retain each flow's existing bounded
 redirect/error projection rather than sharing one HTTP status: for example,
 Integration Definition OAuth reports `connection_conflict`, while social OAuth
 reports `not_authorized`.
 
-The personal-only `google-drive/install` connector carries no ownership field
-and writes `subject_id = <caller>`, so its start route applies the principal
-fence directly. Historical `atlassian/install` states retain the same owner
-contract, but new native starts are retired.
-
-**Native Atlassian retirement.** Jira/Confluence agent access now uses the existing
-hosted Atlassian MCP connector and its OAuth flow. The native `atlassian` Connect
-provider and native live tools are no longer offered. Native setup, browsing,
-source selection, resume and manual schedule triggers refuse with `410` before
-provider requests. Older native callbacks retain signed-state/owner/replay checks
-and exact return navigation, settling pending attempts as failed without token
-exchange. Existing source schedules show **Sync retired**; future and queued
-runs cannot create new agent sessions, and already accepted attempts cannot fetch
-native content. Historical grants, imported Documents and run history remain;
-disconnect, pause and schedule deletion retain their cleanup semantics. Native
-wire types and old tool names are compatibility-only. Google Drive is unchanged.
-See [Atlassian](atlassian.md) for the exact boundaries.
+**Native Google Drive and Atlassian removal.** Integration Knowledge sync was
+removed, and with it the native Google Drive and Atlassian source connectors:
+their install, OAuth callback, browsing and source routes are gone. Agents reach
+Google Drive and Atlassian through the hosted MCP connectors and their OAuth
+flows. The routes the public SDK still calls answer `410` until its next major;
+the old native tool names are compatibility-only. See [Atlassian](atlassian.md)
+and [Google Drive](google-drive.md).
 
 ## 3. Credential encryption
 
@@ -258,7 +261,7 @@ Every integration callback returns the browser to a real page with a plain-langu
 
 ### 5.2.1 Authorization-server clients
 
-DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
+DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres. An operator client is selected only by the authorization server whose metadata was actually fetched (or an issuer equal to it); an issuer that the metadata merely claims never selects one, because the same metadata chooses the token endpoint that receives the client secret.
 
 Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. Opengeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
 
@@ -302,12 +305,16 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
   "client_name": "Opengeni",
   "redirect_uris": ["<publicBaseUrl>/v1/integrations/oauth/callback"],
   "token_endpoint_auth_method": "none",
-  "grant_types": ["authorization_code", "refresh_token"],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer"
+  ],
   "response_types": ["code"]
 }
 ```
 
-`client_id` byte-matches its serving URL. Base URL is `settings.publicBaseUrl` (`OPENGENI_PUBLIC_BASE_URL`, already required in managed mode); HTTPS is enforced when integrations are enabled outside local dev. Per-deployment documents differ by construction, so staging/prod/embedded hosts each get their own client identity automatically.
+`client_id` byte-matches its serving URL. Base URL is `settings.publicBaseUrl` (`OPENGENI_PUBLIC_BASE_URL`, already required in managed mode); HTTPS is enforced when integrations are enabled outside local dev. Per-deployment documents differ by construction, so staging/prod/embedded hosts each get their own client identity automatically. The JWT bearer grant is listed for auto-connect (§ 5.5).
 
 ### 5.4 Client-side security requirements
 
@@ -330,9 +337,65 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
   PRM mode, subject to reviewed provider-profile suppression. It is always
   omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
-- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
+- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless the actual destination matches the operator's `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS`, running in local/test, or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`. See [trusted private destinations](workspace-integrations.md#trusted-private-network-destinations) for the exact-host/optional-port format and redirect/DNS-pinning rules.
 - No arbitrary token passthrough: hosted MCP credentials go only to their exact bound server. Reviewed first-party API bridges may send their provider grant only to explicitly approved provider API destinations, with the same owner, resource and scope fences. Gmail's historical MCP resource identifies the local REST bridge: setup uses pinned Google OAuth metadata and a required Gmail profile check, without contacting Google's MCP preview server. Our own first-party MCP servers keep validating audience on inbound tokens.
 - Token responses stored, never logged.
+
+### 5.5 Auto-connect: Opengeni as the ID-JAG issuer
+
+An organization connector with `login: "auto_connect"` connects each member
+to an outside MCP app with no sign-in screen, using MCP Enterprise-Managed
+Authorization in the client role. (The server role, Claude or an identity
+provider connecting members to Opengeni's own `/v1/mcp`, is in
+[MCP surfaces](mcp-surfaces.md#auto-connect-enterprise-managed-authorization).)
+
+- **Issuer.** Each organization has its own issuer,
+  `<publicBaseUrl>/v1/organizations/:organizationId/identity`, with
+  OIDC and RFC 8414 metadata (`/.well-known/openid-configuration`, both
+  `oauth-authorization-server` placements) and its key set at `/jwks.json`.
+  The signing key (`organization_identity_issuers`) is created the first time
+  an admin adds an auto-connect connector; its private half is encrypted with
+  the environments encryption key and never leaves the database.
+- **Setup.** `POST /v1/organizations/:id/connectors/auto-connect/check`
+  (`checkOrganizationConnectorAutoConnect`) probes the server like a sign-in
+  would (§ 5.4) with the `assertion_grant` purpose and reports whether its
+  authorization server lists the JWT bearer grant or the ID-JAG profile, and
+  whether it reads Client ID Metadata Documents. If it does, Opengeni's client
+  ID is its document URL (§ 5.3); otherwise the admin enters the client ID the
+  app gave Opengeni (`autoConnectClientId`). In the app, the admin pastes the
+  organization's issuer URL as a trusted (ID-JAG) issuer. The connector's
+  `config.autoConnect` keeps the authorization server issuer (every ID-JAG's
+  `aud`, spelled exactly as the server publishes it), token endpoint,
+  resource, scopes, client ID and the last result; nothing in it is secret.
+- **Test.** `POST /v1/organizations/:id/connectors/:connectorId/auto-connect/test`
+  (`testOrganizationConnectorAutoConnect`) signs and redeems one ID-JAG for
+  the admin, saves nothing, and returns the app's refusal in plain words.
+- **Connecting a member.** Opengeni signs a five-minute ID-JAG (`typ`
+  `oauth-id-jag+jwt`, RS256) with `sub` the member's subject ID, `email` and
+  `email_verified: true` (people with an unverified email are not connected),
+  `aud`, `client_id`, `resource` and `scope`, and redeems it at the token
+  endpoint with the JWT bearer grant. The token is saved as the member's own
+  `oauth2` connection (credential `grant: "id_jag"`, metadata
+  `clientRegistrationMethod: "id_jag"`) and turned on in the workspace. A
+  member who already has a working login to that server is left alone.
+- **When.** Before each turn, for at most four auto-connect connectors the turn
+  may use that the person has no login to (connectors they already have a
+  login to, turned on in this workspace, are left out before the limit
+  applies; a login from another workspace is turned on here), best effort;
+  after a refusal that
+  person's turns stop asking that app for ten minutes and the usual sign-in
+  prompt stands in. A member's own **Connect** calls
+  `POST /v1/workspaces/:id/organization-connectors/:connectorId/connect`
+  (`connectWorkspaceOrganizationConnector`) and falls back to the OAuth sign-in
+  when the app refuses.
+- **Refresh.** There is no refresh token: the token broker signs and redeems
+  a new ID-JAG when the token runs out. The app refusing it is permanent, like
+  a refused refresh token; not reaching it is retried. Each renewal first
+  checks that the originating connector (`connector_id` in the credential) is
+  still active with the same authorization server and client ID, and that the
+  person is still an active member; otherwise renewal fails as `invalid_grant`.
+  Only the person's own session can create their login; service principals
+  are refused like any other personal connection.
 
 ## 6. Tool↔connection contract and `tool.auth_needed`
 

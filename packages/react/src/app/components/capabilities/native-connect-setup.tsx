@@ -1,6 +1,17 @@
+import {
+  adminApprovalLink,
+  connectSetupContinuesWithoutDialog,
+  continueConnectSetup,
+} from "../../../connect-setup-model";
+import {
+  connectionServicePresentation,
+  connectionServiceWording,
+} from "../../../connection-service-presentation";
+import { useOpenGeniText } from "../../../messages/runtime";
 import { useEffect, useState, useRef } from "react";
 import {
   ConnectController,
+  ConnectPopupClosedError,
   authorizeConnectAttempt,
   createBrowserConnectNavigation,
   type ConnectTransport,
@@ -28,6 +39,8 @@ export type NativeConnectRequest = {
   returnUrl: string;
   idempotencyKey: string;
   reconnectAccountId?: string | undefined;
+  /** Additional provider access this reconnect asks for (incremental consent). */
+  requestedScopes?: string[] | undefined;
   installationTarget?: ConnectInstallationTarget | undefined;
   displayName?: string | undefined;
   description?: string | undefined;
@@ -42,9 +55,21 @@ export function nativeConnectApiInput(request: NativeConnectRequest) {
     returnUrl: request.returnUrl,
     idempotencyKey: request.idempotencyKey,
     ...(request.reconnectAccountId ? { reconnectAccountId: request.reconnectAccountId } : {}),
+    ...(request.reconnectAccountId && request.requestedScopes?.length
+      ? { requestedScopes: [...request.requestedScopes] }
+      : {}),
     ...(request.installationTarget ? { installationTarget: request.installationTarget } : {}),
   };
 }
+
+function sameScopes(left: readonly string[] | undefined, right: readonly string[] | undefined) {
+  const a = [...new Set(left ?? [])].sort();
+  const b = [...new Set(right ?? [])].sort();
+  return a.length === b.length && a.every((scope, index) => scope === b[index]);
+}
+
+/** How long setup closed mid-way may keep finishing without its dialog. */
+const BACKGROUND_SETUP_LIMIT_MS = 30 * 60_000;
 
 /** Native presentation only. Durable setup and provider callbacks are shared
  * with host products; legacy query-param callbacks remain read-compatible. */
@@ -59,9 +84,17 @@ export function NativeConnectSetup({
   workspaceId: string;
   request: NativeConnectRequest;
   onClose(): void;
+  /**
+   * Setup completed. Closing the dialog after sign-in lets setup carry on,
+   * so this can run after `onClose`, possibly while another dialog is open.
+   */
   onComplete(attempt: ConnectAttempt): void;
 }) {
+  const t = useOpenGeniText();
+  const own = connectionServiceWording(t, request.providerId);
+  const serviceName = own.name ?? request.displayName;
   const [controller, setController] = useState<ConnectController | null>(null);
+  const [approvalPending, setApprovalPending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [preparing, setPreparing] = useState(true);
   const [retry, setRetry] = useState(0);
@@ -75,6 +108,10 @@ export function NativeConnectSetup({
   );
   const navigation = useRef<AbortController | null>(null);
   const completedAttempt = useRef<string | null>(null);
+  // The person opened the provider's sign-in for this attempt.
+  const signInStarted = useRef(false);
+  const latestComplete = useRef(onComplete);
+  latestComplete.current = onComplete;
   // Consent-gated connect journey: started when the dialog begins setup,
   // finished by the attempt's settled state, `abandoned` when closed first.
   const journey = useRef<IntegrationConnectTracker | null>(null);
@@ -95,6 +132,7 @@ export function NativeConnectSetup({
       return;
     }
     const next = new ConnectController(transport, workspaceId);
+    signInStarted.current = false;
     setController(next);
     setFailed(false);
     setPreparing(true);
@@ -114,7 +152,9 @@ export function NativeConnectSetup({
             attempt.providerId === request.providerId &&
             attempt.ownership === request.ownership &&
             attempt.installationTarget?.instanceKey === request.installationTarget?.instanceKey &&
-            (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId),
+            (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId) &&
+            // A pending reconnect resumes only if it asks for the same access.
+            sameScopes(attempt.requestedScopes, request.requestedScopes),
         );
         if (matches.length === 1) {
           setResumed(true);
@@ -139,6 +179,7 @@ export function NativeConnectSetup({
     if (!controller) return;
     const notify = () => {
       const attempt = controller.getSnapshot().attempt;
+      setApprovalPending(Boolean(attempt && adminApprovalLink(attempt)));
       const outcome = attempt ? connectAttemptOutcome(attempt) : null;
       if (outcome) journey.current?.finish(outcome);
       // A non-owner's request: remember it so the GitHub card can say it's
@@ -160,11 +201,29 @@ export function NativeConnectSetup({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (open) return;
+        // Closing never stops setup the person already authorized: it carries
+        // on without the dialog and reports completion the same way.
+        const attempt = controller?.getSnapshot().attempt;
+        if (
+          attempt &&
+          completedAttempt.current !== attempt.id &&
+          connectSetupContinuesWithoutDialog(attempt, signInStarted.current)
+        ) {
+          completedAttempt.current = attempt.id;
+          const complete = latestComplete.current;
+          void continueConnectSetup(transport, attempt, {
+            // Bounded: the attempt's own expiry ends it sooner.
+            signal: AbortSignal.timeout(BACKGROUND_SETUP_LIMIT_MS),
+          }).then((done) => {
+            if (done) complete(done);
+          });
+        }
+        onClose();
       }}
     >
       <CapabilityDialogContent
-        className="max-h-[85dvh] overflow-y-auto sm:max-w-[36rem]"
+        className="w-full max-h-[85dvh] overflow-y-auto sm:max-w-[36rem]"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           heading.current?.focus();
@@ -176,10 +235,18 @@ export function NativeConnectSetup({
           }
         }}
       >
-        <DialogHeader className="flex-row items-center gap-4 border-b border-border px-6 py-6 pr-12 text-left">
+        <DialogHeader
+          className={`flex-row items-center gap-4 px-6 py-6 pr-12 text-left ${approvalPending ? "pb-2" : "border-b border-border"}`}
+        >
           <ConnectionLogo
-            src={request.logoUrl ?? null}
-            name={request.displayName ?? request.providerId}
+            src={
+              request.logoUrl ??
+              connectionServicePresentation({
+                id: request.providerId,
+                label: serviceName ?? request.providerId,
+              }).logo
+            }
+            name={serviceName ?? request.providerId}
           />
           <div className="min-w-0 space-y-1.5">
             <DialogTitle
@@ -187,11 +254,14 @@ export function NativeConnectSetup({
               tabIndex={-1}
               className="text-xl font-semibold tracking-tight outline-hidden"
             >
-              Connect{" "}
-              {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
+              Connect {serviceName ?? request.installationTarget?.displayName ?? request.providerId}
             </DialogTitle>
-            <DialogDescription className="text-sm leading-6 text-fg-muted">
-              {request.description ?? "Authorize access to use this connection in Opengeni."}
+            <DialogDescription
+              className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
+            >
+              {own.description ??
+                request.description ??
+                "Authorize access to use this connection in Opengeni."}
             </DialogDescription>
           </div>
         </DialogHeader>
@@ -199,7 +269,7 @@ export function NativeConnectSetup({
           {failed && (
             <div
               role="alert"
-              className="flex flex-wrap items-center justify-between gap-3 text-status-error"
+              className="flex flex-wrap items-center justify-between gap-3 text-danger"
             >
               Could not start setup.{" "}
               <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
@@ -270,8 +340,14 @@ export function NativeConnectSetup({
             <ConnectSetup
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
+              serviceName={serviceName ?? request.installationTarget?.displayName}
               controller={controller}
-              {...(["github-app", "github-lens"].includes(request.providerId)
+              onRetry={() =>
+                controller.begin(
+                  nativeConnectApiInput({ ...request, idempotencyKey: crypto.randomUUID() }),
+                )
+              }
+              {...(request.providerId === "github-app"
                 ? {
                     onSelectAccount: (accountId: string) => {
                       const signal = navigation.current?.signal;
@@ -281,16 +357,31 @@ export function NativeConnectSetup({
                   }
                 : {})}
               onAuthorize={async (attempt) => {
-                const result = await authorizeConnectAttempt(
-                  transport,
-                  attempt,
-                  createBrowserConnectNavigation(window),
-                  {
-                    mode: "popup",
-                    ...(navigation.current ? { signal: navigation.current.signal } : {}),
-                  },
-                );
-                if (result) await controller.recover(result.id);
+                const browser = createBrowserConnectNavigation(window);
+                try {
+                  const result = await authorizeConnectAttempt(
+                    transport,
+                    attempt,
+                    {
+                      // Sign-in counts as started only once its window opened.
+                      openPopup: (url) => {
+                        const popup = browser.openPopup(url);
+                        if (popup) signInStarted.current = true;
+                        return popup;
+                      },
+                      redirect: (url) => browser.redirect(url),
+                    },
+                    {
+                      mode: "popup",
+                      ...(navigation.current ? { signal: navigation.current.signal } : {}),
+                    },
+                  );
+                  if (result) await controller.recover(result.id);
+                } catch (error) {
+                  // The person closed the sign-in window: nothing to carry on.
+                  if (error instanceof ConnectPopupClosedError) signInStarted.current = false;
+                  throw error;
+                }
               }}
             />
           )}

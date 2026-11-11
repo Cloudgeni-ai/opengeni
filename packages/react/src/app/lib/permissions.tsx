@@ -1,5 +1,9 @@
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
-import { Permission } from "@opengeni/contracts";
+import {
+  Permission,
+  WORKSPACE_ADMIN_ROLE_PERMISSIONS,
+  workspaceAdminDelegates,
+} from "@opengeni/contracts";
 import { organizationAdministrationAccountIds } from "../../organization-model";
 
 import type { AccessContext } from "../types";
@@ -108,28 +112,18 @@ export function apiKeyPermissionGroups(): PermissionGroup[] {
   return cachedApiKeyPermissionGroups;
 }
 
-// Mirrors the API's ensureDelegablePermissions: workspace:admin delegates most
-// workspace scopes, but high-trust scopes require literal grants in the right
-// authority (workspace or organization). Other grants delegate only themselves.
+// The API's ensureDelegablePermissions rule (shared through contracts):
+// workspace:admin delegates most workspace scopes, but high-trust scopes require
+// literal grants in the right authority (workspace or organization). Other
+// grants delegate only themselves.
 export function delegableApiKeyPermissions(
   grantPermissions: readonly string[],
   accountGrantPermissions: readonly string[] = [],
 ): Set<string> {
   if (grantPermissions.includes("workspace:admin")) {
-    const accountLiteralPermissions = new Set<string>([
-      "account:read",
-      "account:admin",
-      "workspace:create",
-      "billing:read",
-      "billing:manage",
-    ]);
-    const workspaceLiteralPermissions = new Set<string>(["members:manage", "secrets:read"]);
     return new Set<string>(
-      Permission.options.filter(
-        (permission) =>
-          (!accountLiteralPermissions.has(permission) ||
-            accountGrantPermissions.includes(permission)) &&
-          (!workspaceLiteralPermissions.has(permission) || grantPermissions.includes(permission)),
+      Permission.options.filter((permission) =>
+        workspaceAdminDelegates(grantPermissions, accountGrantPermissions, permission),
       ),
     );
   }
@@ -256,13 +250,9 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "github:use",
   "connections:read",
   "connections:write",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "rigs:use",
@@ -298,7 +288,7 @@ export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition
       "stream:view",
       "files:read",
       "documents:search",
-      "variable-sets:list",
+      "secrets:list",
       "connections:read",
       "rigs:use",
       "artifacts:read",
@@ -314,47 +304,10 @@ export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition
     role: "admin",
     label: "Workspace admin",
     description: "Can manage shared workspace settings, access, and integrations.",
-    permissions: [
-      "workspace:read",
-      "workspace:admin",
-      "members:manage",
-      "sessions:create",
-      "sessions:read",
-      "sessions:control",
-      "stream:view",
-      "stream:control",
-      "stream:acknowledge",
-      "terminal:attach",
-      "codemode:call",
-      "files:upload",
-      "files:read",
-      "files:write",
-      "documents:manage",
-      "documents:search",
-      "scheduled_tasks:manage",
-      "scheduled_tasks:run",
-      "github:manage",
-      "github:use",
-      "api_keys:manage",
-      "connections:read",
-      "connections:write",
-      "variable-sets:list",
-      "variable-sets:read",
-      "variable-sets:write",
-      "variable-sets:manage",
-      "variable-sets:attach",
-      "variable-sets:use",
-      "secrets:list",
-      "secrets:write",
-      "mcp_servers:attach",
-      "goals:manage",
-      "rigs:use",
-      "rigs:manage",
-      "enrollments:read",
-      "enrollments:manage",
-      "artifacts:read",
-      "artifacts:publish",
-    ],
+    // A getter, never a module-scope read of contracts (chunk evaluation order).
+    get permissions() {
+      return WORKSPACE_ADMIN_ROLE_PERMISSIONS;
+    },
   },
 ];
 
@@ -369,6 +322,71 @@ export function hasWorkspacePermission(
     (permissionSetCovers(grant.permissions, permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
+}
+
+/**
+ * Whether the viewer may add integrations here: install plugins and API
+ * integrations, add MCP servers and turn on an integration that is not on yet.
+ * Members hold `connections:write`; integration admins hold
+ * `capabilities:manage`. An organization can keep this for admins
+ * (`memberIntegrationSetup: "admins"`). A member's add never changes what is
+ * already set up; see {@link canChangeWorkspaceIntegrations}.
+ */
+export function canAddWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  return (
+    canChangeWorkspaceIntegrations(context, workspaceId) ||
+    (canManageWorkspaceIntegrations(context, workspaceId) && memberIntegrationSetup !== "admins")
+  );
+}
+
+/**
+ * Whether the viewer may remove plugins and integrations and configure an
+ * integration's sources here, whatever the organization's setup policy. The
+ * same rule as the API's (`INTEGRATION_SETUP_PERMISSION`).
+ */
+export function canManageWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return (
+    hasWorkspacePermission(context, workspaceId, "capabilities:manage") ||
+    hasWorkspacePermission(context, workspaceId, "connections:write")
+  );
+}
+
+/**
+ * Whether the viewer may change an integration that is already set up: update
+ * a plugin, check a custom API for updates, or reconnect a shared account.
+ * Integration admin work (`capabilities:manage`), like tool approval rules,
+ * auto-approval and turning an integration off for everyone.
+ */
+export function canChangeWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return hasWorkspacePermission(context, workspaceId, "capabilities:manage");
+}
+
+/**
+ * Whether the chat's connect card may sign in a workspace-owned account for an
+ * OAuth MCP server. Admins may for any server. Members (`connections:write`)
+ * may only turn on a server that is not on yet, when their organization lets
+ * members turn integrations on: their setup never changes a server that is
+ * already on, so a new account for one would go unused.
+ */
+export function canConnectWorkspaceMcpFromChat(
+  context: AccessContext | null,
+  workspaceId: string,
+  item: { enabled?: boolean | undefined } | undefined,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  if (!hasWorkspacePermission(context, workspaceId, "connections:write")) return false;
+  if (hasWorkspacePermission(context, workspaceId, "capabilities:manage")) return true;
+  return item?.enabled !== true && memberIntegrationSetup !== "admins";
 }
 
 /**
@@ -419,6 +437,52 @@ export function canManageWorkspaceSettings(
     selfContext.identity.subjectId === `user:${selfContext.identity.managedUserId}` &&
     hasWorkspacePermission(context, workspace.id, "workspace:read") &&
     personalWorkspaceMembership(workspace, selfContext),
+  );
+}
+
+/**
+ * Shared content of a workspace that everyone who works there may change for
+ * everyone, like a shared Skill: its instructions and the review of the
+ * agent's proposed changes to them, a shared workspace's name and its custom
+ * model entries. Whoever manages the workspace's settings
+ * may; otherwise a person of the organization who can start chats here
+ * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
+ * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.
+ */
+export function canContributeWorkspaceContent(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (canManageWorkspaceSettings(context, workspace, selfContext)) return true;
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id);
+  return Boolean(
+    grant &&
+    grant.accountId === workspace.accountId &&
+    isSignedInPerson(context, workspace.id) &&
+    hasWorkspacePermission(context, workspace.id, "sessions:create"),
+  );
+}
+
+/**
+ * The signed-in person themself, not a key, a delegated credential or an
+ * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
+ * Mirrors the API's rule for Only me machines and shared workspace content;
+ * the API still decides.
+ */
+export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
+  if (!context || context.credential) return false;
+  const person =
+    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(
+    person &&
+    grant &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator,
   );
 }
 

@@ -39,6 +39,13 @@ import {
   type WorkbookLinkState,
 } from "@opengeni/sdk/office";
 import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
+import { landingWorkspaceId } from "./landing-workspace";
+import { SPREADSHEET_STARTERS } from "./starters";
+import {
+  availableSessionStorage,
+  currentViteBuildId,
+  installVitePreloadRecovery,
+} from "../../src/lib/vite-preload-recovery";
 import "./pane.css";
 
 const apiBaseUrl =
@@ -53,6 +60,18 @@ const RETRY_MIN_MS = 600;
 
 // The session panel's terminal, desktop viewer, code editor and highlighted diffs.
 enableWorkbench();
+
+// A lazy part of the pane that fails to download reloads the pane once, as
+// the web app does; a second failure shows the chat's Reload message.
+const preloadRecoveryStorage = availableSessionStorage(window);
+if (preloadRecoveryStorage) {
+  installVitePreloadRecovery({
+    target: window,
+    storage: preloadRecoveryStorage,
+    buildId: currentViteBuildId(document),
+    reload: () => window.location.reload(),
+  });
+}
 
 const surfaces: SessionAppSurfaces = {
   pdfPreview: lazy(() => import("../../src/components/artifacts/pdf-file-preview")),
@@ -281,10 +300,7 @@ function PaneAccount(props: {
 }
 
 function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }) {
-  const client = useMemo(
-    () => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token, onDeprecation: false }),
-    [token],
-  );
+  const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -303,15 +319,22 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       attempt > 0
         ? new Promise<void>((resolve) => setTimeout(resolve, RETRY_MIN_MS))
         : Promise.resolve();
-    client
-      .listWorkspaces()
-      .then(async (list) => {
+    Promise.all([
+      client.listWorkspaces(),
+      // The person's own default workspace; without it the pane still opens one.
+      client.getAccessContext().catch(() => null),
+    ])
+      .then(async ([list, access]) => {
         await shown;
         if (!live) return;
         setWorkspaces(list);
         setLoadError(null);
         setWorkspaceId((current) =>
-          current && list.some((each) => each.id === current) ? current : (list[0]?.id ?? null),
+          landingWorkspaceId({
+            workspaceIds: list.map((each) => each.id),
+            remembered: current,
+            defaultWorkspaceId: access?.defaultWorkspaceId,
+          }),
         );
         setRetrying(false);
       })
@@ -343,6 +366,13 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       ticket: () => client.createOfficeWorkbookTicket(workspaceId),
       baseUrl: apiBaseUrl,
       describe,
+      // As the person: agents open chat files here and save copies of the
+      // workbook to their chat, with the audience the API chose for it.
+      files: {
+        download: async (artifact) =>
+          (await client.downloadRetainedArtifact(workspaceId, artifact)).bytes,
+        upload: async (file) => await client.uploadFile(workspaceId, file),
+      },
       onState: (state) => {
         setLink(state);
         if (state.status === "signed_out") onSignedOut();
@@ -410,6 +440,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       theme={theme}
       surfaces={surfaces}
       messageContext={messageContext}
+      starters={SPREADSHEET_STARTERS}
       onUnauthorized={onSignedOut}
       openUrl={openInBrowser}
       slots={{

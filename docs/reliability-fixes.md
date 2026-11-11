@@ -19,8 +19,6 @@ over this summary. Canonical sources:
   conversation-truth reconcile, `historyRowsToAppend`, `modelUsageSourceKey`.
 - `packages/db/src/index.ts` — `orphanedResultRowIndicesForRepair`,
   `claimNextSessionExecution`, the reusable-session locked update.
-- `packages/db/drizzle/0014_repair_orphaned_function_call_results.sql` — the
-  one-time orphan repair.
 - `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
   helpers and `assertReusableSessionRevivable`.
 

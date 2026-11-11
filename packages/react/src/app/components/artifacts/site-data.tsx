@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import { DatabaseIcon, DownloadIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { toast } from "../../lib/toast";
 import type {
@@ -10,6 +11,8 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "../../app-context";
+import { personSubjectOf } from "../../lib/person-subject";
+import { usePersonName } from "../../lib/use-person-name";
 import { Button } from "../../../ui/button";
 import { BackLink, DetailMeta } from "../../../ui/detail-page";
 import { DestructiveConfirm } from "../ui/destructive-confirm";
@@ -24,13 +27,13 @@ import { SettingRow, SettingRowGroup } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
 import { UsageMeter } from "../../../ui/usage-meter";
 import { formatBytes } from "../../lib/format";
-import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 export type SiteDataClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "getSiteData" | "querySiteData" | "writeSiteData" | "exportSiteData"
 > &
-  Partial<Pick<OpenGeniBrowserClient, "getSiteSql" | "updateSiteSqlSettings">>;
+  Partial<Pick<ChatClient<OpenGeniBrowserClient>, "getSiteSql" | "updateSiteSqlSettings">>;
 
 const PAGE_SIZE = 50;
 const COLLECTION_COLUMNS: RowListColumn[] = [
@@ -92,11 +95,13 @@ function forbidden(error: unknown): boolean {
  */
 export function SiteData(props: { workspaceId: string; siteId: string; title: string }) {
   const { client, accessContext } = useAppContext();
+  const personName = usePersonName(props.workspaceId);
   return (
     <SiteDataPanel
       {...props}
       client={client}
       currentPrincipal={accessContext.subjectId ? `user:${accessContext.subjectId}` : null}
+      personName={personName}
     />
   );
 }
@@ -107,12 +112,16 @@ export function SiteDataPanel({
   siteId,
   title,
   currentPrincipal,
+  personName,
 }: {
   client: SiteDataClient;
   workspaceId: string;
   siteId: string;
   title: string;
+  /** The viewer's record owner (`user:<subject>`), for "Added by you". */
   currentPrincipal: string | null;
+  /** Names a person's subject (`user:<id>`); null when unknown. */
+  personName?: ((subjectId: string) => string | null) | undefined;
 }) {
   const [described, setDescribed] = useState<SiteDataDescribeResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -153,6 +162,7 @@ export function SiteDataPanel({
         siteId={siteId}
         collection={collection}
         currentPrincipal={currentPrincipal}
+        personName={personName}
         onBack={() => {
           setCollectionName(null);
           void load();
@@ -310,6 +320,7 @@ function SiteDataCollection({
   siteId,
   collection,
   currentPrincipal,
+  personName,
   onBack,
 }: {
   client: SiteDataClient;
@@ -317,6 +328,7 @@ function SiteDataCollection({
   siteId: string;
   collection: SiteDataCollectionResponse;
   currentPrincipal: string | null;
+  personName: ((subjectId: string) => string | null) | undefined;
   onBack: () => void;
 }) {
   const [page, setPage] = useState<SiteDataQueryResponse | null>(null);
@@ -388,7 +400,7 @@ function SiteDataCollection({
         });
     } catch (nextError) {
       toast.error("Couldn't export records", {
-        description: errorMessage(nextError),
+        description: userErrorText(nextError),
       });
     } finally {
       setExporting(false);
@@ -404,6 +416,7 @@ function SiteDataCollection({
         collection={collection}
         record={open}
         currentPrincipal={currentPrincipal}
+        personName={personName}
         onBack={() => setOpen(null)}
         onDeleted={() => {
           setOpen(null);
@@ -503,6 +516,7 @@ function SiteDataRecordView({
   collection,
   record,
   currentPrincipal,
+  personName,
   onBack,
   onDeleted,
 }: {
@@ -512,11 +526,20 @@ function SiteDataRecordView({
   collection: SiteDataCollectionResponse;
   record: SiteDataRecordResponse;
   currentPrincipal: string | null;
+  personName: ((subjectId: string) => string | null) | undefined;
   onBack: () => void;
   onDeleted: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const name = siteDataRecordTitle(record);
+  // Owners are `user:<subject>` (the Site viewer id), never shown raw.
+  const ownerSubject = personSubjectOf(record.owner);
+  const addedBy =
+    currentPrincipal && record.owner === currentPrincipal
+      ? "you"
+      : ownerSubject
+        ? (personName?.(ownerSubject) ?? null)
+        : null;
   const remove = async () => {
     await client.writeSiteData(workspaceId, siteId, {
       operations: [
@@ -542,7 +565,7 @@ function SiteDataRecordView({
               <RelativeTime key="updated" date={record.updatedAt} prefix="Updated" inSentence />
               {`Version ${record.version}`}
               {formatBytes(record.sizeBytes)}
-              {currentPrincipal && record.owner === currentPrincipal ? "Added by you" : null}
+              {addedBy ? `Added by ${addedBy}` : null}
             </DetailMeta>
           </div>
           <RowButton onClick={() => setConfirming(true)}>

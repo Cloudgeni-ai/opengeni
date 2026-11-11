@@ -1,9 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
+import {
+  normalizePermission,
+  type Permission,
+  type SessionAuthorizationOperation,
+  type SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import {
   acceptOrganizationInvitation,
   claimSessionWorkForAttempt,
   createDb,
+  createAgent,
   createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
@@ -15,6 +21,7 @@ import {
   submitHumanPromptInTransaction,
   withSessionRlsActorContext,
   withWorkspaceSubjectSessionActivityRls,
+  SessionAgentRequiresPrivateChatError,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
@@ -444,6 +451,37 @@ describe("managed-human session tenancy application service", () => {
     await expect(open(personalWorkspaceId)).resolves.toBeUndefined();
   }, 180_000);
 
+  test("the Personal workspace limit takes the usage-allowance switch to set, never to remove", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-limit-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal limit",
+    });
+    const accountId = access.defaultAccountId!;
+    const change = (usageAllowancesEnabled: boolean, credits: number | null) =>
+      updateOrganizationPrivacySettings(
+        { db: client!.db, settings: { ...testSettings(), usageAllowancesEnabled } },
+        {
+          organizationId: accountId,
+          actorSubjectId: subjectId,
+          request: { personalWorkspaceMonthlyCredits: credits },
+        },
+      );
+
+    expect(
+      await getOrganizationPrivacySettings({ db: client.db, settings: testSettings() }, accountId),
+    ).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+    await expect(change(false, 50_000_000)).rejects.toBeInstanceOf(OrganizationPrivacyLockedError);
+    expect(await change(true, 50_000_000)).toMatchObject({
+      personalWorkspaceMonthlyCredits: 50_000_000,
+      personalWorkspaces: true,
+    });
+    expect(await change(false, null)).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+  }, 180_000);
+
   test("serves personal-resource discovery for a receipt-less organization; unknown authorities deny", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;
@@ -536,6 +574,68 @@ describe("managed-human session tenancy application service", () => {
         crypto.randomUUID(),
       ),
     ).rejects.not.toBeInstanceOf(SessionTenancyNotActivatedError);
+  }, 180_000);
+
+  test("personal-resource gates accept canonical or historical secret grants without rewriting either", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-secret-grants-${crypto.randomUUID()}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal secret grants",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    const deps = { db: client.db };
+    const permissionSets: Permission[][] = [
+      ["secrets:list", "secrets:use", "sessions:create"],
+      ["variable-sets:list", "variable-sets:attach", "variable-sets:use", "sessions:create"],
+    ];
+    for (const permissions of permissionSets) {
+      Object.freeze(permissions);
+      const before = JSON.stringify(permissions);
+      const authorization = {
+        grant: { ...grant, permissions, permissionMode: "explicit" },
+        accountGrant: access.accountGrants[0] ?? null,
+        authenticatedSubjectId: grant.subjectId,
+        contextIntegrity: true,
+        canonicalManagedHumanSession: true,
+      } satisfies AccessGrantAuthorization;
+      await expect(
+        listManagedHumanUserResourceAuthorities(deps, authorization, grant.workspaceId, {
+          resourceKind: "variable_set",
+          limit: 100,
+        }),
+      ).resolves.toEqual({ authorities: [], nextCursor: null });
+      const issue = (input: AccessGrantAuthorization) =>
+        issueManagedHumanUserResourceGrant(deps, input, grant.workspaceId, crypto.randomUUID(), {
+          scope: "user",
+          resourceKind: "variable_set",
+          mode: "always",
+          context: "user_private",
+          workspaceSharedAcknowledged: false,
+        });
+      // Full permission is not resource authority: an unknown target still
+      // fails the database's exact owner/authority check.
+      const failure = await issue(authorization).catch((error: unknown) => error);
+      expect(nestedPostgresSqlState(failure)).toBe("42501");
+      for (const missing of ["secrets:list", "secrets:use", "sessions:create"] as const) {
+        await expect(
+          issue({
+            ...authorization,
+            grant: {
+              ...authorization.grant,
+              permissions: permissions.filter(
+                (permission) => normalizePermission(permission) !== missing,
+              ),
+            },
+          }),
+        ).rejects.toMatchObject({ status: 403, permission: missing });
+      }
+      expect(JSON.stringify(permissions)).toBe(before);
+    }
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
@@ -860,6 +960,180 @@ describe("managed-human session tenancy application service", () => {
       ownedByCurrentUser: true,
       fork: { sourceVisibility: "private", sourceAuthorityEpoch: 2 },
     });
+  }, 180_000);
+
+  test("a fork cannot copy a session onto a sandbox backend the deployment does not serve", async () => {
+    if (!shared || !client) return;
+    const userId = `core-session-fork-backend-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Core fork backend",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${grant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'core-test'
+      )`;
+    // A row on the host backend, as main used to accept on any deployment.
+    const source = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "fork me onto the host",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "local",
+    });
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const request = {
+      idempotencyKey: `fork-backend-${crypto.randomUUID()}`,
+      visibility: "workspace" as const,
+      workspaceSharedAcknowledged: true,
+    };
+    const cloud = testSettings({
+      sandboxBackend: "modal",
+      modalTokenId: "test-modal-token-id",
+      modalTokenSecret: "test-modal-token-secret",
+    });
+    const countSessions = async () => {
+      const [row] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count from sessions where workspace_id = ${grant.workspaceId}`;
+      return row?.count ?? 0;
+    };
+    const before = await countSessions();
+    await expect(
+      forkManagedHumanSession(
+        { db: client.db, bus: new MemoryEventBus(), sessionAuthorization, settings: cloud },
+        authorization,
+        grant.workspaceId,
+        source.id,
+        request,
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('sandboxBackend "local" is not available'),
+    });
+    expect(await countSessions()).toBe(before);
+    // Where the backend is the deployment default, forking is unchanged.
+    const forked = await forkManagedHumanSession(
+      {
+        db: client.db,
+        bus: new MemoryEventBus(),
+        sessionAuthorization,
+        settings: testSettings({ sandboxBackend: "local" }),
+      },
+      authorization,
+      grant.workspaceId,
+      source.id,
+      request,
+    );
+    expect(forked).toMatchObject({ replay: false });
+    expect(await countSessions()).toBe(before + 1);
+  }, 180_000);
+
+  test("a chat with an Only me agent cannot be shared", async () => {
+    if (!shared || !client) return;
+    const userId = `core-session-agent-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Only me agent owner",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${grant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'core-test'
+      )`;
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const { agent } = await createAgent(
+      client.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      {
+        visibility: "private",
+        ownerSubjectId: subjectId,
+        name: "Diary",
+        description: "",
+        avatar: null,
+        instructions: "Keep it private.",
+        firstMessage: "",
+        memoryEnabled: false,
+        origin: "app",
+        sourceSessionId: null,
+        createdBySubjectId: subjectId,
+      },
+    );
+    const chat = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Dear diary",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      visibility: "user_private",
+      agent: { id: agent.id },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const deps = {
+      db: client.db,
+      bus: new MemoryEventBus(),
+      sessionAuthorization,
+      settings: testSettings(),
+    };
+    await expect(
+      updateManagedHumanSessionVisibility(deps, authorization, grant.workspaceId, chat.id, {
+        visibility: "workspace",
+        expectedAuthorityEpoch: 1,
+        idempotencyKey: "agent-chat-share-1",
+      }),
+    ).rejects.toBeInstanceOf(SessionAgentRequiresPrivateChatError);
+    const [row] = await shared.admin<{ visibility: string; agent_id: string }[]>`
+      select visibility, agent_id::text from sessions where id = ${chat.id}`;
+    expect(row).toEqual({ visibility: "user_private", agent_id: agent.id });
   }, 180_000);
 
   test("make private anyway stops a running response and drops another member's authority in one call", async () => {

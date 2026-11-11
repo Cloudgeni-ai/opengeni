@@ -26,10 +26,11 @@ rather than choose. The canonical product boundary is in
 | Session MCP headers | Arbitrary headers, authenticated-encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
 | Capability MCP headers | Arbitrary headers, authenticated-encrypted at rest | Workspace admin when configuring a capability | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Until reconfigured | Third-party MCP servers enabled workspace-wide |
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow in Workspace or Organization settings | OpenAI; Opengeni stores encrypted, never returns them | Provider-defined, auto-refreshed | One workspace pool, or one organization pool inherited by current and future shared workspaces; personal workspaces remain local |
-| Organization Vercel AI Gateway / OpenRouter / Opper keys | Provider API key, encrypted | Organization settings → Models, connected by owners and admins and available in every shared workspace or the ones they choose | Organization provider account; Opengeni never returns the key | Until rotated or disconnected | One organization connection per provider inherited by current/future shared workspaces; Personal workspaces remain local; workspace-only connections remain independent |
+| Organization Vercel AI Gateway / OpenRouter / Opper keys | Provider API key, encrypted | Organization settings → Models, connected by owners and admins and available in every shared workspace or the ones they choose | Organization provider account; Opengeni never returns the key | Until rotated or disconnected | One organization connection per provider inherited by current/future workspaces, Personal workspaces included (never another organization's); workspace-only connections remain independent |
 | Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | Opengeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
 | Personal GitHub Git broker bearer | Encrypted opaque `oggh1.…` password used only by Git smart HTTP | Opengeni worker from an exact accepted personal repository snapshot | Opengeni API broker plus live connection/repository/provider revalidation | Five minutes, proactively renewed without changing routes | One active managed-sandbox attempt; delivered through private editor/file ingress, never provider CLIs, Connected Machines, model context, manifests, remotes, argv, logs, events, or audit text |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials`, or a standalone product through the workspace credential provider (`docs/workspace-integrations.md`) | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
+| Credential profile variables | Environment variables (for example `GH_TOKEN`, `AZURE_CLIENT_SECRET`) mapped to vault references by an opt-in workspace or chat profile | Workspace admins or a chat's controllers ([`secrets.md`](secrets.md#credential-profiles)); values come from vaults | Upstream CLIs and SDKs (`gh`, `az`, git through the optional helper) | Resolved again for every command | One agent command's process environment, on Connected Machines and managed sandboxes; never command text, stored arguments, config or files |
 | Sandbox Codemode bearer | Narrow `ogd_…`; protected attempt file via `OPENGENI_CODEMODE_TOKEN_FILE` on managed boxes, direct `OPENGENI_CODEMODE_TOKEN` only in an exact Connected Machine child exec | Opengeni worker from first-party signing authority | Exact-attempt Codemode API | One hour per bearer, proactively renewed during the active attempt | `@opengeni/codemode`/`ogtool` on managed sandboxes; native `opengeni-agent codemode` or an installed client in Connected Machine commands. Group-global ttyd and stable machine state receive no bearer |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
@@ -52,7 +53,8 @@ Rules that hold across the table:
   and leaving the organization revokes it for good. Only the person can create
   one (in the browser, or through an agent or key with their Full access, so a
   limited key never mints a broader one); they see and revoke their own, and
-  owners and admins see and revoke everyone's. A personal key is never combined
+  owners and admins see and revoke everyone's, except that only an owner
+  revokes an owner's (each listed key carries `canRevoke`). A personal key is never combined
   with external-user or service headers. It works on every route the person
   can use, including the organization MCP server (`/v1/mcp`). Stored rows keep
   the legacy `permissions` column empty, so an older API instance in a rolling
@@ -102,11 +104,32 @@ Rules that hold across the table:
   enters Git configuration or repository metadata. `gh`, `glab`, and `az`
   select direct provider credentials by an explicit binding, current `origin`,
   or an unambiguous sole binding. They never receive a smart-Git broker bearer
-  and instead direct the agent to configured provider MCP tools. Provider
+  and instead direct the agent to configured provider MCP tools. The exception
+  is `gh` on repositories mounted as the person (and outside any checkout in
+  such a session): it reaches GitHub through the personal GitHub gateway on
+  the API, which adds the person's token there; the sandbox keeps only the
+  bearer, read per request by a short-lived local proxy and never placed in
+  `gh`'s environment, config or arguments (see
+  [personal GitHub](personal-github.md#gh-in-managed-sandboxes)). Provider
   aliases exist only for a single direct binding. Renewal atomically replaces
   each binding file, so a multi-day turn sees current credentials without model
   action or manifest mutation and a failed sibling refresh cannot overwrite it;
   broker route changes require a newer admitted turn.
+- **Credential profiles are per command and opt-in.** A profile stores names
+  and vault references only. Each command's variables are resolved through the
+  attempt's secret resolver (vault policy, per-use approval and audit apply)
+  and added to that command's environment below anything the command sets
+  itself. Connected Machines receive them in `ExecRequest.env`; managed
+  sandboxes source and delete a 0600 env file in the same command. The optional
+  git helper uses per-command `GIT_CONFIG_*` variables for `https://github.com`
+  and writes no git config. On managed sandboxes the binding files still give
+  git, `gh`, `glab` and `az` their credentials, but for a variable a profile
+  delivers the profile wins: the git helper replaces the binding helper for
+  `github.com`, and the provider CLI wrappers keep the profile's token. Host
+  run credentials are applied after the profile and win for the same names.
+  An entry that cannot be resolved is skipped with a note; it never fails the
+  command. A command that prints a profile value shows it in its output like any
+  other output ([`secrets.md`](secrets.md#agent-visible-content)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

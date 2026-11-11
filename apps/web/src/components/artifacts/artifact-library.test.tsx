@@ -512,6 +512,56 @@ test("Only me files and images are marked in the gallery and the list; shared on
   }
 });
 
+test("Only me documents and spreadsheets are marked in the list; shared ones are not", async () => {
+  localStorage.setItem("opengeni:artifact-library:view:v1", "list");
+  const documents: ArtifactCatalogItem[] = [
+    {
+      id: "a".repeat(32),
+      kind: "document",
+      title: "Private plan",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-02T00:00:00Z",
+      visibility: "private",
+      ownedByViewer: true,
+    },
+    {
+      id: "b".repeat(32),
+      kind: "spreadsheet",
+      title: "Team budget",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-01T00:00:00Z",
+      visibility: "workspace",
+      ownedByViewer: false,
+    },
+  ];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={documents}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    const marked = [...container.querySelectorAll("ul[aria-label=Artifacts] > li")].map((entry) => [
+      entry.textContent?.includes("Private plan") ? "plan" : "budget",
+      entry.textContent?.includes("Only me") ?? false,
+    ]);
+    expect(Object.fromEntries(marked)).toEqual({ plan: true, budget: false });
+  } finally {
+    await act(async () => root.unmount());
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+    container.remove();
+  }
+});
+
 test("a Site in the Artifacts list opens in the Site view; other artifacts keep their page", async () => {
   localStorage.setItem("opengeni:artifact-library:view:v1", "list");
   const container = document.createElement("div");
@@ -542,12 +592,16 @@ test("a Site in the Artifacts list opens in the Site view; other artifacts keep 
       [...container.querySelectorAll<HTMLAnchorElement>("a[href]")].find((anchor) =>
         anchor.textContent?.includes(title),
       )!;
-    expect(link("Status board").getAttribute("href")).toBe("/workspaces/workspace/sites/same");
+    // A Site opened from the list keeps the list's place, for its Back to Artifacts.
+    expect(link("Status board").getAttribute("href")).toBe(
+      "/workspaces/workspace/sites/same?browse=true&q=plan",
+    );
     expect(link("Project brief").getAttribute("href")).toContain(
       "/workspaces/workspace/artifacts/editable/same?",
     );
     await act(async () => link("Status board").click());
     expect(router.state.location.pathname).toBe("/workspaces/workspace/sites/same");
+    expect(router.state.location.search).toMatchObject({ browse: true, q: "plan" });
   } finally {
     localStorage.removeItem("opengeni:artifact-library:view:v1");
     await act(async () => root.unmount());

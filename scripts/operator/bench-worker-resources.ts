@@ -23,6 +23,7 @@ import { postgresWireBudget } from "./postgres-wire-budget";
 // OPENGENI_BENCH_WORKER_TOOLS=5 adds five local SDK tool calls and a second
 // model response. It measures durable tool checkpoints, not connector dispatch
 // or external execution. Cycles are protocol boundaries, not serial latency.
+// OPENGENI_BENCH_WORKER_CHILD=1 exercises a child with an active root parent.
 type Sample = {
   operation: string;
   statements: number;
@@ -35,6 +36,7 @@ type Sample = {
   scopeStatements: Record<string, number>;
 };
 const samples: Sample[] = [];
+const childSession = process.env.OPENGENI_BENCH_WORKER_CHILD === "1";
 const toolCount = Number(process.env.OPENGENI_BENCH_WORKER_TOOLS ?? "0");
 if (toolCount !== 0 && toolCount !== 5) throw new Error("Worker fixture supports 0 or 5 tools");
 const streamChunks = Number(process.env.OPENGENI_BENCH_STREAM_CHUNKS ?? "0");
@@ -188,16 +190,21 @@ try {
       subjectId: `benchmark:${id}`,
     });
     const grant = access.workspaceGrants[0]!;
-    const session = await createSession(client.db, {
+    const sessionInput = {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       initialMessage: "Count a scripted turn",
       model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
       resources: [],
       metadata: {},
+    };
+    const parent = childSession ? await createSession(client.db, sessionInput) : null;
+    const session = await createSession(client.db, {
+      ...sessionInput,
+      ...(parent ? { parentSessionId: parent.id } : {}),
     });
     await submitTestHumanPrompt(client.db, {
       accountId: grant.accountId,
@@ -309,6 +316,7 @@ try {
     generatedAt: new Date().toISOString(),
     fixture: {
       toolCount,
+      childSession,
       streamChunks,
       streamDelayMs,
       serviceLifetime: "process",

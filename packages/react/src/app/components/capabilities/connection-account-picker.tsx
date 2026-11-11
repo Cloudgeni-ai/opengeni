@@ -1,7 +1,10 @@
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
+import { useOptionalAppContext } from "../../app-context";
 import { DropdownMenuItem } from "../../../ui/dropdown-menu";
 import { ComposerMenuSwitchIndicator } from "../../../ui/composer-menu";
+import { connectionAccountRows } from "./connection-account-rows";
+import type { AccountOriginWorkspace } from "./connection-account-rows";
 import type {
   ConnectedAccountGroup,
   ConnectionAccountChoices,
@@ -18,6 +21,11 @@ export type ConnectionAccountPickerProps = {
   disabled?: boolean | undefined;
   presentation?: "menu" | "dialog" | undefined;
   emptySelectionHint?: string | undefined;
+  /** The workspace being viewed, to name where another workspace's account came from.
+   * Defaults to the console's current workspace. */
+  workspaceId?: string | undefined;
+  /** The workspaces the person can see. Defaults to the console's list. */
+  workspaces?: readonly AccountOriginWorkspace[] | undefined;
 };
 
 export type ConnectionAccountControls = ConnectionAccountPickerProps & {
@@ -28,9 +36,16 @@ export type ConnectionAccountControls = ConnectionAccountPickerProps & {
 };
 
 export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
+  const context = useOptionalAppContext();
+  const workspaceId = props.workspaceId ?? context?.workspaceStateOwnerId ?? null;
   return props.groups.map((group) => {
     const chosen = props.choices[group.serverId] ?? group.accounts.map((account) => account.id);
     const missing = chosen.filter((id) => !group.accounts.some((account) => account.id === id));
+    const rows = connectionAccountRows(group.accounts, {
+      fallbackName: group.name,
+      workspaceId,
+      workspaces: props.workspaces ?? context?.workspaces,
+    });
     return (
       <div key={group.serverId} role="group" aria-label={`${group.name} accounts`}>
         {props.presentation !== "menu" ? (
@@ -38,8 +53,9 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
         ) : null}
         {group.accounts.map((account) => {
           const checked = chosen.includes(account.id);
-          const label = connectionAccountLabel(account, `${group.name} account`);
-          const ownership = account.subjectId === null ? "This workspace" : "Only me";
+          const row = rows.get(account.id)!;
+          const label = row.label;
+          const ownership = row.scope;
           const onToggle = () =>
             props.onChoose(
               group.serverId,

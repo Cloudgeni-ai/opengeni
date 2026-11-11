@@ -1,4 +1,11 @@
-import { blocks, hasSandbox, sentences, toolAvailable, type AgentPromptContext } from "./types";
+import {
+  blocks,
+  hasSandbox,
+  sentences,
+  toolAvailable,
+  toolSearchAvailable,
+  type AgentPromptContext,
+} from "./types";
 
 function newMessages(context: AgentPromptContext): string {
   const { goals, subagents } = context.capabilities;
@@ -20,8 +27,6 @@ function newMessages(context: AgentPromptContext): string {
     "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
     waitForInput &&
       `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` when available with the answer in its \`reply\`, so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
-    waitForInput &&
-      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
     goals
       ? "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains."
       : "If nothing is in flight, the answer is your final response; offer to continue when work remains.",
@@ -30,34 +35,55 @@ function newMessages(context: AgentPromptContext): string {
   );
 }
 
-const WAITING = `If an existing wait's remaining time is below the tool's minimum or its deadline has passed, do not send an invalid timeout or round up and silently extend it. A question-only human/API turn that has not consumed immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Otherwise, do not assume the old wait remains armed: register a valid wait if still needed and make any unavoidable deadline adjustment explicit.
+/**
+ * When to end a turn on a wait. How the wait itself behaves (when to call it,
+ * `reply`, the deadline, what wakes it) is stated once, in the
+ * `wait_for_input` tool description, so it is not repeated here.
+ */
+const WAITING =
+  "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation to rediscover the same wait: either keep advancing substantive work in this turn or, when further progress genuinely depends on work already in flight or a meaningful timed recheck, call `wait_for_input` when available before ending. A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.";
 
-Outside a question or status turn, do not end with only a status reply and leave an immediate continuation to rediscover the same wait: either keep advancing substantive work in this turn or, when further progress genuinely depends on work already in flight or a meaningful timed recheck, call \`wait_for_input\` when available before ending. Do not use \`wait_for_input\` for work you can still advance or for a blocker that requires a human decision. A continuation that only confirms the same unchanged wait calls \`wait_for_input\` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.
-
-Avoid holding execution open with long sleeps or repeated blocking waits when an out-of-turn wait is available. Respect each tool's actual execution-wait limits; those limits do not cap \`wait_for_input\`, which may span hours or days within its own limits.
-
-No short execution wait or preliminary status recheck is required before \`wait_for_input\`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate. When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling. This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.`;
-
-/** The tool-neutral Waiting guidance kept when `wait_for_input` is proven absent. */
-const WAITING_WITHOUT_WAIT_FOR_INPUT =
+/** Names automations and session waits, so it renders only where one exists. */
+const WAITING_MONITORING =
   "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.";
 
-const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates. Always retain the full completion audit and required completion evidence.`;
+const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates.`;
+
+/** The goal completion audit survives compaction; rendered only with goals. */
+const COMPACTION_GOAL_AUDITS =
+  "Always retain the full completion audit and required completion evidence.";
 
 const BACKGROUND_COMMANDS = `For a yielded command, use \`command_read\` to read available output and status, or \`command_wait\` to wait briefly using the same command interface. Keep the command ID and output cursor. A terminal read suppresses any still-pending completion notification; a running read does not. Earlier tool results and delivered messages never change. Use \`command_input\` only to send input where supported, not to poll output. An unsupported input capability does not imply output is unavailable. Give foreground commands a realistic requested wait; default to 10 seconds (yield_time_ms: 10000). An internal polling slice is not a reason to return a background handle.
 
 Command completion alone resumes you only while you have an explicit \`wait_for_input\` registered. For ordinary background commands, register that session-level wait before ending your turn. Exception: pending Codemode calls need the current live attempt; keep observing them with \`command_wait\`/\`command_read\` instead of ending the turn. If you finish normally, command results remain retained and can accompany later input, but do not start another turn by themselves. No per-command dismissal is required.`;
 
+/** Rendered only when the runtime delivers finished commands on its own. */
+const COMMAND_COMPLETION_DELIVERY =
+  "A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.";
+
+/** Anchor the delivery sentence follows in the full-availability text. */
+const TERMINAL_READ_SENTENCE =
+  "A terminal read suppresses any still-pending completion notification; a running read does not.";
+
 /**
  * Background-command guidance, unchanged unless `command_read`, `command_wait`
- * or `wait_for_input` is proven absent. `command_input` is a local sandbox
+ * or `wait_for_input` is proven absent, plus one sentence when finished
+ * commands are delivered on their own. `command_input` is a local sandbox
  * adapter and always keeps its sentences.
  */
 function backgroundCommands(context: AgentPromptContext): string {
   const read = toolAvailable(context, "command_read");
   const wait = toolAvailable(context, "command_wait");
   const waitForInput = toolAvailable(context, "wait_for_input");
-  if (read && wait && waitForInput) return BACKGROUND_COMMANDS;
+  const delivery = context.resources.commandCompletionDelivery === true;
+  if (read && wait && waitForInput) {
+    return delivery
+      ? BACKGROUND_COMMANDS.replace(
+          TERMINAL_READ_SENTENCE,
+          `${TERMINAL_READ_SENTENCE} ${COMMAND_COMPLETION_DELIVERY}`,
+        )
+      : BACKGROUND_COMMANDS;
+  }
   const observe =
     read && wait ? "`command_wait`/`command_read`" : read ? "`command_read`" : "`command_wait`";
   return blocks(
@@ -72,6 +98,7 @@ function backgroundCommands(context: AgentPromptContext): string {
       (read || wait) && "Keep the command ID and output cursor.",
       (read || wait) &&
         "A terminal read suppresses any still-pending completion notification; a running read does not.",
+      delivery && COMMAND_COMPLETION_DELIVERY,
       "Earlier tool results and delivered messages never change.",
       "Use `command_input` only to send input where supported, not to poll output.",
       "An unsupported input capability does not imply output is unavailable.",
@@ -97,27 +124,34 @@ function backgroundCommands(context: AgentPromptContext): string {
  * Connected Machine is attached, background commands. Embedder instructions do
  * not override these. Clauses naming a first-party runtime tool
  * (`wait_for_input`, `command_read`, `command_wait`) drop only when the attempt
- * proved that tool absent; tool discovery is never pruned.
+ * proved that tool absent. Tool discovery renders unless the attempt proved it
+ * attaches nothing deferred (`toolSearchAbsent`), in which case it has no
+ * search router; the router decision is made from the same frozen facts.
  */
 export function renderRuntimeMechanics(context: AgentPromptContext): string {
   const waitForInput = toolAvailable(context, "wait_for_input");
+  const toolSearch = toolSearchAvailable(context);
+  const monitoring =
+    (context.capabilities.schedules || context.capabilities.subagents) && WAITING_MONITORING;
+  const waiting = waitForInput ? sentences(WAITING, monitoring) : monitoring;
   return blocks(
     "# Runtime mechanics",
-    "## Tool discovery",
-    sentences(
-      "Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.",
-      "Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches. Check the match: ranking is not certainty. Native search returns loaded function definitions directly. In ordinary search receipts, `schemasLoaded: true` means `tools` have loaded schemas but `suggestions` are unloaded alternatives; with `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them. Known exact names bypass ranking and inference. Once its schema is in context, call the tool by name or through `tool_invoke` where available; do not rediscover it unless its schema is no longer in context.",
-      "When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.",
-      "Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`. If search misses, browse the relevant groups and follow `nextCursor` until covered, then load chosen exact names with `tool_search`.",
-      "`namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.",
-      "Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.",
-    ),
+    toolSearch && "## Tool discovery",
+    toolSearch &&
+      sentences(
+        "Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.",
+        "Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches. Check the match: ranking is not certainty. Native search returns loaded function definitions directly. In ordinary search receipts, `schemasLoaded: true` means `tools` have loaded schemas but `suggestions` are unloaded alternatives; with `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them. Known exact names bypass ranking and inference. Once its schema is in context, call the tool by name or through `tool_invoke` where available; do not rediscover it unless its schema is no longer in context.",
+        "When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.",
+        "Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`. If search misses, browse the relevant groups and follow `nextCursor` until covered, then load chosen exact names with `tool_search`.",
+        "`namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.",
+        "Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.",
+      ),
     "## New messages while you work",
     newMessages(context),
-    "## Waiting",
-    waitForInput ? WAITING : WAITING_WITHOUT_WAIT_FOR_INPUT,
+    waiting && "## Waiting",
+    waiting,
     "## Compaction",
-    COMPACTION,
+    context.capabilities.goals ? `${COMPACTION} ${COMPACTION_GOAL_AUDITS}` : COMPACTION,
     // command_read/command_wait exist only with attached compute.
     hasSandbox(context) && "## Background commands",
     hasSandbox(context) && backgroundCommands(context),

@@ -20,7 +20,7 @@ import {
 import {
   buildClaudeCoreRequestAuthorization,
   CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
-  claudeCoreModelScope,
+  withClaudeCoreConnectionCredential,
   claudeCoreSettingsCredential,
   claudeCoreSettingsPlaceholderToken,
   claudeCoreRequestOutcomeUnknown,
@@ -28,7 +28,7 @@ import {
   claudeResponseInspector,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
-  selectClaudeTurnCapacityByRoute,
+  selectClaudeTurnCapacity,
 } from "../src/activities/agent-turn/claude-core";
 import {
   subscriptionCoreTurnOf,
@@ -124,12 +124,11 @@ function capacityDeps(overrides: { source?: string; isClaudeTurn?: boolean } = {
   return deps as unknown as CapacityPhaseDeps;
 }
 
-function route(value: db.SubscriptionCoreProviderRoute) {
+function scopedDb() {
   spy(db, "withRlsContext").mockImplementation(
     async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
       await callback({} as never),
   );
-  return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
 function coreTurns(
@@ -163,44 +162,21 @@ const runPlacement = {
   connectedCount: 1,
 } as unknown as db.SubscriptionCorePlacement;
 
-describe("Claude capacity by provider route", () => {
-  test("the legacy route fails closed after exactly one route read (the legacy selection is deleted)", async () => {
-    const read = route("legacy");
-    const { place } = coreTurns(runPlacement);
-    const deps = capacityDeps();
-    await expect(selectClaudeTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(read.mock.calls[0]![1]).toEqual({ accountId: "account-1", provider: "claude" });
-    expect(place).not.toHaveBeenCalled();
-    expect(deps.leases.claude.holderId).toBeNull();
-  });
-
-  test("a non-Claude turn reads no route", async () => {
-    const read = route("core");
-    expect(await selectClaudeTurnCapacityByRoute(capacityDeps({ isClaudeTurn: false }))).toEqual({
+describe("Claude capacity on the shared core", () => {
+  test("a non-Claude turn is not placed", async () => {
+    scopedDb();
+    expect(await selectClaudeTurnCapacity(capacityDeps({ isClaudeTurn: false }))).toEqual({
       ok: true,
     });
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  test("maintenance fails closed and reads neither selector", async () => {
-    route("maintenance");
-    const { place } = coreTurns(runPlacement);
-    await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(place).not.toHaveBeenCalled();
   });
 
   test("core places the accepted turn and adopts the core lease", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const { place, recover } = coreTurns(runPlacement);
     const deps = capacityDeps();
     try {
-      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(await selectClaudeTurnCapacity(deps)).toEqual({ ok: true });
       expect(recover).toHaveBeenCalledTimes(1);
       expect(place).toHaveBeenCalledWith(deps.db, {
         identity,
@@ -230,14 +206,14 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a recovered connection wakes the account's Claude waiters, never Codex's", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
     const codexWake = spy(db, "wakeSubscriptionCoreCodexCapacityWaiters");
     const { recover } = coreTurns(runPlacement, undefined, 1);
     const deps = capacityDeps();
     try {
-      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(await selectClaudeTurnCapacity(deps)).toEqual({ ok: true });
       expect(recover).toHaveBeenCalledTimes(1);
       expect(wake).toHaveBeenCalledWith(deps.db, "claude", {
         accountId: identity.accountId,
@@ -250,7 +226,7 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a core wait parks the same turn on its Claude core waiter and re-evaluates it", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
       productModelId: PRODUCT_MODEL,
@@ -302,7 +278,7 @@ describe("Claude capacity by provider route", () => {
       events: [],
     });
     const deps = capacityDeps();
-    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectClaudeTurnCapacity(deps)).toEqual({
       exit: {
         status: "waiting_capacity",
         capacityWait: {
@@ -339,7 +315,7 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
       kind: "wait",
@@ -354,7 +330,7 @@ describe("Claude capacity by provider route", () => {
       settled.push(value);
       return true;
     };
-    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectClaudeTurnCapacity(deps)).toEqual({
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
@@ -370,8 +346,10 @@ function credential(token: string) {
 }
 
 /** A placed core turn with a held core lease and scripted request custody. */
-function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: boolean } = {}) {
+function placedCore(options: { reserveError?: Error; refreshAdvances?: boolean } = {}) {
   const order: string[] = [];
+  // Separate source or lease reads before a request's reservation.
+  const reads: string[] = [];
   let operation = 0;
   const runtime = {
     reserveSubscriptionCoreRequest: async (
@@ -381,6 +359,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
       request: { requestId: string; transportAttempt: number },
     ) => {
       order.push(`reserve:${request.requestId}:${request.transportAttempt}`);
+      if (options.reserveError) throw options.reserveError;
       return { operationId: `operation-${++operation}` };
     },
     settleSubscriptionCoreRequest: async (
@@ -391,7 +370,10 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
     ) => {
       order.push(`settle:${request.operationId}:${request.outcome}`);
     },
-    isSubscriptionCoreSourceDisconnected: async () => false,
+    isSubscriptionCoreSourceDisconnected: async () => {
+      reads.push("source");
+      return false;
+    },
   };
   spy(db, "subscriptionCoreRequests").mockReturnValue(runtime as never);
   let refreshes = 0;
@@ -417,8 +399,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
   lease.held = true;
   lease.confirmedUntilMs = performance.now() + 60_000;
   spyOn(lease, "assertCurrentForDispatch").mockImplementation(async () => {
-    order.push("fence");
-    await options.fence?.();
+    reads.push("lease");
   });
   const core: SubscriptionCoreTurn = {
     identity,
@@ -434,7 +415,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
     execution: { attemptId: "attempt-1", executionGeneration: 3 },
     upstreamModelIds: ["claude-sonnet-5", "claude-opus-5-5"],
   });
-  return { order, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
+  return { order, reads, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
 }
 
 function sse(...items: Array<[string, unknown]>): Response {
@@ -526,7 +507,7 @@ describe("Claude request custody on the core", () => {
         body: JSON.stringify({ model: "claude-sonnet-5", messages: [] }),
       },
     ]);
-    expect(placed.order).toEqual(["fence", "reserve:attempt-1:1:1:claude:1:1"]);
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
     // The refusal settlement fences on the generation the admitted main-lane bearer carried.
     expect(placed.core.credentialVersion).toBe(4);
     // A completed response is settled only after the history checkpoint.
@@ -550,10 +531,8 @@ describe("Claude request custody on the core", () => {
     ]);
     expect(sent.sent[1]!.body).toBe(sent.sent[0]!.body);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
-      "fence",
       "reserve:attempt-1:1:1:claude:1:2",
     ]);
     expect(placed.core.credentialVersion).toBe(5);
@@ -568,7 +547,6 @@ describe("Claude request custody on the core", () => {
     expect(sent.calls()).toBe(1);
     expect(placed.refreshes()).toBe(1);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -603,7 +581,6 @@ describe("Claude request custody on the core", () => {
     expect((await sent.response).status).toBe(529);
     expect(placed.refreshes()).toBe(0);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -621,7 +598,6 @@ describe("Claude request custody on the core", () => {
     ]);
     await (await sent.response).text();
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -632,7 +608,6 @@ describe("Claude request custody on the core", () => {
     const dropped = send(placed, [() => new Response("gateway timeout", { status: 504 })]);
     expect((await dropped.response).status).toBe(504);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:unknown",
     ]);
@@ -664,17 +639,40 @@ describe("Claude request custody on the core", () => {
     expect(claudeCoreRequestOutcomeUnknown(new Error("plain"), placed.core)).not.toBeNull();
   });
 
-  test("a lost core lease stops dispatch before any reservation", async () => {
-    const lost = Object.assign(new Error("lease lost"), { code: "claude_credential_lease_lost" });
-    const placed = placedCore({
-      fence: async () => {
-        throw lost;
-      },
-    });
+  test("a request is fenced by its reservation alone, with no separate source or lease read", async () => {
+    const placed = placedCore();
+    await (await send(placed, [answered]).response).text();
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
+    expect(placed.reads).toEqual([]);
+  });
+
+  test("a locally lost core lease stops dispatch before any reservation", async () => {
+    const placed = placedCore();
+    placed.lease.markLost("not_found");
     const sent = send(placed, [answered]);
-    await expect(sent.response).rejects.toBe(lost);
+    await expect(sent.response).rejects.toMatchObject({ code: "claude_credential_lease_lost" });
     expect(sent.calls()).toBe(0);
-    expect(placed.order).toEqual(["fence"]);
+    expect(placed.order).toEqual([]);
+  });
+
+  test("a lease the reservation finds lost marks the holder lost and stops before network I/O", async () => {
+    const placed = placedCore({ reserveError: db.SUBSCRIPTION_CORE_CLAUDE.errors.leaseLost() });
+    const sent = send(placed, [answered]);
+    await expect(sent.response).rejects.toMatchObject({ code: "claude_credential_lease_lost" });
+    expect(sent.calls()).toBe(0);
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
+    expect(() => placed.lease.assertUsable()).toThrow();
+  });
+
+  test("a disconnected source the reservation finds is surfaced as is", async () => {
+    const disconnected = Object.assign(new Error("source disconnected"), {
+      code: "subscription_core_source_disconnected",
+    });
+    const placed = placedCore({ reserveError: disconnected });
+    const sent = send(placed, [answered]);
+    await expect(sent.response).rejects.toBe(disconnected);
+    expect(sent.calls()).toBe(0);
+    expect(() => placed.lease.assertUsable()).not.toThrow();
   });
 
   test("session-title requests use their own custody lane under the same fence", async () => {
@@ -687,7 +685,6 @@ describe("Claude request custody on the core", () => {
     });
     await dropped.response;
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:title:1:1",
       "settle:operation-1:unknown",
     ]);
@@ -888,19 +885,36 @@ describe("Claude response inspection", () => {
 });
 
 describe("Claude model scope and provider ids", () => {
-  test("the scope follows the product model's own prefix", () => {
-    expect(claudeCoreModelScope("organization-claude-subscription/claude-sonnet-5")).toBe(
+  test("a core-placed credential reaches every Claude subscription list", () => {
+    const catalog = withClaudeConnectionCatalog(
+      withClaudeConnectionCatalog(
+        testSettings({ claudeSubscriptionEnabled: true }),
+        { claude_subscription: { models: [{ upstreamModelId: "claude-sonnet-5" }] } },
+        "workspace",
+      ),
+      { claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] } },
       "organization",
     );
-    expect(claudeCoreModelScope("workspace-claude-subscription/claude-sonnet-5")).toBe("workspace");
-    expect(claudeCoreModelScope("supergrok/grok-4")).toBe("organization");
-    // A workspace-scoped model runs on organization connections on the core,
-    // so workspace policy must allow it under both identities.
-    expect(
-      db.subscriptionCoreClaudeModelPolicyProviderIds(
-        "workspace-claude-subscription/claude-sonnet-5",
-      ),
-    ).toEqual(["workspace-claude-subscription", "organization-claude-subscription"]);
+    const binding = { connectionId: "20000000-0000-4000-8000-000000000003", credentialVersion: 3 };
+    const settings = withClaudeCoreConnectionCredential(catalog, "placeholder-bearer", binding);
+    const providers = parseModelProvidersJson(settings.modelProvidersJson);
+    for (const id of ["workspace-claude-subscription", "organization-claude-subscription"]) {
+      const provider = providers.find((candidate) => candidate.id === id);
+      expect(provider?.apiKey).toBe("placeholder-bearer");
+      expect(provider?.anthropic?.credentialBinding).toEqual(binding);
+    }
+    // Workspace model policy treats every Claude subscription provider id as
+    // one provider, so every id form names all of them.
+    for (const modelId of [
+      "claude/claude-sonnet-5",
+      "workspace-claude-subscription/claude-sonnet-5",
+      "organization-claude-subscription/claude-sonnet-5",
+    ])
+      expect(db.subscriptionCoreClaudeModelPolicyProviderIds(modelId)).toEqual([
+        "claude-subscription",
+        "workspace-claude-subscription",
+        "organization-claude-subscription",
+      ]);
     expect(db.subscriptionCoreClaudeModelPolicyProviderIds("supergrok/grok-4")).toEqual([
       "organization-claude-subscription",
     ]);
@@ -969,15 +983,6 @@ describe("Claude model scope and provider ids", () => {
     // set, each model once, and no other provider's models.
     expect(ids.toSorted()).toEqual(["claude-haiku-5", "claude-opus-5-5", "claude-sonnet-5"]);
   });
-});
-
-test("no Claude turn on the legacy route touches durable events through the core", async () => {
-  route("legacy");
-  const publish = spy(events, "publishDurableSessionEvents");
-  await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-    payload: { code: "subscription_core_cutover_disabled" },
-  });
-  expect(publish).not.toHaveBeenCalled();
 });
 
 test("a core-placed Claude turn is the turn's placement for attribution, checkpoints and revalidation", async () => {
@@ -1234,14 +1239,12 @@ describe("Claude custody edge paths on the core", () => {
     await custody(() => claude.getResponse(modelRequest));
     expect(calls()).toBe(2);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
-      "fence",
       "reserve:attempt-1:1:1:claude:2:1",
     ]);
     expect(placed.core.requests!.canRecover()).toBe(false);
     await placed.core.requests!.checkpoint();
-    expect(placed.order.slice(4)).toEqual([
+    expect(placed.order.slice(2)).toEqual([
       "settle:operation-1:response_received",
       "settle:operation-2:response_received",
     ]);
@@ -1410,7 +1413,6 @@ describe("Claude custody edge paths on the core", () => {
     expect(cancelled).toBe(true);
     expect(sent.calls()).toBe(1);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);

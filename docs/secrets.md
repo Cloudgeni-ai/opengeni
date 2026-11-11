@@ -32,9 +32,14 @@ each hosted field keeps encrypted **versions**.
   default **Private** vault is always available everywhere. Vaults created
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
-- **Organization** vaults are managed with `account:admin`; their reach is set
-  by "Available in" (all workspaces or a list, and optionally personal
-  workspaces).
+- **Organization** vaults are managed by the organization's owner or an admin
+  (or a credential holding `account:admin`); their reach is set
+  by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
+  list of them, and separately whether members' Personal workspaces have it
+  (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
+  whichever workspace choice is made (migration 1171; before it, a vault with
+  a list never reached a Personal workspace, so 1171 turned the switch off on
+  those vaults to keep their reach).
 - **Task** vaults hold secrets created during one task. There is one per root
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),
@@ -123,7 +128,8 @@ literally.
 - Names match case-insensitively after Unicode NFC normalisation and trimming.
 - References are at most 300 characters. Text that starts like a reference but
   does not parse fails the call with `invalid_reference`; it is never passed
-  through.
+  through. Hand-off tools (below) are the exception: they resolve nothing, so
+  they keep such text as written.
 - A tool call resolves all of its references or none. On any failure nothing is
   dispatched and the tool returns a typed error naming the references, never
   values. A missing secret's error includes a ready `request_human_input` call
@@ -155,18 +161,42 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
+| Credential profiles | Opt-in variables (for example `GH_TOKEN`) added to the environment of every `exec_command` and `run_on` exec, resolved per command through the same resolver. The command text is unchanged. See [Credential profiles](#credential-profiles). |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
-| `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
-| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. |
-| Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
-| Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
+| `{{secretfile:…}}` | Written to a 0600 file under an attempt-private directory in `/tmp/opengeni-private/secrets/` and replaced by its path; deletion is attempted at attempt end on the original recipient. An unavailable provider can leave the file behind, but cannot block turn completion. Use it for binary values and anything over 100 KiB. |
+| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
+| Opengeni's hand-off tools: sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, Skills, artifacts, Sites data, notifications, and every Opengeni tool not named in the next row | Never resolved. The tool receives the reference text and stores or forwards it; the session, scheduled run or goal continuation that receives it resolves it only when it executes something (a shell command, `run_on`, browser typing, a connector call), under its own vault policy. A missing or malformed reference does not fail the call, and `secretfile` stays text. An escaped reference (`\{{secret:Item}}`) still arrives as `{{secret:Item}}`, so escaping here is optional. Opengeni tools added later are hand-off tools by default. Opengeni's built-in tools that send text to outside systems (Slack bot messages, X, Reddit and social replies, Fiken contacts and invoices, `web_fetch` URLs) are hand-off tools too: the recipient gets the reference text, never the value. |
+| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. `event_sources_create_webhook` and `event_sources_update` resolve only `signingSecret`, which the webhook source keeps encrypted; a name or format next to it stays reference text. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
+| Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. Hand-off tools keep reference text for Sites too. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
-| Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. A login in a connected password manager that holds a passkey (Bitwarden, Vaultwarden, Keeper, Proton Pass) shows `hasPasskey`, matches a `passkey` search and signs in the same way; its key is read live from the provider and never stored. See [external vaults](external-vaults.md). |
+| Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. A login in a connected password manager that holds a passkey (Bitwarden, Vaultwarden, Keeper, Proton Pass) shows `hasPasskey`, matches a `passkey` search and signs in the same way; its key is read live from the provider and never stored. See [external vaults](external-vaults.md). The browser holds a person's passkeys only while their agent's turn acts in it: a person or another turn driving the same browser finds none, and a passkey the page registers is saved only for the turn whose passkeys were loaded at the time. |
 
 Exec caps: 256 KiB of env per command and 100 KiB per value. Larger or binary
 values return `too_large` or `binary_value` with a `secretfile` hint.
 OpenSandbox has no file writer, so commands with references fail there with an
 unsupported-routing error.
+
+Hand-off tools exist because an agent once wrote an unescaped reference into
+`session_create` (26 October 2026): the tool received the value and stored it
+in the child's first message, while the caller's own journal kept only the
+reference. Now a reference reaches another session, a schedule, a goal, a note,
+Knowledge or an artifact only as text, and a backslash escape is no longer
+needed to keep it that way. The receiving work resolves it with its own
+principal and vault policy: a child's policy is never wider than its parent's
+(the effective set is intersected with every ancestor at each resolution), and
+a scheduled run uses the schedule's owner and policy. A message or Steer sent
+into a turn that another person started resolves later under that turn's
+person, exactly as if it had been typed in that chat. Inside a shell command or
+a script, including `ogtool call`, the escape is still needed: the command or
+file write puts the value in before any tool runs. With the `secrets`
+capability off for an agent, nothing resolves in that agent's tool calls and
+text passes unchanged, backslash included. A tool call nested in
+`admin_action_call` (`tools/invoke`, `tools/calls`) is resolved by the app
+under the person's own access, not the session's task vault or vault policy;
+it needs full access, which already acts as the person.
+
+Stored and agent-visible content is otherwise kept exact
+([Agent-visible content](#agent-visible-content)).
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
@@ -180,7 +210,172 @@ Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process
 only while a command that references it runs. Scripts that read ambient
 variables should take them from a reference instead, for example
-`API_TOKEN={{secret:Stripe}} ./deploy.sh`.
+`API_TOKEN={{secret:Stripe}} ./deploy.sh`, or from a credential profile when
+every command should have the variable.
+
+## Credential profiles
+
+A credential profile is an opt-in list of environment variable names, each
+mapped to one secret reference. Opengeni adds those variables to the
+environment of every command an agent runs, so CLIs such as `gh`, `az` or
+`terraform` find their credentials without the agent writing references into
+each command or into the prompts of the chats it starts.
+
+```json
+{
+  "entries": [
+    { "name": "GH_TOKEN", "reference": "{{secret:cloudgeni-cloud-auth/CLOUDGENI_GITHUB_TOKEN/value}}" },
+    { "name": "AZURE_CLIENT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_ID/value}}" },
+    { "name": "AZURE_CLIENT_SECRET", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_SECRET/value}}" },
+    { "name": "AZURE_TENANT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_TENANT_ID/value}}" },
+    { "name": "AZURE_SUBSCRIPTION_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_SUBSCRIPTION_ID/value}}" }
+  ],
+  "gitHelper": true
+}
+```
+
+**Levels.** A workspace has at most one profile, used by every chat in it. A
+chat can add its own profile, which the chats it starts inherit, the same way
+the vault policy propagates. A command receives the workspace entries, then
+each chat's entries from the root chat down to its own; a nearer level
+replaces an entry with the same name (ignoring case). `gitHelper` follows the nearest level
+that sets it and is off by default. Nothing is configured until someone sets a
+profile.
+
+**Delivery.** For each `exec_command` (including commands that keep running in
+the background) and each `run_on` exec, the runtime resolves the effective
+profile through the attempt's `SecretResolver`, so the vault policy, "Ask me
+each time" approvals and the audit trail apply exactly as for a written
+reference. Values ride the same in-memory carry as references
+(`packages/runtime/src/sandbox/secret-delivery.ts`): Connected Machines receive
+them in `ExecRequest.env`, and managed sandboxes export them from the 0600 env
+file that is sourced and deleted in the same command. They exist only in the
+command's process environment, never in the command text, stored tool
+arguments, git config or files left on the machine. A command that prints one
+(`env`, `printenv`, `gh auth status -t`) shows the value in its output like
+any other output, so don't print them
+([Agent-visible content](#agent-visible-content)). Profile variables are applied first, so anything the
+command sets itself (`GH_TOKEN=… gh …`, `export`, a reference) wins. Each
+command also gets `OPENGENI_CREDENTIAL_PROFILE_VARS`, the comma-separated names
+(never values) the profile delivered. The profile is read again at most every
+few seconds, so a change applies to the next commands without restarting
+anything; a read that takes longer than about two seconds or fails uses the
+last profile read in the attempt, or none, so a slow database never stalls
+commands. Only one read runs at a time; once a command stopped waiting for it,
+later commands use that fallback without waiting until it finishes (a stuck
+read is replaced after 30 seconds).
+
+**Lenient.** A profile never fails a command. An entry that cannot be resolved
+(missing secret, policy, waiting for approval, provider unavailable, too large
+or binary) is skipped and the command runs without it; the tool result ends
+with a short note such as `[Note: credential profile skipped AZURE_TENANT_ID
+(secret not found)]`. Each distinct note is shown once per attempt, not on
+every command. A password manager that does not answer within about 15 seconds
+skips its entries the same way; that lookup is not cancelled, so it can
+still use an "Allow once" approval and be recorded in the audit trail even
+though the command ran without the value. A managed sandbox that cannot receive the env
+file (for example an OpenSandbox backend, which has no private file writes)
+runs the command without the profile and says so once. An agent with secrets
+turned off runs without the profile and without a note. An entry waiting for
+the person's approval is asked for once per attempt; approving it with "Allow once" covers one command, so use a
+longer approval for an item every command needs. Notes never show values.
+Entries resolve only after the command's own references resolved. Entries from
+connected vaults (1Password and similar) are read per command and count toward
+the per-attempt provider read limit, so prefer Opengeni vaults for profile
+items that every command uses.
+
+**Git helper.** With `gitHelper: true` and `GH_TOKEN` set by the profile,
+each command also gets per-command git configuration through
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`: for
+`https://github.com` it first clears the machine's own credential helpers and
+then adds one that answers git's `get` request with `GH_TOKEN` from the
+environment (user `x-access-token`). Nothing is written to global or repository
+git config, and other hosts keep the machine's configuration. This needs git
+2.31 or later; older git ignores the variables. On a Connected Machine whose
+own environment already sets `GIT_CONFIG_COUNT`, the helper's entries replace
+the first ones for that command, so put such settings in the profile instead.
+
+**Precedence on managed sandboxes.** A profile is an explicit choice, so it
+wins over the platform's repository bindings for the variables it delivers:
+the git helper replaces the binding's helper for `github.com`, and the `gh`,
+`glab` and `az` wrappers keep a profile-delivered `GH_TOKEN`, `GITLAB_TOKEN` or
+`AZURE_DEVOPS_EXT_PAT` (they read `OPENGENI_CREDENTIAL_PROFILE_VARS`) instead
+of replacing it with the binding token. Without a profile entry for that
+variable, the bindings work as before. Host run credentials
+([credentials.md](credentials.md)) are applied after the profile and win for
+the same variable names. On Connected Machines there are no wrappers, so `gh`
+reads `GH_TOKEN` directly.
+
+**Rules.** Names use letters, digits and underscores, do not start with a
+digit, are unique ignoring case, and never start with `OPENGENI_` (reserved).
+Each entry holds exactly one `{{secret:…}}` reference; `secretfile` references
+are not accepted. An escaped reference (`\{{secret:…}}`, as written for
+hand-off tools) is stored unescaped. At most 32 entries; each value is capped
+at 100 KiB and all profile values of one command at 256 KiB. That cap is
+counted separately from the command's own references (which have their own
+256 KiB cap), so one command can carry up to 512 KiB of such variables. Saving an empty profile clears that
+level. Changes are audited as `credential_profile.updated` or
+`credential_profile.cleared` with variable names only.
+
+**Configuring.** Reading needs `secrets:list`. Changing needs `secrets:write`
+plus `workspace:admin` for the workspace profile (the owner of a Personal
+workspace changes its profile too), or `sessions:control` and the chat's
+tool-policy access for a chat profile. Use the HTTP routes below or
+the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
+UI yet. Profiles hold references, never values.
+
+## Agent-visible content
+
+Opengeni never rewrites what an agent sees to hide secrets. These rules are
+also in `AGENTS.md`:
+
+1. Model context is append-only: nothing already sent to a model is
+   rewritten, re-masked or reordered later.
+2. Agent-visible content is never rewritten for secrecy: secrets flow by
+   reference, delivery keeps values out of output, and leaks are removed by an
+   explicit operator scrub.
+3. No heuristics that guess whether text is secret in the agent path.
+4. Protection may leave a field value out by standard markup; it never
+   refuses an action the agent is authorized to take and never fails closed.
+5. A change touching this must state whether it can change bytes already sent
+   to a model (the answer must be no), what non-secret content it can hide,
+   and its latency.
+6. The second fallout fix to one protection mechanism must evaluate removing
+   it.
+
+How secrets stay out of the chat instead:
+
+- Agents use secrets by reference. A value is resolved only where a tool runs
+  and never enters tool arguments, events or history
+  ([Where references resolve](#where-references-resolve)).
+- Delivery keeps values out of output: environment files deleted by the same
+  command, secret-file paths, and browser or desktop fills that type a value
+  without echoing it.
+- What a tool returns is what the agent sees and what is stored. A command
+  that prints a secret puts that secret in the chat; rotate it, or remove it
+  with the [scrub](#removing-secrets-from-stored-history).
+- Page reads leave out the values of fields that standard markup marks
+  private: `type=password`, the `autocomplete` tokens `current-password`,
+  `new-password`, `one-time-code` and `cc-*`, `type=hidden`, and the
+  `data-private`, `data-sensitive` and `data-opengeni-private` attributes. The
+  field stays present, labelled and fillable. Nothing is guessed from names,
+  ids, placeholders or labels. Screenshots, recordings and clipboard copies
+  are never refused. On Windows desktops, Edit controls keep their value out,
+  because the desktop driver cannot tell a password box apart.
+- `secret_get` returns a value to the model when the agent has
+  `secrets:read`; that value is ordinary content from then on.
+
+From 26 October to early November 2026, Opengeni masked known secret values
+and secret-shaped strings in tool results, model input and stored text, and
+captured shaped values into the Task vault. That was removed because it
+rewrote text already sent to the model (one prompt-cache miss each time a new
+value was learned, system prompt included), mangled tool names and file paths
+that contained a short value, and hid content agents needed. Text it wrote
+stays as it is: secret references and `[masked …]` markers in old chats are
+plain text now, and Task-vault items it captured stay usable by reference.
+Stored tool names it broke are fixed once by
+`bun run db:repair-invalid-tool-names` (a dry run by default; `--apply`
+writes).
 
 ## Asking a person
 
@@ -308,6 +503,8 @@ With the `secrets` capability on, agents get:
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
+| `secret_profile_get` | Show the [credential profile](#credential-profiles): this chat's additions and what its commands receive (`scope: "session"`, the default), or the workspace profile. Names and references only. | `secrets:list` |
+| `secret_profile_set` | Replace this chat's profile (inherited by the chats it starts) or, with `scope: "workspace"`, the workspace profile. References are stored as written, never resolved. | `secrets:write`, plus `sessions:control` (chat) or `workspace:admin` (workspace) |
 
 Discovery with no filters lists items; an empty query is not required. Keep
 the same filters when following `nextCursor`. Provider freshness is reported
@@ -432,6 +629,145 @@ For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
 Managed runtimes refuse to start with it set.
 
+## Removing secrets from stored history
+
+A secret that already reached a session's stored history (pasted into a
+message, printed by a command, or resolved into a hand-off before references
+were kept) stays there until it is removed. A workspace admin, or the owner of
+a Personal workspace, removes it with
+`POST /v1/workspaces/:workspaceId/secret-redactions`:
+
+```json
+{
+  "sessionIds": ["…"],
+  "includeDescendants": true,
+  "match": { "reference": "Vault/Item/field" },
+  "dryRun": true
+}
+```
+
+- `match` is either a vault reference, written with or without its braces,
+  or built-in patterns:
+  `{ "patterns": [{ "kind": "url_password", "hosts": ["db.example.com"] }, { "kind": "github_token" }] }`.
+  `url_password` finds the password in `scheme://user:password@host` URLs, for
+  every host or only the hosts named; `github_token` finds GitHub token
+  shapes, including one inside a longer URL password. Both use the scrub's own matcher
+  (`packages/core/src/domain/session-secret-redaction-matchers.ts`), so a
+  reference finds its value as written, trimmed, JSON-escaped,
+  percent-encoded and base64.
+- A reference's value is read in memory for matching only. It is never
+  returned, logged or written to the audit event. The caller needs
+  `workspace:admin`; a reference also needs permission to use that item
+  (`secrets:use`, which workspace owners and admins hold unless a grant with
+  explicit permissions leaves it out). A value shorter than 8 characters (not
+  counting surrounding whitespace) answers 422, so a
+  run can never rewrite everything; so does a value holding `[redacted: …]`
+  text, since that part may be a kept marker.
+  Every named session (and descendant) must be one the caller may change; one
+  that is not answers 404.
+- Each match becomes `[redacted: <reference or kind>]`, for example
+  `[redacted: secret:Vault/Item/field]` or `[redacted: url_password]`. The
+  marker names the reference without its braces, so it can never resolve back
+  into the value. Everything else in the text stays exact.
+- `dryRun: true` counts without changing anything. Running the same request
+  again is safe: markers are never matched, so the second run finds nothing.
+  A later run with another reference never rewrites a marker an earlier run
+  wrote, even when its value appears in that marker's label. Text that only
+  looks like a marker (a label the scrub never writes) is searched like any
+  text; text typed exactly like a reference marker
+  (`[redacted: secret:Vault/Item/field]`) is kept as is, like a real one.
+  Run patterns before references for the same sessions: once a URL's
+  username is replaced, `url_password` no longer recognizes that URL.
+- The response has counts only, per table and per session (`rowsMatched`,
+  `rowsChanged`, `matches`), the places still `pending` (below) and any
+  `failures` by table and error code. A failure never stops the run; run it
+  again to retry. `mirror_row_unreadable` means a search-mirror row still could
+  not be decoded after the run rebuilt it from its event, so it could not be
+  checked. `cell_not_rewritten` means a matched copy is still stored (it
+  changed under the run, a check refused the edit, or something still refers
+  to a matched content blob).
+- A session with a turn in progress is skipped (failure `session_active`):
+  the turn could write the text again from memory. So is a session being
+  moved to long-term storage (`session_archiving`): its export could keep the
+  old copy. A dry run still counts both. Run again once it is idle or
+  archived. Every write also takes the session's ordinary writer lock and
+  rechecks this. Before the archive pass, every session listed as live is
+  read again: one archived during the run has its archive scrubbed too, and
+  one still being moved is reported as `session_archiving`.
+- An audit event (`session.secret_history.redacted`, or
+  `session.secret_history.counted` for a dry run) records the match label,
+  sessions and totals, and is written even when the run stops part way
+  (`outcome: "failed"`).
+
+What is rewritten: every stored copy in the chosen sessions: the session row
+(title, first message, instructions, metadata), turns (prompts, model context
+and the frozen goal), timeline events and the message search mirror, model
+history, pending tool calls, realtime entries and projections, model-request
+snapshots and the content blobs they point to, code-mode calls, background
+commands, machine inputs (scheduled ones included) and their outbox,
+human-input requests, run states, command receipts, unsent composer drafts,
+connector action reviews, feedback comments and context, session list
+snapshots, goals and goal revisions, task notes, MCP operation results, host
+export payloads and the history repair audit, and, for a session in
+long-term storage, its archive bundle and transcript
+(docs/session-storage-lifecycle.md, "Removing secrets from the archive").
+Each table is read in bounded pages, one transaction per page, under the
+caller's row-level security; a cell is rewritten only while it still holds
+what was read, so a concurrent writer is never overwritten. JSON keys are
+never rewritten, only string values. Content blobs are content-addressed: a
+model request is redacted whole (a secret can straddle two body chunks), then
+re-encoded into new blobs, and every old blob nothing refers to any more is
+deleted, along with any other unreferenced blob of the session created at
+least ten minutes ago (a chunk a failed earlier run left behind may hold part
+of a split secret). Those deletions count in the blobs' `rowsChanged` only,
+so it can be higher than `rowsMatched`. The search mirror is rebuilt from the
+scrubbed events, and its `rowsChanged` counts the rows rebuilt. The patterns
+scan a very large cell in windows cut at whitespace or quotes, so a long cell
+is searched whole.
+
+Goal text, goal revisions, a turn's frozen goal, task notes, the search
+mirror, machine inputs, content blobs (and so the model-request snapshots
+that keep their content in them), MCP results, host export payloads, the
+repair audit and the archive manifest are written only through two owner
+routines (1091). The cell writer re-reads each cell, checks it belongs to the
+named session, and accepts only text that is the old text with spans
+replaced by `[redacted: …]` markers; goal text keeps its length limit. The
+guards on immutable records (goals, frozen goals, settled MCP results,
+scheduled occurrences, archived sessions) let only that writer through, by a
+capability row it holds for its own transaction. Their runtime grant follows
+one release later, as for every new private routine
+(docs/migrations-expand-contract.md); until then the response lists those
+places in `pending` and still counts what it can read. Run the request again
+once they are granted.
+
+Not covered, by design or for now:
+
+- Other sessions that copied the text: a fork or a session that received it
+  in a message is its own session; name it too. `includeDescendants` follows
+  child sessions up to 64 levels deep.
+- Document inspection receipts stay immutable; they hold artifact
+  observations, not conversation text.
+- Inbox items and phone push records keep their own copies of a reply's
+  first lines, a question's prompt and choices, an approval's title, a
+  paused goal's reason and the agent's notifications; push records also
+  copy the chat's title. The scrub does not rewrite them. Push records are
+  deleted a week after they are delivered or given up on.
+- Opengeni's Slack inbox keeps the text of incoming Slack messages, and a
+  message the agent posts as the Opengeni Slack bot is saved with its text
+  before it is sent and kept until the chat or the Slack connection is
+  deleted.
+- An MCP operation's `receipt_digest` is not recomputed after its result is
+  rewritten, so re-settling that exact operation later reports a conflict
+  instead of replaying.
+- Files, artifacts, recordings, screenshots, Knowledge, workspace files,
+  sandbox disks, provider-side stored responses, and logs or telemetry
+  outside Opengeni's database and archive. Rotate a credential that reached
+  any of these, or a model provider.
+
+This scrub is the one way Opengeni removes a secret from stored history; new
+copies are kept out by references and delivery, not by rewriting content
+([Agent-visible content](#agent-visible-content)).
+
 ## HTTP API
 
 All routes are under `/v1/workspaces/:workspaceId`.
@@ -439,11 +775,14 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | Route | Purpose |
 |---|---|
 | `GET, POST /vaults`; `GET, PATCH, DELETE /vaults/:vaultId` | Vaults |
+| `GET /organization-vaults` | Every organization vault, wherever it works, for account administrators (`account:admin` and `secrets:list`). `complete` is always `true`; servers before migration 1272 could list only the ones that work in this workspace and sent `false` |
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
+| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `secrets:write` plus `workspace:admin` (or owning the Personal workspace) |
+| `GET, PUT /sessions/:sessionId/credential-profile` | A chat's own profile and its effective profile `{profile, effective}`; `PUT` needs `sessions:control` and `secrets:write` |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
@@ -451,6 +790,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
 | `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
 | `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
+| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin or Personal owner; counts only) |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).
@@ -474,19 +814,11 @@ Migration `0739_vaults.sql` (maintenance mode) runs in one transaction:
 3. Variable values are deleted, and variable names are scrubbed from persisted
    sandbox env in session envelopes and lease resume state.
 
-Set header rows, attachments and the set database routines stay for now,
-because scheduled-run admission still fences on them; they are inert. A later
-contract migration drops them.
-
-After the migration:
-
-- `/variable-sets/*`, `/environments/*` and `PUT /sessions/:id/variable-sets`
-  return 410 `variable_sets_removed`.
-- Non-empty `variableSetIds`, `variableSetId`, `environmentId` and rig
-  `defaultVariableSetIds` return 422 `variable_sets_removed`. Empty arrays and
-  null are accepted and ignored.
-- `@opengeni/sdk` 2.0.0 drops the Variable Set methods and types.
-- The Variable Sets settings page redirects to Secrets.
+The old set tables are inert: nothing reads or writes them, and a later
+contract migration drops them. The Variable Set routes, request and response
+fields, SDK methods and settings page are gone, and the retired
+`variable-sets:*` and `environments:*` permissions were rewritten to the
+matching `secrets:*` permissions.
 
 Anything that read a set's variables from the environment must now reference
 them explicitly.

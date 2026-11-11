@@ -233,8 +233,8 @@ function Feedback() {
         ) : null}
         <Text style={note}>
           {images.length > 0 ? "Sent with the screenshot: " : "Sent with your feedback: "}
-          the screen you were on, the app version, your phone model and system version, and recent
-          errors.
+          the screen and chat you were on, the app version, your phone model and system version, and
+          the app's recent errors, requests and steps.
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>

@@ -11,6 +11,20 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
+import {
+  ADD_ACCOUNT_LIMIT_COPY,
+  addAccountLimit,
+  connectionAccountRows,
+  type AccountOriginWorkspace,
+} from "@opengeni/react/app/components/capabilities/connection-account-rows";
+import {
+  OWN_WHERE_IT_WORKS_DESCRIPTION,
+  OWN_WHERE_IT_WORKS_TITLE,
+  OwnWhereItWorks,
+  ownReachHasNothingToChoose,
+  useOwnResourceReach,
+  type OwnReachClient,
+} from "@opengeni/react/app/components/own-where-it-works";
 
 const ACCOUNT_STATUS = {
   active: "connected",
@@ -26,6 +40,14 @@ export type CatalogConnectedAccountsManagement = {
   viewerSubjectId: string | null;
   /** The viewer holds connections:write in this workspace. */
   canWrite: boolean;
+  /** Whether the viewer may remove their own accounts in that workspace
+   * (connections:personal there). Your own account is removed in the
+   * workspace it was added in. Omit to fall back to `canWrite`. */
+  canRemoveOwnIn?: (workspaceId: string) => boolean;
+  /** Whether the viewer may sign their own account in again in that workspace
+   * (connections:write there: signing in needs it). Omit to fall back to
+   * `canWrite`. */
+  canReconnectOwnIn?: (workspaceId: string) => boolean;
   busy?: boolean;
   /** Re-run sign-in for exactly this account (OAuth accounts only). */
   onReconnect?: (account: ConnectionMetadata) => void;
@@ -33,6 +55,8 @@ export type CatalogConnectedAccountsManagement = {
   onRemove: (account: ConnectionMetadata) => Promise<boolean | void>;
   /** Sign in a further account; omit when the connector holds a single account. */
   onAdd?: () => void;
+  /** Who a further account would belong to, so Add follows the account rule. */
+  addOwnership?: "personal" | "workspace";
 };
 
 export type CatalogConnectedAccountsProps = {
@@ -42,20 +66,80 @@ export type CatalogConnectedAccountsProps = {
   accessDenied?: boolean;
   onRetry?: () => void;
   management?: CatalogConnectedAccountsManagement;
+  /** The workspace being viewed. Accounts added in another workspace name
+   * where they came from. */
+  workspaceId?: string | undefined;
+  workspaces?: readonly AccountOriginWorkspace[] | undefined;
+  /** Your own logins: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { client: OwnReachClient; workspaceId: string } | undefined;
 };
 
-/** Whether the viewer may disconnect this account: their own personal account,
- * or a shared workspace account when they can manage workspace connections.
- * Another person's personal account is never theirs to remove. */
-export function canRemoveConnectedAccount(
-  account: Pick<ConnectionMetadata, "subjectId">,
-  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
-): boolean {
-  if (!management?.canWrite) return false;
+/** Under your own login: the workspaces where it works for your own messages. */
+function OwnLoginWhereItWorks({
+  ownReach,
+  account,
+  label,
+}: {
+  ownReach: { client: OwnReachClient; workspaceId: string };
+  account: ConnectionMetadata;
+  label: string;
+}) {
+  const reach = useOwnResourceReach({
+    ...ownReach,
+    resourceKind: "connection",
+    resourceId: account.id,
+  });
+  if (reach.state.status === "absent") return null;
+  if (reach.state.status === "ready" && ownReachHasNothingToChoose(reach.state.workspaces))
+    return null;
   return (
-    account.subjectId === null ||
-    (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
+    <div className="min-w-0 basis-full">
+      <p className="m-0 text-xs leading-4.5 font-medium text-fg">{OWN_WHERE_IT_WORKS_TITLE}</p>
+      <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
+      <OwnWhereItWorks name={label} reach={reach} />
+    </div>
   );
+}
+
+/** Whether the viewer may disconnect this account: their own personal
+ * account, wherever it was added, when they may remove their own accounts in
+ * that workspace; or a shared account of this workspace when they can manage
+ * workspace connections. Another person's personal account is never theirs,
+ * and a shared account from another workspace is managed by that workspace's
+ * admins. */
+export function canRemoveConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management:
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canRemoveOwnIn">
+    | undefined,
+  workspaceId?: string | undefined,
+): boolean {
+  return canActOnConnectedAccount(account, management, management?.canRemoveOwnIn, workspaceId);
+}
+
+/** Whether the viewer may sign this account in again: as for removal, but
+ * signing in needs connections:write in the account's workspace. */
+export function canReconnectConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management:
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canReconnectOwnIn">
+    | undefined,
+  workspaceId?: string | undefined,
+): boolean {
+  return canActOnConnectedAccount(account, management, management?.canReconnectOwnIn, workspaceId);
+}
+
+function canActOnConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+  ownIn: ((workspaceId: string) => boolean) | undefined,
+  workspaceId: string | undefined,
+): boolean {
+  if (!management) return false;
+  if (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
+    return ownIn ? ownIn(account.workspaceId) : management.canWrite;
+  if (account.subjectId !== null || !management.canWrite) return false;
+  return !workspaceId || account.workspaceId === workspaceId;
 }
 
 /** Sign-in never produced a usable account identity. */
@@ -86,10 +170,14 @@ export function CatalogConnectedAccounts({
   accessDenied = false,
   onRetry,
   management,
+  workspaceId,
+  workspaces,
+  ownReach,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
     label: string;
+    origin: string | null;
   } | null>(null);
   if (
     item.kind !== "mcp" ||
@@ -117,9 +205,29 @@ export function CatalogConnectedAccounts({
     connections ?? [],
     item.mcpUrl ?? item.endpointUrl,
   ).filter((account) => account.status !== "revoked");
+  const rows = connectionAccountRows(accounts, {
+    fallbackName: item.name,
+    workspaceId,
+    workspaces,
+    labelOf: (account) => connectionSignInLabel(account, item.name),
+  });
   const busy = management?.busy === true;
+  // A service that can't tell accounts apart allows one per person; an account
+  // connected before it could is signed in again once. Say so instead of Add.
+  const limit =
+    management?.onAdd && management.addOwnership
+      ? addAccountLimit(accounts, {
+          viewerSubjectId: management.viewerSubjectId,
+          ownership: management.addOwnership,
+        })
+      : null;
   const addAction =
-    management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
+    management?.onAdd &&
+    management.canWrite &&
+    !limit &&
+    !accessDenied &&
+    !loadFailed &&
+    connections ? (
       <Button
         type="button"
         variant="outline"
@@ -171,75 +279,89 @@ export function CatalogConnectedAccounts({
       ) : accounts.length === 0 ? (
         <p className="m-0 text-sm text-fg-muted">No accounts connected to this connector.</p>
       ) : (
-        <ul
-          aria-label={`${item.name} connected accounts`}
-          className="m-0 list-none divide-y divide-border p-0"
-        >
-          {accounts.map((account) => {
-            const label = connectionSignInLabel(account, item.name);
-            const unfinished = connectedAccountSignInUnfinished(account);
-            const reconnect =
-              management?.onReconnect &&
-              account.kind === "oauth2" &&
-              account.status !== "active" &&
-              canRemoveConnectedAccount(account, management)
-                ? management.onReconnect
-                : null;
-            const removable = canRemoveConnectedAccount(account, management);
-            return (
-              <li
-                key={account.id}
-                className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
-              >
-                <div className="min-w-0 flex-1 basis-48">
-                  <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <MetaChip>{account.subjectId === null ? "This workspace" : "Only me"}</MetaChip>
+        <>
+          {limit && management?.canWrite ? (
+            <p className="m-0 mb-3 text-sm text-fg-muted">{ADD_ACCOUNT_LIMIT_COPY[limit]}</p>
+          ) : null}
+          <ul
+            aria-label={`${item.name} connected accounts`}
+            className="m-0 list-none divide-y divide-border p-0"
+          >
+            {accounts.map((account) => {
+              const row = rows.get(account.id)!;
+              const label = row.label;
+              const unfinished = connectedAccountSignInUnfinished(account);
+              // Re-signing in refreshes the same row wherever it was added. An
+              // account from before its service could be identified offers it too.
+              const reconnect =
+                management?.onReconnect &&
+                account.kind === "oauth2" &&
+                (account.status !== "active" ||
+                  (limit === "reconnect" && account.accountIdentity === "reconnect")) &&
+                canReconnectConnectedAccount(account, management, workspaceId)
+                  ? management.onReconnect
+                  : null;
+              const removable = canRemoveConnectedAccount(account, management, workspaceId);
+              return (
+                <li
+                  key={account.id}
+                  className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
+                >
+                  <div className="min-w-0 flex-1 basis-48">
+                    <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      <MetaChip>{row.scope}</MetaChip>
+                    </div>
                   </div>
-                </div>
-                {unfinished ? (
-                  <StatusBadge status="needs_reconnect" variant="dot">
-                    Sign-in not finished
-                  </StatusBadge>
-                ) : (
-                  <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
-                )}
-                {reconnect || removable ? (
-                  <div className="flex shrink-0 items-center gap-2">
-                    {reconnect ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="min-h-9"
-                        disabled={busy}
-                        aria-label={`Reconnect ${label}`}
-                        onClick={() => reconnect(account)}
-                      >
-                        <RefreshCwIcon aria-hidden="true" />
-                        Reconnect
-                      </Button>
-                    ) : null}
-                    {removable ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="min-h-9 text-fg-muted hover:text-status-failed"
-                        disabled={busy}
-                        aria-label={`Remove ${label}`}
-                        onClick={() => setRemoveTarget({ account, label })}
-                      >
-                        <TrashIcon aria-hidden="true" />
-                        Remove
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
+                  {unfinished ? (
+                    <StatusBadge status="needs_reconnect" variant="dot">
+                      Sign-in not finished
+                    </StatusBadge>
+                  ) : (
+                    <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
+                  )}
+                  {reconnect || removable ? (
+                    <div className="flex shrink-0 items-center gap-2">
+                      {reconnect ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="min-h-9"
+                          disabled={busy}
+                          aria-label={`Reconnect ${label}`}
+                          onClick={() => reconnect(account)}
+                        >
+                          <RefreshCwIcon aria-hidden="true" />
+                          Reconnect
+                        </Button>
+                      ) : null}
+                      {removable ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="min-h-9 text-fg-muted hover:text-status-failed"
+                          disabled={busy}
+                          aria-label={`Remove ${label}`}
+                          onClick={() => setRemoveTarget({ account, label, origin: row.origin })}
+                        >
+                          <TrashIcon aria-hidden="true" />
+                          Remove
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {ownReach &&
+                  account.subjectId !== null &&
+                  account.subjectId === management?.viewerSubjectId ? (
+                    <OwnLoginWhereItWorks ownReach={ownReach} account={account} label={label} />
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
       {management ? (
         <ConfirmDialog
@@ -251,7 +373,9 @@ export function CatalogConnectedAccounts({
           description={
             removeTarget?.account.subjectId === null
               ? `${item.name} stops using this account for everyone in this workspace. You can add it again later.`
-              : `${item.name} stops using this account. You can add it again later.`
+              : removeTarget?.origin
+                ? `${item.name} stops using this account here and in ${removeTarget.origin}, where it was added. You can add it again later.`
+                : `${item.name} stops using this account. You can add it again later.`
           }
           confirmLabel="Remove account"
           pendingLabel="Removing…"

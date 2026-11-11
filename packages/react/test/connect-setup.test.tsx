@@ -173,11 +173,17 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(required).toContain("needs a Microsoft 365 admin to approve");
-  expect(required).toContain("Admin approval link");
-  expect(required).toContain(`href="${link.replaceAll("&", "&amp;")}"`);
-  expect(required).toContain("Copy admin approval link");
+  expect(required).toContain("Your IT needs to approve Opengeni first");
+  expect(required).toContain("Copy message for IT");
+  expect(required).toContain("Copy approval link");
+  expect(required).toContain("Open approval link");
+  // The ready-made message carries the exact approval link.
+  expect(required).toContain(`could you approve it with this link?`.replace("could", "Could"));
+  expect(required).toContain(link.replaceAll("&", "&amp;"));
   expect(required).not.toContain("Connection setup could not continue");
+  expect(required).not.toContain("Personal connection");
+  expect(required).not.toContain("<ol>");
+  expect(required).not.toContain("Check status");
   const declined = await render({ type: "none" }, "cancelled", {
     providerId: "microsoft-outlook-mail",
     error: {
@@ -186,7 +192,9 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(declined).toContain("If it said your organization needs an admin");
+  expect(declined).toContain("Microsoft didn&#x27;t give access");
+  expect(declined).toContain("If Microsoft said an admin has to approve Opengeni");
+  expect(declined).toContain("Copy message for IT");
   const other = await render({ type: "none" }, "cancelled", {
     error: {
       code: "provider_denied",
@@ -194,7 +202,8 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: false,
     },
   });
-  expect(other).not.toContain("Admin approval link");
+  expect(other).not.toContain("Open approval link");
+  expect(other).not.toContain("Copy message for IT");
 });
 
 test("GitHub account selection explains how a non-owner requests an organization install", async () => {
@@ -306,4 +315,114 @@ test("a custom OpenAPI source keeps the explicit tool review", async () => {
   });
   expect(html).toContain("Add selected tools");
   expect(html).not.toContain("Finishing setup");
+});
+
+test("setup the person authorized carries on without its dialog", async () => {
+  const { connectSetupContinuesWithoutDialog, continueConnectSetup } =
+    await import("../src/connect-setup-model");
+  const signingIn: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "personal",
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: { type: "authorize", url: "https://login.microsoftonline.com/authorize" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  // Closing before signing in leaves nothing running; after, it carries on.
+  expect(connectSetupContinuesWithoutDialog(signingIn, false)).toBe(false);
+  expect(connectSetupContinuesWithoutDialog(signingIn, true)).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      { ...signingIn, state: "connected_but_incomplete", nextAction: { type: "none" } },
+      false,
+    ),
+  ).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      {
+        ...signingIn,
+        state: "connected_but_incomplete",
+        nextAction: { type: "none" },
+        error: { code: "failed", message: "failed", retryable: true },
+      },
+      true,
+    ),
+  ).toBe(false);
+  // The provider callback finished setup: nothing is left to do but read it.
+  const complete: ConnectAttempt = {
+    ...signingIn,
+    revision: 2,
+    state: "complete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: true,
+  };
+  let reads = 0;
+  const advances: unknown[] = [];
+  const transport = {
+    get: async () => (++reads < 2 ? signingIn : complete),
+    advance: async (...args: unknown[]) => {
+      advances.push(args);
+      return complete;
+    },
+  };
+  expect(await continueConnectSetup(transport, signingIn)).toEqual(complete);
+  expect(advances).toEqual([]);
+  // A setup that needs the person again stays resumable instead.
+  expect(
+    await continueConnectSetup(transport, {
+      ...signingIn,
+      state: "account_selection",
+      nextAction: { type: "select_account", accounts: [] },
+    }),
+  ).toBeNull();
+});
+
+test("background setup stops at a refusal and when it is aborted", async () => {
+  const { continueConnectSetup } = await import("../src/connect-setup-model");
+  const connected: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "workspace",
+    revision: 2,
+    state: "connected_but_incomplete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  let reads = 0;
+  const refused = Object.assign(new Error("Forbidden"), { status: 403 });
+  const transport = {
+    get: async () => {
+      reads += 1;
+      return connected;
+    },
+    advance: async () => {
+      throw refused;
+    },
+  };
+  // A permission or policy refusal needs the person: no waiting for a move.
+  const started = Date.now();
+  expect(await continueConnectSetup(transport, connected, { settleMs: 5_000 })).toBeNull();
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(reads).toBe(0);
+  // A conflict waits for the attempt to move, until it is aborted.
+  const conflict = { ...transport, advance: async () => Promise.reject({ status: 409 }) };
+  const abort = new AbortController();
+  const continuing = continueConnectSetup(conflict, connected, {
+    signal: abort.signal,
+    settleMs: 60_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  abort.abort();
+  expect(await continuing).toBeNull();
+  expect(reads).toBeGreaterThan(0);
 });

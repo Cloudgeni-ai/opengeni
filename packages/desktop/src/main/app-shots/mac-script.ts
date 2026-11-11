@@ -16,7 +16,7 @@
 // `run`'s return value.
 
 /** Appends the explicit entry point: `main` receives the arguments after `-e <script>`. */
-function withEntry(body: string): string {
+export function withEntry(body: string): string {
   return `${body}
 ObjC.import("Foundation");
 function scriptArguments() {

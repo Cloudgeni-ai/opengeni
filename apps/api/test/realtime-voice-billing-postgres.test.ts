@@ -1,15 +1,21 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createRealtimeVoiceBilling } from "@opengeni/core";
+import { createRealtimeVoiceBilling, settleVoiceInputUsage } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
+  applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
   createSession,
   getBillingBalance,
+  getWorkspaceUsage,
   listUsageEvents,
   renewSessionRealtimeInTransaction,
+  setMemberAllowance,
+  setWorkspaceAllowance,
+  upsertOrganizationPlan,
+  withBillingOriginOverride,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
@@ -21,6 +27,7 @@ import { Hono } from "hono";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { insufficientCreditsHttpError } from "../src/http/api-error";
 
 const DELEGATION_SECRET = "realtime-voice-billing-secret-with-32-bytes";
 const AZURE_MODEL = "opengeni-azure/gpt-live-1";
@@ -30,6 +37,8 @@ const MINUTE = 52_500;
 const pricedSettings = testSettings({
   productAccessMode: "managed",
   billingMode: "stripe",
+  subscriptionPlansEnabled: true,
+  byokPlatformFeeBps: 0,
   delegationSecret: DELEGATION_SECRET,
   vercelAiGatewayApiKey: "gateway-test-key",
   azureLiveEndpoint: "https://voice.example.test",
@@ -85,6 +94,15 @@ function appFor(settings: Settings): Hono {
     },
   } as unknown as ApiRouteDeps;
   const app = new Hono();
+  app.onError((error, c) => {
+    const refusal = insufficientCreditsHttpError(error);
+    if (refusal)
+      return c.json(
+        { error: { code: refusal.code, message: refusal.message, details: refusal.details } },
+        refusal.status,
+      );
+    throw error;
+  });
   registerSessionRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
   return app;
@@ -183,7 +201,7 @@ async function costEvents(value: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
-  test("refuses unfunded starts with the voice-input code; workspace-funded voice is not gated", async () => {
+  test("refuses unfunded hosted starts and API subscription starts", async () => {
     const app = appFor(pricedSettings);
     const value = await fixture(0);
     const refused = await begin(app, value, AZURE_MODEL);
@@ -191,9 +209,12 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(await refused.response.json()).toMatchObject({ code: "insufficient_credits" });
     const gateway = await begin(app, value, "opengeni-gateway/openai/gpt-realtime-2.1");
     expect(gateway.response.status).toBe(402);
-    // A connected subscription is paid by the workspace: admission is not credit-gated.
+    // Connected subscriptions cannot fund an API-origin call, regardless of credits.
     const codex = await begin(app, value, "gpt-live-1-boulder-alpha");
-    expect(codex.response.status).toBe(201);
+    expect(codex.response.status).toBe(403);
+    expect(await codex.response.json()).toMatchObject({
+      error: { details: { code: "subscription_api_unavailable" } },
+    });
 
     const catalog = await app.request(
       `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
@@ -207,7 +228,52 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       available: false,
       unavailableCode: "insufficient_credits",
     });
+    for (const model of models.filter((entry) => String(entry.provider).startsWith("Connected "))) {
+      expect(model).toMatchObject({
+        available: false,
+        unavailableCode: "subscription_api_unavailable",
+      });
+    }
   });
+
+  test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+    "%s requires a paid app plan without charging credits",
+    async (model) => {
+      const app = appFor(pricedSettings);
+      for (const [key, status, allowed] of [
+        [null, "active", false],
+        ["free", "active", false],
+        ["pro", "past_due", false],
+        ["pro", "active", true],
+        ["max", "active", true],
+      ] as const) {
+        const value = await fixture(0);
+        if (key)
+          await upsertOrganizationPlan(client.db, {
+            accountId: value.accountId,
+            planKey: key,
+            status,
+            ...(key === "free" ? {} : { stripeSubscriptionId: `sub_${crypto.randomUUID()}` }),
+            currentPeriodStart: new Date(Date.now() - 1000),
+            currentPeriodEnd: new Date(Date.now() + 3_600_000),
+          });
+        const callsBefore = providerCalls;
+        const started = await withBillingOriginOverride("app", () => begin(app, value, model));
+        expect(started.response.status).toBe(allowed ? 201 : 402);
+        if (!allowed)
+          expect(await started.response.json()).toMatchObject({
+            error: {
+              details: { code: "subscription_plan_required", action: { type: "upgrade_plan" } },
+            },
+          });
+        expect(providerCalls).toBe(callsBefore);
+        expect(await costEvents(value)).toEqual([]);
+        expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
+        const api = await begin(app, value, model);
+        expect(api.response.status).toBe(403);
+      }
+    },
+  );
 
   test("promotional chat-only credits are named instead of reported as no credits", async () => {
     const app = appFor(pricedSettings);
@@ -219,15 +285,24 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       eligibleModelIds: ["gpt-chat-only"],
       idempotencyKey: `promo:${value.accountId}`,
     });
-    const refused = await begin(app, value, AZURE_MODEL);
+    // A person in the app (the app's own sign-in fixes this scope in production).
+    const refused = await withBillingOriginOverride("app", () => begin(app, value, AZURE_MODEL));
     expect(refused.response.status).toBe(402);
     expect(await refused.response.json()).toMatchObject({
       code: "insufficient_credits",
       message: "Promotional credits don't cover live voice. Add credits to use it.",
     });
-    const catalog = await app.request(
-      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
-      { headers: value.headers },
+    // The fixture's own delegated token is API use: it is told credits pay.
+    const api = await begin(app, value, AZURE_MODEL);
+    expect(api.response.status).toBe(402);
+    expect(await api.response.json()).toMatchObject({
+      code: "insufficient_credits",
+      message: "API usage uses credits, not your plan credit.",
+    });
+    const catalog = await withBillingOriginOverride("app", () =>
+      app.request(`http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`, {
+        headers: value.headers,
+      }),
     );
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
     expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
@@ -237,7 +312,115 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     });
   });
 
+  test.each(["gpt-live-1-boulder-alpha", "supergrok/grok-voice-think-fast-2.0"])(
+    "%s rechecks API origin and plan before negotiating an already-started app call",
+    async (model) => {
+      const app = appFor(pricedSettings);
+      for (const origin of ["api", "app"] as const) {
+        const value = await fixture(0);
+        const plan = {
+          accountId: value.accountId,
+          planKey: "pro",
+          stripeSubscriptionId: `sub_${crypto.randomUUID()}`,
+          currentPeriodStart: new Date(Date.now() - 1000),
+          currentPeriodEnd: new Date(Date.now() + 3_600_000),
+        };
+        await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+        const started = await withBillingOriginOverride("app", () => begin(app, value, model));
+        expect(started.response.status).toBe(201);
+        const { mode } = (await started.response.json()) as {
+          mode: { id: string; version: number; connectionEpoch: number };
+        };
+        if (origin === "app")
+          await upsertOrganizationPlan(client.db, { ...plan, status: "past_due" });
+        const webrtc = model === "gpt-live-1-boulder-alpha";
+        const callsBefore = providerCalls;
+        const refused = await withBillingOriginOverride(origin, () =>
+          app.request(`${value.base}/${webrtc ? "webrtc" : "websocket"}`, {
+            method: "POST",
+            headers: value.headers,
+            body: JSON.stringify({
+              realtimeId: mode.id,
+              operationId: crypto.randomUUID(),
+              browserInstanceId: started.proof.browserInstanceId,
+              ownerKey: started.proof.ownerKey,
+              expectedVersion: mode.version,
+              expectedConnectionEpoch: mode.connectionEpoch,
+              rotate: false,
+              ...(webrtc ? { sdp: "v=0\r\na=offer:fixture\r\n", version: "v3" } : {}),
+            }),
+          }),
+        );
+        expect(refused.status).toBe(origin === "api" ? 403 : 402);
+        expect(await refused.json()).toMatchObject({
+          error: {
+            details: {
+              code:
+                origin === "api" ? "subscription_api_unavailable" : "subscription_plan_required",
+            },
+          },
+        });
+        expect(providerCalls).toBe(callsBefore);
+        const rows =
+          await shared.admin`select state from session_realtime_connections where realtime_id = ${mode.id}::uuid`;
+        expect(rows.map((row) => row.state)).toEqual(["failed"]);
+        await upsertOrganizationPlan(client.db, { ...plan, status: "active" });
+        const [current] =
+          await shared.admin`select version, connection_epoch from session_realtime_modes where id = ${mode.id}::uuid`;
+        const retry = await withBillingOriginOverride("app", () =>
+          app.request(`${value.base}/${webrtc ? "webrtc" : "websocket"}`, {
+            method: "POST",
+            headers: value.headers,
+            body: JSON.stringify({
+              realtimeId: mode.id,
+              operationId: crypto.randomUUID(),
+              browserInstanceId: started.proof.browserInstanceId,
+              ownerKey: started.proof.ownerKey,
+              expectedVersion: current!.version,
+              expectedConnectionEpoch: current!.connection_epoch,
+              rotate: true,
+              ...(webrtc ? { sdp: "v=0\r\na=offer:fixture\r\n", version: "v3" } : {}),
+            }),
+          }),
+        );
+        // This fixture has no provider connection. Its corrected retry must
+        // pass admission and claim a new operation, not remain wedged in the old one.
+        expect(await retry.text()).not.toContain("REALTIME_CONNECTION_ACTIVE");
+        expect(
+          (
+            await shared.admin`select id from session_realtime_connections where realtime_id = ${mode.id}::uuid`
+          ).length,
+        ).toBe(2);
+      }
+    },
+  );
+
+  test("an API caller cannot spend signup credits on live voice", async () => {
+    // The fixture's delegated token is a product on the SDK: API use, which
+    // spends credits only.
+    const app = appFor(pricedSettings);
+    const value = await fixture(0);
+    await applyCreditLedgerEntry(client.db, {
+      accountId: value.accountId,
+      amountMicros: 2 * MINUTE,
+      type: "grant",
+      eligibleModelIds: ["gpt-chat-only"],
+      sourceType: "verified_signup_trial",
+      sourceId: value.subjectId,
+      idempotencyKey: `verified-signup-trial:v1:${value.accountId}`,
+      metadata: { campaign: "verified_signup_trial_v1", creditOfferLabel: "Signup credits" },
+    });
+    const refused = await begin(app, value, AZURE_MODEL);
+    expect(refused.response.status).toBe(402);
+    expect(await costEvents(value)).toHaveLength(0);
+  });
+
   test("signup trial credits make live voice available and pay for its minutes", async () => {
+    // A person in the app (the app's own sign-in fixes this scope in production).
+    await withBillingOriginOverride("app", () => signupTrialVoice());
+  });
+
+  async function signupTrialVoice() {
     const app = appFor(pricedSettings);
     const value = await fixture(0);
     // Signup credits stay scoped to chat models for model usage, yet pay for voice.
@@ -295,7 +478,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       expect.objectContaining({ remainingMicros: MINUTE, coversVoice: true }),
     ]);
     expect(await costEvents(value)).toHaveLength(1);
-  });
+  }
 
   test("an enabled provider without pricing is neither offered nor startable", async () => {
     const app = appFor({ ...pricedSettings, azureLivePricingJson: undefined });
@@ -489,4 +672,142 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       expect(await costEvents(value)).toHaveLength(1);
     },
   );
+});
+
+describe("live voice counts against the member's usage allowance (real PostgreSQL)", () => {
+  // The workspace allows ten minutes; the member who talks is allowed one.
+  async function memberFixture() {
+    const value = await fixture(10 * MINUTE);
+    const personalWorkspaceId = crypto.randomUUID();
+    await shared.admin`insert into workspaces (id, account_id, name)
+      values (${personalWorkspaceId}, ${value.accountId}, 'Personal')`;
+    await shared.admin`insert into organization_memberships
+      (account_id, subject_id, role, status, personal_workspace_id)
+      values (${value.accountId}, ${value.subjectId}, 'owner', 'active', ${personalWorkspaceId})`;
+    const scope = {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      actorSubjectId: value.subjectId,
+    };
+    await setWorkspaceAllowance(client.db, {
+      ...scope,
+      includedCredits: 10 * MINUTE,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await setMemberAllowance(client.db, {
+      ...scope,
+      subjectId: value.subjectId,
+      rule: { credits: MINUTE },
+      expectedVersion: 0,
+    });
+    return value;
+  }
+
+  async function usage(value: Awaited<ReturnType<typeof memberFixture>>) {
+    const current = await getWorkspaceUsage(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+    });
+    const member = current.members.find((row) => row.subjectId === value.subjectId);
+    return { workspace: current.workspace.used, member: member?.used, status: member?.status };
+  }
+
+  async function admitAgain(value: Awaited<ReturnType<typeof memberFixture>>) {
+    return await createRealtimeVoiceBilling({ db: client.db, settings: pricedSettings })
+      .admit({
+        accountId: value.accountId,
+        workspaceId: value.workspaceId,
+        model: AZURE_MODEL,
+        attribution: { kind: "human", initiatingHumanSubjectId: value.subjectId },
+      })
+      .then(
+        () => "admitted",
+        (error: unknown) => (error as { code?: string }).code ?? String(error),
+      );
+  }
+
+  test("a billed minute fills the member's allowance, stops the call and refuses a new one", async () => {
+    const app = appFor(pricedSettings);
+    const value = await memberFixture();
+    const started = await begin(app, value, AZURE_MODEL);
+    expect(started.response.status).toBe(201);
+    const mode = (
+      (await started.response.json()) as {
+        mode: { id: string; version: number; connectionEpoch: number };
+      }
+    ).mode;
+    const proof = started.proof;
+    const negotiated = await app.request(`${value.base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify({
+        realtimeId: mode.id,
+        operationId: crypto.randomUUID(),
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: mode.version,
+        expectedConnectionEpoch: mode.connectionEpoch,
+        rotate: false,
+        sdp: "v=0\r\na=offer:fixture\r\n",
+        version: "v3",
+      }),
+    });
+    expect(negotiated.status).toBe(200);
+    // The first started minute is billed when the provider connection is issued.
+    expect(await costEvents(value)).toHaveLength(1);
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: MINUTE, status: "exhausted" });
+
+    const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
+      method: "PATCH",
+      headers: value.headers,
+      body: JSON.stringify({
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: mode.version,
+      }),
+    });
+    expect(heartbeat.status).toBe(200);
+    const body = (await heartbeat.json()) as { stop?: { code: string } };
+    expect(body.stop).toMatchObject({ code: "allowance_exhausted" });
+    expect(await admitAgain(value)).toBe("allowance_exhausted");
+  });
+
+  test("a live-voice debit without its recorded usage event counts for the workspace only", async () => {
+    const value = await memberFixture();
+    const sourceId = `${crypto.randomUUID()}:1`;
+    // Debit metadata naming a person is not trusted on its own.
+    await applyCreditDebitAfterUse(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      type: "voice_realtime_debit",
+      amountMicros: MINUTE,
+      sourceType: "voice_realtime",
+      sourceId,
+      idempotencyKey: `credit:voice_realtime_debit:${sourceId}`,
+      metadata: { initiatingHumanSubjectId: value.subjectId },
+    });
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: 0, status: "ok" });
+    expect(await admitAgain(value)).toBe("admitted");
+  });
+
+  test("voice input still counts against the member's allowance", async () => {
+    const value = await memberFixture();
+    await settleVoiceInputUsage(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      providerId: "fixture",
+      model: "fixture-transcribe",
+      billing: {
+        sourceId: crypto.randomUUID(),
+        attribution: { kind: "human", initiatingHumanSubjectId: value.subjectId },
+      },
+      usage: { kind: "duration", seconds: 60 },
+      basis: "provider_duration",
+      providerCostMicros: 50_000,
+      creditCostMicros: MINUTE,
+    });
+    expect(await usage(value)).toEqual({ workspace: MINUTE, member: MINUTE, status: "exhausted" });
+    expect(await admitAgain(value)).toBe("allowance_exhausted");
+  });
 });

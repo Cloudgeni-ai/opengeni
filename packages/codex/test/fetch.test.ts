@@ -6,6 +6,7 @@ import {
   CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   type CodexModelRequestEvent,
+  type CodexReportedUsage,
   type CodexRequestContext,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
@@ -18,6 +19,7 @@ import {
   warmCodexResponsesConnection,
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
+  parseCodexReportedUsage,
   parseCodexUsageHeaders,
   withCodexRequestOverrides,
 } from "../src";
@@ -2658,6 +2660,43 @@ describe("parseCodexUsageHeaders", () => {
   });
 });
 
+describe("parseCodexReportedUsage", () => {
+  test("reports a weekly-only account's windows that the labeled snapshot cannot hold", () => {
+    const headers = new Headers({
+      "x-codex-primary-used-percent": "66",
+      "x-codex-primary-limit-window-seconds": "604800",
+      "x-codex-primary-reset-at": "1783200000",
+      "x-codex-secondary-used-percent": "0",
+    });
+    expect(parseCodexUsageHeaders(headers)).toBeNull();
+    const reported = parseCodexReportedUsage(headers);
+    expect(reported?.windows).toEqual([
+      { usedPercent: 66, resetAt: new Date(1783200000 * 1000) },
+      { usedPercent: 0, resetAt: null },
+    ]);
+  });
+
+  test("reports a single slot, resolving reset-after-seconds", () => {
+    const before = Date.now();
+    const reported = parseCodexReportedUsage(
+      new Headers({
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-after-seconds": "3600",
+      }),
+    );
+    expect(reported?.windows).toHaveLength(1);
+    expect(reported!.windows[0]!.usedPercent).toBe(100);
+    expect(reported!.windows[0]!.resetAt!.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
+  });
+
+  test("absent or non-integer used-percent reports nothing", () => {
+    expect(parseCodexReportedUsage(new Headers({}))).toBeNull();
+    expect(
+      parseCodexReportedUsage(new Headers({ "x-codex-primary-used-percent": "n/a" })),
+    ).toBeNull();
+  });
+});
+
 describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
   function usageBase(status: number, headers: Record<string, string>): FetchLike {
     return async () =>
@@ -2766,5 +2805,34 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
       }),
     );
     expect(seen).toHaveLength(0);
+  });
+
+  test("reports a weekly-only account's usage even though no labeled snapshot exists", async () => {
+    const labeled: CodexUsageHeaderSnapshot[] = [];
+    const reported: CodexReportedUsage[] = [];
+    for (const status of [200, 429]) {
+      const fetchImpl = codexSubscriptionFetch(
+        usageBase(status, {
+          "x-codex-primary-used-percent": "100",
+          "x-codex-primary-limit-window-seconds": "604800",
+        }),
+      );
+      await codexRequestStorage.run(
+        ctx({
+          onUsageHeaders: (s) => labeled.push(s),
+          onReportedUsage: (usage) => reported.push(usage),
+        }),
+        () =>
+          fetchImpl("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+          }),
+      );
+    }
+    expect(labeled).toHaveLength(0);
+    expect(reported.map((usage) => usage.windows.map((w) => w.usedPercent))).toEqual([
+      [100],
+      [100],
+    ]);
   });
 });

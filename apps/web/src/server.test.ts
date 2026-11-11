@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createWebHandler,
   demoApiProxyFromEnvironment,
+  noindexFromEnvironment,
   previousAssetRootsFromEnvironment,
   publicWebOriginFromEnvironment,
   withAbsoluteLinkPreviewUrls,
@@ -91,9 +92,9 @@ describe("production web handler", () => {
     for (const response of responses) {
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
-      // Embedding is supported, so the shell never forbids framing.
-      expect(response.headers.get("x-frame-options")).toBeNull();
-      expect(response.headers.get("content-security-policy")).toBeNull();
+      // Only the console itself may frame its pages; no script policy is set.
+      expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+      expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
     }
 
     // The setup page keeps its stricter policy so the bearer never leaks.
@@ -102,6 +103,98 @@ describe("production web handler", () => {
     );
     expect(setup.headers.get("referrer-policy")).toBe("no-referrer");
     expect(setup.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // A chat share link's address is its key: never a referrer, never indexed.
+    const shared = await handler(new Request("https://example.test/share/Zq3secretShareKey0000"));
+    expect(shared.status).toBe(200);
+    expect(shared.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(shared.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(shared.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(shared.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(await shared.text()).toContain("Opengeni");
+  });
+
+  test("lets Office on the web frame only the Excel add-in pages", async () => {
+    const root = await fixture();
+    await mkdir(join(root, "office/assets"), { recursive: true });
+    await Bun.write(join(root, "office/index.html"), "<!doctype html><title>pane</title>");
+    await Bun.write(join(root, "office/auth-callback.html"), "<!doctype html><title>cb</title>");
+    await Bun.write(join(root, "office/assets/pane-abc.js"), "export {};\n");
+    const handler = createWebHandler(root);
+    for (const path of [
+      "/office/",
+      "/office/auth-callback.html",
+      "/office/assets/pane-abc.js",
+      "/office/manifest.xml",
+    ]) {
+      const response = await handler(new Request(`https://example.test${path}`));
+      expect(response.status).toBe(200);
+      const policy = response.headers.get("content-security-policy") ?? "";
+      expect(policy.startsWith("frame-ancestors 'self' ")).toBe(true);
+      for (const host of [
+        "https://*.officeapps.live.com",
+        "https://*.office.com",
+        "https://*.cloud.microsoft",
+        "https://*.sharepoint.com",
+      ]) {
+        expect(policy.split(" ")).toContain(host);
+      }
+      // X-Frame-Options cannot allow Microsoft's hosts, so it is not sent here.
+      expect(response.headers.get("x-frame-options")).toBeNull();
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    }
+    // A console route that merely starts with "office" keeps the strict policy.
+    const lookalike = await handler(new Request("https://example.test/officers"));
+    expect(lookalike.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+    expect(lookalike.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+  });
+
+  test("asks search engines not to index anything when the deployment opts in", async () => {
+    const root = await fixture();
+    const requests = () => [
+      new Request("https://example.test/"),
+      new Request("https://example.test/workspaces/ws/sessions/id"),
+      new Request("https://example.test/assets/app-abc123.js"),
+      new Request("https://example.test/assets/missing.js"),
+      new Request("https://example.test/robots.txt"),
+      new Request("https://example.test/%2e%2e%2fsecret"),
+      new Request("https://example.test/", { method: "POST" }),
+      new Request("https://example.test/react-demo"),
+      new Request("https://example.test/", { method: "HEAD" }),
+      new Request(`https://example.test/setup-account?token=${VALID_SETUP_TOKEN}`),
+      new Request("https://example.test/demo-api/healthz"),
+    ];
+
+    const noindex = createWebHandler(root, {
+      noindex: true,
+      publicOrigin: "https://console.example.test",
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async () => Response.json({ ok: true }),
+      },
+    });
+    for (const response of await Promise.all(requests().map(noindex))) {
+      expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    }
+    const shell = await noindex(new Request("https://example.test/workspaces/x"));
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain("Opengeni");
+
+    // Off by default: only share and setup pages opt out of indexing.
+    const indexed = createWebHandler(root);
+    for (const path of ["/", "/workspaces/x", "/assets/app-abc123.js", "/robots.txt"]) {
+      const response = await indexed(new Request(`https://example.test${path}`));
+      expect(response.headers.get("x-robots-tag")).toBeNull();
+    }
+  });
+
+  test("reads the noindex opt-in from the environment", () => {
+    expect(noindexFromEnvironment({})).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "false" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "0" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: " TRUE " })).toBe(true);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "1" })).toBe(true);
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {

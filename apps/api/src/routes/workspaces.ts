@@ -1,16 +1,28 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import { billingOriginForAccessGrant } from "../access-grant-rls";
 import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
+  checkOwnSubscriptionPlan,
   deploymentRealtimeVoice,
+  memberExecutionTargetUsable,
+  realtimeVoiceRegionAllowed,
+  settingsWithInferenceResidency,
   realtimeVoiceOfferProblem,
+  resolveMemberExecutionDefault,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
-import { getWorkspaceSettings, listConnectionsMetadata } from "@opengeni/db";
+import {
+  getWorkspaceSettings,
+  listConnectionsMetadata,
+  PERSONAL_WORKSPACE_EXTERNAL_SOURCE,
+} from "@opengeni/db";
 import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  listOrganizationCompatibleEndpointsForWorkspace,
   loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
@@ -18,15 +30,21 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  evaluateWorkspaceModelPolicy,
+  machineCanBeWorkspaceDefault,
+  MemberDefaultExecutionTarget,
   resolveRealtimeVoiceSettings,
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
+  UpdateMemberDefaultExecutionTargetRequest,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
 import {
+  clearWorkspaceMemberExecutionDefault,
   forgetWorkspaceRecordingVoices,
   getWorkspaceConnectionModelRestrictions,
+  setWorkspaceMemberExecutionDefault,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -66,7 +84,11 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import {
+  loadWorkspaceCodexCatalogReadiness,
+  releaseAdmissionBlocksAfterAccessChange,
+} from "@opengeni/core";
+import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -106,7 +128,6 @@ import {
   updateWorkspace,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
-  readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceVercelAiGatewayConnectionActive,
@@ -140,6 +161,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireWorkspaceMemberManagementAuthority,
+  requireWorkspaceContributorGrant,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
@@ -162,7 +184,8 @@ import {
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
-import { projectWorkspaceModelCatalog } from "../model-catalog";
+import { projectWorkspaceModelCatalog, withRegionAvailability } from "../model-catalog";
+import { ownSubscriptionPlanNeeded, withOwnSubscriptionPlan } from "../own-subscription-plan";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
@@ -188,6 +211,7 @@ import {
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { liveStreamSignal } from "../http/server-drain";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function canonicalWorkspacePolicyModelIds(
@@ -302,17 +326,15 @@ export function externalWorkspaceAccountId(
 }
 
 /**
- * Codex Live readiness: the legacy active subscription without a cutover
- * row; on the shared core, any shared connection that could serve a
- * realtime operation here; never ready during maintenance.
+ * Codex Live readiness: any shared core connection that could serve a
+ * realtime operation here.
  */
 async function workspaceCodexRealtimeReady(
   routeDeps: ApiRouteDeps,
   grant: { accountId: string; subjectId: string },
   workspaceId: string,
 ): Promise<boolean> {
-  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
-  if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
+  if (!routeDeps.settings.codexSubscriptionEnabled) return false;
   const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
     kind: "workspace",
     accountId: grant.accountId,
@@ -386,6 +408,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const accountId = externalWorkspaceAccountId(context, request.accountId);
     const payload = { ...request, accountId };
     requireAccountPermission(context, accountId, "workspace:create");
+    refusePersonalWorkspaceIdentity(payload.externalSource);
     try {
       const existing = await findWorkspaceByExternalIdentity(deps.db, {
         accountId: payload.accountId,
@@ -456,6 +479,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     requireAccountPermission(context, accountId, "workspace:create");
+    refusePersonalWorkspaceIdentity(payload.externalSource);
     await requireLimit(deps, {
       accountId,
       action: "workspace:create",
@@ -507,7 +531,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Each field has its own rule, checked below once the body says which
+    // fields change: anyone who works here renames a shared workspace and
+    // edits its instructions; the verified owner renames their Personal
+    // workspace; only an admin changes its slug.
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const body = await readRequestJson(c);
     if (workspaceUpdateRequestsSettings(body)) {
       throw new ApiHttpError(400, {
@@ -538,6 +566,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = parseRequestBody(UpdateWorkspaceRequest, body);
+    if (payload.slug !== undefined) {
+      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    }
+    if (
+      payload.name !== undefined &&
+      !hasPermission(grant.permissions, "workspace:admin", grant.permissionMode) &&
+      (await requireWorkspace(deps.db, workspaceId)).kind !== "shared"
+    ) {
+      // A Personal workspace is renamed by whoever changes its settings: its
+      // verified owner, acting as themselves.
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    }
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
@@ -568,6 +608,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const executionTarget = parsed.defaultExecutionTarget;
     if (executionTarget?.kind === "machine") {
+      const workspace = await requireWorkspace(deps.db, workspaceId);
       const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
       const enrollment = machine?.enrollmentId
         ? await getEnrollment(deps.db, grant, machine.enrollmentId)
@@ -577,12 +618,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         !deps.settings.sandboxSelfhostedEnabled ||
         !machine ||
         machine.kind !== "selfhosted" ||
-        machine.scope === "user" ||
+        !machineCanBeWorkspaceDefault(machine, workspace) ||
         !enrollment ||
         enrollment.status !== "active"
       ) {
         throw new HTTPException(422, {
-          message: "Choose an available shared Connected Machine for the workspace default.",
+          message:
+            workspace.kind === "personal"
+              ? "Choose an available Connected Machine for the workspace default."
+              : "Choose an available shared Connected Machine for the workspace default.",
         });
       }
     } else if (
@@ -624,6 +668,43 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
+  // "Your default machine": the caller's own placement for the new chats they
+  // start here, ahead of the workspace default. Personal: nobody else reads it.
+  app.get("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const resolved = await resolveMemberExecutionDefault(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return c.json(MemberDefaultExecutionTarget.parse(resolved));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const parsed = parseRequestBody(UpdateMemberDefaultExecutionTargetRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid default machine",
+    });
+    const access = { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId };
+    if (parsed.target === null) {
+      await clearWorkspaceMemberExecutionDefault(deps.db, access);
+      return c.json(MemberDefaultExecutionTarget.parse({ target: null, usable: false }));
+    }
+    if (!(await memberExecutionTargetUsable(deps.db, deps.settings, access, parsed.target))) {
+      throw new HTTPException(422, {
+        message:
+          parsed.target.kind === "managed"
+            ? "This deployment does not provide a managed sandbox."
+            : "Choose an available Connected Machine you can use.",
+      });
+    }
+    await setWorkspaceMemberExecutionDefault(deps.db, { ...access, target: parsed.target });
+    return c.json(MemberDefaultExecutionTarget.parse({ target: parsed.target, usable: true }));
+  });
+
   // Per-workspace model/provider availability policy (the HARD blocker over
   // which providers/models may serve a turn at all). Absent row reads as
   // unrestricted {null, null}. No Azure AD credential resolver is wired here,
@@ -660,6 +741,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
           })
         : undefined;
+    // Whether this organization's plan includes its own subscriptions, and if
+    // not, the plan that does. A failed read marks nothing: admission still
+    // refuses with Upgrade, so a hint is never worth failing the catalog.
+    const ownSubscriptionPlan = ownSubscriptionPlanNeeded(
+      deps.db,
+      resolvedCatalog.settings,
+      grant.accountId,
+    ).catch(() => null);
     const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
@@ -676,6 +765,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
       organizationDefaults,
       creditBalance,
+      organizationCompatibleEndpoints,
     ] = await Promise.all([
       claudeCore.then((core) =>
         getWorkspaceConnectionModelRestrictions(
@@ -735,6 +825,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.settings.billingMode === "stripe"
         ? getBillingBalance(deps.db, grant.accountId)
         : Promise.resolve(undefined),
+      // The organization's own OpenAI-compatible endpoints this workspace can use.
+      catalogInputs?.then((inputs) => inputs.organizationCompatibleEndpoints) ??
+        listOrganizationCompatibleEndpointsForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+        }),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
     const connectionModelRestrictions = xaiCatalog.core
@@ -796,6 +892,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           models: organizationProviders.azure_openai?.models ?? [],
         },
       },
+      organizationCompatibleEndpoints,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
@@ -808,15 +905,47 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationDefaults,
       ...(creditBalance ? { creditBalance } : {}),
     });
-    const catalog = projectWorkspaceModelCatalog(selections, {
-      defaultSelection,
-      creditsSelection: creditsDefaultSessionModel({
-        settings: workspaceCatalogSettings,
-        selections,
-        workspaceSettings,
-        organizationDefaults,
-      }),
+    const { requiredModelGeography } = await settingsWithInferenceResidency(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      settings: workspaceCatalogSettings,
     });
+    const catalog = projectWorkspaceModelCatalog(
+      withRegionAvailability(selections, requiredModelGeography),
+      {
+        defaultSelection,
+        creditsSelection: creditsDefaultSessionModel({
+          settings: workspaceCatalogSettings,
+          selections,
+          workspaceSettings,
+          organizationDefaults,
+        }),
+      },
+    );
+    // The organization's allowlist is a ceiling the workspace's own list can
+    // only narrow; say per model where it rules one out (Allowed models).
+    if (
+      organizationDefaults.allowedProviders !== null ||
+      organizationDefaults.allowedModels !== null
+    ) {
+      const providerByModel = new Map(
+        selections.map((selection) => [selection.model.id, selection.model.providerId]),
+      );
+      for (const model of catalog.models) {
+        model.organizationAllowed = evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: organizationDefaults.allowedProviders,
+            allowedModels: organizationDefaults.allowedModels,
+            allowCreditModels: true,
+          },
+          {
+            providerId: providerByModel.get(model.id) ?? model.provider,
+            modelId: model.id,
+            chargesCredits: false,
+          },
+        ).allowed;
+      }
+    }
     for (const model of catalog.models) {
       model.compactionPolicy = workspaceModelCompactionPolicy(
         workspaceCatalogSettings,
@@ -845,7 +974,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     c.header("cache-control", "private, no-store");
-    return c.json(WorkspaceModelCatalogResponse.parse(catalog));
+    return c.json(
+      WorkspaceModelCatalogResponse.parse(
+        withOwnSubscriptionPlan(catalog, selections, await ownSubscriptionPlan),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
@@ -865,7 +998,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceGatewayCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -940,7 +1073,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -998,7 +1131,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceOpenRouterCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -1073,7 +1206,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -1132,7 +1265,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceOpperCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -1209,7 +1342,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/opper-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -1261,6 +1394,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsConnected,
       workspaceSettings,
       organizationDefaults,
+      residencySettings,
+      subscriptionAdmission,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1272,6 +1407,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
+      settingsWithInferenceResidency(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        settings: deps.settings,
+      }),
+      billingOriginForAccessGrant(deps, grant).then((origin) =>
+        checkOwnSubscriptionPlan(deps, grant.accountId, origin),
+      ),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1318,7 +1461,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ])
         : (["none", false] as const);
     const hasCredits = creditStanding === "spendable";
-    const models = [
+    const offeredModels = [
       ...managedCandidates.map((model, index) => ({
         ...model,
         provider: "OpenGeni" as const,
@@ -1346,6 +1489,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected Codex" as const,
         description: "Deep session integration",
         ...availability(codexConnected, "Connect Codex to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       {
@@ -1354,6 +1504,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected SuperGrok" as const,
         description: "Direct SuperGrok speech-to-speech",
         ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       ...Object.values(ELEVENLABS_REALTIME_MODELS).map((model) => ({
@@ -1373,6 +1530,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         recommended: false,
       })),
     ];
+    // EU-only: a model whose route has no EU residency record is listed as
+    // region_restricted, and nothing else is offered in its place.
+    const models = offeredModels.map((model) =>
+      realtimeVoiceRegionAllowed(residencySettings, model.id)
+        ? model
+        : {
+            ...model,
+            available: false,
+            unavailableReason: REGION_RESTRICTED_MESSAGE,
+            unavailableCode: REGION_RESTRICTED,
+            recommended: false,
+          },
+    );
     // Each model lists the voice settings its provider offers, with the
     // workspace's saved values for it and the organization's default, and
     // which model each of them chose to start voice conversations with.
@@ -1383,6 +1553,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {
         ...model,
+        incomingPreparation: model.id === "gpt-live-1-boulder-alpha",
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
         ...(inherited ? { organizationVoiceSettings: inherited } : {}),
@@ -1542,7 +1713,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.bus,
       workspaceId,
       after,
-      c.req.raw.signal,
+      liveStreamSignal(c),
       {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
@@ -1668,6 +1839,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
@@ -1713,6 +1893,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {
@@ -1758,6 +1947,8 @@ async function workspaceModelPolicyResponse(
   workspaceId: string,
 ): Promise<WorkspaceModelPolicyResponse> {
   const layers = await getWorkspaceModelPolicyLayers(deps.db, workspaceId);
+  // The workspace's own list as saved (the form edits it); a model runs only
+  // when both it and `organization` allow it.
   const effective = layers.workspace ?? layers.organization;
   return WorkspaceModelPolicyResponse.parse({
     allowedProviders: effective?.allowedProviders ?? null,
@@ -1773,6 +1964,19 @@ function workspaceLimit(deps: ApiRouteDeps): number | null {
     return null;
   }
   return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
+}
+
+/**
+ * Only Opengeni creates a Personal workspace, with its owner's membership. A
+ * workspace created here with that identity would claim someone's Personal
+ * workspace before they join.
+ */
+function refusePersonalWorkspaceIdentity(externalSource: string | null | undefined): void {
+  if (externalSource?.trim() === PERSONAL_WORKSPACE_EXTERNAL_SOURCE) {
+    throw new HTTPException(422, {
+      message: "This external source is reserved for Personal workspaces.",
+    });
+  }
 }
 
 async function listWorkspacePeople(
@@ -1852,8 +2056,6 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, {
-      message: `missing permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }

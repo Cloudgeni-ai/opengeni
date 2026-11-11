@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "5.4.2",
+  "version": "6.14.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -19,14 +19,6 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./google-drive": {
-      "types": "./src/google-drive.ts",
-      "default": "./src/google-drive.ts"
-    },
-    "./atlassian": {
-      "types": "./src/atlassian.ts",
-      "default": "./src/atlassian.ts"
     }
   },
   "publishConfig": {
@@ -43,13 +35,14 @@
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "@opengeni/storage": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "openai": "6.47.0"
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

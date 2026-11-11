@@ -17,7 +17,7 @@ import type {
 } from "@opengeni/sdk";
 
 import type { OpenGeniMessageKey, OpenGeniText } from "../../messages/runtime";
-import { inSentence } from "../../ui/relative-time";
+import { inSentence } from "../../ui/time-format";
 import {
   sessionAutomationWait,
   sessionAutomationWaitLabel,
@@ -34,7 +34,7 @@ import {
   validateCadence,
   type CadenceScheduleSpec,
   type CadenceValue,
-} from "../../ui/cadence-picker";
+} from "../../ui/cadence-model";
 import {
   emptyEventTriggersDraft,
   eventTriggersDraftFrom,
@@ -170,7 +170,11 @@ export function automationListensForEvents(task: AutomationState): boolean {
   return task.status === "active" && hasEventTriggers(task) && !isFinishedOnce(task);
 }
 
-/** An agent automation, as opposed to a knowledge source sync. */
+/**
+ * An agent automation. Every current schedule is one; this stays exported for
+ * the public `@opengeni/react/automations` surface and filters out the removed
+ * Knowledge source sync tasks an older server may still list.
+ */
 export function isAgentAutomation(
   task: Pick<ScheduledTask, "action"> & { agentConfig?: { knowledgeSource?: unknown } },
 ): boolean {
@@ -311,6 +315,7 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_update_superseded: "automations.run.error.turnInterrupted",
   scheduled_turn_withdrawn_for_edit: "automations.run.error.turnWithdrawn",
   scheduled_session_not_idle: "automations.run.error.chatBusy",
+  scheduled_session_waiting_capacity: "automations.run.error.chatWaitingForAccount",
   scheduled_session_paused: "automations.run.error.chatPaused",
   session_cancelled: "automations.run.error.chatEnded",
   scheduled_target_session_unavailable: "automations.run.error.chatGone",
@@ -329,13 +334,13 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_causal_membership_changed: "automations.run.error.accessUnavailable",
   connection_account_unavailable: "automations.run.error.accountUnavailable",
   scheduled_model_unavailable: "automations.run.error.modelUnavailable",
-  variable_set_unavailable: "automations.run.error.variableSetUnavailable",
   rig_version_unavailable: "automations.run.error.rigUnavailable",
   insufficient_credits: "automations.run.error.outOfCredits",
   allowance_exhausted: "automations.run.error.allowanceUsed",
   monthly_model_cost_limit: "automations.run.error.monthlyCostLimit",
   monthly_agent_run_limit: "automations.run.error.monthlyRunLimit",
   session_usage_limit: "automations.run.error.usageLimit",
+  chain_limit: "automations.run.error.chainLimit",
 };
 
 /** Older runs recorded an unavailable model as the API's own sentence. */
@@ -555,6 +560,26 @@ export function automationUpdateRequest(
               : { triggers: [] },
         }),
   };
+}
+
+/* ----------------------------------------------------------------------------
+   Create with Opengeni.
+   -------------------------------------------------------------------------- */
+
+/**
+ * The first message of a "Create with Opengeni" chat: the person says what
+ * should happen and how often, and the agent finds what the automation needs
+ * and creates it. Setup guidance belongs in the bundled schedules Skill, which
+ * the agent reads when this request is relevant.
+ */
+export function automationAgentOpeningMessage(request: string, timeZone: string): string {
+  return [
+    "Help me create an automation in this workspace.",
+    "",
+    request.trim(),
+    "",
+    `My time zone is ${timeZone}.`,
+  ].join("\n");
 }
 
 /* ----------------------------------------------------------------------------

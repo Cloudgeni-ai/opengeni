@@ -363,7 +363,9 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       expect(preview().getAttribute("data-reload")).toBe("1");
       expect(preview().hasAttribute("data-full-screen")).toBe(false);
       await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Open full screen"]')!.click(),
+        container
+          .querySelector<HTMLButtonElement>('[aria-label="Expand Site to full window"]')!
+          .click(),
       );
       expect(preview().hasAttribute("data-full-screen")).toBe(true);
     } finally {

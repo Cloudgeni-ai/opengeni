@@ -116,8 +116,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    const webPort = await freePort();
+    webBaseUrl = `http://127.0.0.1:${webPort}`;
     const app = createApp({
-      settings: { ...browserTestSettings, databaseUrl: shared.appUrl },
+      // The web app calls the unauthenticated local-mode API from its own
+      // origin, which local mode grants CORS only when configured.
+      settings: { ...browserTestSettings, databaseUrl: shared.appUrl, webBaseUrl },
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient,
@@ -130,8 +134,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     });
     apiBaseUrl = `http://127.0.0.1:${api.port}`;
 
-    const webPort = await freePort();
-    webBaseUrl = `http://127.0.0.1:${webPort}`;
     web = await startProcess(
       [
         "bun",
@@ -555,26 +557,36 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
-      // By collection: top-level collections are sections and a sub-collection
-      // is a row inside its parent, never a section of its own.
-      await page.getByRole("radio", { name: "By collection", exact: true }).click();
-      const acmeSection = page.getByRole("region", { name: "Acme tree", exact: true });
-      const billingSection = page.getByRole("region", { name: "Billing tree", exact: true });
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
-      await billingSection.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
-      expect(await page.getByRole("region", { name: "Contracts tree", exact: true }).count()).toBe(
-        0,
-      );
-      // The nested entry is inside Contracts, which is a row; it is not listed in Acme.
+      // Collections lists only the top-level collections. A sub-collection
+      // opens from its parent's page, and entries are not listed here.
+      await page.getByRole("radio", { name: "Collections", exact: true }).click();
+      const collectionList = page.getByRole("list", { name: "Collections", exact: true });
+      const acmeRow = collectionList.getByRole("button", { name: "Acme tree", exact: true });
+      await acmeRow.waitFor();
+      await collectionList.getByRole("button", { name: "Billing tree", exact: true }).waitFor();
       expect(
-        await acmeSection.getByRole("button", { name: "Nested renewal", exact: true }).count(),
+        await collectionList.getByRole("button", { name: "Contracts tree", exact: true }).count(),
       ).toBe(0);
       expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
-        1,
+        0,
       );
 
-      // A sub-collection opens as its own page from the keyboard.
-      const contractsRow = acmeSection.getByRole("button", { name: "Contracts tree", exact: true });
+      // A collection opens as its own page from the keyboard, with its
+      // sub-collections; the nested entry is inside Contracts, not Acme.
+      await acmeRow.focus();
+      await page.keyboard.press("Enter");
+      const acmeHeading = page.getByRole("heading", { level: 1, name: "Acme tree", exact: true });
+      await acmeHeading.waitFor();
+      const contractsRow = collectionList.getByRole("button", {
+        name: "Contracts tree",
+        exact: true,
+      });
+      await contractsRow.waitFor();
+      expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        0,
+      );
+
+      // A sub-collection opens as its own page from the keyboard too.
       await contractsRow.focus();
       await page.keyboard.press("Enter");
       const contractsHeading = page.getByRole("heading", {
@@ -588,7 +600,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       const members = page.getByRole("list", { name: "Entries", exact: true });
       await members.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
       await returnToLibraryFromEntry(page);
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
+      await acmeRow.click();
+      await acmeHeading.waitFor();
+      await contractsRow.waitFor();
 
       // A completed page must reauthorize on reopen, even when the browser's
       // local access-context identity has not changed. Never redisplay its old
@@ -608,7 +622,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       expect(unexpectedDiagnostics(context)).toEqual([]);
       const diagnosticsBeforeDenial = unexpectedDiagnostics(context).length;
       await page.route(collectionSearch, denyCollection);
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await contractsRow.click();
       await contractsHeading.waitFor();
       await page.getByText("Couldn't load the entries", { exact: true }).waitFor();
       expect(deniedReopens).toBeGreaterThanOrEqual(1);
@@ -644,6 +658,8 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await collectionPath.getByText("Contracts tree", { exact: true }).waitFor();
       await page.goBack();
       await contractsHeading.waitFor();
+      await page.goBack();
+      await acmeHeading.waitFor();
       await page.goBack();
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
 
@@ -683,9 +699,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await expectNoPageOverflow(page);
       await expectNoAxeViolations(page, contentPageSelector, "nested-knowledge-collection-mobile");
 
-      // Search reaches entries inside nested collections from the By collection view.
+      // Search in Entries reaches entries inside nested collections.
       await returnToLibraryFromEntry(page);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+      await page.getByRole("radio", { name: "Entries", exact: true }).click();
       await page
         .getByRole("searchbox", { name: "Search knowledge", exact: true })
         .fill("Nested renewal");

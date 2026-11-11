@@ -3,7 +3,6 @@ import { ConnectionCatalog } from "@opengeni/react/connect";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
 import { githubChip } from "@/components/capabilities/use-github-integration";
 import {
   canInstallOpenGeniSlackBot,
@@ -21,7 +20,7 @@ import {
 } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { capabilityStateChip } from "@opengeni/react/app/lib/capabilities";
 import {
-  canManageApiIntegrations,
+  apiIntegrationAccess,
   fetchOAuthReturnRows,
   integrationQuickConnect,
   integrationRowBusy,
@@ -123,14 +122,7 @@ describe("integration state chips", () => {
     expect(connectionAccessChip(integration.chip, false).label).toBe("Loading");
   });
 
-  test("marks historical native Atlassian accounts retired without changing GitHub states", () => {
-    expect(atlassianChip("connected", true, true).label).toBe("Retired");
-    expect(atlassianChip("paused", true, true).label).toBe("Retired");
-    expect(atlassianChip("needs_attention", true, true).label).toBe("Retired");
-    expect(atlassianChip("not_connected", true, true).label).toBe("Retired");
-    expect(atlassianChip("connected", true, false).label).toBe("Retired");
-    expect(atlassianChip("connected", false, false).label).toBe("Access restricted");
-
+  test("keeps GitHub installation states", () => {
     const bound: GitHubAppInfo = {
       configured: true,
       status: "bound",
@@ -220,13 +212,18 @@ describe("Slack integration authority", () => {
     expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
-    expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
-      false,
-    );
-    expect(canManageApiIntegrations(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
-      true,
-    );
-    expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
+    const access = (permissions: string[], policy?: "members" | "admins") =>
+      apiIntegrationAccess(accessContext(permissions), "workspace-a", policy);
+    expect(access(["connections:write"])).toEqual({ add: true, manage: true, change: false });
+    expect(access(["connections:write"], "admins")).toEqual({
+      add: false,
+      manage: true,
+      change: false,
+    });
+    for (const permissions of [["connections:read"], ["connections:personal"]])
+      expect(access(permissions)).toEqual({ add: false, manage: false, change: false });
+    for (const permissions of [["capabilities:manage"], ["workspace:admin"]])
+      expect(access(permissions, "admins")).toEqual({ add: true, manage: true, change: true });
   });
 });
 

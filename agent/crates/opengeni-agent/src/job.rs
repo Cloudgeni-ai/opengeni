@@ -14,6 +14,8 @@
 //!   the gate is `flow.allowance() > 0` (window exhaustion stops reads → the
 //!   child blocks on write(2) → end-to-end throttle); while detached, and while
 //!   draining after child exit, the gate is retention headroom (ruling M2).
+//!   A consumer that unfollows (`OpAck.detach`) leaves the op detached but
+//!   ungated: it drains to retention's typed overflow, sending nothing.
 //! * Ack accounting: freed sent-bytes are computed against retention BEFORE
 //!   anything is freed (the frames are gone afterwards), and EVERY ack side
 //!   effect — the credit window, the retention floor, final-ack honoring — is
@@ -102,6 +104,18 @@ pub enum JobCommand {
         /// The fresh send-credit window in bytes.
         window_bytes: u64,
     },
+    /// The consumer stops following the op's frames (wire: `OpAck.detach`):
+    /// its turn yielded or its read ended, and nothing receives the op's
+    /// subject until a later attach. Sending stops and the child keeps
+    /// draining into retention ungated by credit, so an unread noisy command
+    /// still ends typed at its quota instead of parking. Applies only from the
+    /// exact current generation, like every ack side effect.
+    Unfollow {
+        /// The consumer's attach generation.
+        generation: u64,
+        /// Cumulative: every frame with `seq <= acked_seq` is acknowledged.
+        acked_seq: u64,
+    },
     /// The transport is gone (connection loss). Sending stops; the op keeps
     /// running and retention keeps accumulating (op ⊥ connection).
     Detach {
@@ -183,11 +197,55 @@ pub struct JobParams {
     /// every append, attached or not — the supervisor reads it to answer
     /// `OpQuery`/`OpStatus.next_seq` without reaching into the pump.
     pub watermark: Arc<AtomicU64>,
+    /// When the child last wrote output; see [`OpHeard`].
+    pub heard: Arc<OpHeard>,
     /// Set (once) if POST-EXIT replay fails (spool IO/corruption): the
     /// terminal record survives in the registry, but the retained frames are
     /// unrecoverable — status answers must say so typed rather than let a
     /// consumer wait forever on replay (FAILURE-VISIBILITY two-planes rule).
     pub collection_failure: Arc<OnceLock<JobFailure>>,
+}
+
+/// When a job last showed a sign of life: when it was started (or adopted by
+/// this process image), or when its child last wrote output. Frames other
+/// than output (progress, exit) do not count, so a quiet command that is
+/// only being watched stays quiet.
+///
+/// A running command that has been silent for longer than its sandbox's
+/// silence limit no longer keeps a compute sandbox awake: a dev server or a
+/// `sleep` left in the background must not hold it forever, while CPU or IO
+/// still keep genuinely busy work awake on the host's side.
+#[derive(Debug)]
+pub struct OpHeard {
+    base: Instant,
+    after_base_ms: AtomicU64,
+}
+
+impl Default for OpHeard {
+    /// Heard now.
+    fn default() -> Self {
+        Self {
+            base: Instant::now(),
+            after_base_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl OpHeard {
+    /// Records a sign of life now.
+    pub fn touch(&self) {
+        let after = u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.after_base_ms.fetch_max(after, Ordering::Relaxed);
+    }
+
+    /// How long the job has been silent at `now`.
+    #[must_use]
+    pub fn silent_for(&self, now: Instant) -> Duration {
+        let after = Duration::from_millis(self.after_base_ms.load(Ordering::Relaxed));
+        self.base
+            .checked_add(after)
+            .map_or(Duration::ZERO, |heard| now.saturating_duration_since(heard))
+    }
 }
 
 /// The typed terminal outcome of a job — the engine-side form of the wire
@@ -472,6 +530,7 @@ pub async fn run_job(
         deadline,
         config,
         watermark,
+        heard,
         collection_failure,
     } = params;
 
@@ -488,8 +547,10 @@ pub async fn run_job(
         ),
         retention_config: retention,
         flow: CreditFlow::new(),
+        unfollowed: false,
         hooks,
         watermark,
+        heard,
         collection_failure,
         exit_fence: None,
         exit_record: None,
@@ -543,6 +604,8 @@ pub struct ResumeParams {
     pub config: JobConfig,
     /// See [`JobParams::watermark`].
     pub watermark: Arc<AtomicU64>,
+    /// See [`JobParams::heard`].
+    pub heard: Arc<OpHeard>,
     /// See [`JobParams::collection_failure`].
     pub collection_failure: Arc<OnceLock<JobFailure>>,
 }
@@ -573,6 +636,7 @@ pub async fn run_job_resumed(
         spool_dir,
         config,
         watermark,
+        heard,
         collection_failure,
     } = params;
     let restored = (|| -> Result<_, String> {
@@ -627,8 +691,10 @@ pub async fn run_job_resumed(
         retention,
         retention_config,
         flow: CreditFlow::resumed(state.generation),
+        unfollowed: false,
         hooks,
         watermark,
+        heard,
         collection_failure,
         exit_fence: state.exit_fence,
         exit_record: exit,
@@ -817,9 +883,14 @@ struct Pump {
     retention: RetentionLog,
     retention_config: RetentionConfig,
     flow: CreditFlow,
+    /// The current generation's consumer stopped following (see
+    /// [`JobCommand::Unfollow`]); cleared by the next accepted attach.
+    unfollowed: bool,
     hooks: JobHooks,
     /// Mirror of `retention.high_seq()` for supervisor-side status answers.
     watermark: Arc<AtomicU64>,
+    /// See [`JobParams::heard`].
+    heard: Arc<OpHeard>,
     /// See [`JobParams::collection_failure`].
     collection_failure: Arc<OnceLock<JobFailure>>,
     /// The final-ack fence: the terminal frame's seq (or, when the exit frame
@@ -1059,6 +1130,10 @@ impl Pump {
                 from_seq,
                 window_bytes,
             } => self.apply_attach(generation, from_seq, window_bytes),
+            JobCommand::Unfollow {
+                generation,
+                acked_seq,
+            } => self.apply_unfollow(generation, acked_seq),
             JobCommand::Detach { completed } => {
                 self.flow.detach();
                 if let Some(completed) = completed {
@@ -1250,9 +1325,33 @@ impl Pump {
     fn apply_attach(&mut self, generation: u64, from_seq: u64, window_bytes: u64) {
         let from = from_seq.min(self.retention.high_seq());
         match self.flow.attach(generation, from, window_bytes) {
-            AttachOutcome::Accepted => self.drive_catch_up(),
+            AttachOutcome::Accepted => {
+                self.unfollowed = false;
+                self.drive_catch_up();
+            }
             AttachOutcome::StaleGeneration { current } => {
                 debug!(generation, current, "stale attach refused");
+            }
+        }
+    }
+
+    /// Handles an unfollow: the ack floor applies as for any current-generation
+    /// ack, then sending stops without replaying anything the departed
+    /// consumer would never receive. The read gate becomes ungated draining
+    /// (see [`Self::may_read`]).
+    fn apply_unfollow(&mut self, generation: u64, acked_seq: u64) {
+        let upper = acked_seq.min(self.flow.sent_hi());
+        let freed = self
+            .retention
+            .payload_bytes_in_range(self.retention.floor(), upper);
+        match self.flow.on_ack(generation, 0, freed) {
+            AckOutcome::Applied => {
+                self.retention.ack(acked_seq);
+                self.flow.detach();
+                self.unfollowed = true;
+            }
+            AckOutcome::StaleGeneration { current } => {
+                debug!(generation, current, "stale unfollow refused");
             }
         }
     }
@@ -1346,6 +1445,7 @@ impl Pump {
 
     /// Digests + appends one chunk of child output.
     fn on_data(&mut self, channel: Channel, bytes: &[u8]) {
+        self.heard.touch();
         let n = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         match channel {
             Channel::Stdout => {
@@ -1385,6 +1485,10 @@ impl Pump {
             self.retention_headroom()
         } else if self.flow.is_attached() {
             self.flow.sent_hi() >= self.retention.high_seq() && self.flow.allowance() > 0
+        } else if self.unfollowed {
+            // Nobody follows and nobody throttles: drain until retention's
+            // typed overflow, as an unlimited window would, without sending.
+            true
         } else {
             self.retention_headroom()
         }
@@ -1582,6 +1686,7 @@ mod tests {
                 },
             );
             let watermark = Arc::new(AtomicU64::new(0));
+            let heard = Arc::new(OpHeard::default());
             let collection_failure = Arc::new(OnceLock::new());
             let params = JobParams {
                 child,
@@ -1593,6 +1698,7 @@ mod tests {
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,
                 watermark: watermark.clone(),
+                heard: heard.clone(),
                 collection_failure: collection_failure.clone(),
             };
             let task = tokio::spawn(run_job(params, cmd_rx, hooks));
@@ -1604,6 +1710,7 @@ mod tests {
                 dir,
                 wait: self.wait,
                 watermark,
+                heard,
                 collection_failure,
             }
         }
@@ -1617,6 +1724,7 @@ mod tests {
         dir: tempfile::TempDir,
         wait: Duration,
         watermark: Arc<AtomicU64>,
+        heard: Arc<OpHeard>,
         collection_failure: Arc<OnceLock<JobFailure>>,
     }
 
@@ -1881,6 +1989,59 @@ mod tests {
         assert_eq!(exit.stdout.digest, blake3::hash(b"stdin-bytes"));
         job.final_ack(1, exit_seq.unwrap(), 1 << 20).await;
         job.join().await;
+    }
+
+    /// A job is heard when it starts and whenever its child writes output.
+    /// The progress frames it appends while silent do not count.
+    #[tokio::test]
+    async fn a_job_is_heard_when_it_writes_output_and_silent_otherwise() {
+        let mut builder = job("sleep 3; printf late; sleep 30");
+        builder.config.progress_interval = Duration::from_millis(50);
+        let mut job = builder.start();
+        assert!(
+            job.heard.silent_for(Instant::now()) < Duration::from_secs(1),
+            "a job is heard when it starts"
+        );
+
+        // Silent but ticking: the pump appends progress frames meanwhile.
+        job.wait_for_watermark_at_least(3).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let quiet = job.heard.silent_for(Instant::now());
+        assert!(
+            quiet >= Duration::from_millis(500),
+            "progress frames are not output: silent for {quiet:?}"
+        );
+
+        timeout(WAIT, async {
+            while job.heard.silent_for(Instant::now()) >= Duration::from_millis(500) {
+                tokio::time::sleep(PRODUCER_POLL).await;
+            }
+        })
+        .await
+        .expect("the late output is heard");
+        job.send(JobCommand::Cancel).await;
+        let _ = job.wait_exit().await;
+    }
+
+    #[test]
+    fn a_fresh_stamp_is_heard_now_and_never_runs_backwards() {
+        let heard = OpHeard::default();
+        let now = Instant::now();
+        assert!(heard.silent_for(now) < Duration::from_secs(1));
+        let later = now + Duration::from_secs(700);
+        assert!(heard.silent_for(later) >= Duration::from_secs(699));
+        heard.after_base_ms.store(5_000, Ordering::Relaxed);
+        heard.touch();
+        assert_eq!(
+            heard.after_base_ms.load(Ordering::Relaxed),
+            5_000,
+            "a stale touch never moves the stamp back"
+        );
+        assert_eq!(
+            heard.silent_for(heard.base),
+            Duration::ZERO,
+            "a stamp ahead of now is silent for zero"
+        );
     }
 
     #[tokio::test]
@@ -2300,6 +2461,99 @@ mod tests {
         job.join().await;
     }
 
+    /// A consumer that stops following (its turn yielded, its read ended)
+    /// must not leave the runner sending to an unsubscribed subject: those
+    /// frames share the machine's bulk connection with every other command's
+    /// output and completion. The child still runs to completion unthrottled,
+    /// and a later attach replays everything byte-exact.
+    #[tokio::test]
+    async fn an_unfollowed_op_stops_sending_drains_its_child_and_replays_on_attach() {
+        let script = blocking_producer_script(4096);
+        let mut job = job(&script).frame_bytes(4096).start();
+
+        job.attach(1, 0, 8192).await;
+        job.barrier().await;
+        release_producer(&job);
+        let first = vec![job.next_frame().await, job.next_frame().await];
+        assert_eq!(data_total(&first), 8192, "exactly one window was emitted");
+        assert_eq!(job.wait_for_watermark_at_least(2).await, 2);
+
+        // A stale generation cannot unfollow for the live consumer.
+        job.send(JobCommand::Unfollow {
+            generation: 0,
+            acked_seq: 0,
+        })
+        .await;
+        job.barrier().await;
+        assert_eq!(job.watermark.load(Ordering::Relaxed), 2, "still throttled");
+
+        job.send(JobCommand::Unfollow {
+            generation: 1,
+            acked_seq: 0,
+        })
+        .await;
+        let (exit_seq, exit) = job.wait_exit().await;
+        assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
+        assert_eq!(exit.stdout.total_bytes, 819_200);
+        assert_eq!(
+            producer_counts(&job),
+            (200, 200),
+            "the child was never parked"
+        );
+        job.no_frame_for(Duration::from_millis(150)).await;
+
+        job.attach(2, 0, 1 << 30).await;
+        let replay = job.collect_until_exit().await;
+        assert_eq!(reassemble(&replay, Channel::Stdout), vec![b' '; 200 * 4096]);
+        assert_eq!(
+            replay.last().expect("exit").seq,
+            exit_seq.expect("exit seq")
+        );
+        job.final_ack(2, exit_seq.expect("exit seq"), 1 << 20).await;
+        job.join().await;
+    }
+
+    /// Unfollowing keeps the unlimited-credit retention contract: an unread
+    /// noisy command ends typed at its quota instead of parking forever.
+    #[tokio::test]
+    async fn an_unfollowed_noisy_op_ends_typed_at_its_retention_quota() {
+        use opengeni_agent_engine::retention::RECORD_OVERHEAD_BYTES;
+        let frame_cost = 1024 + RECORD_OVERHEAD_BYTES;
+        let mut job = job("while :; do head -c 1024 /dev/zero; done")
+            .frame_bytes(1024)
+            .retention(RetentionConfig {
+                memory_max_bytes: usize::try_from(4 * frame_cost).expect("fits"),
+                memory_max_frames: 64,
+                spool_max_bytes: 0,
+                spool_segment_bytes: 4096,
+            })
+            .start();
+        job.attach(1, 0, 0).await;
+        job.send(JobCommand::Unfollow {
+            generation: 1,
+            acked_seq: 0,
+        })
+        .await;
+        let (_, exit) = job.wait_exit().await;
+        assert!(
+            matches!(
+                exit.outcome,
+                JobOutcome::Failed(JobFailure::Overflow { .. })
+            ),
+            "expected typed overflow, got {:?}",
+            exit.outcome
+        );
+        while let Ok(frame) = job.frames.try_recv() {
+            assert!(
+                !matches!(frame.body, FrameBody::Data { .. }),
+                "nothing follows the op, so no data was sent: {frame:?}"
+            );
+        }
+        job.final_ack(1, job.watermark.load(Ordering::Relaxed), 1 << 20)
+            .await;
+        job.join().await;
+    }
+
     #[tokio::test]
     async fn overshoot_frame_closes_the_read_gate_end_to_end() {
         // Window 1536, frames <= 1024: frame 1 (1024) sends; frame 2 cannot
@@ -2557,6 +2811,7 @@ mod tests {
             spool_dir: job.dir.path().join("spool"),
             config: JobConfig::default(),
             watermark: Arc::new(AtomicU64::new(0)),
+            heard: Arc::default(),
             collection_failure: Arc::new(OnceLock::new()),
         };
         let resumed = tokio::spawn(async move {
@@ -2685,6 +2940,7 @@ mod tests {
             spool_dir: job.dir.path().join("spool"),
             config: JobConfig::default(),
             watermark: Arc::new(AtomicU64::new(0)),
+            heard: Arc::default(),
             collection_failure: Arc::new(OnceLock::new()),
         };
         let resumed = tokio::spawn(run_job_resumed(params, cmd_rx, hooks));

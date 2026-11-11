@@ -144,8 +144,10 @@ const grantBlockedSession = {
   status: "requires_action",
   activeSandboxId: null,
   effectiveControl: { state: "active", controlVersion: 4, controlEtag: "etag-4" },
+  // A failure nothing signals a fix for: the only kind that offers Try again.
   admissionBlock: {
-    reason: "personal_resource_grant_required",
+    reason: "database_claim_rejected",
+    sqlState: "23505",
     retryPolicy: "explicit_recheck",
     blockedAt: "2026-10-21T12:40:43Z",
   },
@@ -266,7 +268,7 @@ async function renderScreen(options: { provider?: boolean } = {}) {
     const button = view.container.querySelector<HTMLButtonElement>(
       'button[aria-label="Try again"]',
     );
-    if (!button) throw new Error("Try again is not shown");
+    if (!button) throw new Error(`Try again is not shown: ${view.container.textContent}`);
     return button;
   };
   return { view, retry };
@@ -359,13 +361,83 @@ const ownerOnlySession = {
 };
 
 // Machine reads are cached per client, so this runs before machine access is known.
-test("without machine access the same refusal reads as a permission check, with the web's words", async () => {
+test("without machine access the same refusal reads as a permission check that starts by itself", async () => {
   session = ownerOnlySession;
   const view = await renderComponent(createElement(Screen));
   await flush();
   expect(view.container.textContent).toContain("Permission needed");
-  expect(view.container.textContent).toContain("The next step was blocked by a permission check.");
+  expect(view.container.textContent).toContain("A permission check stopped your next message.");
+  expect(view.container.textContent).toContain("It starts by itself once access");
+  expect(view.container.querySelector("button")).toBeNull();
   await view.unmount();
+});
+
+test("the machine's owner gets Machine access needed and Allow for this chat, which never resends", async () => {
+  session = {
+    ...ownerOnlySession,
+    id: "session-c",
+    tenancy: { visibility: "private", authorityEpoch: 2 },
+  } as never;
+  const grants: unknown[][] = [];
+  (client as Record<string, unknown>).listUserResourceAuthorities = async () => ({
+    authorities: [
+      {
+        authorityId: "laptop-authority",
+        resourceKind: "connected_machine",
+        resourceId: "laptop-enrollment",
+        status: "active",
+      },
+    ],
+    nextCursor: null,
+  });
+  (client as Record<string, unknown>).issueUserResourceGrant = async (...args: unknown[]) => {
+    grants.push(args);
+    return {};
+  };
+  machinesResponse = {
+    activeSandboxId: "owner-laptop",
+    activeEpoch: 1,
+    machines: [
+      {
+        sandboxId: "owner-laptop",
+        enrollmentId: "laptop-enrollment",
+        name: "Kari's laptop",
+        scope: "user",
+        state: "online",
+        active: true,
+      },
+    ],
+    sessionMachineAccess: {
+      sandboxId: "owner-laptop",
+      machineName: "Kari's laptop",
+      ownerName: "Kari",
+      isOwner: true,
+      queuedTurnBlocked: false,
+    },
+  };
+  try {
+    const view = await renderComponent(createElement(Screen));
+    await flush();
+    expect(view.container.textContent).toContain("Machine access needed");
+    expect(view.container.textContent).not.toContain("Permission needed");
+    const allow = view.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Allow for this chat"]',
+    );
+    expect(allow).not.toBeNull();
+    await actRun(async () => {
+      allow!.click();
+      allow!.click();
+    });
+    await flush();
+    expect(grants).toHaveLength(1);
+    expect(grants[0]![1]).toBe("laptop-authority");
+    expect(grants[0]![2]).toMatchObject({ mode: "session", sessionId: "session-c" });
+    expect(resumes).toHaveLength(0);
+    await view.unmount();
+  } finally {
+    delete (client as Record<string, unknown>).listUserResourceAuthorities;
+    delete (client as Record<string, unknown>).issueUserResourceGrant;
+  }
 });
 
 test("a message refused on someone else's personal machine says only its owner can start work there", async () => {
@@ -386,5 +458,49 @@ test("a message refused on someone else's personal machine says only its owner c
   await flush();
   expect(view.container.textContent).toContain("This message needs a different machine");
   expect(view.container.textContent).toContain("Only Kari can start new work there.");
+  await view.unmount();
+});
+
+test("a message sent for the owner's other machine names it and runs it there, with no futile Try again", async () => {
+  // Machine reads are cached per session, so this chat is a fresh one.
+  session = {
+    ...grantBlockedSession,
+    id: "session-b",
+    activeSandboxId: "laptop",
+    admissionBlock: {
+      reason: "personal_resource_grant_required",
+      retryPolicy: "explicit_recheck",
+      blockedAt: "2026-10-21T12:40:43Z",
+    },
+  };
+  machinesResponse = {
+    activeSandboxId: "laptop",
+    activeEpoch: 1,
+    machines: [
+      { sandboxId: "server", name: "Home server", scope: "user", state: "online", active: false },
+    ],
+    sessionMachineAccess: {
+      sandboxId: "laptop",
+      machineName: "Laptop",
+      ownerName: "Kari",
+      isOwner: true,
+      queuedTurnBlocked: false,
+      queuedTurnNotApprovedHere: true,
+      queuedTurnApprovedMachines: [{ sandboxId: "server", machineName: "Home server" }],
+    },
+  };
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("Your message is waiting for “Home server”");
+  expect(view.container.textContent).toContain("this chat now runs on “Laptop”");
+  expect(view.container.querySelector('button[aria-label="Try again"]')).toBeNull();
+  const run = view.container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Run it on Home server"]',
+  );
+  expect(run).not.toBeNull();
+  await actRun(async () => run!.click());
+  await flush();
+  // Moved; the server starts it there by itself, so nothing is resent.
+  expect(resumes).toHaveLength(0);
   await view.unmount();
 });

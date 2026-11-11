@@ -22,6 +22,15 @@ import {
   type ExtensionHello,
   type ExtensionInventory,
 } from "./protocol";
+import {
+  SitePermissionError,
+  isSitePermission,
+  openSitePermissionsPage,
+  removeSitePermission,
+  setSitePermission,
+  sitePermissionsState,
+  turnOffSitePermissions,
+} from "./site-permissions";
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
@@ -65,6 +74,31 @@ type StoredState = {
   inventoryRevision?: number;
 };
 
+// What outlives this worker. Chrome stops an extension's worker and starts a
+// new one whenever it likes, and keeps the tabs, their ids and this
+// extension's debugger attachments meanwhile; it drops the attachments when
+// the extension reloads or updates, and everything when Chrome restarts.
+// chrome.storage.session lives exactly as long, so the state generation kept
+// there names that live state, and the debugger attachments recorded there
+// let a new worker carry on with them.
+type LiveState = {
+  stateGeneration: string;
+  lastAttachment: number;
+  // Attached tab ids, each with the number of its current attachment.
+  attachments: Record<string, number>;
+  // Tabs an agent opened (with tabs.create) that are still open: only in
+  // those can an agent set a site permission.
+  createdTabs?: number[];
+};
+const LIVE_STATE_KEY = "liveState";
+// How a new worker found the live state of the workers before it, newest
+// last, in chrome.storage.local: which attachments it could carry on with.
+const STATE_RESUMPTIONS_KEY = "stateResumptions";
+const MAX_STATE_RESUMPTIONS = 20;
+// A debugger command that reads and changes nothing, and that Chrome refuses
+// unless this extension is attached to the tab.
+const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
+
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
 let readyGeneration: string | null = null;
@@ -87,6 +121,8 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 // name an attachment are refused once it has ended, so a late one can never
 // run under a newer attachment of the same tab.
 const attachedDebuggerTabs = new Map<number, number>();
+// Tabs an agent opened that are still open.
+const agentCreatedTabs = new Set<number>();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -107,12 +143,143 @@ let updatePending = false;
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let commandsInFlight = 0;
 let lastAgentCommandAtMs = Date.now();
-// Tab ids, debugger attachments and the event buffer above live exactly as long
-// as this worker. Every native reconnect in that lifetime reports the same
-// state generation, so the agent can keep sessions bound across agent or
-// native-host restarts while the per-port connection generation still fences
-// each transport.
-const STATE_GENERATION = crypto.randomUUID();
+// The live state's generation once read or started (see LiveState). Every
+// native reconnect reports it, from this worker or a later one, so the agent
+// keeps sessions bound across agent, native-host and worker restarts while the
+// per-port connection generation still fences each transport.
+let liveState: Promise<string> | null = null;
+let currentStateGeneration: string | null = null;
+let liveStateWrite: Promise<void> = Promise.resolve();
+// The debugger event buffer lives only as long as this worker, and its
+// sequence numbers start again with the next one. Each poll names this
+// worker's stream, so a reader can tell a restarted buffer from its own.
+const EVENT_STREAM = crypto.randomUUID();
+
+/** The live state's generation: the one an earlier worker recorded, with the
+ * debugger attachments it left that are still attached, or a new one. */
+function stateGeneration(): Promise<string> {
+  liveState ??= resumeLiveState();
+  return liveState;
+}
+
+async function resumeLiveState(): Promise<string> {
+  let stored: LiveState | null;
+  try {
+    stored = parseLiveState((await chrome.storage.session.get(LIVE_STATE_KEY))[LIVE_STATE_KEY]);
+  } catch {
+    // Without session storage this worker's state is all there is.
+    currentStateGeneration = crypto.randomUUID();
+    return currentStateGeneration;
+  }
+  if (!stored) {
+    currentStateGeneration = crypto.randomUUID();
+    await recordLiveState();
+    return currentStateGeneration;
+  }
+  lastAttachment = stored.lastAttachment;
+  let kept = 0;
+  let detached = 0;
+  let closed = 0;
+  for (const [tab, attachment] of Object.entries(stored.attachments)) {
+    const tabId = Number(tab);
+    if (await debuggingTab(tabId)) {
+      attachedDebuggerTabs.set(tabId, attachment);
+      kept += 1;
+    } else if (await tabExists(tabId)) {
+      detached += 1;
+    } else {
+      closed += 1;
+    }
+  }
+  for (const tabId of stored.createdTabs ?? []) {
+    if (await tabExists(tabId)) agentCreatedTabs.add(tabId);
+  }
+  // Only now: until then nothing records the attachments or applies an update.
+  currentStateGeneration = stored.stateGeneration;
+  await recordLiveState();
+  await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
+  maybeApplyUpdate();
+  return stored.stateGeneration;
+}
+
+function parseLiveState(value: unknown): LiveState | null {
+  if (value === null || typeof value !== "object") return null;
+  const state = value as Partial<LiveState>;
+  if (typeof state.stateGeneration !== "string" || state.stateGeneration.length === 0) return null;
+  const attachments: Record<string, number> = {};
+  for (const [tab, attachment] of Object.entries(state.attachments ?? {})) {
+    if (Number.isSafeInteger(Number(tab)) && Number.isSafeInteger(attachment))
+      attachments[tab] = attachment;
+  }
+  return {
+    stateGeneration: state.stateGeneration,
+    lastAttachment: Number.isSafeInteger(state.lastAttachment)
+      ? state.lastAttachment!
+      : lastAttachment,
+    attachments,
+    createdTabs: Array.isArray(state.createdTabs)
+      ? state.createdTabs.filter((tabId) => Number.isSafeInteger(tabId))
+      : [],
+  };
+}
+
+/** Record the live state for the next worker, in order. Best effort: a
+ * worker that cannot record it leaves the next one a new state. */
+function recordLiveState(): Promise<void> {
+  const generation = currentStateGeneration;
+  if (generation === null) return liveStateWrite;
+  const state: LiveState = {
+    stateGeneration: generation,
+    lastAttachment,
+    attachments: Object.fromEntries(
+      [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
+    ),
+    createdTabs: [...agentCreatedTabs],
+  };
+  liveStateWrite = liveStateWrite
+    .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
+    .catch(() => undefined);
+  return liveStateWrite;
+}
+
+async function recordResumption(result: {
+  attachmentsKept: number;
+  attachmentsEnded: number;
+  tabsClosed: number;
+}): Promise<void> {
+  console.info("continued the live state of an earlier worker", result);
+  try {
+    const stored = (await chrome.storage.local.get(STATE_RESUMPTIONS_KEY))[STATE_RESUMPTIONS_KEY];
+    const earlier = Array.isArray(stored) ? stored : [];
+    await chrome.storage.local.set({
+      [STATE_RESUMPTIONS_KEY]: [...earlier, { at: new Date().toISOString(), ...result }].slice(
+        -MAX_STATE_RESUMPTIONS,
+      ),
+    });
+  } catch {
+    // Diagnostics only.
+  }
+}
+
+/** Whether this extension's debugger is attached to the tab, as Chrome
+ * answers a command that does nothing. */
+async function debuggingTab(tabId: number): Promise<boolean> {
+  try {
+    await chrome.debugger.sendCommand({ tabId }, ATTACHMENT_PROBE_METHOD, {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tabExists(tabId: number): Promise<boolean> {
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function storedState(): Promise<Required<StoredState>> {
   const stored = (await chrome.storage.local.get([
@@ -154,7 +321,11 @@ async function tabs(): Promise<AttachedTab[]> {
 }
 
 async function device(revision: number, generation: string): Promise<ExtensionDevice> {
-  const [state, platform] = await Promise.all([storedState(), chrome.runtime.getPlatformInfo()]);
+  const [state, platform, liveGeneration] = await Promise.all([
+    storedState(),
+    chrome.runtime.getPlatformInfo(),
+    stateGeneration(),
+  ]);
   const product = browserProduct(navigator.userAgent);
   currentDeviceId = state.deviceId;
   currentProfileLabel = state.profileLabel;
@@ -168,7 +339,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
     platform: extensionPlatform(platform),
     architecture: extensionArchitecture(platform),
     connectionGeneration: generation,
-    stateGeneration: STATE_GENERATION,
+    stateGeneration: liveGeneration,
     inventoryRevision: revision,
     capabilities: {
       tabInventory: true,
@@ -180,6 +351,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
       diagnostics: true,
       rawCdp: false,
       linkedComputer: true,
+      paymentFieldPrivacy: true,
     },
   };
 }
@@ -344,6 +516,8 @@ async function settleCommandNow(
     if (command.deviceId !== currentDeviceId || command.connectionGeneration !== generation) {
       throw new BridgeCommandError("fenced", "attached browser connection changed", true);
     }
+    // A new worker first takes over the debugger attachments it inherited.
+    await stateGeneration();
     // Event polling and pings continue while nothing is happening; only real
     // tab and debugger work counts as an agent using this browser.
     if (command.payload.type !== "debugger.poll" && command.payload.type !== "ping") {
@@ -376,13 +550,17 @@ async function settleCommandNow(
 async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
   switch (command.type) {
     case "ping":
-      return { pong: true };
+      // Commands added since the first release, so the agent can tell
+      // whether this extension knows them before it sends one.
+      return { pong: true, sitePermissions: true };
     case "tabs.list":
       return { tabs: await tabs() };
     case "tabs.create": {
       const created = await createTab(command.url);
       const tab = attachedTab(created);
       if (!tab) throw new BridgeCommandError("tab_unavailable", "Chrome did not create a tab");
+      agentCreatedTabs.add(created.id!);
+      void recordLiveState();
       scheduleInventory();
       return { tab };
     }
@@ -473,6 +651,18 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     }
     case "downloads.find":
       return { downloads: await findDownloads(command.url, command.startedAfter) };
+    case "permissions.set":
+      try {
+        return await setSitePermission(command, {
+          openedByAgent: (tabId) => agentCreatedTabs.has(numericTabId(tabId)),
+          controlledTab,
+        });
+      } catch (error) {
+        if (error instanceof SitePermissionError) {
+          throw new BridgeCommandError(error.code, error.message);
+        }
+        throw error;
+      }
     case "debugger.poll": {
       const firstSequence = debuggerEvents[0]?.sequence ?? debuggerSequence + 1;
       const available = debuggerEvents.filter((event) => event.sequence > command.afterSequence);
@@ -482,12 +672,23 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         cursor: events.at(-1)?.sequence ?? debuggerSequence,
         // Pagination is not history loss: the next poll continues from cursor.
         truncated: debuggerEvents.length > 0 && command.afterSequence < firstSequence - 1,
+        // A different stream than a reader's last poll means this buffer
+        // started again with a new worker: events in between are lost.
+        stream: EVENT_STREAM,
       };
     }
   }
 }
 
 const MAX_FOUND_DOWNLOADS = 16;
+
+/** The tab, while the agent's attachment to it lasts. */
+async function controlledTab(tabId: string, attachment: number): Promise<chrome.tabs.Tab | null> {
+  const id = numericTabId(tabId);
+  if (attachedDebuggerTabs.get(id) !== attachment) return null;
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return attachedDebuggerTabs.get(id) === attachment ? tab : null;
+}
 
 /**
  * Opens a tab without raising Chrome. Opengeni renders and controls attached
@@ -559,21 +760,28 @@ async function requireControllableTab(tabId: number): Promise<void> {
 }
 
 async function detachDebugger(tabId: number): Promise<void> {
-  if (!attachedDebuggerTabs.delete(tabId)) return;
+  if (attachedDebuggerTabs.delete(tabId)) void recordLiveState();
+  // Also an attachment an earlier worker left without recording it.
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
-    // Already detached is the desired idempotent state.
+    // Not attached is the desired idempotent state.
   }
 }
 
 /** Attaches Chrome's debugger to a tab, first removing other extensions'
- * frames when Chrome refuses because of one. */
+ * frames when Chrome refuses because of one. An attachment an earlier worker
+ * of this extension left on the tab without recording it is taken over. */
 async function attachDebugger(tabId: number): Promise<void> {
   const removalsBefore = finishedFrameRemovalCount(tabId);
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
   } catch (error) {
+    if (alreadyAttached(error) && (await debuggingTab(tabId))) {
+      if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+      void recordLiveState();
+      return;
+    }
     if (!otherExtensionFrameRefusal(error)) throw error;
     let { removed, reused } = await frameRemovalSince(tabId, removalsBefore);
     for (;;) {
@@ -594,6 +802,16 @@ async function attachDebugger(tabId: number): Promise<void> {
   }
   // Another attach of this tab may have finished first; keep its number.
   if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+  void recordLiveState();
+}
+
+/** Chrome refuses a second attach of this extension to a tab with "Another
+ * debugger is already attached to the tab with id: N." */
+function alreadyAttached(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.trim().startsWith("Another debugger is already attached to the tab")
+  );
 }
 
 /** Chrome refuses to attach to a tab holding another extension's page with
@@ -682,7 +900,6 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
   );
   frameRemovalTimes.set(tabId, recent);
   if (recent.length >= FRAME_REMOVAL_LIMIT) return null;
-  recent.push(now);
   const run = (target: chrome.scripting.InjectionTarget) =>
     chrome.scripting.executeScript({
       target,
@@ -690,12 +907,20 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
       func: removeFramesOfOtherExtensions,
       args: [chrome.runtime.id],
     });
+  let blankCreated: BlankCreatedFrames | null = null;
+  try {
+    blankCreated = await blankCreatedExtensionFrames(tabId);
+  } catch (error) {
+    // A page that does not answer is not asked again.
+    if (error instanceof FrameRemovalTimeout) return [];
+  }
   let results: Awaited<ReturnType<typeof run>>;
   try {
     results = await withinFrameRemovalTimeout(run({ tabId, allFrames: true }));
   } catch (error) {
     // A page that does not answer is not asked again.
     if (error instanceof FrameRemovalTimeout) return [];
+    blankCreated = null;
     try {
       results = await withinFrameRemovalTimeout(run({ tabId }));
     } catch {
@@ -713,7 +938,28 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
       ),
     ),
   ];
+  if (blankCreated !== null) {
+    try {
+      const removals = await withinFrameRemovalTimeout(
+        chrome.scripting.executeScript({
+          target: { tabId, frameIds: blankCreated.parentFrameIds },
+          world: "ISOLATED",
+          func: removeUnseenFrames,
+          args: [blankCreated.token],
+        }),
+      );
+      if (
+        removals.some((removal) => typeof removal.result === "number" && removal.result > 0) &&
+        !removed.includes(blankCreated.extensionId)
+      )
+        removed.push(blankCreated.extensionId);
+    } catch {
+      // The frames' page went away or stopped answering meanwhile.
+    }
+  }
   if (removed.length > 0) {
+    // Only a removal that changed the page counts against its limit.
+    recent.push(now);
     removedFrameExtensions.set(tabId, removed);
     console.warn(`removed other extensions' frames from tab ${tabId}: ${removed.join(", ")}`);
   }
@@ -775,6 +1021,223 @@ function removeFramesOfOtherExtensions(ownId: string): string[] {
   return [...removed];
 }
 
+type BlankCreatedFrames = {
+  token: string;
+  parentFrameIds: number[];
+  // The extension whose page they hold, or "" when Chrome holds pages of
+  // more than one.
+  extensionId: string;
+};
+
+/**
+ * An extension can load its page into a frame it created blank, so the
+ * frame's address does not show it, and nothing tells this extension which
+ * element holds it. It is found by what Chrome reports, never by a frame
+ * merely not answering, which may be the page's own:
+ * - Chrome reports most frames of the page to this extension
+ *   (webNavigation.getAllFrames), but not one holding another extension's
+ *   page, nor some of the page's own (a blob: page, or a data: page a frame
+ *   created blank was pointed at by script). It lets this extension script
+ *   every frame except those and pages it may not access (an error page, a
+ *   site the person took its access from).
+ * - Every frame that runs this extension's script says so to its parent, so
+ *   a parent knows which of its frames (`unseen`) did not.
+ * - Chrome's debugging targets list other extensions' pages, but across the
+ *   whole browser: they do not say which tab holds them. So an unseen frame
+ *   is taken for another extension's page only as the one place this tab can
+ *   hold it: the tab has exactly one unseen frame, which holds no frames of
+ *   its own; every frame Chrome reports ran the script (none can hide the
+ *   page instead, or be among the unseen); every frame that ran it was
+ *   heard and answered; Chrome reports no frame after the search that it did
+ *   not report before (a frame the page added meanwhile may be unseen); the
+ *   tab holds no other extension's page found by its address (which would
+ *   account for the targets instead); and the targets hold at least one
+ *   other extension's page.
+ * Otherwise nothing found this way is removed. Returns the parents whose
+ * unseen frames are other extensions', or null.
+ */
+async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedFrames | null> {
+  const ownId = chrome.runtime.id;
+  const extensionFrames = (await withinFrameRemovalTimeout(chrome.debugger.getTargets())).flatMap(
+    (target) => {
+      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(target.url)?.[1]?.toLowerCase();
+      return target.type === "other" && id && id !== ownId ? [id] : [];
+    },
+  );
+  if (extensionFrames.length === 0) return null;
+  const reported =
+    (await withinFrameRemovalTimeout(chrome.webNavigation.getAllFrames({ tabId }))) ?? [];
+  const token = crypto.randomUUID();
+  const inEveryFrame = <Args extends unknown[], Result>(
+    func: (...args: Args) => Result,
+    args: Args,
+  ) =>
+    withinFrameRemovalTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        world: "ISOLATED",
+        func,
+        args,
+      }),
+    );
+  await inEveryFrame(listenForFrameAnnouncements, [token]);
+  const announced = await inEveryFrame(announceFrame, [token]);
+  const ran = new Set(announced.map((result) => result.frameId));
+  const expected = announced.flatMap((result) =>
+    result.frameId !== 0 && typeof result.result === "string" ? [result.result] : [],
+  );
+  let reports: { frameId: number; probe: UnseenFrames | null }[] = [];
+  for (let round = 0; ; round++) {
+    const results = await inEveryFrame(unseenFrames, [token]);
+    const heard = new Set(results.flatMap((result) => result.result?.heard ?? []));
+    reports = results.map((result) => ({ frameId: result.frameId, probe: result.result ?? null }));
+    if (expected.every((announcement) => heard.has(announcement))) break;
+    // A frame that ran the script but was not heard may be among the unseen.
+    if (round >= 2) return null;
+  }
+  const reportedAfter =
+    (await withinFrameRemovalTimeout(chrome.webNavigation.getAllFrames({ tabId }))) ?? [];
+  const reportedBefore = new Set(reported.map((frame) => frame.frameId));
+  if (reportedAfter.some((frame) => !reportedBefore.has(frame.frameId))) return null;
+  // A reported frame the script did not run in may hold the other
+  // extension's page instead, or be one of its parent's unseen frames.
+  if (reported.some((frame) => frame.frameId !== 0 && !ran.has(frame.frameId))) return null;
+  const probes = reports.map((report) => report.probe);
+  if (probes.some((probe) => probe === null || probe.addressed > 0 || probe.nested)) return null;
+  const holding = reports.filter((report) => (report.probe?.unseen ?? 0) > 0);
+  if (holding.length !== 1 || holding[0]!.probe!.unseen !== 1) return null;
+  const extensions = new Set(extensionFrames);
+  return {
+    token,
+    parentFrameIds: holding.map((report) => report.frameId),
+    extensionId: extensions.size === 1 ? [...extensions][0]! : "",
+  };
+}
+
+type FrameProbe = { token: string; heard: Map<MessageEventSource, string> };
+
+/** What unseenFrames finds in one frame. */
+type UnseenFrames = {
+  // Frames it cannot see into that did not announce themselves.
+  unseen: number;
+  // Whether one of them holds frames of its own.
+  nested: boolean;
+  // Frames whose address shows another extension's page.
+  addressed: number;
+  heard: string[];
+};
+
+/** Runs in every page frame, in this extension's isolated world: records
+ * which of its frames say `token` to it (see blankCreatedExtensionFrames).
+ * Self-contained, since Chrome runs it from its source. */
+function listenForFrameAnnouncements(token: string): void {
+  const scope = globalThis as typeof globalThis & { __frameProbe?: FrameProbe };
+  if (!scope.__frameProbe) {
+    const probe: FrameProbe = { token, heard: new Map() };
+    scope.__frameProbe = probe;
+    addEventListener(
+      "message",
+      (event) => {
+        const data: unknown = event.data;
+        if (
+          event.source &&
+          typeof data === "string" &&
+          data.startsWith(`${probe.token}:`) &&
+          data.length > probe.token.length + 1
+        )
+          probe.heard.set(event.source, data.slice(probe.token.length + 1));
+      },
+      true,
+    );
+  }
+  scope.__frameProbe.token = token;
+  scope.__frameProbe.heard.clear();
+}
+
+/** Runs in every page frame, in this extension's isolated world: says
+ * `token` to its parent with a new announcement id, and returns that id.
+ * Self-contained, since Chrome runs it from its source. */
+function announceFrame(token: string): string | null {
+  if (window === window.parent) return null;
+  const announcement = crypto.randomUUID();
+  window.parent.postMessage(`${token}:${announcement}`, "*");
+  return announcement;
+}
+
+/** Runs in every page frame, in this extension's isolated world, after its
+ * frames announced themselves: keeps the frames this extension cannot see
+ * into (no readable document, created blank, so their address names no page)
+ * that did not say `token`, and returns how many there are, whether any holds
+ * frames of its own, how many frames show another extension's page by their
+ * address, and the announcements heard. Self-contained, since Chrome runs it
+ * from its source. */
+async function unseenFrames(token: string): Promise<UnseenFrames | null> {
+  const probe = (globalThis as typeof globalThis & { __frameProbe?: FrameProbe }).__frameProbe;
+  if (!probe || probe.token !== token) return null;
+  // Messages from frames in other processes arrive a moment later.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const shadowRootOf = (element: Element): ShadowRoot | null => {
+    try {
+      return chrome.dom.openOrClosedShadowRoot(element as HTMLElement) ?? null;
+    } catch {
+      return element.shadowRoot;
+    }
+  };
+  const unseen: Element[] = [];
+  let nested = false;
+  let addressed = 0;
+  const visit = (root: Document | ShadowRoot): void => {
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const source =
+        element instanceof HTMLIFrameElement ||
+        element instanceof HTMLFrameElement ||
+        element instanceof HTMLEmbedElement
+          ? element.src
+          : element instanceof HTMLObjectElement
+            ? element.data
+            : "";
+      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(source)?.[1]?.toLowerCase();
+      if (id && id !== chrome.runtime.id) addressed += 1;
+      if (
+        (element instanceof HTMLIFrameElement || element instanceof HTMLFrameElement) &&
+        /^(about:blank)?$/i.test((element.getAttribute("src") ?? "").trim()) &&
+        element.contentWindow !== null &&
+        element.contentDocument === null &&
+        !probe.heard.has(element.contentWindow)
+      ) {
+        unseen.push(element);
+        // A frame's count of its own frames is readable across origins.
+        if (element.contentWindow.length > 0) nested = true;
+      }
+      const shadow = shadowRootOf(element);
+      if (shadow) visit(shadow);
+    }
+  };
+  visit(document);
+  (globalThis as typeof globalThis & { __unseenFrames?: [string, Element[]] }).__unseenFrames = [
+    token,
+    unseen,
+  ];
+  return { unseen: unseen.length, nested, addressed, heard: [...probe.heard.values()] };
+}
+
+/** Runs in a page frame blankCreatedExtensionFrames found holding other
+ * extensions' pages, in this extension's isolated world: removes the frames
+ * unseenFrames kept for `token` and returns how many it removed.
+ * Self-contained, since Chrome runs it from its source. */
+function removeUnseenFrames(token: string): number {
+  const kept = (globalThis as typeof globalThis & { __unseenFrames?: [string, Element[]] })
+    .__unseenFrames;
+  if (!kept || kept[0] !== token) return 0;
+  let count = 0;
+  for (const element of kept[1]) {
+    if (!element.isConnected) continue;
+    element.remove();
+    count += 1;
+  }
+  return count;
+}
+
 /**
  * Chrome downloads a new extension version but installs it only when this
  * worker stops, and the native port keeps the worker running for as long as
@@ -795,7 +1258,9 @@ function requestExtensionUpdate(): void {
 }
 
 function maybeApplyUpdate(): void {
-  if (!updatePending || commandsInFlight > 0) return;
+  // Until a new worker has taken over the attachments it inherited, it cannot
+  // tell whether an agent is still driving a tab.
+  if (!updatePending || commandsInFlight > 0 || currentStateGeneration === null) return;
   const idleMs = Date.now() - lastAgentCommandAtMs;
   if (attachedDebuggerTabs.size === 0 || idleMs >= UPDATE_IDLE_RELOAD_MS) {
     chrome.runtime.reload();
@@ -913,6 +1378,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const attachment = attachedDebuggerTabs.get(source.tabId);
   if (attachment === undefined) return;
   attachedDebuggerTabs.delete(source.tabId);
+  void recordLiveState();
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
@@ -927,6 +1393,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (agentCreatedTabs.delete(tabId)) void recordLiveState();
   frameRemovalTimes.delete(tabId);
   frameRemovals.delete(tabId);
   finishedFrameRemovals.delete(tabId);
@@ -978,9 +1445,14 @@ for (const event of [
   event.addListener(scheduleInventory as never);
 }
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
-  const typed = message as { type: string; profileLabel?: unknown };
+  const typed = message as {
+    type: string;
+    profileLabel?: unknown;
+    pattern?: unknown;
+    permission?: unknown;
+  };
   if (typed.type === "status") {
     const connected = nativePort !== null && readyGeneration === connectionGeneration;
     const status = connected
@@ -1009,6 +1481,25 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
       respond({ saved: true, profileLabel });
     });
     return true;
+  }
+  // The popup and the site permissions page, never a page script.
+  if (!sender.url?.startsWith(chrome.runtime.getURL(""))) return false;
+  const answer = (work: Promise<unknown>) => {
+    void work.then(respond, (error: unknown) =>
+      respond({ error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  };
+  switch (typed.type) {
+    case "site_permissions":
+      return answer(sitePermissionsState());
+    case "remove_site_permission":
+      if (typeof typed.pattern !== "string" || !isSitePermission(typed.permission)) return false;
+      return answer(removeSitePermission(typed.pattern, typed.permission));
+    case "turn_off_site_permissions":
+      return answer(turnOffSitePermissions());
+    case "open_site_permissions":
+      return answer(openSitePermissionsPage({ bringForward: true }).then(() => ({ opened: true })));
   }
   return false;
 });

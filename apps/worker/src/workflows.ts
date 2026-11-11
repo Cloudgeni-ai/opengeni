@@ -18,13 +18,6 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
-export { automationRunWorkflow, type AutomationRunWorkflowInput } from "./workflows/automations";
-export {
-  knowledgeSourceSyncWake,
-  knowledgeSourceSyncWorkflow,
-  knowledgeSourceSyncWorkflowId,
-  type KnowledgeSourceSyncWorkflowInput,
-} from "./workflows/knowledge-source-sync";
 export {
   sandboxDrainWorkflow,
   sandboxIdleCheckpointSweepWorkflow,
@@ -35,6 +28,10 @@ export {
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
 export { sessionStorageMaintenanceWorkflow } from "./workflows/session-storage";
+export {
+  sessionArchiveRequestWorkflow,
+  sessionArchiveRestoreWorkflow,
+} from "./workflows/session-archive-request";
 export {
   browserDeadlineCheckpointWorkflow,
   browserDeadlineCheckpointSweepWorkflow,
@@ -51,13 +48,18 @@ export {
   browserRecordingVideoWorkflowId,
   recordingDeletionWorkflow,
   recordingDeletionWorkflowId,
+  recordingSpeakerScanWorkflow,
+  recordingSpeakerScanWorkflowId,
   recordingTranscriptWorkflow,
   recordingTranscriptWorkflowId,
   type BrowserRecordingVideoWorkflowInput,
   type RecordingDeletionWorkflowInput,
   type RecordingTranscriptWorkflowInput,
 } from "./workflows/recordings";
-export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
+export {
+  sessionWorkflowWakeDispatcherWorkflow,
+  sessionWorkflowWakeMaintenanceWorkflow,
+} from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

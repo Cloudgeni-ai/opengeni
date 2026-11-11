@@ -5,21 +5,93 @@
  */
 import { OPENGENI_DESKTOP_APP_HEADER } from "@opengeni/contracts";
 import {
+  DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT,
   getDesktopBridge,
   hasDesktopCapability,
   type DesktopBridge,
   type DesktopCapability,
+  type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
+
+import { reportDesktopBridgeMissing } from "./client-signals";
 
 export const desktopBridge: DesktopBridge | null =
   typeof window === "undefined" ? null : getDesktopBridge();
 
 /**
- * In the macOS app the window's traffic lights sit in the top-left corner of
- * the page, where the rails put the brand; the Dock and menu bar already name
- * the app, so rails keep that row for the window controls.
+ * The name a window this app opens without an opener handle carries
+ * (`openBlankTab`), so its page still knows it is not the app's own window.
  */
-export const windowControlsInPage = desktopBridge?.platform === "macos";
+export const OPENED_WINDOW_NAME = "opengeni-opened-window";
+
+/**
+ * The platform of the Opengeni desktop app from its user agent, which
+ * Electron writes as `… Opengeni/<version> Chrome/… Electron/<version> …`;
+ * null anywhere else, including other Electron apps.
+ */
+export function desktopPlatformFromUserAgent(userAgent: string): DesktopPlatform | null {
+  if (!/\bOpengeni\/\d[^\s]*\s.*\bElectron\/\d/u.test(userAgent)) return null;
+  if (/\bMacintosh\b|\bMac OS X\b/u.test(userAgent)) return "macos";
+  if (/\bWindows\b/u.test(userAgent)) return "windows";
+  return "linux";
+}
+
+/** The desktop app's version from its user agent (`Opengeni/<version>`), or null. */
+export function desktopAppVersionFromUserAgent(userAgent: string): string | null {
+  return /\bOpengeni\/(\d[^\s]*)\s.*\bElectron\/\d/u.exec(userAgent)?.[1] ?? null;
+}
+
+/** The parts of a window that decide whether it is the desktop app's own. */
+export type DesktopWindowView = {
+  opener: unknown;
+  top: unknown;
+  name: string;
+  navigator: { userAgent: string };
+};
+
+/**
+ * The desktop app's platform in a window. The bridge says so; without it (a
+ * page the shell's preload didn't reach) the app's user agent still does, so
+ * the page keeps room for the native window controls drawn over it.
+ * Capabilities come only from the bridge. A window the page opened (sign-in
+ * and connect flows, `openBlankTab`) has the system title bar and no bridge,
+ * so it keeps the web layout; so does a page in a frame.
+ */
+export function desktopPlatformIn(
+  bridge: DesktopBridge | null,
+  view: DesktopWindowView,
+): DesktopPlatform | null {
+  if (bridge) return bridge.platform;
+  if (view.opener || view.top !== view || view.name === OPENED_WINDOW_NAME) return null;
+  return desktopPlatformFromUserAgent(view.navigator.userAgent);
+}
+
+/** The desktop app's platform for this page; see `desktopPlatformIn`. */
+export const desktopPlatform: DesktopPlatform | null =
+  typeof window === "undefined" ? null : desktopPlatformIn(desktopBridge, window);
+
+/**
+ * Count once when the page is the desktop app's own window by its user agent
+ * but the shell's bridge is missing, so we learn how often and where that
+ * happens. Call after the client signal reporter is installed; while the page
+ * loads, pass the pattern of the route the router is loading, since the
+ * route it shows is not resolved yet.
+ */
+export function reportMissingDesktopBridge(routePattern?: () => string): void {
+  if (desktopBridge || !desktopPlatform) return;
+  reportDesktopBridgeMissing(
+    desktopPlatform,
+    desktopAppVersionFromUserAgent(navigator.userAgent),
+    routePattern,
+  );
+}
+
+/**
+ * Whether the page runs in the macOS app.
+ * @deprecated The desktop window bar now holds the window controls above the
+ * page, so no page layout needs to make room for them.
+ */
+export const windowControlsInPage = desktopPlatform === "macos";
 
 export function desktopCapability(capability: DesktopCapability): DesktopBridge | null {
   return hasDesktopCapability(desktopBridge, capability) ? desktopBridge : null;
@@ -41,13 +113,62 @@ declare global {
 }
 
 /**
+ * How far down the macOS window the traffic lights' centre is, in CSS pixels
+ * at the page's zoom, or null for other platforms (and without the bridge,
+ * where the page keeps the current shell's 22px). The sidebar toggle and a
+ * chat's header are centred on this line, so they line up with the lights.
+ * The shell centres the lights on its window bar (`windowBarHeight`); shells
+ * that don't report it (0.1.33 and older) centre them on a 56px row.
+ */
+export function desktopWindowControlsCentre(bridge: DesktopBridge | null): number | null {
+  if (bridge?.platform !== "macos") return null;
+  const reported = bridge.windowBarHeight;
+  const height =
+    typeof reported === "number" && Number.isFinite(reported) && reported > 0
+      ? reported
+      : DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT;
+  return height / 2 / desktopZoom(bridge);
+}
+
+/** The page's zoom factor in the desktop app (1 at 100%, and in shells that don't report it). */
+function desktopZoom(bridge: DesktopBridge | null): number {
+  let zoom = 1;
+  try {
+    zoom = bridge?.zoomFactor?.() ?? 1;
+  } catch {
+    // An older or failing shell: assume 100%.
+  }
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+/**
+ * Tells the page where the traffic lights' centre line is
+ * (`--og-window-controls-center`) and its zoom (`--og-window-zoom`), so the
+ * window bar's controls keep their place in the window beside the lights;
+ * kept up to date when the page zooms (which resizes its viewport). See
+ * `desktopWindowControlsCentre`.
+ */
+export function applyDesktopWindowBar(root: HTMLElement, bridge: DesktopBridge | null): void {
+  const apply = () => {
+    const centre = desktopWindowControlsCentre(bridge);
+    if (centre == null) return;
+    root.style.setProperty("--og-window-controls-center", `${centre}px`);
+    root.style.setProperty("--og-window-zoom", String(desktopZoom(bridge)));
+  };
+  apply();
+  if (bridge?.platform === "macos")
+    root.ownerDocument.defaultView?.addEventListener("resize", apply);
+}
+
+/**
  * Before the first render: mark the document so the desktop layout applies
- * from the first frame (room for the window controls, draggable title areas,
+ * from the first frame (the window bar for the window controls, draggable title areas,
  * window materials), and let the shell navigate client-side.
  */
 export function installDesktopShell(navigate: (path: string) => void): void {
+  if (desktopPlatform) document.documentElement.dataset.desktop = desktopPlatform;
+  applyDesktopWindowBar(document.documentElement, desktopBridge);
   if (!desktopBridge) return;
-  document.documentElement.dataset.desktop = desktopBridge.platform;
   window.__opengeniDesktopNavigate = (path: string) => {
     if (typeof path === "string" && path.startsWith("/") && !path.startsWith("//")) navigate(path);
   };

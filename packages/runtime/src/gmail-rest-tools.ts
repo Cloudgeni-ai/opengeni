@@ -293,3 +293,15 @@ export function gmailToolSupportsScopes(name: string, scopes: readonly string[])
   }
   return has("readonly");
 }
+
+/** The narrowest Gmail scope that lets `gmailToolSupportsScopes` admit a tool. */
+export function gmailToolRequiredScope(name: string): string {
+  const scope = (suffix: string) => `https://www.googleapis.com/auth/gmail.${suffix}`;
+  if (composeTools.has(name)) return scope("compose");
+  if (
+    (GMAIL_EXTRA_MUTATIONS.has(name) || /^(?:label|unlabel)_/u.test(name)) &&
+    !["watch_mailbox", "stop_watch"].includes(name)
+  )
+    return scope("modify");
+  return scope("readonly");
+}

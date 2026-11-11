@@ -3,10 +3,16 @@ import { Link } from "../../lib/navigation";
 import {
   ArchiveIcon,
   ChevronRightIcon,
+  CopyIcon,
+  CopyPlusIcon,
   EllipsisIcon,
+  FolderIcon,
+  InfoIcon,
+  LinkIcon,
   PanelsTopLeftIcon,
   PinIcon,
 } from "lucide-react";
+import { OpenPublishedSiteItem, useSiteActions, type SiteActions } from "../artifacts/site-actions";
 import { RailTrailingMetadata } from "./session-row-content";
 import {
   RAIL_ROW_OVERFLOW_TRIGGER_CLASS,
@@ -18,29 +24,62 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "../../../ui/context-menu";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { cn } from "../../lib/utils";
 import { visualTreeDepth } from "../../lib/session-rail";
 import type { RailAggregateStatus } from "../../lib/sessions-group";
 import type { SessionSiteOrigin } from "../../lib/session-site-origin";
+import type { Channel } from "../../types";
 
 /**
  * Pin and archive for Site rows, in this person's own sidebar. Archive only
  * hides the row; the Site stays published. Absent where the client cannot
- * change sidebar state, and then the row offers no actions.
+ * change sidebar state, and then the row offers no actions. Move files the
+ * row in another project (null is Default), like a chat; absent where the
+ * client predates it.
  */
 export type SiteRowActions = {
   pin: (origin: SessionSiteOrigin, pinned: boolean) => void;
   archive: (origin: SessionSiteOrigin) => void;
+  move?:
+    | ((origin: SessionSiteOrigin, fromChannelId: string | null, channelId: string | null) => void)
+    | undefined;
 };
 export const SiteRowActionsContext = createContext<SiteRowActions | null>(null);
+
+/** Drag payload of a Site row: `{ siteId, title, channelId }` as JSON. */
+export const SITE_DRAG_TYPE = "application/x-opengeni-site";
+
+export type SiteRowDragPayload = { siteId: string; title: string; channelId: string | null };
+
+export function readSiteRowDragPayload(value: string): SiteRowDragPayload | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const { siteId, title, channelId } = parsed as Record<string, unknown>;
+    if (
+      typeof siteId !== "string" ||
+      typeof title !== "string" ||
+      (channelId !== null && typeof channelId !== "string")
+    )
+      return null;
+    return { siteId, title, channelId };
+  } catch {
+    return null;
+  }
+}
 
 /** A Site's row in the rail: open the Site view, or disclose its conversations. */
 export function SiteSessionGroupHeading({
@@ -54,6 +93,8 @@ export function SiteSessionGroupHeading({
   depth = 0,
   active = false,
   pinned = false,
+  channelId,
+  channels,
 }: {
   origin: SessionSiteOrigin;
   workspaceId: string;
@@ -67,8 +108,22 @@ export function SiteSessionGroupHeading({
   active?: boolean | undefined;
   /** This person pinned the Site in their sidebar. */
   pinned?: boolean | undefined;
+  /** The project this row is in (null is Default); undefined when it stands for every project. */
+  channelId?: string | null | undefined;
+  /** Projects it can move to, as offered for chats. */
+  channels?: readonly Channel[] | undefined;
 }) {
   const actions = useContext(SiteRowActionsContext);
+  // Held by the row, not its menu, so a duplicate still running when the
+  // menu closes stays busy the next time it opens.
+  const site = useSiteActions(workspaceId, origin);
+  const move = actions?.move;
+  // As for a chat row: listed only when there is a project to choose.
+  const moveTargets =
+    move && channelId !== undefined && channels && channels.length > 0
+      ? [{ id: null, name: "Default" }, ...channels]
+      : [];
+  const canMove = moveTargets.length > 0;
   const conversations = `${count} ${count === 1 ? "conversation" : "conversations"}`;
   // A Site without conversations is a plain row: nothing to disclose.
   const disclosable = count > 0 || expanded;
@@ -110,6 +165,24 @@ export function SiteSessionGroupHeading({
         aria-current={active ? "page" : undefined}
         // Without conversations there is no status to announce.
         aria-label={`Open ${origin.title}. Site${pinned ? ". Pinned" : ""}${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
+        // Drag onto a project to move the row there, like a chat row.
+        draggable={canMove}
+        onDragStart={(event) => {
+          if (!canMove) {
+            event.preventDefault();
+            return;
+          }
+          event.stopPropagation();
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData(
+            SITE_DRAG_TYPE,
+            JSON.stringify({
+              siteId: origin.siteId,
+              title: origin.title,
+              channelId: channelId ?? null,
+            } satisfies SiteRowDragPayload),
+          );
+        }}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
       >
         <PanelsTopLeftIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-muted" />
@@ -164,14 +237,16 @@ export function SiteSessionGroupHeading({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-40" data-site-menu={origin.siteId}>
-              <DropdownMenuItem onSelect={() => actions.pin(origin, !pinned)}>
-                <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
-                {pinLabel}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => actions.archive(origin)}>
-                <ArchiveIcon className="size-4" />
-                Archive
-              </DropdownMenuItem>
+              <SiteRowMenuItems
+                menu="dropdown"
+                origin={origin}
+                site={site}
+                workspaceId={workspaceId}
+                pinned={pinned}
+                actions={actions}
+                moveTargets={moveTargets}
+                channelId={channelId}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </>
@@ -183,15 +258,108 @@ export function SiteSessionGroupHeading({
     <ContextMenu>
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
       <ContextMenuContent className="min-w-40" data-site-menu={origin.siteId}>
-        <ContextMenuItem onSelect={() => actions.pin(origin, !pinned)}>
-          <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
-          {pinLabel}
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => actions.archive(origin)}>
-          <ArchiveIcon className="size-4" />
-          Archive
-        </ContextMenuItem>
+        <SiteRowMenuItems
+          menu="context"
+          origin={origin}
+          site={site}
+          workspaceId={workspaceId}
+          pinned={pinned}
+          actions={actions}
+          moveTargets={moveTargets}
+          channelId={channelId}
+        />
       </ContextMenuContent>
     </ContextMenu>
+  );
+}
+
+/**
+ * A Site row's menu, the same for right-click and "…": what a chat row
+ * offers that fits a Site (Copy link, Copy title, Pin, Archive, Move to
+ * project), plus the Site's own: Duplicate, Site details and, once known to
+ * be on the web, Open published Site (last, so nothing moves when it shows). Renaming has no place here: a Site is
+ * named by what it publishes.
+ */
+function SiteRowMenuItems({
+  menu,
+  origin,
+  site,
+  workspaceId,
+  pinned,
+  actions,
+  moveTargets,
+  channelId,
+}: {
+  menu: "context" | "dropdown";
+  origin: SessionSiteOrigin;
+  site: SiteActions;
+  workspaceId: string;
+  pinned: boolean;
+  actions: SiteRowActions;
+  moveTargets: readonly { id: string | null; name: string }[];
+  channelId: string | null | undefined;
+}) {
+  const Item = (menu === "context" ? ContextMenuItem : DropdownMenuItem) as typeof DropdownMenuItem;
+  const Separator = menu === "context" ? ContextMenuSeparator : DropdownMenuSeparator;
+  const Label = menu === "context" ? ContextMenuLabel : DropdownMenuLabel;
+  return (
+    <>
+      <Item data-site-action="copy-link" onSelect={site.copyLink}>
+        <LinkIcon className="size-4" />
+        Copy link
+      </Item>
+      <Item data-site-action="copy-title" onSelect={site.copyTitle}>
+        <CopyIcon className="size-4" />
+        Copy title
+      </Item>
+      <Item onSelect={() => actions.pin(origin, !pinned)}>
+        <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
+        {pinned ? "Unpin" : "Pin"}
+      </Item>
+      {site.duplicate ? (
+        <Item
+          data-site-action="duplicate"
+          disabled={site.duplicate.busy}
+          onSelect={site.duplicate.run}
+        >
+          <CopyPlusIcon className="size-4" />
+          {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
+        </Item>
+      ) : null}
+      <Item asChild data-site-action="details">
+        <Link {...site.details}>
+          <InfoIcon className="size-4" />
+          Site details
+        </Link>
+      </Item>
+      <Item onSelect={() => actions.archive(origin)}>
+        <ArchiveIcon className="size-4" />
+        Archive
+      </Item>
+      {/* Last, as it shows once the address has loaded: nothing above moves. */}
+      <OpenPublishedSiteItem item={Item} workspaceId={workspaceId} siteId={origin.siteId} />
+      {moveTargets.length > 0 ? (
+        <>
+          <Separator />
+          <Label>Move to project</Label>
+          {moveTargets.map((channel) => {
+            const current = (channelId ?? null) === channel.id;
+            return (
+              <Item
+                key={channel.id ?? "default"}
+                aria-current={current ? "true" : undefined}
+                onSelect={() => {
+                  if (!current) actions.move?.(origin, channelId ?? null, channel.id);
+                }}
+              >
+                <FolderIcon aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                <DropdownMenuCheck checked={current} />
+              </Item>
+            );
+          })}
+        </>
+      ) : null}
+    </>
   );
 }

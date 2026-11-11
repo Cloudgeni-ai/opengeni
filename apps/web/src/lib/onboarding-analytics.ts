@@ -25,7 +25,7 @@ export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 /** How a step was completed. */
 export const ONBOARDING_COMPLETIONS = {
-  use_case: ["embed", "cloud"],
+  use_case: ["everyday", "embed", "cloud"],
   organization_name: ["created"],
   invitation: ["joined"],
   model_access: ["start_chatting", "skipped", "connected_model", "checkout"],

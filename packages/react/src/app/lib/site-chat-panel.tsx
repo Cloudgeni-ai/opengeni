@@ -1,10 +1,11 @@
 import { useCallback, useRef, useState } from "react";
 
 /**
- * The Site view's chat panel width and whether it is hidden, remembered per
- * person (not per Site or workspace) in this browser: a reader who likes a
- * wide chat gets it on every Site. Storage that is blocked or full only
- * means the choice lasts until the page reloads.
+ * The Site view's chat panel width, whether it is hidden and which side it
+ * sits on, remembered per person (not per Site or workspace) in this
+ * browser: a reader who likes a wide chat on the left gets it on every
+ * Site. Storage that is blocked or full only means the choice lasts until
+ * the page reloads.
  */
 export const SITE_CHAT_MIN_WIDTH = 320;
 export const SITE_CHAT_MAX_WIDTH = 720;
@@ -16,7 +17,13 @@ const VERSION = 1;
 
 type PanelStorage = Pick<Storage, "getItem" | "setItem">;
 
-export type SiteChatPanelLayout = Readonly<{ width: number; collapsed: boolean }>;
+export type SiteChatPosition = "left" | "right";
+
+export type SiteChatPanelLayout = Readonly<{
+  width: number;
+  collapsed: boolean;
+  position: SiteChatPosition;
+}>;
 
 export function siteChatPanelStorageId(subjectId: string): string {
   return ["og.site-view.chat", `v${VERSION}`, encodeURIComponent(subjectId)].join(":");
@@ -31,17 +38,23 @@ export function readSiteChatPanelLayout(
   storageId: string,
   storage: PanelStorage | null = browserStorage(),
 ): SiteChatPanelLayout {
-  const fallback = { width: SITE_CHAT_DEFAULT_WIDTH, collapsed: false };
+  const fallback: SiteChatPanelLayout = {
+    width: SITE_CHAT_DEFAULT_WIDTH,
+    collapsed: false,
+    position: "right",
+  };
   if (!storage) return fallback;
   try {
     const raw = storage.getItem(storageId);
     if (!raw) return fallback;
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
-    const { width, collapsed } = value as Record<string, unknown>;
+    const { width, collapsed, position } = value as Record<string, unknown>;
     return {
       width: typeof width === "number" ? clampSiteChatWidth(width) : fallback.width,
       collapsed: collapsed === true,
+      // Layouts saved before the choice existed, or unreadable, keep the right.
+      position: position === "left" ? "left" : "right",
     };
   } catch {
     return fallback;
@@ -57,7 +70,11 @@ export function writeSiteChatPanelLayout(
   try {
     storage.setItem(
       storageId,
-      JSON.stringify({ width: clampSiteChatWidth(layout.width), collapsed: layout.collapsed }),
+      JSON.stringify({
+        width: clampSiteChatWidth(layout.width),
+        collapsed: layout.collapsed,
+        position: layout.position,
+      }),
     );
   } catch {
     // The panel stays usable when persistence is blocked or quota is exhausted.

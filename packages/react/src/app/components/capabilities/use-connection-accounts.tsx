@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { CapabilityCatalogItem, Session } from "@opengeni/sdk";
+import type { CapabilityCatalogItem, ChatSession as Session } from "@opengeni/sdk";
 import { isConnectionAccountSubmissionError } from "../../../lib/format";
 import { userErrorText } from "../../../ui/api-error";
 import { isWorkspacePermissionDenied } from "../../lib/permissions";
@@ -18,7 +19,7 @@ import {
 } from "./session-connection-accounts";
 
 export function useConnectionAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   session: Pick<Session, "id" | "workspaceId"> & { selectedIds: string[] },
   catalog: CapabilityCatalogItem[],
   canReadConnections: boolean | null,
@@ -53,13 +54,13 @@ export function useConnectionAccounts(
   };
   const epoch = scope.current.epoch;
   const [choices, setChoices] = useState<{
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     identity: string;
     epoch: number;
     accounts: ConnectionAccountChoices;
   } | null>(null);
   const [result, setResult] = useState<{
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     identity: string;
     epoch: number;
     catalog: CapabilityCatalogItem[];

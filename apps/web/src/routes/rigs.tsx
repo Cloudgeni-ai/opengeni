@@ -35,7 +35,8 @@ import { userFacingError } from "@opengeni/react/ui/api-error";
 import { LoadFailure } from "@opengeni/react/ui/load-failure";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { orgLabel } from "@opengeni/react/app/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
 import type { CreateRigRequest, Rig } from "@opengeni/react/app/types";
 
@@ -54,10 +55,12 @@ export function RigsRoute({ workspaceId, view }: { workspaceId: string; view?: "
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const canManageOrganization = Boolean(
-    workspace?.accountId &&
-    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
-  );
+  // Organization Sandbox Environments: the owner or an admin, as the server allows.
+  const canManageOrganization = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspace?.accountId,
+  });
   const canCreatePersonal = Boolean(
     context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId &&
     workspace?.accountId &&

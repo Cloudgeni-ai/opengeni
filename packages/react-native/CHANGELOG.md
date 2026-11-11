@@ -1,5 +1,651 @@
 # @opengeni/react-native
 
+## 6.14.0
+
+### Patch Changes
+
+- 618c2b7: An action the agent asked for from Code Mode can be approved in embedded chats again. Such an approval carries no arguments of its own, since they stay in the action's saved review on the server, and `SessionConversation` (and so `OpenGeniChat`) never read that review: a fresh request showed "The details of this older request couldn't be recovered" with only Decline, also when a host's `approvalProps.loadReview` resolved `null` for it. The conversation now reads the saved review (`getToolActionReview`, with `getToolReviewDetails` for its details) for every approval the host's own loader leaves to the standard card. `NativeSessionScreen` does the same when it is given the full `client`. A session client without these two methods keeps the old behaviour.
+- c472500: A meeting transcript now says where a track recorded nothing, such as "Ingrid's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded." Before, a microphone that was unplugged or tab sharing that ended left a voice missing with no explanation, so the transcript looked like it had skipped speech. Each track's new `unrecorded` field lists those stretches. The server works them out from the chunks' start times when a recording is finalized (migration 1353 adds the column). Older meetings get them the next time they are transcribed. Stretches under two seconds are ignored. The web and phone transcripts show a quiet line where each one starts, naming the person when the track carries one named voice and saying "Nothing was recorded" where every track was silent at once; no turn runs across one. `@opengeni/react/recordings` exports `transcriptUnrecordedMarks`, `interleaveUnrecordedMarks`, `trackSpeakerName` and `unrecordedMarkText` for embedders that render their own transcript, and `groupTranscriptTurns` takes the times no turn may run across.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [4664732]
+- Updated dependencies [618c2b7]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [dd11dad]
+- Updated dependencies [55665bc]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [7c926f8]
+- Updated dependencies [89a1793]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/react@6.14.0
+  - @opengeni/sdk@6.14.0
+
+## 6.13.0
+
+### Minor Changes
+
+- 1c7aa2a: People on a plan that doesn't include their own subscriptions (Codex, Claude, SuperGrok) now hear it before Send instead of after it. The workspace model catalog returns `ownSubscriptionPlan` (`{ key, label, monthlyPriceMicros }`) and the same `requiredPlan` on each own-subscription model while the organization's plan doesn't include them. The plan is the cheapest self-service plan that does, from the plan catalog (`ownSubscriptionUpgradePlan` in `@opengeni/contracts/billing-origin`). Connect pages and onboarding say "Using your own subscription needs Pro ($20/month).". The web and React Native model pickers label those models "Needs Pro" (`requiredPlanHint`) and keep them selectable. The new-chat page shows a notice with one action when one is chosen, and a one-time dismissible heads-up to people who connected one earlier.
+
+### Patch Changes
+
+- b15212e: A message that couldn't start because of access now starts by itself once that is fixed. When its machine is allowed for the chat, the sender's workspace access is restored, or the chat moves to a machine it may use, the saved message is released and started exactly once. A paused, cancelled or edited chat is left alone, and a claim that raced the change is re-read instead of parked. The "Recheck access" button is gone. The notice says what is blocking the message and offers the one action that fixes it: the machine's owner gets "Allow for this chat", others learn who can allow it, and lost membership names a workspace admin. Only an unknown failure offers "Try again". A claim refused because a personal machine isn't approved now reads as "Machine access needed", not as a generic permission check. `useSessionStart` adds `allowMachine`, `needsMachineAccess` and `refresh`, and `@opengeni/react` exports `allowMachineForChat`, `sessionAdmissionNeedsMachineAccess` and `sessionAdmissionMachineAccessCopy`.
+- Updated dependencies [460102f]
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+  - @opengeni/react@6.13.0
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 6ba27af: Android voice calls can be system calls, and agents can ring Android phones. With the config plugin's new `call.androidSystemCall: true`, a call is a self-managed Telecom call with a call notification and a phone-call foreground service, so it keeps going with the screen off, a cellular call holds it, and headsets and watches answer and hang up. It starts on the loudspeaker (or a connected headset) before voice starts, so the route does not change under a live call. When the app uses expo-notifications, an agent's call push rings the phone with the incoming-call notification and a full-screen ring screen on the lock screen, and answering or declining reaches JavaScript through the same `incoming` adapter and events as on iOS.
+- b742c7d: An optional iOS call audio device for WebRTC (config plugin option `call.iosAudioDevice`), so a call can connect while the phone rings without opening the microphone. With it, WebRTC's audio runs through Opengeni's device instead of its built-in one: while a CallKit call rings it sends silent audio frames and drops whatever the far end plays, so the connection is live and the far end hears a silent line; once CallKit activates the audio session on answer (at once for a call placed in the app, or without CallKit) it runs Apple's voice-processing I/O unit, as WebRTC's own device does, so echo cancellation, noise suppression and gain control are unchanged. It falls back to silence and recovers through audio interruptions, rebuilds itself after a media-services reset or a route change that alters the sample rate, and leaves loudspeaker toggles alone. Off by default; it needs react-native-webrtc.
+- 906407a: Chat and agent avatars now show in native apps as they do on the web. `@opengeni/react-native/timeline` adds `SessionAvatar` (emoji, letters, icon or image avatars on their hue; image avatars load with the person's own access and fall back to the chat's initials) and `useNativeSessionIdentity`. Session rows show a chat's avatar beside its title when given an `avatarClient`, and `SessionHeaderTitle` takes `avatar` and `agentName`, so an agent's chat shows the agent's current icon and name. The shared rules (initials, fallback colours, tile colours, the agent behind a chat) are in the new `@opengeni/react/session-avatar-model` entry point.
+- fcdf7de: Keep operator instructions, skill bodies and the full tool catalog out of default
+  chat session responses through the explicit typed `client.withSessionResponse("chat")` opt-in
+  and JSON content negotiation on the existing Accept header. SDK defaults and
+  required Session fields stay unchanged. Console, mobile and packaged chat clients
+  opt into the compact type. Settings and server-side integrations can explicitly read
+  the full configuration with `getSessionConfiguration` and session-control authority.
+  Server-owned session relays refuse browser configuration and model-context reads.
+
+  Export `OPENGENI_BROWSER_RESPONSE_HEADERS`, share it between API CORS and the
+  packaged relay, and warn once when required history response metadata is unreadable.
+  Cross-origin hosts should use the export for `Access-Control-Expose-Headers`.
+
+### Patch Changes
+
+- 2e7c01e: Voice calls on Android now set up the phone's call audio, and a call that is silent on one side says so.
+
+  - Android: `createExpoCallAdapter` no longer returns null. The package's call module now ships an Android side that, while a call runs, takes audio focus for voice communication, switches the phone into communication mode and routes the call to a connected headset or the loudspeaker (every call starts on the loudspeaker, as on iOS), then restores the previous audio state when the call ends. Before, WebRTC recorded and played as if no call were running, and on some phones the microphone handed the call nothing but silence, so the voice never heard the person. There is no system call screen on Android: the adapter reports `showsSystemCall: false`, `systemCall` stays false, and agent calls (`incoming`) remain iOS-only. The package's Android manifest adds `MODIFY_AUDIO_SETTINGS`, a normal permission with no prompt. Native Android builds need a rebuild to include the module.
+  - SDK: while a call is live, the realtime controller reads the peer connection's audio statistics once a second. An unmuted microphone that delivers no sound at all for 8 seconds raises the recoverable `no_input_audio` diagnostic, and a finished reply whose audio never played raises `output_silent`; both set `error` with a plain message and clear once audio flows. Platforms whose statistics lack audio energy report nothing.
+  - React Native: `useNativeRealtimeCall` returns a `notice` for these, and `OpenGeniNativeCallView` shows it under the call status.
+  - React: the voice control shows "No sound from your microphone" or "Reply not played" beside the button, with the detail in its menu.
+
+- f83dc50: iOS voice calls keep their audio route when voice starts. WebRTC used to apply its own audio session configuration (without the loudspeaker option) once call audio came up, which moved a loudspeaker call to the receiver a few seconds in. The call module now gives WebRTC the call's own configuration (and updates it when the person switches the speaker), so WebRTC finds the session already set up and changes nothing. The JavaScript workaround that switched the speaker back afterwards is removed; the call screen shows the actual route.
+- fccf354: Keep native chat responsive on long or crafted messages: bound Markdown input to
+  8,192 characters and show longer messages in selectable plain-text pages, with
+  every character still available. Bound math normalization too. The mobile app
+  pins patched Markdown/linkification and URI-decoding dependencies.
+- 98938f0: Prepare native call data and microphone-free WebRTC offers while ringing, reuse the workspace voice selection, and overlap outgoing setup with admission. Keep provider calls and microphone capture behind Answer, release abandoned preparation, and expose server setup phase timings.
+- 3929153: Prepare incoming voice connections while ringing only on phones with a native audio device that guarantees silence until Answer. Hold context delivery until the answering phone wins, release unused preparations silently, and retain connect-on-answer behavior on other hosts.
+- 8099970: A subscription speech service that is out of credit now says so. Subscription transcription reads the provider's refusal instead of discarding it, so xAI's "run out of credits" answer becomes an out-of-credit error rather than a generic failure; a failed dictation keeps that reason, and the composer and phone dictation tell you the speech-to-text service is out of credit. Phone dictation no longer says to retry when you're back online after the speech service itself failed.
+- bee1e4c: With `busySend: "steer"`, a message sent while a turn runs now always reaches that turn, even when the client's copy of the session is a few seconds behind. The composer used to pick Steer or Send from its own view of the session, so a Send right after a turn started could be queued and answered only after the turn finished. It now submits the new `delivery: "steer_or_send"` (accepted by `steerMessage` and draft submits), and the server resolves it under the same locks that start and settle turns: it steers a running or just-starting turn, starts a turn when the session is idle, and queues without resuming when it is paused. Only the resolved `steer` or `send` is recorded, so nothing the model sees changes. Exact retries replay the first decision. Plain `send` and explicit Queue are unchanged, and the composer falls back to its own choice against a server without `steer_or_send`.
+- Updated dependencies [64fd53f]
+- Updated dependencies [7332869]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [b01c6c8]
+- Updated dependencies [3c94d65]
+- Updated dependencies [6c69279]
+- Updated dependencies [81642f5]
+- Updated dependencies [281af3a]
+- Updated dependencies [2117a2d]
+- Updated dependencies [b2c6c04]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [fccf354]
+- Updated dependencies [906407a]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [60ed55d]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [8099970]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/react@6.12.0
+  - @opengeni/sdk@6.12.0
+
+## 6.11.0
+
+### Minor Changes
+
+- d66e22b: `agentSignals` on `SessionConversation`, `MessageTimeline` and React Native's `NativeSessionScreen` now also takes an object of switches, `{ goal, agents, commands, turnDetail }`, each `true` unless set, so a host can hide one part of how the agent works without the rest. `agentSignals={{ goal: false }}` hides the goal pill and keeps queued messages, helper agents, the live step and the host's own `turnSummary` facets. `true` and `false` mean what they did. The row above `SessionConversation`'s composer (queue, wait, goal and agents chips) now sits in the composer's readable column, so it lines up with the composer in a wide panel instead of starting at the panel's left edge; a `chromeProps.className` is still added to it.
+- 5dabaa2: Archived chats now read as Archived everywhere, never as "Cancelled". Archiving a chat stops its running work, which leaves the session's internal status `cancelled`; the chat header, sidebar row and hover card, session tiles, sub-agent list, inspector, conversation divider, empty state and composer placeholder (web and native) now show the archive instead, with the existing read-only notice and Continue in a new chat. `sessionDisplayStatus` returns the new `archived` display status for archived sessions, and `sessionArchived` and `sessionStatusItemDisplayStatus` are exported. The packaged conversation is read-only for archived chats too, and `session_get` reports the archive as soon as a chat is archived, before its content is stored.
+- 9788ab8: Hosts can hide the agent's behind-the-scenes signals from end users. Pass `agentSignals={false}` to `SessionConversation`, `SessionConversationView` or `OpenGeniChat` (through `conversationProps`) to hide the goal pill and any agents or commands segments, and to React Native's `NativeSessionScreen` to hide its goal, agents and commands chips. Queued messages, approvals and the agent's questions still show; the default is unchanged.
+
+  The goal pill's pause reasons ("Paused · agent", "· cap", "· manually" and the rest) and the agents chip's "2 running" / "1 paused" now come from the message catalog (`sessionChrome.pausedReason*`, `sessionAgentsModel.runningCount`, `sessionAgentsModel.pausedCount`), so a translated chat no longer shows them in English.
+
+  Hosts can lead the live "Working" / "Waiting" / "Paused" turn row with their own mark, such as a small animated mascot: `turnSummary.renderLiveMark` on the web timeline (`SessionConversation` takes it through `timelineProps`) and `renderLiveMark` on React Native's `NativeSessionScreen` and `MessageTimeline`. It receives the row's state (`working`, `waiting` with `waitingOn: "you"` for an approval or question, or `paused`) and is removed when the turn settles. The default is no mark.
+
+- 6c3fcf3: React Native hosts can now show readable approval cards. `NativeSessionScreen` and `ApprovalStrip` take `loadReview`, the same hook and the same `ToolActionReview` as the web `ApprovalSurface`: return the server's review from `client.getToolActionReview`, or your own plain title, consequence and the fields worth reading, so a write tool whose arguments are only identifiers no longer shows its raw title and identifiers. The review only changes what the card says; the approval decided is always the one the agent asked for, and a review for another approval is ignored. While it loads the card shows the tool's title and holds Approve (Reject still works); resolving `null` or a 404 keeps the standard card; any other failure shows the standard card, still decidable, with Try again. A loaded review's `availableActions`, `approvedBy`, samples and protected fields now show on the native card as they do on the web. On the web, `ApprovalSurface`'s `loadReview` may now resolve `null` to keep the standard card, so one loader serves both.
+
+### Patch Changes
+
+- 5962929: Attached images always show as images. A draft restored after a reload or opened on another device, a queued message, and a sent message viewed elsewhere now load their pictures from the server instead of showing a generic file chip, on web and native. Every surface reads previews the same way through the new `useStoredFiles`, `useStoredFilePreview` and `readStoredFilePreviewUrl` helpers, which share one signed URL per file until shortly before it expires and re-sign once when an image stops loading.
+- 276001c: An automation run in a chat now reads as what happened, not as its instructions. A run shows one plain, centered line (the automation's name and what the event that started it says, for example "Ticket assigned to you: T-4907 Refund request from Contoso"), then the agent's answer. The pending and delivered events for a run now carry the automation's name as their summary, plus `automation: {name, eventSummaries, eventCount}` on the member, so the instructions never reach a chat; the agent still reads them in the update as before. Older runs read "Automation run".
+
+  A run with nothing for the person stays out of the chat. New occurrences tell the agent to answer exactly `NO_REPLY` when nothing needs the person, and the web and native timelines then draw neither the run's line, its work nor its answer; the token itself is never drawn anywhere, even while it streams. `NO_REPLY_SENTINEL`, `isNoReplyText` and `mayBecomeNoReplyText` come from `@opengeni/contracts/no-reply`, shared with Slack replies.
+
+  `agentSignals={false}` on `SessionConversation`, `MessageTimeline`, `NativeSessionScreen` and the native `MessageTimeline` now also keeps turn rows to their status (no step preview or host `turnSummary` facets) and shows an automation run as only its line and answer: no work row, nothing while it works, and nothing for a failure only an operator can fix. `automationRunOutcomesOnly`, `automationRunLine`, `isAutomationRunBatch` and `readableWorkIsEmpty` are exported for hosts that build their own timeline.
+
+- 248da65: A voice call on iPhone stays on the loudspeaker or receiver the person sees, instead of switching to the receiver by itself a few seconds in. When call audio starts, WebRTC applies its own voice-chat audio configuration, which falls back to the receiver; the call treated that as a new route and showed it. The native module now reports why the route changed (`routeChanged` carries a `reason`), and `useNativeRealtimeCall` puts audio back on the person's choice when only the session's configuration changed, while route changes from the person (the call screen, Control Center) or a device (AirPods, headphones) are kept. This covers calls started in the app and agent calls answered on the system call screen; every call starts on the loudspeaker.
+- b631728: An expired connector account is no longer invisible. When a refresh token is rejected and a connection moves to `needs_reauth`, the turn that hit it posts one inbox notice to the person who started that turn ("Gmail needs reconnecting", naming the account), deduplicated per connection. The turn notice for unavailable connectors now lists the accounts that need reconnecting with the day they stopped working, and `capability_catalog_search` says the same in the item's setup text and a new `setup.reconnect` list. `capability_authorization_request` takes an optional `connectionId` (picked automatically when exactly one account can be reconnected) and posts a card that reconnects that same account, instead of a fresh Connect card that could not finish because the account was already connected. The web and native cards show "Reconnect <service>" and skip the ownership choice.
+- fde0171: A React Native app no longer crashes when it returns to the foreground. The native environment shim called its `window` and `document` listeners with no event, so the `pageshow` handlers read `event.persisted` on `undefined` and threw. Every shimmed listener now receives a browser-shaped event (`type`, `target`, `currentTarget`, `timeStamp`, the usual no-op methods, `persisted: false` for `pageshow` and `pagehide`, `relatedTarget: null` for `focus` and `blur`); listener objects and `{ once: true }` work; a listener that throws is logged and the rest still run, instead of failing the app-state callback. The shimmed `document` also has `hasFocus()`. The `pageshow` handlers in `@opengeni/react` now tolerate a missing or partial event.
+- c8c10a8: A run with nothing for the person now leaves no trace for them. When a turn's answer is exactly `NO_REPLY` (for example an automation run that found nothing to do), the chat is not marked unread, no inbox reply item opens and no phone notification is sent. The run stays in the session's history. Migration 1289 changes the event cursor, inbox and push triggers; the web and native read-acknowledgement predicate follows the same rule.
+
+  A finished turn's phone notification now carries its answer, the same text the chat shows, instead of "The agent replied."; a turn with no answer sends none. Events that arrive close together already start one run, so they give one answer and one notification.
+
+  Internal IDs hidden from displayed system text no longer leave broken text behind. An ID now goes with what only named it: its label ("Organisation: <id>"), or a parenthetical that held only it ("(run <id>)"), and the punctuation around it is tidied, so "Connected. Organisation: <id>." reads "Connected." This applies to update summaries and to what an automation run's event says, on web and native.
+
+- 42c5ebd: A running startup step in the chat timeline now says how long it has been running, updated every second in its title the way the turn header does ("Preparing runtime and model request · 1m 21s"), and a running environment setup step names the environment ("Setting up cloudgeni"). Before, a long environment setup showed only "Setting up sandbox environment" with no time, so a slow setup looked stuck. Startup phase items carry a new optional `subject`, the environment name from `rig.setup.*` events. Settled steps keep their final duration.
+- 7f3617d: Selected text is clearly visible in dark and light themes. A new `--og-color-text-selection` token (a translucent blue) now drives the page selection, text fields (including the shared `Input` and `CopyField`, which had their own low-contrast selection colours), the code editor and the terminal. They used to take a translucent mix of the neutral grey accent, which in dark mode looked like one more grey surface. Hosts that want a branded selection colour override the new token; the selection no longer follows `--og-color-accent`. In the native composer, Android uses the token for the highlight, which was previously the opaque grey accent and left the selected text hard to read, while the caret and handles stay on the accent. On iOS the composer now uses the app's tint (system blue by default) instead of the grey accent.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [d66e22b]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [80ff42d]
+- Updated dependencies [5962929]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [52e1ed5]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [f987b58]
+- Updated dependencies [a505ce8]
+- Updated dependencies [532751d]
+- Updated dependencies [fff4a9f]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [06606ef]
+- Updated dependencies [888aaf5]
+- Updated dependencies [b631728]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [9788ab8]
+- Updated dependencies [11550b6]
+- Updated dependencies [7e28f18]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [7850181]
+- Updated dependencies [6c3fcf3]
+- Updated dependencies [fde0171]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [f65d130]
+- Updated dependencies [486e0bf]
+- Updated dependencies [c8c10a8]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [42c5ebd]
+- Updated dependencies [1010518]
+- Updated dependencies [5b15f1a]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [c82cbca]
+- Updated dependencies [7f3617d]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+- Updated dependencies [60a67e6]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/sdk@6.11.0
+  - @opengeni/react@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [d4bc733]
+- Updated dependencies [ed08f55]
+- Updated dependencies [b032ab0]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [dfe42f6]
+- Updated dependencies [f619179]
+- Updated dependencies [15763a2]
+- Updated dependencies [b089060]
+- Updated dependencies [6674146]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/sdk@6.10.0
+  - @opengeni/react@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- 54bf495: A paused chat no longer says it is working. Its turn row reads "Paused" with the clock stopped where the pause began, and switches back to working on Resume; paused time is not counted as work. This covers a chat's own Pause, a parent's and the workspace's. Sidebar rows mark paused work with a pause icon instead of the spinner, including a parent whose workers are paused, through the new `treeStats.pausedWorkDescendants` count. A sub-chat's descendant counts now also respect its ancestors' pauses. `MessageTimeline` in both `@opengeni/react` and `@opengeni/react-native` takes the live pause through its new `pause` prop (`timelineLivePause(session.effectiveControl)`); custom timelines can use `useTimelinePauses`.
+- Updated dependencies [331bc5e]
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/react@6.9.0
+  - @opengeni/sdk@6.9.0
+  - @opengeni/contracts@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [fbb70bc]
+- Updated dependencies [feaecf8]
+- Updated dependencies [b393cac]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/react@6.8.0
+  - @opengeni/sdk@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- cf35731: Only the owner of a personal (Only me) login can approve an action that runs on it. An approval runs on the accounts its message froze, so before this any member, workspace API key or Slack click by someone else could make an action happen as another person. The owner's personal API key and `asUser` tokens count as the owner. Approving such an action as anyone else now answers 403 with `details.code: "APPROVAL_REQUIRES_ACCOUNT_OWNER"` and a message naming who can approve (the SDK adds `isApprovalRequiresAccountOwnerError` and `APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE`); declining stays open to anyone who can control the chat, and actions on workspace logins keep their ordinary rules. A tool review adds the optional `approvedBy` ("you" or "account_owner") and `accountOwnerLabel` fields, and the review card says who can approve, or tells the owner in a shared chat that the decision is theirs. Slack cards for anyone else offer only Decline, and the desktop and mobile apps show or route a refused approval instead of failing.
+- Updated dependencies [c08233e]
+- Updated dependencies [cb37e4d]
+- Updated dependencies [0d04cf4]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/sdk@6.7.0
+  - @opengeni/react@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- Updated dependencies [62198d1]
+- Updated dependencies [fb49abf]
+- Updated dependencies [2c76a2a]
+- Updated dependencies [45f7296]
+- Updated dependencies [80eb21d]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [77bd008]
+- Updated dependencies [1650d7c]
+- Updated dependencies [4930632]
+- Updated dependencies [3cb05f9]
+  - @opengeni/react@6.6.0
+  - @opengeni/sdk@6.6.0
+  - @opengeni/contracts@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- d5ce7de: Transcribing a meeting again also writes its notes again when nobody has touched them. Before, the built-in summary only ever wrote a meeting's first notes, so after a re-run the notes still described the transcript the re-run replaced, for example claiming one speaker after the new transcript found two. Now a re-run starts the built-in summary when the notes were last saved by an earlier summary chat of the same meeting in which every turn was the service's; `meetingSummaryCandidate` returns their revision as `replacesRevision`, and `meetingSummaryPrompt` takes it, telling the chat to save over exactly that revision and to keep anyone else's notes. Notes a person edited, an automation wrote, or someone talked to the notes chat about are never replaced. A first summary's message is unchanged. The Transcribe again description says so, under new message keys (`meetings.detailPage.makesANewTranscriptNotesToo`, `native.meetings.meetingView.aNewTranscriptAndNotesToo`) so hosts translate it again.
+- Updated dependencies [485069a]
+- Updated dependencies [8fb2596]
+- Updated dependencies [7de2adf]
+- Updated dependencies [f1998df]
+- Updated dependencies [52403f0]
+- Updated dependencies [a8273ce]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [d5ce7de]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [05ce0d6]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [9d08d81]
+- Updated dependencies [4682263]
+- Updated dependencies [c77bf12]
+- Updated dependencies [6826a21]
+- Updated dependencies [cf6c808]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [c17e9a6]
+- Updated dependencies [b4eeaf6]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/react@6.5.0
+  - @opengeni/contracts@6.5.0
+  - @opengeni/sdk@6.5.0
+
+## 6.4.0
+
+### Minor Changes
+
+- b4e780e: Meetings from audio recorded elsewhere, such as a phone call recorded with the phone's own record button or a voice memo. Share it to the app, or pick it with the phone Meetings list's new Import a recording button, and it becomes a meeting with a transcript and notes. It is saved on the phone first and uploaded in the background.
+
+  - `useRecorder().importAudio(...)` (React) makes a meeting from a file.
+  - `@opengeni/react-native/meetings` adds `useSharedAudioImport`, `sharedAudioRedirect` for expo-router's `+native-intent`, `importAudioFile`, and the config plugin option `audioImport: true`. With that option, iOS accepts audio documents and Android shows the app under "Open with" for audio.
+  - `uploadRecordingAudio` reads an M4A file's length and recording date from its header when they aren't given (`audioFileDurationMilliseconds`, `audioFileCreatedAt`), and its recording now ends after the audio's length rather than when the upload started.
+
+### Patch Changes
+
+- c698d85: A phone meeting keeps recording with the screen locked. While the app was in the background, the recording screens still redrew several times a second (the level meter ran on the JavaScript thread and every clock, level and live-transcript change re-rendered the screens), which used enough CPU that iOS ended the app and the recording with it. Now the level meter is scaled on the native side and stops in the background, and `MeetingRecorderProvider` tells the screens nothing while the app is in the background; they get the latest state when it is back in front. Capture and upload are unchanged.
+- bf3cf84: Live transcripts on a model the deployment pays for now cost credits while credit billing is active: the payer is admitted before the live secret is minted (402 without credits, 403 `policy_blocked` when credits are turned off or the payer can't be identified), and each save charges the track's audio from its charged mark (`recording_tracks.live_charged_milliseconds`, migration 1131) to its streamed total at the model's voice price. The charge's usage receipt is recorded and the mark moved in the save's own transaction, so overlapping saves and retries charge each range once and a failed receipt fails the save for the recorder to retry; the debit follows the commit, and a failed one is applied from its receipt when the meeting is finalized or by the next voice admission. The duration is the recorder's report, recorded with basis `client_reported_duration`. The SDK reports a track's streamed total about every minute while streaming (silence too), on pause and resume, and before asking for another session; a track charged in credits gets no more live sessions once the time between those reports (counted for the track only up to a report of more audio, at most that audio plus a minute and 3 minutes each, so pauses never count) runs more than 10 minutes plus a quarter ahead of what it reported, once 4 sessions went unreported, or after 20 sessions plus one per 5 minutes reported (at most 100), or when the new session's hour would take the person's time no reported audio accounts for (pauses, unreported sessions, and time beyond the audio reported, without the track's minute of slack, so a trickle of audio doesn't cover it) in the last 24 hours in that workspace past 4 hours plus six times the live audio charged in credits (`LIVE_UNBACKED_PER_CHARGED`, so meetings of about 9 minutes or longer never use the day up and free provider time stays at most 4 hours plus six times what was paid), counted only within an hour of each session's start since a provider session runs at most an hour, with each session's whole hour counted up front and swapped at each report for what it actually left unaccounted plus what it could still run (so an abandoned session costs its hour, and one the provider never started gives it back), and stored per person and hour for tracks charged in credits only (`recording_live_unbacked_hours`, migration 1131; every API key of a workspace shares one bound, as keys record no person, while personal keys and delegated sessions count as their person; session requests of one bound, and saves on a session a previous release started, are serialized by an advisory lock, so a burst can't run over it; a session's time stays in the hour it began in, and hour rows are locked oldest first so concurrent requests can't deadlock) (409 `live_grant_limit` / `live_streamed_behind`); an honest recorder isn't refused for silence, long pauses, or quick pause and resume cycles (only a day with more pauses shorter than a session than the bound allows, or many live meetings under about 9 minutes, loses the live preview), the SDK asks for no new live session while paused, and the React Native recorder now reports its pauses, resumes and interruptions to the live transcript. `live.costUsd` stays the list price of everything streamed, and usage allowances that price unbilled use count only audio not charged in credits (`live_charged_cost_usd_micros`, and a same-signature `count_unbilled_model_allowance_debit()`), so charged audio never counts twice, also after a switch to an uncharged model (audio saved through a previous-release pod during the rollout is the exception, documented). Live-transcript refusals have their own wording. A live model with no credit price isn't served then (503 `model_unavailable`, `retryable: false`). The deployment's Azure Speech account without a voice input MAI price (OPENGENI_VOICE_INPUT_MAI_PRICING_JSON) doesn't transcribe meetings while credits are billed: the default and automatic choice move to a model that can run (a priced deployment model, a subscription or the workspace's key), `GET …/recording-models` lists it `available: false` with `unavailableReason: "unpriced"`, and a meeting that names it fails with `model_unavailable`, which the app explains and offers another model for. Credit admission's own policy refusal (credits off, unidentified payer) is now a 403 `policy_blocked` on meeting transcripts too, not a 500. The SDK's live transcriber treats 402, 429 and any `retryable: false` refusal as final instead of reconnecting all meeting, and retries its last save when recording stops. Legacy billing accounts (OPENGENI_BILLING_LEGACY_ACCOUNT_IDS, CloudGeni) keep today's behaviour: no admission, no charge, no price shown on live-only models, and unpriced models still served.
+- 3c16116: Deciding several parallel tool approvals now just works. A decision for an approval that is still undecided is accepted while the turn resumes from a sibling decision, instead of failing with "no unhandled approval is pending". One resume applies every decision made before it, so each decision no longer restarts the turn and asks the rest again, and an already decided approval is never asked again. Deciding the same approval twice is accepted once, and a real conflict says why: already approved or declined, already finished, or the turn ended. The chat, the sub-session card, the phone app and the embedded chat keep the undecided approvals up and decidable while the turn resumes. `approvalsDecidable(status)` is exported from `@opengeni/react` and `@opengeni/react/session`.
+- Updated dependencies [1f918a4]
+- Updated dependencies [106652b]
+- Updated dependencies [75d3c08]
+- Updated dependencies [de928fa]
+- Updated dependencies [92f419c]
+- Updated dependencies [000c023]
+- Updated dependencies [1e0a7ed]
+- Updated dependencies [641fd9e]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [e132b96]
+- Updated dependencies [9416f77]
+- Updated dependencies [b4e780e]
+- Updated dependencies [952d1d9]
+- Updated dependencies [61107a3]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [73f01eb]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a7b05f9]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [3c16116]
+- Updated dependencies [d784716]
+- Updated dependencies [d55f740]
+- Updated dependencies [4a48589]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [0d409a7]
+- Updated dependencies [1e98c19]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+- Updated dependencies [184b5d7]
+- Updated dependencies [aaf1758]
+- Updated dependencies [c825e31]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/react@6.4.0
+  - @opengeni/sdk@6.4.0
+
+## 6.3.1
+
+### Minor Changes
+
+- d91058a: Agents can call a person. The new `call_user` tool rings the person's phones with the system's incoming-call screen (CallKit on iOS, through a PushKit VoIP push) when something cannot wait, waits up to 40 seconds while it rings, and returns `answered`, `declined`, `missed` or `cancelled`. Answering opens the chat's voice call, which starts by saying why the agent called. Nothing rings until the person turns on "Let agents call this iPhone" on that phone (native push rule `call`); "Teammates' agents too" (`call_members`) lets agents of other workspace members call them. One call rings a person at a time, a chat calls at most three times an hour, and after a decline it cannot call again for 15 minutes. A missed call leaves a "Missed call" notification. New: `session.agentCall.ringing` and `session.agentCall.settled` events (also subscribable by workspace webhooks, so a product can ring its own app with its own push credentials), `GET /v1/workspaces/:workspaceId/agent-calls/:callId` with `/answer` and `/decline`, the SDK's `getAgentCall`, `answerAgentCall` and `declineAgentCall`, the native push device's `voipToken`, and in `@opengeni/react-native` `useIncomingAgentCalls` and `useNativeVoipToken`.
+- c35704f: Meetings name themselves. Nobody has to type a name: a meeting started without one is named after the event on its owner's connected Google or Outlook calendar at the time it started, or else, once its notes are written, from what was said (the built-in summary passes a short name to `meeting_notes_save` as the new `title`). A name someone types, at start or by renaming, always wins and is never replaced. Recordings carry `titleSource` (`person`, `calendar`, `conversation`, `app` or `default`; migration 1132 adds it, and existing recordings are `person`), and create requests may pass `titleSource: "app"` for a title the app only guessed, such as the desktop app's "Zoom meeting". The web and phone recorders no longer send a made-up date name, the recorder shows the calendar name once the server has it (`serverTitle` in the upload status), and the meeting page shows the new name when the notes arrive. Private, declined, cancelled and all-day events are never used, and the calendar lookup never holds up capture.
+
+### Patch Changes
+
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [3972ff6]
+- Updated dependencies [d872b12]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [b9d38df]
+- Updated dependencies [c0b945b]
+- Updated dependencies [d39663d]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [99159e9]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [d3f93eb]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [375ea76]
+- Updated dependencies [139a2be]
+- Updated dependencies [21390fc]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+  - @opengeni/contracts@6.3.0
+  - @opengeni/react@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/sdk@6.2.0
+  - @opengeni/react@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- d60e6ec: Command steps in a chat's activity read as what they did in plain words ("Downloaded email-review.json", "Read report.md", "Ran make_chart.py", or the tool an `ogtool call` ran, such as "Search messages") instead of the raw `$ command`. The full command stays one click away, at the top of the step's output. Signed and token-bearing links (storage signatures such as `sig=` or `X-Amz-Signature=`, and `token=`-style parameters) never show their query as text, in commands, command output or tool payloads. Credentials are hidden too: well-known token formats, `Authorization` and `Cookie` headers (including `[name, value]` header pairs), `.netrc` passwords, password flags such as `mysql -p…`, `sshpass -p` and `docker login -p`, and values under secret-looking names. Command fields are read as commands, while output and prose are read as text, so code (calls, member access, constants) and ordinary words stay visible, and saved secret references stay intact. `@opengeni/react/timeline-model` exports `commandStepTitle`, `redactSignedUrls`, `redactPayload` and the `CredentialContext` type, and the English catalog gains the `timeline.commandStep.*` keys. Plain tool details are unchanged.
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [d60e6ec]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/react@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- 1271da5: Cancel throws a dictation away. Cancel, Escape and the phone's cancel now delete the dictation under way, while it records or while it is being transcribed, so no composer offers it again. Before, speech longer than a few seconds was kept and the composer offered it later. A dictation an earlier page left only stops being retried when cancelled, and dictations that fail are still kept and offered as before.
+
+  The desktop app keeps a cancelled dictation's speech in Recent dictations, marked "Cancelled, not transcribed", to play or transcribe again there; the retry shortcut transcribes it and types it. `useVoiceInput` gives `onAudio` the cancelled copy with `cancelled: true`, the `cancelled` desktop dictation report carries its `audio`, and history entries have `cancelled: true` until they are transcribed again.
+
+  `useVoiceInput` has a new `setAside()` for interruptions other than the person's Cancel, such as live voice taking over or another chat opening: capture stops and the speech stays saved to insert later, as `cancel()` did before. The composer's cancel button reads "Discard dictation".
+
+- 7b98d86: Agents can offer options as an interactive answer. An `opengeni-ui` fence holds one JSON object with the options, the fields to compare, an optional chart field and whether the person may pick; the conversation draws it as cards, a sortable table (web) and a bar chart, with filter chips, the best value per field marked, and a pick bar that sends the choice as the person's next message. The answer grows in place while it streams and stays read only in ended sessions. `InteractiveAnswer`, `InteractiveAnswerProvider` and `browserInteractiveAnswerStore` are exported from `@opengeni/react`, the renderer-neutral model from `@opengeni/react/interactive-answer-model`, and `NativeSessionScreen` accepts an `answerStore`. The bundled `visualize` Skill describes the fence.
+- cebc433: Question cards offer "Let the agent decide". On every ordinary question (never a secret, a Skill review or a secret approval; tool approvals stay human-only) one secondary action replaces Skip and settles the request as `{ outcome: "skipped", agentDecides: true }`, accepted even when the request does not allow an ordinary skip. The agent's tool result carries a note to make its own best choice and say in one sentence what it chose, and the settled card reads "You let the agent decide". On a sub-session's question shown in a parent chat, the action instead sends the parent's own agent a message naming the exact request; the card says "Your agent is deciding" and stays answerable, and the message shows what the agent decided once the sub-session's request settles. `HumanInputForm` takes `onLetAgentDecide` and `agentDeciding`, `HumanInputSurface` forwards them, and `humanInputAgentMayDecide` tells which requests qualify.
+
+  A sub-session's blocking question now also wakes a parent whose goal is completed (the goal is not reopened), so the parent agent can answer it before the person has to. Before, such a parent kept the notice unread and the person was the only one asked. Agents are told to answer a child's question from their task context before the person has to, and to do the agent work it asks for (such as starting a reviewer) and then answer. The `request_human_input` description tells a sub-session to message its parent agent, rather than ask the person, when what it needs is agent work.
+
+- 449bcae: An MCP server can now ask the person a question in the middle of a tool call (MCP form elicitation, revision 2026-07-28, multi round-trip): a confirmation or a form to fill in. Model calls to third-party MCP servers declare that they can answer forms (form mode only; URL mode is not offered, and a server that asks for a page anyway ends the call with an error result). When the server answers `input_required`, the call pauses as an approval of the same call, the person answers in the approval card (possibly hours later, including in unattended runs), and the call is retried with the answer and the server's byte-exact `requestState`. Declining is sent to the server too (`action: "decline"`), so it can release what it was holding and finish the call its own way; the model then sees the server's result followed by a short note that the person declined. The model never sees the question or the answers. `session.requiresAction` approvals carry a new `elicitation` field (`{ server, round, requests }`); `user.approvalDecision` takes `content` and `elicitationRound`. Approving an approval with `elicitation` requires `elicitationRound` to be the current question's round, and the API checks `content` against the server's form (422 with the reason otherwise), so a stale card or a surface that never showed the question cannot answer a newer one. The question shows on every approval surface: the session card (web and native), the inbox (the question as the title; Allow for a short confirmation, Answer for a form), phone push ("<server> asks: …", opening the app, with no lock-screen actions) and private Slack cards (Allow for a confirmation, a link to answer a form in Opengeni). Connector action records gain `input_round`, so a tool with an Ask policy or saved rule can be asked more than once and answered in a later worker attempt. New exports: the `McpElicitation*` schemas, `MCP_ELICITATION_MAX_ROUNDS` and helpers in `@opengeni/contracts` (also at `@opengeni/contracts/mcp-elicitation`), and their types including `McpElicitationAnswer` in `@opengeni/sdk`; `InboxItem.serverQuestion` (`{ server, kind, round }`); `sendApprovalDecision` accepts `content` and `elicitationRound`; React `ApprovalSurface` renders the question and passes `{ content, elicitationRound }` to `onApprove` as its second argument, and `McpElicitationRequest` is exported from `@opengeni/react/session-ui`; React Native `ApprovalStrip`'s `onDecide` receives the same answer as its third argument; `@opengeni/testing/mcp-elicitation-server` is a fake server for client tests. See `docs/mcp-elicitation.md`.
+- d215541: The phone meeting screen can now teach Opengeni your voice, as the web page does. Naming a speaker offers "It's me", and naming yourself asks once whether to remember your voice so later meetings suggest your name. A name suggested from a voice shows as Suggested and is confirmed or turned down from its speaker (with Undo), and a named person's voice is remembered or forgotten from their speaker. Someone outside the workspace is remembered only after confirming they agreed. A new name typed on the phone now joins the people directory, as on the web, so their voice can be remembered too. `useMeetingView` gains `viewer` and `voiceRecognition` options for this, and `recordings` to use a recordings client of the host's own.
+- ce001ee: Agents can mark one option of a question as recommended, ask a yes/no question whose two buttons use their own words (`confirm: true` with two options, the action first), and attach a short preview to each option, such as the exact text a choice would send. The web and phone question cards show a "Recommended" badge, the two decision buttons and the previews.
+- 71bcf11: A saved message that was sent for one of the person's machines no longer leaves the chat at a dead end after the chat moves to another of their machines. The chat now names the machine the message was sent for, offers "Run it on …" (move back, then one recheck), and explains how to send it again on the current machine instead of offering a recheck that can't pass. `SessionMachineAccess` gains `queuedTurnNotApprovedHere` and `queuedTurnApprovedMachines` (machine names only for the message's sender), and `@opengeni/react/session` exports the shared model. The generic "not approved for this chat" wording no longer tells the owner to ask the owner.
+
+### Patch Changes
+
+- 73d6402: A question card with one question now says "Send answer" instead of "Send answers", on the web and on the phone. `HumanInputFormMessages` gains an optional `submitOne` label for that case. A host that sets its own `submit` label keeps it for single questions too unless it also sets `submitOne`.
+- 9d2f49f: Follow-ups to "Let the agent decide":
+
+  - `HumanInputFormMessages.letAgentDecide` and `agentDeciding` are optional. A host's complete message set written before they existed type-checks again, and the card uses the default copy for any key the host leaves unset.
+  - The chat record of a hand-off stops reading the sub-session's question once it is settled.
+  - The record's words, and the text of the hand-off message, come from the host's messages (`humanInputDelegation.message`, `humanInputDelegation.messageWithMore`, `messageTimeline.agentDecided`, `messageTimeline.agentDecidedSummary`, `messageTimeline.answeredSummary`).
+  - A hand-off another member sent no longer reads "You let the agent decide". It reads "Let the agent decide" under that member's name.
+  - A hand-off that fails to send shows the API's own message on the card (for example "The service is updating. Try again in a moment."). It no longer shows the generic "The request could not be completed."
+
+- 66d1e08: Approvals waiting in the inbox and in phone and desktop notifications now say what the action does and where it runs ("Move 3 messages to Trash", Gmail) instead of the raw tool name ("batch_modify_messages"). A pending approval's `display.title` is set to the same title its review card shows, an inbox approval's `body` names the integration (and the account when there are several), and the push reads "Needs your approval: … (Gmail)". The inbox shows that integration in the row's details line instead of a code chip.
+- 7400009: Opening a chat no longer loads MathJax up front. The built timeline imported it as the module loaded, which crashed release builds whose global `document` is partial; MathJax now loads only when a message first shows math.
+- 4b0dd0b: Approval cards for long HTML emails now list every link target the reader doesn't show in full, however long the message is: a "Links:" line leads the preview, and past its limit it says "Details lists every link": the message's Details now lead with every link target, one per row. Link addresses decode exactly as a browser does (every named reference, numeric references without a semicolon), a form's submit destination counts as a link, and paragraph and line breaks read as breaks. Operation titles: Stripe-style ids such as `PostChargesChargeCapture` read "Capture charge", and `users.user.sendMail` reads "Send an email".
+
+  The integration Connect card keeps every line true: when it can no longer see the sign-in window while waiting (closed, or cut off by the provider's page, as Google's sign-in pages do) it keeps waiting and says "Finish signing in to {name}. If you closed the sign-in window, open it again." with an Open sign-in window button, the "You can close the sign-in window." reminder goes once the window closes, and keyboard focus stays on the card after connecting. The code step reads in order (code, a button-styled "Open the sign-in page", then what to do there) on web and phone, and "Waiting for authorization" now reads "Waiting for you to sign in".
+
+- a227067: A phone approval card now shows each field in full, as the web card does, so a person can read the whole message before approving. Only a value the server cut short keeps a 6-line clamp, with all of it under Details. When the review body is taller than its window, its scroll bar flashes once on iOS and stays visible on Android.
+- fd80817: A person's message no longer waits behind a turn parked on a subscription usage limit (or an account that needs reconnecting). Sending a message now replaces the parked turn and starts right away on the model it was sent with, the same way a message replaces a pending decision. A paused chat, a chat held by used-up Opengeni allowance or credits, a queued-prompt edit, and agent or machine input keep ordinary queueing. `@opengeni/react` adds `promptSendDestination`, which web, embedded and native composers use to show such a message in the chat instead of the queue; the console keeps Pause available while a turn is parked.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [83ed5c0]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [20f51f3]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [d8a1b83]
+- Updated dependencies [aa6b340]
+- Updated dependencies [f2e1953]
+- Updated dependencies [d96e0c9]
+- Updated dependencies [f0fe215]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [a4d583d]
+- Updated dependencies [f0708a1]
+- Updated dependencies [1271da5]
+- Updated dependencies [3fc010b]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [9d2eca5]
+- Updated dependencies [09972b5]
+- Updated dependencies [73d6402]
+- Updated dependencies [a6004c8]
+- Updated dependencies [7b98d86]
+- Updated dependencies [9d2f49f]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [5c0e0cc]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [bd7200d]
+- Updated dependencies [1b856da]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [a2d28b5]
+- Updated dependencies [d166d88]
+- Updated dependencies [047bf8c]
+- Updated dependencies [d215541]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [36c1fea]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [fd80817]
+- Updated dependencies [a744c56]
+- Updated dependencies [717284e]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [4246602]
+- Updated dependencies [b0f7062]
+- Updated dependencies [579964c]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [2d026a5]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [a84f101]
+- Updated dependencies [b12e9db]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [af0437b]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/react@6.0.0
+  - @opengeni/sdk@6.0.0
+
+## 5.5.1
+
+### Minor Changes
+
+- e473f84: Products that embed meetings get the workspace's own choices without extra wiring, and a meetings-only phone app no longer gets call setup.
+
+  - The recorder on `MeetingsListPage` (web) and `MeetingsList` (React Native) starts with the live transcript on when the workspace's `recordings.liveTranscript` setting says so. `GET /v1/workspaces/:workspaceId/recording-models` now returns `liveTranscript`, and `useRecordingModels` returns it too (undefined until the server answers, or from an older server). A host's own `liveTranscriptDefault` still wins; before, a host that passed none always started with it off, and a phone app had no way to follow the setting at all.
+  - The Expo config plugin sets up calls only when asked: `["@opengeni/react-native", { "recording": true }]` now adds just the background recording setup, without the `voip` background mode, the `INStartCallIntent` activity or the generated Siri and Shortcuts intent. Add `call` to set up calls as well, or pass `"call": false` to leave them out of any entry. The plugin without options still sets up calls, as before.
+  - On phones, "No sound is reaching the microphone" no longer appears during ordinary pauses. It now shows only when a recording has delivered digital silence since it started or resumed, which is what a muted, blocked or broken microphone delivers; a microphone that has picked up any sound is working, however long the pause.
+
+### Patch Changes
+
+- c866336: Connecting a computer that isn't connected yet is now an obvious action in the in-chat Connected Machine card. The card ends with an **Another computer** row whose **Connect** opens the connect flow, instead of a small link under everything else, and no listed machine gets the primary button just because it is the only one online. Screen control and the Chrome extension rows show only for the machine this chat runs on, so steps about a machine the person may not mean no longer compete with choosing or connecting the right one. Without a host connect callback, the embedded card's **Connect another computer** opens in place as a disclosure that says the steps happen on the other computer.
+
+  On the web, the shared `ThisComputerCard` keeps **Connect another computer** as a secondary action beside a connected computer when the host supplied a connect path (`onConnect`, `downloads`, `openAppUrl` or `downloadUrl`). On the phone, `useNativeInChatConnect` accepts an optional `shareConversation` callback; with it, the computer offer explains that a computer connects from the computer itself and offers **Share link to this chat**.
+
+- a4b57e6: In-chat connection requests now read the same to the person and to the agent, and the sign-in window ends cleanly in embedded chats. When the person in the chat can't connect the requested integration from the card (their access doesn't allow it), `capability_authorization_request` now tells the agent so, instead of the generic "posted for confirmation" message, so it no longer asks them to use a card that can't help them. Results for people who can connect are unchanged. The card and the server share one rule for this decision (`inChatCapabilitySetup` in contracts), and the server applies it to the same access the person's chat has: what their sign-in could do when they sent the turn's message, or their latest message in that chat for a turn the platform started for them, such as a wake-up, a child's result or a goal continuation (an embed token narrows it, and their own workspace counts without a membership). Without such a message it falls back to their membership (`readTurnSenderAccess` in db). The console's chat card uses the same rule, so it no longer offers Connect to a member the agent was told can't connect.
+
+  In-chat connect cards also start sign-in with a new optional `finishInPopup: true` flag on `POST /v1/workspaces/:workspaceId/connect/attempts`. The provider's callback then lands on a small server page that closes the sign-in window (or tells the person they can close it) instead of loading a second copy of the host page in the popup. Without the flag the return URL behaves as before. Against an older server that rejects the unknown field, `ConnectController.begin` starts again without it, so sign-in keeps working and returns to the host page as before. Browser cards set it, because they sign in through a popup. Phone cards don't, because the system sign-in browser returns to the app.
+
+  Reviewed catalog integrations no longer carry an "MCP server" label on their connection cards and dialogs, on the web and on the phone. They read as the service itself, with its name and provider. Servers someone added by hand, and registry entries nobody reviewed, keep the label (`showsMcpServerLabel` in `@opengeni/react/in-chat-connect-model`).
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [c866336]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [133a221]
+- Updated dependencies [729329e]
+- Updated dependencies [2483f32]
+- Updated dependencies [cc59c02]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [1cc657b]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [52a0439]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [5ea8c5c]
+- Updated dependencies [a56e1ea]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/react@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes

@@ -341,7 +341,7 @@ async function installFacetFixture(
     facetDefinitions: [
       {
         facetKey: "source",
-        kind: "knowledge_source",
+        kind: "inbound_trigger",
         configSchema: {
           type: "object",
           properties: { source: { type: "string" } },

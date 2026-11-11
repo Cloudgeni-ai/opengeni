@@ -1,4 +1,4 @@
-import { ArchiveConfirmationProvider } from "../lib/archive-session";
+import { SiteToolConsentProvider } from "../lib/site-tool-consent";
 // The Opengeni session app for an embedding page that already holds an
 // authenticated API client (a first-party side pane such as the Excel add-in,
 // the desktop app, a playground). It renders the web app's own session shell,
@@ -25,10 +25,12 @@ import { PortalContainerProvider } from "../../ui/portal-container";
 import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "../components/common";
+import { ConversationRenderBoundary } from "../../components/conversation-render-boundary";
 import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
 import { CreditRequiredGate } from "../components/credit-required-gate";
+import type { SessionStarter } from "../components/new-session-starters";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
@@ -126,6 +128,13 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Suggestions under the new-chat composer in place of Opengeni's own, such
+   * as tasks that fit the app the chat sits in. Each puts its prompt in the
+   * composer for the person to edit and send. An empty list shows none; the
+   * `starters` feature still turns them off.
+   */
+  starters?: readonly SessionStarter[] | undefined;
   /**
    * Opens Opengeni object links in agent messages (files, Sites, editable
    * artifacts) the host's way, such as its own page for an artifact. Return
@@ -234,9 +243,8 @@ function createEmbedStateHost(
         headers,
         fetch: fetchImpl,
         beginSharedRead,
-        onDeprecation: false,
         apiContract: "compatible",
-      }),
+      }).withSessionResponse("chat"),
     fetchClientConfig: (signal, workspaceId) =>
       api.request<ClientConfig>(
         workspaceId
@@ -287,8 +295,21 @@ function SessionAppRoot(props: { className?: string | undefined; children: React
   );
 }
 
-/** The session page or the new-chat page, from the in-memory location. */
+/**
+ * The session page or the new-chat page, from the in-memory location. A
+ * failure (including code that didn't download) stays inside the app instead
+ * of blanking the host page, and opening another screen gets a fresh attempt.
+ */
 function SessionAppRoutes({ workspaceId }: { workspaceId: string }) {
+  const location = useLocation();
+  return (
+    <ConversationRenderBoundary resetKey={`${workspaceId}:${location.pathname}`}>
+      <SessionAppRoute workspaceId={workspaceId} />
+    </ConversationRenderBoundary>
+  );
+}
+
+function SessionAppRoute({ workspaceId }: { workspaceId: string }) {
   const location = useLocation();
   const sessionId = sessionIdIn(location.pathname);
   const launch = parseComposerLaunchSearch(location.search);
@@ -429,14 +450,14 @@ function SessionAppGates({
     const context = state.appContext;
     content = (
       <AppContext.Provider value={context}>
-        <ArchiveConfirmationProvider>
+        <SiteToolConsentProvider>
           <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
-          <CreditRequiredGate
-            creditRequired={state.creditRequired}
-            setCreditRequired={state.setCreditRequired}
-            accessContext={state.accessContext}
-          />
-        </ArchiveConfirmationProvider>
+        </SiteToolConsentProvider>
+        <CreditRequiredGate
+          creditRequired={state.creditRequired}
+          setCreditRequired={state.setCreditRequired}
+          accessContext={state.accessContext}
+        />
       </AppContext.Provider>
     );
   }
@@ -504,6 +525,7 @@ function SessionAppForWorkspace(props: SessionAppProps) {
   useEffect(() => messageContext.set(props.messageContext), [messageContext, props.messageContext]);
   const pdfPreview = props.surfaces?.pdfPreview;
   const editableArtifact = props.surfaces?.editableArtifact;
+  const starters = props.starters;
   const host = useMemo<AppHost>(
     () => ({
       navigation,
@@ -513,9 +535,10 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      ...(starters ? { starters } : {}),
       onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
-    [api, editableArtifact, messageContext, navigation, pdfPreview],
+    [api, editableArtifact, messageContext, navigation, pdfPreview, starters],
   );
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">

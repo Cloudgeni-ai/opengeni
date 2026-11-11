@@ -8,20 +8,18 @@ import {
 } from "../text-models";
 import {
   getWorkspace,
-  readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   subscriptionCoreXaiBearer,
   type Database,
   type SubscriptionCoreFetch,
 } from "@opengeni/db";
 import {
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
+  currentXaiClientVersion,
   XAI_PUBLIC_API_BASE_URL,
 } from "@opengeni/xai-subscription";
 import { workspaceXaiOperationAvailable } from "../../xai-operation-availability";
-import { coreTranscriptionUnavailable, transcribeOnSubscriptionCore } from "./subscription-core";
+import { transcribeOnSubscriptionCore } from "./subscription-core";
 
 const TRANSCRIBE_URL = `${XAI_PUBLIC_API_BASE_URL}/stt`;
 
@@ -76,14 +74,6 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
           requestId,
           signal,
         });
-      const route = await readSubscriptionCoreProviderRouteForWorkspace(input.db, {
-        accountId,
-        workspaceId,
-        provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
-      });
-      // SuperGrok transcribes only on the shared core; any other route
-      // (maintenance, or no receipt) is unavailable.
-      if (route !== "core") throw coreTranscriptionUnavailable();
       // Decision 3: shared organization- or workspace-scoped connections
       // only; personal SuperGrok accounts never transcribe on the core.
       return textTranscriptionResult(
@@ -127,8 +117,8 @@ async function sendXaiTranscription(
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": `opengeni/${XAI_CLIENT_VERSION}`,
-      "x-grok-client-version": XAI_CLIENT_VERSION,
+      "User-Agent": `opengeni/${currentXaiClientVersion()}`,
+      "x-grok-client-version": currentXaiClientVersion(),
       "x-grok-client-identifier": "opengeni",
       "x-grok-client-mode": XAI_CLIENT_MODE,
       "x-grok-session-id": input.requestId,

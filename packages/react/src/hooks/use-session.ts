@@ -1,4 +1,10 @@
-import type { Session, SessionEvent } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readFreshSessionDetail } from "../lib/session-detail-read";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
@@ -10,16 +16,17 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-export type UseSessionOptions = EmbeddedSessionReadClientOverride &
-  SessionEventFeedOptions & {
-    /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
-    pollIntervalMs?: number | undefined;
-    /** Optional shared causal clock invoked when each network read starts. */
-    beginRead?: (() => number) | undefined;
-  };
+export type UseSessionOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionReadClientOverride<Client> &
+    SessionEventFeedOptions & {
+      /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
+      pollIntervalMs?: number | undefined;
+      /** Optional shared causal clock invoked when each network read starts. */
+      beginRead?: (() => number) | undefined;
+    };
 
-export type UseSessionResult = {
-  session: Session | null;
+export type UseSessionResult<S extends Session = FullSession> = {
+  session: S | null;
   loading: boolean;
   error: Error | null;
   /** Monotonic revision of accepted authoritative detail reads. */
@@ -28,7 +35,7 @@ export type UseSessionResult = {
   readGeneration: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
-  updateTitle: (title: string) => Promise<Session | null>;
+  updateTitle: (title: string) => Promise<S | null>;
   /** True while a rename is in flight. */
   updating: boolean;
   mutationError: Error | null;
@@ -43,6 +50,10 @@ export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
 function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
   return (
     isTitleEvent(event) ||
+    // Description or avatar edits (by a person or the agent) refresh the header.
+    event.type === "session.profile_set" ||
+    // The chat's model, effort or speed changed (for example by the agent).
+    event.type === "session.model_settings.updated" ||
     event.type.startsWith("session.command.") ||
     event.type.startsWith("session.wait.") ||
     event.type === "session.status.changed" ||
@@ -53,8 +64,16 @@ function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
 export function useSession(
   sessionId: string | null | undefined,
-  options: UseSessionOptions = {},
-): UseSessionResult {
+  options?: UseSessionOptions,
+): UseSessionResult;
+export function useSession(
+  sessionId: string | null | undefined,
+  options: UseSessionOptions<ChatClient>,
+): UseSessionResult<Session>;
+export function useSession(
+  sessionId: string | null | undefined,
+  options: UseSessionOptions<ChatClient> = {},
+): UseSessionResult<Session> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);

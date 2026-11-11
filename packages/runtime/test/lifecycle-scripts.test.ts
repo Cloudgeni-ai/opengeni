@@ -1244,6 +1244,129 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("broker insteadOf rewrites leave repositories that only share a URL prefix untouched", () => {
+    // Regression: a brokered `https://github.com/acme/app` rewrite captured the
+    // app-installation repository `https://github.com/acme/app-demos.git` too,
+    // because Git matches insteadOf by plain prefix. Its fetch then went to
+    // `<broker>-demos.git` and failed with "Git repository route not found".
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-http-broker-siblings-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const appBroker = "https://broker.example.test/v1/git/personal/route-app";
+      const opsBroker = "https://broker.example.test/v1/git/personal/route-app-ops";
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app",
+          ref: "main",
+          provider: "github" as const,
+          connectionType: "github_personal" as const,
+          credentialBindingId: "personal-binding",
+          repositoryId: "101",
+          access: "write" as const,
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app-ops",
+          ref: "main",
+          provider: "github" as const,
+          connectionType: "github_personal" as const,
+          credentialBindingId: "personal-binding",
+          repositoryId: "102",
+          access: "read" as const,
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/app-demos.git",
+          ref: "main",
+          provider: "github" as const,
+          githubInstallationId: 7,
+          githubRepositoryId: 103,
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "personal-binding",
+          provider: "github" as const,
+          token: "broker-bearer",
+          providerBindingCount: 2,
+          transport: {
+            kind: "http_broker" as const,
+            repositories: [
+              { repositoryUri: "https://github.com/acme/app", brokerUri: appBroker },
+              { repositoryUri: "https://github.com/acme/app-ops", brokerUri: opsBroker },
+            ],
+          },
+        },
+        {
+          credentialBindingId: "github-installation:7",
+          provider: "github" as const,
+          token: "installation-token",
+          providerBindingCount: 2,
+        },
+      ];
+      const brokerSeedPath = join(root, "sibling-broker-seed");
+      writeFileSync(brokerSeedPath, "broker-bearer", { mode: 0o600 });
+      const refresh = gitCredentialBindingTokenRefreshCommand(bindings, [
+        {
+          bindingHash: gitCredentialBindingHash(bindings[0]!.credentialBindingId),
+          path: brokerSeedPath,
+        },
+      ]);
+      const setup = runScript(`${refresh}\n${setupScript(resources, bindings)}`, { HOME: home });
+      expect(setup.output).toBe("");
+      expect(setup.status).toBe(0);
+
+      const effectiveUrl = (url: string) =>
+        execFileSync("git", ["ls-remote", "--get-url", url], {
+          cwd: root,
+          env: { HOME: home },
+          encoding: "utf8",
+        }).trim();
+      // The brokered repositories, and paths below them, still reach the broker.
+      expect(effectiveUrl("https://github.com/acme/app")).toBe(appBroker);
+      expect(effectiveUrl("https://github.com/acme/app/")).toBe(`${appBroker}/`);
+      expect(effectiveUrl("https://github.com/acme/app-ops")).toBe(opsBroker);
+      // The `.git` clone URL GitHub shows is the same repository and reaches
+      // the same broker route.
+      expect(effectiveUrl("https://github.com/acme/app.git")).toBe(appBroker);
+      expect(effectiveUrl("https://github.com/acme/app.git/")).toBe(`${appBroker}/`);
+      expect(effectiveUrl("https://github.com/acme/app-ops.git")).toBe(opsBroker);
+      // Repositories whose URL merely starts with a brokered one stay put,
+      // whether attached through another binding or cloned by hand.
+      for (const sibling of [
+        "https://github.com/acme/app-demos.git",
+        "https://github.com/acme/app-demos",
+        "https://github.com/acme/app.github.io",
+        "https://github.com/acme/app.git-tools",
+        "https://github.com/acme/app_tools",
+        "https://github.com/acme/app2",
+        "https://github.com/acme/app-ops-archive",
+        'https://github.com/acme/app"quoted\\name',
+      ]) {
+        expect(effectiveUrl(sibling)).toBe(sibling);
+      }
+
+      const fill = (host: string, path: string) =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=${host}\npath=${path}\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill("github.com", "acme/app-demos.git")).toContain("password=installation-token");
+      expect(fill("broker.example.test", "v1/git/personal/route-app")).toContain(
+        "password=broker-bearer",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("path-aware Git helper treats custom ports as distinct remote hosts", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-git-binding-ports-"));
     try {
@@ -1582,6 +1705,28 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
         "AZ=azdo-wrapper-1\n",
       );
+      // A credential profile that delivered GH_TOKEN to the command wins over
+      // the binding token file; one that delivered other names does not.
+      expect(
+        execFileSync("gh", [], {
+          env: {
+            ...wrapperEnv,
+            GH_TOKEN: "profile-fake-token",
+            OPENGENI_CREDENTIAL_PROFILE_VARS: "AZURE_CLIENT_ID,GH_TOKEN",
+          },
+          encoding: "utf8",
+        }),
+      ).toBe("GH=profile-fake-token\n");
+      expect(
+        execFileSync("gh", [], {
+          env: {
+            ...wrapperEnv,
+            GH_TOKEN: "stale-ambient-token",
+            OPENGENI_CREDENTIAL_PROFILE_VARS: "AZURE_CLIENT_ID,GH_TOKENS",
+          },
+          encoding: "utf8",
+        }),
+      ).toBe("GH=ghs-wrapper-1\n");
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
       rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), {
@@ -1598,7 +1743,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
-  test("clone is idempotent on a valid work tree and RE-MATERIALIZES a partial (interrupted) tree", () => {
+  test("clone is idempotent on a valid work tree and moves a partial (interrupted) tree aside before re-cloning", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
       const origin = makeOrigin(root);
@@ -1620,17 +1765,427 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(second.output).toContain("already present");
       expect(readFileSync(join(target, "WORK.md"), "utf8")).toBe("agent work\n");
 
-      // partial tree (interrupted materialization: files but no .git) -> rebuilt
+      // partial tree (interrupted materialization: files but no .git) -> moved
+      // aside, never deleted, and rebuilt
       rmSync(join(target, ".git"), { recursive: true, force: true });
       const third = runScript(script, env);
       expect(third.status).toBe(0);
       expect(third.output).toContain("Re-materializing partial repository resource");
       expect(existsSync(join(target, ".git"))).toBe(true);
       expect(existsSync(join(target, "README.md"))).toBe(true);
+      expect(existsSync(join(target, "WORK.md"))).toBe(false);
+      const [recovered] = recoveredSiblings(target);
+      expect(recovered).toBeDefined();
+      expect(readFileSync(join(recovered!, "WORK.md"), "utf8")).toBe("agent work\n");
+      expect(third.output).toContain(
+        `Notice: moved repository folder aside []: ${target}\t${recovered}\tunreadable`,
+      );
       // no tmp clone leaked beside the target
       expect(
         readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  /** The `<target>.opengeni-recovered-*` siblings of a repository folder. */
+  function recoveredSiblings(target: string): string[] {
+    const parent = join(target, "..");
+    const name = target.slice(target.lastIndexOf("/") + 1);
+    return readdirSync(parent)
+      .filter((entry) => entry.startsWith(`${name}.opengeni-recovered-`))
+      .sort()
+      .map((entry) => join(parent, entry));
+  }
+
+  /** Every copy of the target, in place or moved aside, still holding `file`. */
+  function copiesHolding(target: string, file: string): string[] {
+    return [target, ...recoveredSiblings(target)].filter((dir) => existsSync(join(dir, file)));
+  }
+
+  const commitEnv = {
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+  };
+
+  test("a repository folder owned by another user is trusted with safe.directory and kept, never re-cloned", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-owner-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "owned");
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+
+      // Git's own switch for "this repository belongs to someone else", the
+      // state `chown -R 1000:1000 <repo>` leaves for a root setup user.
+      const otherOwner = { HOME: home, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+      const run = runScript(script, otherOwner);
+      expect(existsSync(join(target, "dc-uncommitted.txt"))).toBe(true);
+      expect(run.status).toBe(0);
+      expect(run.output).toContain("owned by another user; added it to safe.directory");
+      expect(run.output).toContain(`Repository resource already present at ${target}`);
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+      expect(
+        execFileSync("git", ["config", "--global", "--get-all", "safe.directory"], {
+          env: { HOME: home },
+        }),
+      ).toBe(`${target}\n`);
+
+      // Later turns find the trusted folder readable and add nothing again.
+      const again = runScript(script, otherOwner);
+      expect(again.status).toBe(0);
+      expect(again.output).not.toContain("safe.directory");
+      expect(
+        execFileSync("git", ["config", "--global", "--get-all", "safe.directory"], {
+          env: { HOME: home },
+        }),
+      ).toBe(`${target}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a repository with a corrupt HEAD is moved aside with its work and cloned fresh", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-corrupt-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "corrupt");
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+
+      const run = runScript(script, { HOME: home });
+      // The uncommitted file survives, in the moved copy.
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
+      expect(run.status).toBe(0);
+      const recovered = recoveredSiblings(target);
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatch(/\.opengeni-recovered-\d{8}T\d{6}Z$/u);
+      expect(readFileSync(join(recovered[0]!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(readFileSync(join(recovered[0]!, ".git", "HEAD"), "utf8")).toBe("not a ref\n");
+      expect(run.output).toContain(
+        `Notice: moved repository folder aside []: ${target}\t${recovered[0]}\tunreadable`,
+      );
+      // A fresh, readable clone took its place.
+      expect(execFileSync("git", ["-C", target, "status", "--porcelain"])).toBe("");
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+      expect(existsSync(join(target, "dc-uncommitted.txt"))).toBe(false);
+
+      // A second corruption in the same second gets its own recovery folder.
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      expect(recoveredSiblings(target)).toHaveLength(2);
+      expect(
+        readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned repository keeps the agent's commits on the pin in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-pinned-"));
+    try {
+      const origin = makeOrigin(root);
+      const first = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "pinned");
+      const pinned = (expectedCommitSha: string) =>
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha,
+        });
+      expect(runScript(pinned(first), { HOME: home }).status).toBe(0);
+
+      // The agent commits on top of the pinned commit: that is the pin plus
+      // its work, so it stays in place on later turns.
+      writeFileSync(join(target, "agent.txt"), "committed\n");
+      execFileSync("git", ["-C", target, "add", "agent.txt"]);
+      execFileSync("git", ["-C", target, "commit", "-m", "agent work"], { env: commitEnv });
+      const agentHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim();
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      const kept = runScript(pinned(first), { HOME: home });
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toEqual([target]);
+      expect(kept.status).toBe(0);
+      expect(kept.output).toContain(`Repository resource already present at ${target}`);
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(agentHead);
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+
+      // The clone records the commit it materialized, so the agent's own
+      // branches stay in place while the pin is unchanged, even off the pin.
+      expect(
+        execFileSync("git", ["-C", target, "config", "--get", "opengeni.materializedCommit"]),
+      ).toBe(`${first}\n`);
+      execFileSync("git", ["-C", target, "checkout", "-q", "--orphan", "rewrite"]);
+      execFileSync("git", ["-C", target, "commit", "-qm", "rewrite"], { env: commitEnv });
+      const branched = runScript(pinned(first), { HOME: home });
+      expect(branched.status).toBe(0);
+      expect(branched.output).toContain(`Repository resource already present at ${target}`);
+      expect(recoveredSiblings(target)).toEqual([]);
+
+      // A folder cloned before the record existed counts while HEAD is built on
+      // the pin, and gets the record.
+      execFileSync("git", ["-C", target, "checkout", "-q", agentHead]);
+      execFileSync("git", ["-C", target, "config", "--unset", "opengeni.materializedCommit"]);
+      const legacy = runScript(pinned(first), { HOME: home });
+      expect(legacy.status).toBe(0);
+      expect(legacy.output).toContain(`Repository resource already present at ${target}`);
+      expect(
+        execFileSync("git", ["-C", target, "config", "--get", "opengeni.materializedCommit"]),
+      ).toBe(`${first}\n`);
+      expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned repository at another commit is moved aside with its work and cloned fresh", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-repinned-"));
+    try {
+      const origin = makeOrigin(root);
+      const first = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "pinned");
+      const pinned = (expectedCommitSha: string) =>
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha,
+        });
+      expect(runScript(pinned(first), { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "agent.txt"), "committed\n");
+      execFileSync("git", ["-C", target, "add", "agent.txt"]);
+      execFileSync("git", ["-C", target, "commit", "-m", "agent work"], { env: commitEnv });
+      const agentHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim();
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+
+      // The pin moves to a commit the folder is not built on: the old folder,
+      // with its unpushed commit and uncommitted file, is moved aside.
+      writeFileSync(join(origin, "README.md"), "second\n");
+      execFileSync("git", ["-C", origin, "commit", "-am", "second"], { env: commitEnv });
+      const second = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const moved = runScript(pinned(second), { HOME: home });
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
+      expect(moved.status).toBe(0);
+      expect(moved.output).toContain("does not match expected commit");
+      const recovered = recoveredSiblings(target);
+      expect(recovered).toHaveLength(1);
+      expect(readFileSync(join(recovered[0]!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(execFileSync("git", ["-C", recovered[0]!, "rev-parse", "HEAD"]).trim()).toBe(
+        agentHead,
+      );
+      expect(moved.output).toContain(
+        `Notice: moved repository folder aside []: ${target}\t${recovered[0]}\tpin`,
+      );
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(second);
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("second\n");
+
+      // A pin that moves back to an older commit is enforced too: the folder
+      // holding the newer pin is moved aside.
+      const back = runScript(
+        cloneScriptWithTarget(
+          target,
+          `file://${origin}`,
+          {
+            kind: "repository",
+            uri: "https://github.com/opengeni/test-fixture.git",
+            ref: first,
+            expectedCommitSha: first,
+          },
+          first,
+        ),
+        { HOME: home },
+      );
+      expect(back.status).toBe(0);
+      expect(recoveredSiblings(target)).toHaveLength(2);
+      expect(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim()).toBe(first);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pinned subpath extract is kept on later turns", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-pinned-subpath-"));
+    try {
+      const origin = makeOrigin(root);
+      mkdirSync(join(origin, "docs"));
+      writeFileSync(join(origin, "docs", "guide.md"), "guide\n");
+      execFileSync("git", ["-C", origin, "add", "docs"]);
+      execFileSync("git", ["-C", origin, "commit", "-qm", "docs"], { env: commitEnv });
+      const sha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"]).trim();
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "docs");
+      const script = cloneScriptWithTarget(
+        target,
+        `file://${origin}`,
+        {
+          kind: "repository",
+          uri: "https://github.com/opengeni/test-fixture.git",
+          ref: "main",
+          expectedCommitSha: sha,
+          subpath: "docs",
+        },
+        "main",
+        "docs",
+      );
+      expect(runScript(script, { HOME: home }).status).toBe(0);
+      writeFileSync(join(target, "notes.md"), "agent notes\n");
+      const again = runScript(script, { HOME: home });
+      expect(again.status).toBe(0);
+      expect(again.output).toContain(`Repository resource already present at ${target}`);
+      expect(readFileSync(join(target, "notes.md"), "utf8")).toBe("agent notes\n");
+      expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a mount point that cannot be renamed has its entries moved aside, or is left whole", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-mount-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "mounted");
+      // A mount point refuses rename, like `mv` of a mounted directory.
+      const shim = join(root, "shim");
+      mkdirSync(shim);
+      const realMv = execFileSync("sh", ["-c", "command -v mv"]).trim();
+      const sq = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      writeFileSync(
+        join(shim, "mv"),
+        [
+          "#!/bin/sh",
+          'src="$1"; [ "$src" = "--" ] && src="$2"',
+          `case "$src" in ${sq(target)}|*/stuck.txt) echo "mv: Device or resource busy" >&2; exit 1 ;; esac`,
+          `exec ${sq(realMv)} "$@"`,
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const env = { HOME: home, PATH: `${shim}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, "dc-uncommitted.txt"), "uncommitted\n");
+      mkdirSync(join(target, "src"));
+      writeFileSync(join(target, "src", "work.ts"), "work\n");
+
+      const moved = runScript(script, env);
+      expect(copiesHolding(target, "dc-uncommitted.txt")).toHaveLength(1);
+      expect(moved.status).toBe(0);
+      const [copy] = recoveredSiblings(target);
+      expect(readFileSync(join(copy!, "dc-uncommitted.txt"), "utf8")).toBe("uncommitted\n");
+      expect(readFileSync(join(copy!, "src", "work.ts"), "utf8")).toBe("work\n");
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+
+      // One entry that cannot move: everything is put back and nothing re-cloned.
+      writeFileSync(join(target, ".git", "HEAD"), "not a ref\n");
+      writeFileSync(join(target, "stuck.txt"), "stuck\n");
+      writeFileSync(join(target, "dc-uncommitted.txt"), "second\n");
+      const stuck = runScript(script, env);
+      expect(stuck.status).not.toBe(0);
+      expect(stuck.output).toContain("Nothing was deleted.");
+      expect(readFileSync(join(target, "dc-uncommitted.txt"), "utf8")).toBe("second\n");
+      expect(readFileSync(join(target, ".git", "HEAD"), "utf8")).toBe("not a ref\n");
+      expect(readFileSync(join(target, "stuck.txt"), "utf8")).toBe("stuck\n");
+      expect(recoveredSiblings(target)).toEqual([copy]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("only Opengeni's own nested temporary clones are removed without a recovery copy", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-nested-tmp-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "raced");
+      // A lost install race nests the loser's temporary clone in the target.
+      mkdirSync(join(target, "raced.tmp.4242", ".git"), { recursive: true });
+      const run = runScript(cloneScriptWithTarget(target, `file://${origin}`), { HOME: home });
+      expect(run.status).toBe(0);
+      expect(readdirSync(target).sort()).toEqual([".git", "README.md"]);
+      expect(recoveredSiblings(target)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the clone hook reports moved folders to the model and in its completed event", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-recovery-hook-"));
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const uri = "https://github.com/opengeni/recovered.git";
+      const session = hostShellSession(join(root, "home"), {
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: uri,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const resource = {
+        kind: "repository" as const,
+        uri,
+        ref: "main",
+        mountPath: "repos/test/recovered",
+      };
+      const target = join(workspace, "repos", "test", "recovered");
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, "notes.txt"), "not a repository yet\n");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const notices: string[] = [];
+      const warn = console.warn;
+      console.warn = () => undefined;
+      try {
+        await runRepositoryCloneHook(session as never, [resource], {
+          environment: {},
+          onRuntimeEvent: async (event) => {
+            events.push(event as never);
+          },
+          onSetupNotice: (notice) => notices.push(notice),
+        });
+      } finally {
+        console.warn = warn;
+      }
+      const [recovered] = recoveredSiblings(target);
+      expect(readFileSync(join(recovered!, "notes.txt"), "utf8")).toBe("not a repository yet\n");
+      const movedTo = `repos/test/${recovered!.slice(recovered!.lastIndexOf("/") + 1)}`;
+      expect(events[1]).toMatchObject({
+        type: "sandbox.operation.completed",
+        payload: {
+          name: "repository-clone",
+          recoveredRepositories: [{ path: "repos/test/recovered", movedTo }],
+        },
+      });
+      expect(notices).toEqual([
+        [
+          "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
+          `- ${target} was moved to ${recovered} because it was not a readable Git work tree.`,
+          "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+        ].join("\n"),
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1745,10 +2300,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const uri = `file://${empty}`;
       const untouched = join(root, "ws", "untouched");
       const worked = join(root, "ws", "worked");
-      for (const target of [untouched, worked]) {
+      const staged = join(root, "ws", "staged");
+      for (const target of [untouched, worked, staged]) {
         expect(runScript(cloneScriptWithTarget(target, uri), { HOME: home }).status).toBe(0);
       }
       writeFileSync(join(worked, "NOTES.md"), "agent work\n");
+      // Work that exists only in the index still counts as work.
+      writeFileSync(join(staged, "STAGED.md"), "staged work\n");
+      execFileSync("git", ["-C", staged, "add", "STAGED.md"]);
+      rmSync(join(staged, "STAGED.md"));
 
       // Someone else pushes the first commit (for example the user's backup).
       // Commits on another branch only keep the stub; the mount's branch is
@@ -1768,6 +2328,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(refilled.status).toBe(0);
       expect(refilled.output).toContain("now has commits; rematerializing");
       expect(readFileSync(join(untouched, "README.md"), "utf8")).toBe("hello\n");
+      expect(recoveredSiblings(untouched)).toEqual([]);
+
+      const stagedRun = runScript(cloneScriptWithTarget(staged, uri), { HOME: home });
+      expect(stagedRun.status).toBe(0);
+      const [stagedCopy] = recoveredSiblings(staged);
+      expect(stagedCopy).toBeDefined();
+      expect(execFileSync("git", ["-C", stagedCopy!, "show", ":STAGED.md"])).toBe("staged work\n");
+      expect(stagedRun.output).toContain(
+        `Notice: moved repository folder aside []: ${staged}\t${stagedCopy}\tremote-commits`,
+      );
+      expect(readFileSync(join(staged, "README.md"), "utf8")).toBe("hello\n");
 
       // A mount with agent work is never replaced.
       const kept = runScript(cloneScriptWithTarget(worked, uri), { HOME: home });
@@ -2000,5 +2571,445 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("concurrent repository preparations on one box never fail on the global Git config lock", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-concurrent-prepare-"));
+    try {
+      const origin = makeOrigin(root);
+      // One box: every preparation shares HOME and so the global Git config,
+      // the way chats created together share their sandbox.
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const identity = {
+        name: "opengeni[bot]",
+        email: "42+opengeni[bot]@users.noreply.github.com",
+      };
+      const remotes = ["alpha", "beta", "gamma"].map(
+        (name) => `https://github.com/acme/${name}.git`,
+      );
+      const resources = remotes.map((uri, index) => ({
+        kind: "repository" as const,
+        uri,
+        ref: "main",
+        mountPath: `repos/acme/repo-${index}`,
+        githubInstallationId: 42,
+        githubRepositoryId: 100 + index,
+      }));
+      const bindings = [
+        {
+          credentialBindingId: "github-installation:42",
+          provider: "github" as const,
+          token: "app-token",
+          identity,
+        },
+      ];
+      const preparations = 6;
+      const sessions = Array.from({ length: preparations }, (_, index) => {
+        const workspace = join(root, `workspace-${index}`);
+        mkdirSync(workspace, { recursive: true });
+        return (extraEnv: Record<string, string> = {}) =>
+          hostShellSession(home, {
+            cwd: workspace,
+            env: {
+              GIT_TERMINAL_PROMPT: "0",
+              GIT_CONFIG_COUNT: String(remotes.length),
+              ...Object.fromEntries(
+                remotes.flatMap((remote, remoteIndex) => [
+                  [`GIT_CONFIG_KEY_${remoteIndex}`, `url.file://${origin}.insteadOf`],
+                  [`GIT_CONFIG_VALUE_${remoteIndex}`, remote],
+                ]),
+              ),
+              ...extraEnv,
+            },
+            rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+          });
+      });
+
+      // Another writer (the agent's own `git config --global`, say) holds the
+      // global config lock while every preparation starts.
+      const prepareAllWhileLocked = async (extraEnv: Record<string, string> = {}) => {
+        const lockFile = join(home, ".gitconfig.lock");
+        writeFileSync(lockFile, "");
+        const release = setTimeout(() => rmSync(lockFile, { force: true }), 1_500);
+        try {
+          return await Promise.allSettled(
+            sessions.map((session) =>
+              runRepositoryCloneHook(session(extraEnv) as never, resources, {
+                environment: {},
+                gitCredentialBindings: bindings,
+              }),
+            ),
+          );
+        } finally {
+          clearTimeout(release);
+          rmSync(lockFile, { force: true });
+        }
+      };
+      const failures = (results: PromiseSettledResult<void>[]) =>
+        results.flatMap((result) =>
+          result.status === "rejected" ? [String(result.reason).slice(0, 2_000)] : [],
+        );
+
+      // Fresh box: credential helper, broker include and default identity.
+      expect(failures(await prepareAllWhileLocked())).toEqual([]);
+      // Next turn on a box whose folders another user owns: every parallel
+      // clone also trusts its folder in safe.directory.
+      expect(
+        failures(await prepareAllWhileLocked({ GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" })),
+      ).toEqual([]);
+
+      const globalConfig = (...args: string[]) =>
+        execFileSync("git", ["config", "--global", ...args], { env: { HOME: home } })
+          .split("\n")
+          .filter((line, index, lines) => index < lines.length - 1 || line !== "");
+      const helper = join(home, ".opengeni", "git-credentials", "helper");
+      for (let index = 0; index < preparations; index += 1) {
+        for (const resource of resources) {
+          const target = join(root, `workspace-${index}`, resource.mountPath);
+          expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+        }
+      }
+      expect(globalConfig("--get", "user.email")).toEqual([identity.email]);
+      const helpers = globalConfig("--get-all", "credential.helper");
+      const safeDirectories = globalConfig("--get-all", "safe.directory");
+      expect(new Set(safeDirectories).size).toBe(safeDirectories.length);
+      expect(safeDirectories.length).toBeGreaterThanOrEqual(preparations * resources.length);
+      if (Bun.which("flock")) {
+        // Serialised per box: each preparation replaced the helper chain whole.
+        expect(helpers).toEqual(["", helper]);
+        expect(globalConfig("--get-all", "include.path")).toEqual([
+          join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"),
+        ]);
+      } else {
+        // Unserialised (no flock): writes still all land, and the chain after
+        // the last reset is only our helper.
+        const effective = helpers.slice(helpers.lastIndexOf("") + 1);
+        expect(effective.length).toBeGreaterThan(0);
+        expect(new Set(effective)).toEqual(new Set([helper]));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  describe("per-repository commit identity", () => {
+    const appRemote = "https://github.com/acme/app-repo.git";
+    const personalRemote = "https://github.com/octocat/personal-repo";
+    const botIdentity = {
+      name: "opengeni[bot]",
+      email: "42+opengeni[bot]@users.noreply.github.com",
+    };
+    const personalIdentity = { name: "octocat", email: "1+octocat@users.noreply.github.com" };
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: appRemote,
+        ref: "main",
+        mountPath: "repos/acme/app-repo",
+        githubInstallationId: 42,
+        githubRepositoryId: 43,
+      },
+      {
+        kind: "repository" as const,
+        uri: personalRemote,
+        ref: "main",
+        mountPath: "repos/octocat/personal-repo",
+        provider: "github" as const,
+        connectionType: "github_personal" as const,
+        credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        repositoryId: "77",
+        access: "write" as const,
+      },
+    ];
+    const bindings = [
+      {
+        credentialBindingId: "github-installation:42",
+        provider: "github" as const,
+        token: "app-token",
+        identity: botIdentity,
+      },
+      {
+        credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        provider: "github" as const,
+        token: "personal-token",
+        identity: personalIdentity,
+      },
+    ];
+
+    /** A sandbox-shaped session whose PATH puts the per-turn wrapper dir first,
+     *  exactly like the provisioned manifest PATH. */
+    function identitySession(
+      root: string,
+      home: string,
+      bakedIdentity: Record<string, string> = {},
+    ) {
+      const origin = existsSync(join(root, "origin")) ? join(root, "origin") : makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const session = hostShellSession(home, {
+        cwd: workspace,
+        env: {
+          PATH: `${join(home, ".opengeni", "bin")}:${process.env.PATH}`,
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: appRemote,
+          GIT_CONFIG_KEY_1: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_1: personalRemote,
+          ...bakedIdentity,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const run = async (cmd: string) => {
+        const result = await session.exec({ cmd });
+        if (result.exitCode !== 0) {
+          throw new Error(`command failed (${result.exitCode}): ${cmd}\n${result.output}`);
+        }
+        return result.stdout.trim();
+      };
+      const commitAs = async (relativeRepo: string, extra = "") =>
+        await run(
+          `${extra} git -C '${join(workspace, relativeRepo)}' commit --allow-empty -q -m change && git -C '${join(workspace, relativeRepo)}' log -1 --format='%an <%ae>|%cn <%ce>'`,
+        );
+      return { session, workspace, run, commitAs };
+    }
+
+    const formatted = (identity: { name: string; email: string }) =>
+      `${identity.name} <${identity.email}>|${identity.name} <${identity.email}>`;
+
+    test("mixed App and personal repositories in one box each commit as their own identity", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-new-box-"));
+      try {
+        const home = join(root, "home");
+        const { session, workspace, run, commitAs } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await commitAs("repos/acme/app-repo")).toBe(formatted(botIdentity));
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+        // A repository the agent creates itself uses the box-wide default: the
+        // App identity when an App repository is attached.
+        await run(`git init -q '${join(workspace, "scratch")}'`);
+        expect(await commitAs("scratch")).toBe(formatted(botIdentity));
+        // The marker is local, never global.
+        expect(
+          await run(
+            `git -C '${join(workspace, "repos/octocat/personal-repo")}' config --local --get opengeni.managedidentity`,
+          ),
+        ).toBe("true");
+
+        // An identity someone set on purpose is never overwritten by later turns.
+        await run(
+          `git -C '${join(workspace, "repos/acme/app-repo")}' config --local --unset opengeni.managedidentity && git -C '${join(workspace, "repos/acme/app-repo")}' config --local user.email custom@example.com`,
+        );
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(
+          await run(
+            `git -C '${join(workspace, "repos/acme/app-repo")}' config --local --get user.email`,
+          ),
+        ).toBe("custom@example.com");
+
+        // A managed identity whose binding no longer carries one is cleared.
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map(({ identity: _identity, ...binding }) => binding),
+        });
+        expect(
+          (
+            await session.exec({
+              cmd: `git -C '${join(workspace, "repos/octocat/personal-repo")}' config --local --get user.email`,
+            })
+          ).exitCode,
+        ).toBe(1);
+        // So is the box-wide default once no binding carries an identity.
+        expect((await session.exec({ cmd: "git config --global --get user.email" })).exitCode).toBe(
+          1,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("an identity changed inside a managed repository is kept on later turns", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-user-edit-"));
+      try {
+        const home = join(root, "home");
+        const { session, workspace, run, commitAs } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        const personalRepo = join(workspace, "repos/octocat/personal-repo");
+        // The agent changes the identity on the person's request, marker untouched.
+        await run(`git -C '${personalRepo}' config user.email mine@corp.example`);
+        await run("git config --global user.name 'Someone Else'");
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(
+          `${personalIdentity.name} <mine@corp.example>|${personalIdentity.name} <mine@corp.example>`,
+        );
+        // No global committer overrides an identity set in the repository.
+        expect(
+          (await session.exec({ cmd: "git config --global --get committer.email" })).exitCode,
+        ).toBe(1);
+        expect(await run("git config --global --get user.name")).toBe("Someone Else");
+        // The repository is no longer managed, so a dropped binding identity
+        // does not clear it either.
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map(({ identity: _identity, ...binding }) => binding),
+        });
+        expect(await run(`git -C '${personalRepo}' config --get user.email`)).toBe(
+          "mine@corp.example",
+        );
+        expect(await run("git config --global --get user.name")).toBe("Someone Else");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a box whose env carries a deployment identity commits personal repositories as the person", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-deployment-box-"));
+      try {
+        const home = join(root, "home");
+        const deployment = { name: "Deploy Bot", email: "deploy@example.com" };
+        const releaseBot = { name: "Release Bot", email: "release@example.com" };
+        const { session, commitAs } = identitySession(root, home, {
+          GIT_AUTHOR_NAME: deployment.name,
+          GIT_AUTHOR_EMAIL: deployment.email,
+          GIT_COMMITTER_NAME: releaseBot.name,
+          GIT_COMMITTER_EMAIL: releaseBot.email,
+        });
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map((binding) =>
+            binding.credentialBindingId === "github-installation:42"
+              ? { ...binding, identity: { ...deployment, committer: releaseBot } }
+              : binding,
+          ),
+        });
+        // A separately configured committer survives on App repositories.
+        expect(await commitAs("repos/acme/app-repo")).toBe(
+          `${deployment.name} <${deployment.email}>|${releaseBot.name} <${releaseBot.email}>`,
+        );
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a box created with a baked GIT_AUTHOR env identity still commits as each repository's identity", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-baked-box-"));
+      try {
+        const home = join(root, "home");
+        const baked = {
+          GIT_AUTHOR_NAME: botIdentity.name,
+          GIT_AUTHOR_EMAIL: botIdentity.email,
+          GIT_COMMITTER_NAME: botIdentity.name,
+          GIT_COMMITTER_EMAIL: botIdentity.email,
+        };
+        const { session, workspace, run, commitAs } = identitySession(root, home, baked);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await run("command -v git")).toBe(join(home, ".opengeni", "bin", "git"));
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+        expect(await commitAs("repos/acme/app-repo")).toBe(formatted(botIdentity));
+        // From inside the repository (no -C) too.
+        expect(
+          await run(
+            `cd '${join(workspace, "repos/octocat/personal-repo")}' && git commit --allow-empty -q -m inside && git log -1 --format='%ae|%ce'`,
+          ),
+        ).toBe(`${personalIdentity.email}|${personalIdentity.email}`);
+        // An identity the command sets itself is respected.
+        expect(
+          await commitAs(
+            "repos/octocat/personal-repo",
+            "GIT_AUTHOR_NAME=Custom GIT_AUTHOR_EMAIL=custom@example.com",
+          ),
+        ).toBe(`Custom <custom@example.com>|${botIdentity.name} <${botIdentity.email}>`);
+        // An unmanaged repository keeps the box's env identity.
+        await run(`git init -q '${join(workspace, "scratch")}'`);
+        expect(await commitAs("scratch")).toBe(formatted(botIdentity));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("the git wrapper never runs itself and fails clearly without a real git", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-wrapper-loop-"));
+      try {
+        const home = join(root, "home");
+        const { session, run } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        const wrapperDir = join(home, ".opengeni", "bin");
+        const linkDir = join(root, "link-bin");
+        mkdirSync(linkDir, { recursive: true });
+        childProcess.execFileSync("ln", ["-s", join(wrapperDir, "git"), join(linkDir, "git")]);
+        expect(
+          await run(`PATH='${wrapperDir}:${linkDir}:${wrapperDir}':"$PATH" git --version`),
+        ).toContain("git version");
+        const missing = await session.exec({
+          cmd: `PATH='${wrapperDir}:${linkDir}' '${join(wrapperDir, "git")}' --version`,
+        });
+        expect(missing.exitCode).toBe(127);
+        expect(missing.stderr).toContain("git: real command not found on PATH");
+
+        // Another git shim that walks PATH skipping itself and execs the next
+        // git reaches the real git in either PATH order.
+        const shimDir = join(root, "shim-bin");
+        mkdirSync(shimDir, { recursive: true });
+        const shim = (mode: "exec" | "fork") =>
+          [
+            "#!/bin/sh",
+            "IFS=:",
+            "for dir in $PATH; do",
+            '  [ -x "$dir/git" ] && ! [ "$dir/git" -ef "$0" ] && { unset IFS; ' +
+              (mode === "exec" ? 'exec "$dir/git" "$@"; }' : '"$dir/git" "$@"; exit $?; }'),
+            "done",
+            "exit 127",
+          ].join("\n");
+        writeFileSync(join(shimDir, "git"), shim("exec"), { mode: 0o755 });
+        for (const order of [`${wrapperDir}:${shimDir}`, `${shimDir}:${wrapperDir}`]) {
+          const result = await session.exec({
+            cmd: `PATH='${order}':"$PATH" timeout 10 git --version`,
+          });
+          expect(result.exitCode).toBe(0);
+          expect(result.stdout).toContain("git version");
+        }
+        // A hook that runs git starts a new chain and still finds the real git.
+        const hooked = join(root, "hooked");
+        await run(`git init -q '${hooked}'`);
+        writeFileSync(
+          join(hooked, ".git", "hooks", "pre-commit"),
+          "#!/bin/sh\nexec git rev-parse --git-dir >/dev/null\n",
+          { mode: 0o755 },
+        );
+        const committed = await session.exec({
+          cmd: `PATH='${wrapperDir}:${shimDir}':"$PATH" timeout 10 git -C '${hooked}' -c user.name=t -c user.email=t@example.com commit --allow-empty -q -m hooked`,
+        });
+        expect(committed.exitCode).toBe(0);
+        // A shim that forks back into the wrapper stops instead of spinning.
+        writeFileSync(join(shimDir, "git"), shim("fork"), { mode: 0o755 });
+        const forked = await session.exec({
+          cmd: `timeout 20 env PATH='${wrapperDir}:${shimDir}' '${join(wrapperDir, "git")}' --version`,
+        });
+        expect(forked.exitCode).toBe(125);
+        expect(forked.stderr).toContain("git wrapper loop");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });

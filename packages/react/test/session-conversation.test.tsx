@@ -1,10 +1,15 @@
 import { expect, jest, test } from "bun:test";
-import type { SaveComposerDraftRequest, SessionQueueSnapshot } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type SaveComposerDraftRequest,
+  type SessionQueueSnapshot,
+} from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
+import type { TimelineItem } from "../src/timeline/types";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
@@ -434,6 +439,87 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
   ).toHaveLength(0);
 });
 
+test("a failed send stays above anything newer the person sent", () => {
+  const failedSend = {
+    clientEventId: "failed-at-17",
+    text: "shorten it",
+    annotations: [],
+    resources: [],
+    occurredAt: "2026-11-01T17:45:33Z",
+    state: "failed" as const,
+    delivery: "send" as const,
+    destination: "chat" as const,
+    error: "Service unavailable",
+  };
+  const earlier = {
+    kind: "user-message" as const,
+    id: "earlier",
+    reconciliationKey: "user-message:earlier",
+    text: "first",
+    resources: [],
+    tools: [],
+    occurredAt: "2026-10-30T12:09:27Z",
+  };
+  const answer = {
+    kind: "system" as const,
+    id: "answer",
+    text: "done",
+    occurredAt: "2026-10-30T12:40:00Z",
+  } as unknown as TimelineItem;
+  const newer = {
+    ...earlier,
+    id: "newer",
+    reconciliationKey: "user-message:newer",
+    text: "shorten it",
+    occurredAt: "2026-11-01T18:53:38Z",
+  };
+  const work = {
+    kind: "system" as const,
+    id: "work",
+    text: "working",
+    occurredAt: "2026-11-01T18:54:00Z",
+  } as unknown as TimelineItem;
+  const pending = { queue: [], snapshot: null };
+  const ids = (items: TimelineItem[]) => items.map((item) => item.id);
+
+  // Something newer was sent: the failure keeps its place before that message.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, newer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "optimistic:failed-at-17", "newer", "work"]);
+
+  // Nothing newer was sent, even with the agent still working: it stays last,
+  // next to the composer, where its recovery actions are seen.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "work", "optimistic:failed-at-17"]);
+
+  // A send still on its way stays last; only the failure moves.
+  expect(
+    ids(
+      conversationTimeline([earlier, newer], pending, {
+        optimisticMessages: [
+          failedSend,
+          {
+            ...failedSend,
+            clientEventId: "sending-now",
+            state: "sending" as const,
+            occurredAt: "2026-11-01T19:00:00Z",
+            error: undefined,
+          },
+        ],
+      }),
+    ),
+  ).toEqual(["earlier", "optimistic:failed-at-17", "newer", "optimistic:sending-now"]);
+});
+
 test("definitively refused messages offer editing, not an unchanged retry", () => {
   let edits = 0;
   const items = conversationTimeline(
@@ -657,6 +743,123 @@ test("complete conversation surfaces tool approvals and wires attachments when u
     await actRun(() => approve!.click());
     await flush(50);
     expect(decisions).toMatchObject([{ approvalId: "call-1", decision: "approve" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Approve all names a refused approval, keeps it waiting and never sends a decided one again", async () => {
+  const sent: string[] = [];
+  const approval = (callId: string) => ({
+    rawItem: { callId, name: "deploy", arguments: { environment: callId } },
+    name: "deploy",
+  });
+  const client = fakeClient({
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333335",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "session.requiresAction",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: { approvals: [approval("call-1"), approval("call-2"), approval("call-3")] },
+        },
+      ] as never,
+    getSession: async () => ({ id: SESSION_ID, status: "requires_action" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    sendApprovalDecision: async (_workspace, _session, decision) => {
+      sent.push(decision.approvalId);
+      if (decision.approvalId === "call-2")
+        throw new OpenGeniApiError(403, "Only the account's owner can approve this action.");
+      return {} as never;
+    },
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+  );
+  const button = (label: string) =>
+    [...view.container.querySelectorAll("button")].find((node) => node.textContent === label);
+  try {
+    await flush(200);
+    await actRun(() => button("Approve all 3")!.click());
+    await flush(200);
+    expect(sent).toEqual(["call-1", "call-2", "call-3"]);
+    // The refusal is named, its card is shown and can be decided again.
+    const alert = view.container.querySelector("[data-og-approval-surface] ul[role='alert']");
+    expect(alert?.textContent).toContain("Couldn't approve");
+    expect(view.container.querySelector("[data-approval-id='call-2']")).not.toBeNull();
+    // The decided ones are still listed until the server's events remove
+    // them, yet nothing offers them again.
+    expect(button("Approve all 3")).toBeUndefined();
+    expect(button("Approve all 2")).toBeUndefined();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Approve all shows no error when its last action was already decided elsewhere", async () => {
+  const sent: string[] = [];
+  const approval = (callId: string) => ({
+    rawItem: { callId, name: "deploy", arguments: { environment: callId } },
+    name: "deploy",
+  });
+  const client = fakeClient({
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333335",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "session.requiresAction",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: { approvals: [approval("call-1"), approval("call-2"), approval("call-3")] },
+        },
+      ] as never,
+    getSession: async () => ({ id: SESSION_ID, status: "requires_action" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    sendApprovalDecision: async (_workspace, _session, decision) => {
+      sent.push(decision.approvalId);
+      if (decision.approvalId === "call-3")
+        throw new OpenGeniApiError(409, "This approval was already decided.");
+      return {} as never;
+    },
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+  );
+  const button = (label: string) =>
+    [...view.container.querySelectorAll("button")].find((node) => node.textContent === label);
+  try {
+    await flush(200);
+    await actRun(() => button("Approve all 3")!.click());
+    await flush(200);
+    expect(sent).toEqual(["call-1", "call-2", "call-3"]);
+    // Already decided is done, not a failure: neither the list nor the
+    // session's own error says otherwise.
+    expect(view.container.querySelector("[data-og-approval-surface] [role='alert']")).toBeNull();
   } finally {
     await view.unmount();
   }

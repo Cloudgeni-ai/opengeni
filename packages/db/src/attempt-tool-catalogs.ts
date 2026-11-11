@@ -74,7 +74,7 @@ export async function persistAttemptToolCatalog(
           },
           encoded.blobs,
         );
-        await tx
+        const [inserted] = await tx
           .insert(schema.sessionAttemptToolCatalogs)
           .values({
             attemptId: catalog.attemptId,
@@ -90,13 +90,21 @@ export async function persistAttemptToolCatalog(
             contentRefs: encoded.refs,
             createdAt: new Date(catalog.createdAt),
           })
-          .onConflictDoNothing({ target: schema.sessionAttemptToolCatalogs.attemptId });
+          .onConflictDoNothing({ target: schema.sessionAttemptToolCatalogs.attemptId })
+          .returning({
+            generation: schema.sessionAttemptToolCatalogs.generation,
+            digest: schema.sessionAttemptToolCatalogs.digest,
+            catalog: schema.sessionAttemptToolCatalogs.catalog,
+            contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
+          });
 
-        const stored = await attemptToolCatalogByAttemptTx(
-          tx,
-          catalog.workspaceId,
-          catalog.attemptId,
-        );
+        // RETURNING is the persisted representation, not the caller's value.
+        // A fresh insert needs no second header read. A conflicting replay must
+        // still load the original row (including its original createdAt), and
+        // both paths hydrate and verify all stored content below.
+        const stored =
+          inserted ??
+          (await attemptToolCatalogByAttemptTx(tx, catalog.workspaceId, catalog.attemptId));
         if (!stored) throw new Error("Failed to persist attempt tool catalog");
         if (stored.digest !== catalog.digest || stored.generation !== catalog.generation) {
           throw new AttemptToolCatalogConflictError();

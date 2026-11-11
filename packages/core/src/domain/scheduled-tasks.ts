@@ -1,16 +1,11 @@
-import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeGoogleDriveSource,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
+import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
 } from "@opengeni/db";
 import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
-  scheduledTaskKnowledgeSource,
-  requireScheduledTaskKnowledgeSource,
+  SessionSkills,
   scheduledOccurrencePayloadUtf8Bytes,
   mergeResourceRefs,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
@@ -19,23 +14,21 @@ import {
 import {
   resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
   type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import type { VaultPolicy } from "@opengeni/contracts";
-import {
-  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeAtlassianSource,
-  isRetiredNativeAtlassianTask,
-} from "@opengeni/contracts/atlassian-native-retirement";
+import type { BillingOrigin, VaultPolicy } from "@opengeni/contracts";
 import type {
   AccessGrant,
-  KnowledgeSourceSyncAction,
+  FirstPartyMcpToolName,
   McpConnectionAccountSelection,
   Permission,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  ScheduledTaskAgentConfigInput,
   Session,
   ToolRef,
   SessionAuthorizationPort,
@@ -65,10 +58,8 @@ import {
   dbSql,
   deleteScheduledTask,
   wakeScheduledTaskEventSubscriptions,
-  getConnectionMetadata,
   getEnrollment,
   getLiveEnrollmentConnection,
-  getKnowledgeSourceForSyncAuthority,
   getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
@@ -84,10 +75,11 @@ import {
   nestedPostgresMessage,
   nestedPostgresSqlState,
   requireWorkspace,
-  scopedKnowledgeScopeKey,
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
+  manualScheduledTaskRunBillingOrigin,
+  markScheduledTaskApiBilled,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -105,6 +97,10 @@ import {
 } from "../site-session-origin";
 
 import { personalGitHubRepositoryResources } from "./resources";
+import {
+  agentPersonalGitHubRepositoryServices,
+  resolveAgentPersonalGitHubRepositoryResources,
+} from "./agent-personal-github-resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { isDeepStrictEqual } from "node:util";
@@ -121,6 +117,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "../session-authorization";
+import { fundedBillingOrigin, resolveTurnBillingOrigin } from "../billing-origin";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import {
@@ -142,7 +139,6 @@ import {
   writeScheduledTaskEvents,
 } from "./event-triggers/automation-events";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
-import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -152,8 +148,12 @@ import {
   canonicalConfiguredModel,
   creationInitiatorForGrant,
   modelUnavailableHttpException,
+  resolveFirstPartyMcpToolsForCreate,
   settingsWithSessionMcpServerMetadata,
+  settingsWithSessionMcpServerInputs,
+  validateSessionMcpServersForCreate,
 } from "./sessions";
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import {
   hasReservedOpenGeniSlackBotSessionMetadata,
   validateOpenGeniSlackBotConnectionSelection,
@@ -361,22 +361,32 @@ export async function createValidatedScheduledTask(input: {
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
   /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
   eventSourceFetch?: typeof fetch | undefined;
+  /** Asks GitHub as the person in All my repositories; tests replace it. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
-  // Variable Sets were replaced by vaults (RM-1).
-  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
+  // Integration Knowledge sync was removed. The request field stays in the
+  // public schema until the next SDK major, so refuse it clearly.
+  if (input.payload.agentConfig.knowledgeSource)
+    throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
+  // The requested Opengeni tools and permissions become the task's creator
+  // selection below; they are never stored in its agentConfig.
+  const {
+    firstPartyMcpTools: requestedFirstPartyMcpTools,
+    firstPartyMcpPermissions: requestedFirstPartyMcpPermissions,
+    ...requestedAgentConfig
+  }: ScheduledTaskAgentConfigInput = input.payload.agentConfig;
+  input = {
+    ...input,
+    payload: { ...input.payload, agentConfig: requestedAgentConfig } as CreateScheduledTaskPayload,
+  };
   if (input.payload.runMode === "existing_session") {
     const target = await validateScheduledTaskTarget({
       ...input,
       targetSessionId: input.payload.targetSessionId,
       runMode: "existing_session",
-      variableSetId: input.payload.variableSetId,
       rigId: input.payload.rigId,
       agentConfig: input.payload.agentConfig,
     });
-    if (input.payload.agentConfig.knowledgeSource)
-      throw new HTTPException(422, {
-        message: "Source ingestion requires a separate scheduled agent",
-      });
     if (input.payload.rigId && input.payload.rigId !== target?.rigId)
       throw new HTTPException(422, {
         message:
@@ -387,7 +397,6 @@ export async function createValidatedScheduledTask(input: {
       payload: {
         ...input.payload,
         agentConfig: scheduledSessionMessageConfig(input.payload.agentConfig),
-        variableSetId: null,
         rigId: null,
       },
     };
@@ -410,14 +419,6 @@ export async function createValidatedScheduledTask(input: {
     learningContext.actor.settingsScopes = [learning.scope];
   // Internal callers can omit the action; agent turns are the default.
   const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
-  const knowledgeAction = input.payload.agentConfig.knowledgeSource ?? null;
-  if (knowledgeAction) {
-    await validateKnowledgeSourceSyncAction({
-      db: input.db,
-      grant: input.grant,
-      action: knowledgeAction,
-    });
-  }
   const validatedAgentConfig: ScheduledTaskAgentConfig = await validateScheduledTaskAgentConfig({
     ...input,
     workspaceId: input.grant.workspaceId,
@@ -448,7 +449,7 @@ export async function createValidatedScheduledTask(input: {
   const requestedPinsRequired =
     "pinnedAccountsRequired" in input.payload && input.payload.pinnedAccountsRequired === true;
   if ((requestedPins?.length ?? 0) > 0 || requestedPinsRequired) {
-    if (input.payload.runMode === "existing_session" || knowledgeAction)
+    if (input.payload.runMode === "existing_session")
       throw new HTTPException(422, {
         message:
           "Pin connector accounts only on a schedule that starts its own session. An existing-chat schedule uses that chat's connectors with the owner's current accounts.",
@@ -464,12 +465,6 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (
-    knowledgeAction &&
-    input.payload.overlapPolicy !== "skip" &&
-    input.payload.overlapPolicy !== "buffer_one"
-  )
-    throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
   const target = await validateScheduledTaskTarget({
@@ -479,25 +474,13 @@ export async function createValidatedScheduledTask(input: {
     grant: input.grant,
     targetSessionId: input.payload.targetSessionId,
     runMode: input.payload.runMode,
-    variableSetId: input.payload.variableSetId,
     rigId: input.payload.rigId,
     // An omitted Sandbox Environment adopts the target session's own one below.
     agentConfig,
   });
-  if (
-    knowledgeAction?.destination.kind === "personal" &&
-    input.payload.runMode !== "new_session_per_run"
-  )
-    throw new HTTPException(422, {
-      message: "Personal source tasks create a private session for each run",
-    });
   if (learning) {
-    const workspace = await requireWorkspace(input.db, input.grant.workspaceId);
     const destination =
-      knowledgeAction?.destination.kind === "personal" ||
-      workspace.kind === "personal" ||
-      target?.tenancy?.visibility === "private" ||
-      target?.memoryScope === "user"
+      target?.tenancy?.visibility === "private" || target?.memoryScope === "user"
         ? "personal"
         : "workspace";
     if (learning.scope !== destination)
@@ -505,24 +488,18 @@ export async function createValidatedScheduledTask(input: {
         message: `This task saves Knowledge in the ${destination} scope. Set its Agent learning override for that scope.`,
       });
   }
-  if (!knowledgeAction) {
-    await validateScheduledTaskMachineTarget({
-      settings: input.settings,
-      db: input.db,
-      grant: input.grant,
-      runMode: input.payload.runMode,
-      agentConfig,
-      audience:
-        "visibility" in input.payload && input.payload.visibility === "private"
-          ? "user_private"
-          : "workspace_shared",
-    });
-  }
+  await validateScheduledTaskMachineTarget({
+    settings: input.settings,
+    db: input.db,
+    grant: input.grant,
+    runMode: input.payload.runMode,
+    agentConfig,
+  });
   // The rig is stored on the task and resolved to its ACTIVE version per fire
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
-  if (!knowledgeAction && input.payload.rigId) {
+  if (input.payload.rigId) {
     await requireScheduledTaskRig(
       input.db,
       {
@@ -533,25 +510,21 @@ export async function createValidatedScheduledTask(input: {
       input.payload.rigId,
     );
   }
-  const rigId = knowledgeAction
-    ? (input.payload.rigId ?? null)
-    : await resolveScheduledTaskCreateRigId({
-        settings: input.settings,
-        db: input.db,
-        grant: input.grant,
-        requestedRigId: input.payload.rigId,
-        runMode: input.payload.runMode,
-        target,
-        agentConfig,
-      });
-  const runtimeSettings = knowledgeAction
-    ? null
-    : await settingsWithEnabledCapabilityMcpServers(
-        input.db,
-        input.grant.workspaceId,
-        input.settings,
-        { subjectId: input.grant.subjectId },
-      );
+  const rigId = await resolveScheduledTaskCreateRigId({
+    settings: input.settings,
+    db: input.db,
+    grant: input.grant,
+    requestedRigId: input.payload.rigId,
+    runMode: input.payload.runMode,
+    target,
+    agentConfig,
+  });
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    input.db,
+    input.grant.workspaceId,
+    input.settings,
+    { subjectId: input.grant.subjectId },
+  );
   // Existing-session runs use the target's persisted MCP configuration, with
   // session definitions taking precedence over deployment servers of the same
   // ID. Metadata selects the destination; captured grants still supply authority.
@@ -563,7 +536,7 @@ export async function createValidatedScheduledTask(input: {
   // that every pinned account resolves for the owner. Nothing it resolves is
   // saved: each run resolves the owner's current accounts again, and a
   // schedule that follows the workspace defaults resolves them again too.
-  if (!knowledgeAction && effectiveRuntimeSettings) {
+  if (effectiveRuntimeSettings) {
     const creationWorkspaceSettings = (await requireWorkspace(input.db, input.grant.workspaceId))
       .settings;
     await freezeConnectionAccounts({
@@ -589,10 +562,18 @@ export async function createValidatedScheduledTask(input: {
       authoritySelections: requestedPins ?? [],
     });
   }
-  const storedAgentConfig = knowledgeAction
-    ? agentConfig
-    : withScheduledTaskPins(agentConfig, requestedPins, requestedPinsRequired);
+  const storedAgentConfig = withScheduledTaskPins(
+    agentConfig,
+    requestedPins,
+    requestedPinsRequired,
+  );
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
+  const creatorLocked = "creatorLocked" in input.payload && input.payload.creatorLocked === true;
+  if (creatorLocked && creationInitiator.actor)
+    throw new HTTPException(422, {
+      message:
+        "An agent can't lock a schedule to itself. Lock it from the app or key that manages it.",
+    });
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
     input.authorization,
     creationInitiator.actor,
@@ -603,6 +584,11 @@ export async function createValidatedScheduledTask(input: {
     grant: input.grant,
     authorization: input.authorization,
     actor: creationInitiator.actor ?? null,
+    requested: {
+      firstPartyMcpTools: requestedFirstPartyMcpTools,
+      firstPartyMcpPermissions: requestedFirstPartyMcpPermissions,
+    },
+    goal: agentConfig.goal !== undefined,
   });
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
@@ -661,19 +647,19 @@ export async function createValidatedScheduledTask(input: {
     requested: "visibility" in input.payload ? input.payload.visibility : undefined,
     current: null,
     targetSessionId: target?.id ?? null,
-    personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId,
   });
-  await requirePersonalMachineAudience({
-    db: input.db,
+  // Every run is billed as whoever set the task up: in the app, plan credit
+  // first; over the API, credits only.
+  const billingOrigin = await resolveTurnBillingOrigin(input.db, {
     grant: input.grant,
-    agentConfig,
-    audience: visibility,
+    authorization: input.authorization,
   });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
       const task = await createScheduledTask(transaction, {
         id,
+        billingOrigin,
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         name: trimmedScheduledTaskName(input.payload.name),
@@ -693,12 +679,12 @@ export async function createValidatedScheduledTask(input: {
         claudeProviderAccountAuthoritySnapshot,
         creatorPolicy,
         targetSessionId: target?.id ?? null,
-        variableSetId: input.payload.variableSetId ?? null,
         ...("vaultPolicy" in input.payload && input.payload.vaultPolicy
           ? { vaultPolicy: scheduledVaultPolicy(input.payload.vaultPolicy) }
           : {}),
         rigId,
         metadata: input.payload.metadata,
+        ...(creatorLocked ? { creatorLocked } : {}),
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       });
       await recordScheduledTaskAccountChoiceChanges(transaction, {
@@ -734,6 +720,11 @@ export async function createValidatedScheduledTask(input: {
  * schedule more than itself). The session access policy is copied from the
  * projection when it exposes those facts; each absent fact is stored as null
  * so a generated session keeps its own default for that key.
+ *
+ * A person, key or app that creates the task can instead name the Opengeni
+ * tools and permissions its runs get, as on session create (`requested`):
+ * tools within the deployment's allowed set and permissions it holds itself.
+ * An agent's task always keeps its own chat's selection.
  */
 export async function frozenScheduledTaskCreatorPolicy(input: {
   db: Database;
@@ -741,11 +732,70 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   grant: AccessGrant;
   authorization?: AccessGrantAuthorization | undefined;
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
+  requested?: {
+    firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+    firstPartyMcpPermissions?: Permission[] | undefined;
+  };
+  /** Whether the task's runs carry a goal, which needs goals:manage. */
+  goal?: boolean;
 }): Promise<ScheduledTaskCreatorPolicy | null> {
   let restricted =
     (input.authorization?.grant === input.grant &&
       isDeveloperSetupAuthorization(input.authorization)) ||
     isDeveloperSetupGrant(input.grant);
+  const requestedTools = input.requested?.firstPartyMcpTools;
+  const requestedPermissions = input.requested?.firstPartyMcpPermissions;
+  if (input.actor && (requestedTools !== undefined || requestedPermissions !== undefined)) {
+    throw new HTTPException(422, {
+      message:
+        "A schedule an agent creates uses that agent's own Opengeni tools and permissions; omit firstPartyMcpTools and firstPartyMcpPermissions.",
+    });
+  }
+  if (!input.actor && (requestedTools !== undefined || requestedPermissions !== undefined)) {
+    const firstPartyMcpTools =
+      requestedTools === undefined
+        ? null
+        : resolveFirstPartyMcpToolsForCreate(
+            requestedTools,
+            undefined,
+            resolveFirstPartyMcpToolPolicy(input.settings),
+          );
+    if (requestedPermissions !== undefined) {
+      requireExplicitPermissionDelegation(input.grant, requestedPermissions);
+      for (const permission of requestedPermissions) {
+        if (!hasPermission(input.grant.permissions, permission, input.grant.permissionMode)) {
+          throw new HTTPException(403, {
+            message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
+          });
+        }
+      }
+      if (input.goal && !requestedPermissions.includes("goals:manage")) {
+        throw new HTTPException(422, {
+          message: "goal-bearing scheduled runs require goals:manage in firstPartyMcpPermissions",
+        });
+      }
+    }
+    // Omitted permissions keep what this credential would delegate anyway.
+    const firstPartyMcpPermissions =
+      requestedPermissions ??
+      (input.grant.permissionMode === "explicit"
+        ? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+            hasPermission(input.grant.permissions, permission, "explicit"),
+          )
+        : null);
+    if (firstPartyMcpPermissions?.length === 0) {
+      throw new HTTPException(403, {
+        message:
+          "the organization key holds no first-party MCP permission it could delegate to scheduled runs",
+      });
+    }
+    return {
+      firstPartyMcpTools,
+      firstPartyMcpPermissions,
+      sessionPolicy: null,
+      ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
+    };
+  }
   if (!input.actor) {
     if (input.grant.permissionMode === "explicit") {
       const permissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
@@ -885,10 +935,20 @@ export async function updateScheduledTaskForApi(
 ): Promise<ScheduledTask> {
   const workspaceId = grant.workspaceId;
   const beforeUpdateCommit = update.beforeUpdateCommit;
+  // An API caller's edit makes every later run API use (credits only).
+  // Pausing spends nothing, so it leaves the origin alone.
+  const pauseOnly = Object.keys(update).length === 1 && update.status === "paused";
+  const callerOrigin = pauseOnly ? null : await resolveTurnBillingOrigin(db, { grant });
   update = {
     ...update,
     beforeUpdateCommit: async (tx) => {
       await assertScheduledTaskMutationOwner(tx, grant, taskId);
+      if (callerOrigin === "api")
+        await markScheduledTaskApiBilled(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          taskId,
+        });
       await beforeUpdateCommit?.(tx);
     },
   };
@@ -972,10 +1032,17 @@ export async function assertScheduledTaskMutationOwner(
     ...(writer.context ? { createdByContext: writer.context } : {}),
     createdByActor: writer.actor ?? null,
   });
-  if (!matches)
+  if (!matches) {
+    const task = await getScheduledTask(db, grant.workspaceId, taskId);
+    if (task?.creatorLocked)
+      throw new HTTPException(403, {
+        message:
+          "This schedule is locked to the app or key that created it, so only that creator can change, run or delete it. A workspace admin can pause it.",
+      });
     throw new HTTPException(403, {
       message: "Only the schedule owner can change or run it. Copy it to create your own schedule.",
     });
+  }
 }
 
 /**
@@ -1011,22 +1078,54 @@ export async function pauseScheduledTaskAsAdmin(
 export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
   "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
 
+/**
+ * Who pays for a run `grant` starts by hand: API when the caller or the task
+ * is API, else the task's app origin. The edge checks credits with it.
+ */
+export async function manualScheduledTaskTriggerBillingOrigin(
+  db: Database,
+  grant: AccessGrant,
+  taskId: string,
+): Promise<BillingOrigin> {
+  return fundedBillingOrigin(
+    grant.accountId,
+    await manualScheduledTaskRunBillingOrigin(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      taskId,
+      callerOrigin: await resolveTurnBillingOrigin(db, { grant }),
+    }),
+  );
+}
+
 export async function triggerScheduledTaskForGrant(
   db: Database,
   grant: AccessGrant,
   workflowClient: SessionWorkflowClient,
   input: Parameters<SessionWorkflowClient["triggerScheduledTask"]>[0],
 ): Promise<void> {
-  await db.transaction(async (tx) => {
-    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
-    if (isRetiredNativeGoogleDriveTask(input.task))
-      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
-    if (isRetiredNativeAtlassianTask(input.task))
-      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
+  const refuseUnrunnable = () => {
     // The worker never runs a paused schedule. Refuse here so the caller is
     // told, instead of accepting a trigger that would silently do nothing.
     if (input.task.status === "paused")
       throw new HTTPException(409, { message: SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE });
+  };
+  // An API caller's run, and every later run, is API use (credits only).
+  // Committed before the run starts, so the run's turn reads it.
+  if ((await resolveTurnBillingOrigin(db, { grant })) === "api") {
+    await db.transaction(async (tx) => {
+      await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+      refuseUnrunnable();
+      await markScheduledTaskApiBilled(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        taskId: input.task.id,
+      });
+    });
+  }
+  await db.transaction(async (tx) => {
+    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    refuseUnrunnable();
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1076,7 +1175,6 @@ export async function validateScheduledTaskTarget(input: {
   grant: AccessGrant;
   targetSessionId: string | null | undefined;
   runMode: ScheduledTask["runMode"];
-  variableSetId: string | null | undefined;
   rigId: string | null | undefined;
   agentConfig: ScheduledTaskAgentConfig;
   missingTargetStatus?: 404 | 422;
@@ -1143,48 +1241,22 @@ export async function validateScheduledTaskTarget(input: {
   return session;
 }
 
-export const PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE =
-  "Your personal machine can only run schedules that only you can see. Set Who can see it to Only me, or pick a shared machine.";
+/** Following a default never counts as consent to run unattended on a personal machine. */
+export const WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE =
+  "The workspace default is a personal machine, which runs only automations it is chosen on. Choose the machine for this automation instead of the workspace default.";
 
 /**
- * A schedule's audience is resolved after its machine is validated, and can be
- * changed without touching the machine. Re-check the pairing on the final
- * audience so a personal machine never ends up on a schedule others can see.
+ * A schedule runs as its owner, so it may use the owner's own (personal)
+ * machine whoever can see it, but only when the machine is picked on it. The
+ * owner check is the scoped lookup itself, which returns a personal machine to
+ * nobody else, and only the owner changes or runs a schedule.
  */
-async function requirePersonalMachineAudience(input: {
-  db: Database;
-  grant: AccessGrant;
-  agentConfig: ScheduledTaskAgentConfig;
-  audience: "user_private" | "workspace_shared";
-}): Promise<void> {
-  const target = input.agentConfig.machineTarget;
-  if (!target || input.audience === "user_private") return;
-  const sandbox = await getSandbox(
-    input.db,
-    {
-      accountId: input.grant.accountId,
-      workspaceId: input.grant.workspaceId,
-      subjectId: input.grant.subjectId,
-    },
-    target.targetSandboxId,
-  );
-  if (sandbox?.scope === "user") {
-    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
-  }
-}
-
 export async function validateScheduledTaskMachineTarget(input: {
   settings: Settings;
   db: Database;
   grant: AccessGrant;
   runMode: ScheduledTask["runMode"];
   agentConfig: ScheduledTaskAgentConfig;
-  /**
-   * Who can see the schedule. A personal machine runs only an Only me schedule
-   * of its owner; the owner check is the scoped lookup itself, which returns a
-   * personal machine to nobody else.
-   */
-  audience: "user_private" | "workspace_shared";
   requireOnline?: boolean;
   /** A reusable chat already owns its placement. */
   reusableSessionId?: string | null;
@@ -1194,6 +1266,15 @@ export async function validateScheduledTaskMachineTarget(input: {
   sandboxOs: Session["sandboxOs"];
 } | null> {
   if (input.runMode === "reusable_session" && input.reusableSessionId) return null;
+  // Generated runs create their session with this backend, so refuse at save
+  // time what the deployment does not serve (see sandboxBackendServed). A
+  // reusable chat that already exists keeps its placement, as at admission.
+  const requestedBackend = input.agentConfig.sandboxBackend;
+  if (requestedBackend !== undefined && !sandboxBackendServed(input.settings, requestedBackend)) {
+    throw new HTTPException(422, {
+      message: unservedSandboxBackendMessage(input.settings, requestedBackend),
+    });
+  }
   let machineTarget = input.agentConfig.machineTarget;
   const followsWorkspace = input.agentConfig.executionTarget === "workspace_default";
   if (followsWorkspace) {
@@ -1259,10 +1340,9 @@ export async function validateScheduledTaskMachineTarget(input: {
     });
   }
   if (sandbox.scope === "user" && followsWorkspace) {
-    throw new HTTPException(422, { message: "The workspace default must be a shared machine" });
-  }
-  if (sandbox.scope === "user" && input.audience !== "user_private") {
-    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
+    throw new HTTPException(422, {
+      message: WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
+    });
   }
   const enrollment = input.requireOnline
     ? await getLiveEnrollmentConnection(input.db, access, sandbox.enrollmentId)
@@ -1327,15 +1407,11 @@ export function scheduledTaskAuthorityUpdateForGrant(
  * caller's choice. An omitted value is resolved once, here, and frozen on the
  * task, the way session create resolves an omitted rigId:
  * - an existing-session task keeps its target session's own environment;
- * - a Connected Machine task stores none: environment setup and Variable Set
- *   injection never reach a machine, so a binding would only add a fire-time
- *   failure mode;
+ * - a Connected Machine task stores none: environment setup never reaches a
+ *   machine, so a binding would only add a fire-time failure mode;
  * - otherwise the workspace default, when the creator can see it and it has an
  *   active version. A stale default degrades to none, like session create.
- * The default's own Variable Sets must be attachable by the creator, exactly
- * as session create requires, so a workspace default never gives a task
- * secrets its creator could not attach. Later changes to the workspace default
- * do not move an existing task.
+ * Later changes to the workspace default do not move an existing task.
  */
 async function resolveScheduledTaskCreateRigId(input: {
   settings: Settings;
@@ -1397,7 +1473,6 @@ export async function validatedScheduledTaskUpdate(
       : runMode === "reusable_session" && input.existing.runMode === "reusable_session"
         ? input.existing.reusableSessionId
         : null;
-  const agentConfig = update.agentConfig ?? input.existing.agentConfig;
   const visibility = await resolveScheduledTaskVisibility({
     db: input.db,
     settings: input.settings,
@@ -1405,14 +1480,7 @@ export async function validatedScheduledTaskUpdate(
     requested: input.payload.visibility,
     current: input.existing,
     targetSessionId,
-    personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId: input.existing.ownerSubjectId,
-  });
-  await requirePersonalMachineAudience({
-    db: input.db,
-    grant: input.grant,
-    agentConfig,
-    audience: visibility,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
   const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
@@ -1521,6 +1589,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
   /** See createValidatedScheduledTask. */
   eventSourceFetch?: typeof fetch | undefined;
+  /** See createValidatedScheduledTask. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??
@@ -1558,15 +1628,10 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   const requestedMode = input.payload.runMode ?? input.existing.runMode;
   if (requestedMode === "existing_session") {
     const config = input.payload.agentConfig ?? input.existing.agentConfig;
-    if (config.knowledgeSource)
-      throw new HTTPException(422, {
-        message: "Source ingestion requires a separate scheduled agent",
-      });
     const target = await validateScheduledTaskTarget({
       ...input,
       runMode: "existing_session",
       targetSessionId: input.payload.targetSessionId ?? input.existing.targetSessionId,
-      variableSetId: null,
       rigId: null,
       agentConfig: scheduledSessionMessageConfig(config),
     });
@@ -1591,21 +1656,17 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
             runMode: "existing_session",
             targetSessionId: previousTargetSessionId,
             departingTarget: true,
-            variableSetId: null,
             rigId: null,
             agentConfig: scheduledSessionMessageConfig(input.existing.agentConfig),
           })
         : null;
-    // Variable Sets were replaced by vaults; only an environment change needs review.
-    const removedVariableSetIds: string[] = [];
+    // Only an environment change needs review.
     const previousRigId = previousTarget ? previousTarget.rigId : input.existing.rigId;
     const changedRig = retargeting && previousRigId && previousRigId !== target?.rigId;
-    if ((removedVariableSetIds.length || changedRig) && !input.payload.adoptSessionSettings) {
+    if (changedRig && !input.payload.adoptSessionSettings) {
       const detail = {
         code: "scheduled_target_access_change",
         targetSessionId: target!.id,
-        removedVariableSetIds,
-        removedVariableSetCount: removedVariableSetIds.length,
         removedRigId: changedRig ? previousRigId : null,
         resolution:
           "Review the destination's access, then retry with adoptSessionSettings=true and the reviewed expectedExecutionDigest to use that chat's attachments.",
@@ -1630,7 +1691,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
                 prompt: input.payload.agentConfigPatch?.prompt ?? config.prompt,
               }),
               agentConfigPatch: undefined,
-              variableSetId: null,
               rigId: null,
             }
           : {}),
@@ -1653,62 +1713,13 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   const update: UpdateScheduledTaskInput = {
     expectedExecutionDigest: input.existing.executionDigest,
   };
-  const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  // Integration Knowledge sync was removed; the request field stays in the
+  // public schema until the next SDK major, so refuse it clearly.
   if (
-    isRetiredNativeGoogleDriveTask(input.existing) &&
-    (input.payload.status === "active" || requestedKnowledgeSource)
+    input.payload.agentConfig?.knowledgeSource ||
+    (input.payload.action && input.payload.action.kind !== "agent_turn")
   )
-    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
-  if (
-    isRetiredNativeAtlassianTask(input.existing) &&
-    (input.payload.status === "active" || requestedKnowledgeSource)
-  )
-    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-  const existingKnowledgeSource = scheduledTaskKnowledgeSource(input.existing);
-  // Editing an ordinary source task's prompt/settings must not orphan its
-  // connector binding. Deleting the task is the explicit source-disable path.
-  if (
-    input.payload.agentConfig &&
-    input.existing.agentConfig.knowledgeSource &&
-    !input.payload.agentConfig.knowledgeSource
-  ) {
-    input = {
-      ...input,
-      payload: {
-        ...input.payload,
-        agentConfig: {
-          ...input.payload.agentConfig,
-          knowledgeSource: input.existing.agentConfig.knowledgeSource,
-        },
-      },
-    };
-  }
-  if (input.payload.action && input.payload.action.kind !== "agent_turn") {
-    throw new HTTPException(422, { message: "Source ingestion uses an ordinary agent task" });
-  }
-  const knowledgeSource =
-    input.payload.agentConfig?.knowledgeSource ?? scheduledTaskKnowledgeSource(input.existing);
-  if (
-    knowledgeSource &&
-    requestedKnowledgeSource &&
-    !isDeepStrictEqual(requestedKnowledgeSource, existingKnowledgeSource)
-  ) {
-    await validateKnowledgeSourceSyncAction({
-      db: input.db,
-      grant: input.grant,
-      action: knowledgeSource,
-    });
-  }
-  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
-  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
-    throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
-  if (
-    knowledgeSource?.destination.kind === "personal" &&
-    (input.payload.runMode ?? input.existing.runMode) !== "new_session_per_run"
-  )
-    throw new HTTPException(422, {
-      message: "Personal source tasks create a private session for each run",
-    });
+    throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
   const materializedReusable =
@@ -1744,9 +1755,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   if (input.payload.vaultPolicy !== undefined) {
     update.vaultPolicy = scheduledVaultPolicy(input.payload.vaultPolicy);
   }
-  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
-  // Clearing a legacy selection stays allowed.
-  if (input.payload.variableSetId === null) update.variableSetId = null;
   if (input.payload.rigId !== undefined) {
     if (materializedReusable && input.payload.rigId !== input.existing.rigId) {
       throw new HTTPException(409, {
@@ -1824,6 +1832,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       ...(input.existing.agentConfig.toolPolicy
         ? { existingToolPolicy: input.existing.agentConfig.toolPolicy }
         : {}),
+      githubPersonalFetch: input.githubPersonalFetch,
     });
     if (
       materializedReusable &&
@@ -1922,8 +1931,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   const authorityTargetChanged =
     nextRunMode !== input.existing.runMode ||
     nextTargetSessionId !== input.existing.targetSessionId ||
-    (input.payload.variableSetId !== undefined &&
-      input.payload.variableSetId !== input.existing.variableSetId) ||
     (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
   const materialExecutionChange =
     authorityTargetChanged ||
@@ -1994,10 +2001,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       targetSessionId: nextTargetSessionId,
       runMode: nextRunMode,
-      variableSetId:
-        input.payload.variableSetId !== undefined
-          ? input.payload.variableSetId
-          : input.existing.variableSetId,
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
@@ -2110,8 +2113,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     update.clonePersonalResourceAuthorityFromRevision === undefined
   ) {
     // Administrative lifecycle/name edits preserve the exact revision-bound
-    // causal human. They must not silently re-authorize retained Variable Set,
-    // Rig, Connection, or xAI authority under the manager performing the edit.
+    // causal human. They must not silently re-authorize retained Rig,
+    // Connection, or xAI authority under the manager performing the edit.
     update.clonePersonalResourceAuthorityFromRevision = input.existing.authorityRevision;
   }
   if (
@@ -2126,7 +2129,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       targetSessionId: existingTarget,
       departingTarget: true,
       runMode: "existing_session",
-      variableSetId: input.existing.variableSetId,
       rigId: input.existing.rigId,
       agentConfig: input.existing.agentConfig,
     });
@@ -2138,15 +2140,10 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     grant: input.grant,
     targetSessionId: nextTargetSessionId,
     runMode: nextRunMode,
-    variableSetId:
-      input.payload.variableSetId !== undefined
-        ? input.payload.variableSetId
-        : input.existing.variableSetId,
     rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
     agentConfig: update.agentConfig ?? input.existing.agentConfig,
   });
   if (
-    !knowledgeSource &&
     !(
       materializedReusable &&
       nextAgentConfig.executionTarget === input.existing.agentConfig.executionTarget &&
@@ -2160,10 +2157,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       runMode: nextRunMode,
       agentConfig: update.agentConfig ?? input.existing.agentConfig,
-      audience:
-        (input.payload.visibility ?? input.existing.visibility) === "private"
-          ? "user_private"
-          : "workspace_shared",
     });
   }
   if (
@@ -2224,72 +2217,10 @@ export async function restoreScheduledTask(
     ...(task.runMode === "existing_session"
       ? { targetSessionId: task.targetSessionId }
       : { reusableSessionId: task.reusableSessionId }),
-    variableSetId: task.variableSetId,
     rigId: task.rigId,
     metadata: task.metadata,
     clonePersonalResourceAuthorityFromRevision: task.authorityRevision,
   });
-}
-
-async function validateKnowledgeSourceSyncAction(input: {
-  db: Database;
-  grant: AccessGrant;
-  action: KnowledgeSourceSyncAction;
-}): Promise<void> {
-  if (isRetiredNativeGoogleDriveSource(input.action))
-    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
-  if (isRetiredNativeAtlassianSource(input.action))
-    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-  if (input.action.initiatingSubjectId !== input.grant.subjectId) {
-    throw new HTTPException(403, {
-      message: "knowledge source sync must preserve the exact initiating subject",
-    });
-  }
-  if (input.action.connection.ownerSubjectId !== input.grant.subjectId) {
-    throw new HTTPException(403, {
-      message: "knowledge source connection must belong to the initiating subject",
-    });
-  }
-  const resolved = await getKnowledgeSourceForSyncAuthority(input.db, {
-    accountId: input.grant.accountId,
-    workspaceId: input.grant.workspaceId,
-    sourceId: input.action.sourceId,
-    initiatingSubjectId: input.grant.subjectId,
-  });
-  if (!resolved || resolved.source.lifecycleState !== "active") {
-    throw new HTTPException(404, { message: "knowledge source not found" });
-  }
-  if (
-    resolved.source.syncGeneration !== input.action.sourceGeneration ||
-    resolved.source.lifecycleGeneration !== input.action.sourceLifecycleGeneration ||
-    scopedKnowledgeScopeKey(resolved.source.scope) !==
-      scopedKnowledgeScopeKey(input.action.destination)
-  ) {
-    throw new HTTPException(409, {
-      message: "knowledge source authority or generation changed",
-    });
-  }
-  const connection = await getConnectionMetadata(
-    input.db,
-    input.grant.workspaceId,
-    input.action.connection.connectionId,
-    input.grant.subjectId,
-  );
-  if (
-    !connection ||
-    connection.accountId !== input.grant.accountId ||
-    connection.workspaceId !== input.grant.workspaceId ||
-    connection.subjectId !== input.action.connection.ownerSubjectId ||
-    connection.version !== input.action.connection.connectionVersion ||
-    connection.providerDomain.toLowerCase() !==
-      input.action.connection.providerDomain.toLowerCase() ||
-    connection.kind !== input.action.connection.kind ||
-    connection.status !== "active"
-  ) {
-    throw new HTTPException(409, {
-      message: "knowledge source connection authority changed or requires reconnect",
-    });
-  }
 }
 
 export class ScheduledTaskSyncError extends Error {
@@ -2303,11 +2234,10 @@ export class ScheduledTaskSyncError extends Error {
 }
 
 /**
- * One deletion lifecycle shared by HTTP and first-party MCP adapters.
- * Connector authorization is proven before the one-way tombstone. The same
- * transaction detaches reclaimable task resources and persists both external
- * cleanup obligations; best-effort processing is only an acceleration of that
- * durable receipt.
+ * One deletion lifecycle shared by HTTP and first-party MCP adapters. The
+ * transaction detaches reclaimable task resources and persists the Temporal
+ * cleanup obligation; best-effort processing only accelerates that durable
+ * receipt.
  */
 export async function deleteScheduledTaskLifecycle(input: {
   db: Database;
@@ -2315,8 +2245,6 @@ export async function deleteScheduledTaskLifecycle(input: {
   taskId: string;
   subjectId: string;
   beforeDeleteCommit?: (tx: Database) => Promise<void>;
-  preflightConnectorAuthorization: (task: ScheduledTask) => Promise<void>;
-  cleanupConnectorAuthorization: (db: Database, task: ScheduledTask) => Promise<void>;
   processCleanupClaims?: (claims: readonly TemporalScheduleCleanupClaim[]) => Promise<void>;
 }): Promise<{
   task: ScheduledTask;
@@ -2336,29 +2264,7 @@ export async function deleteScheduledTaskLifecycle(input: {
       if (!task) throw new HTTPException(404, { message: "Scheduled task not found" });
       await input.beforeDeleteCommit?.(tx);
       const wasLive = task.deletedAt === null;
-      if (
-        scheduledTaskKnowledgeSource(task) &&
-        (requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
-          requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId)
-      ) {
-        throw new HTTPException(403, {
-          message: "knowledge source schedule requires the exact initiating subject",
-        });
-      }
-      if (wasLive && scheduledTaskKnowledgeSource(task)) {
-        await input.preflightConnectorAuthorization(task);
-      }
-      const deletion = scheduledTaskKnowledgeSource(task)
-        ? await (async () => {
-            await input.cleanupConnectorAuthorization(tx, task);
-            return await deleteScheduledTask(tx, input.workspaceId, task.id, {
-              connectorCleanupSubjectId: input.subjectId,
-              connectorCleanupCompleted: true,
-              expectedAuthorityRevision: task.authorityRevision,
-              expectedExecutionDigest: task.executionDigest,
-            });
-          })()
-        : await deleteScheduledTask(tx, input.workspaceId, task.id);
+      const deletion = await deleteScheduledTask(tx, input.workspaceId, task.id);
       if (wasLive) await wakeScheduledTaskEventSubscriptions(tx, input.workspaceId, task.id);
       return { task, deletion };
     },
@@ -2536,6 +2442,8 @@ async function validateScheduledTaskAgentConfig(input: {
    * the tools a read returned) never turns the defaults into a fixed list.
    */
   existingToolPolicy?: ScheduledTaskAgentConfig["toolPolicy"];
+  /** Asks GitHub as the person in All my repositories; tests replace it. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTaskAgentConfig> {
   const existingChat = input.payload.runMode === "existing_session";
   if (existingChat)
@@ -2585,7 +2493,23 @@ async function validateScheduledTaskAgentConfig(input: {
   // through session creation later, where the effective default is vetted.
   if (!unchangedCreationField("model"))
     await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
-  const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
+  // An agent may name a repository as the person with just uri, ref and
+  // connectionType; its own turn's Your GitHub delegation fills in the rest.
+  const resources = normalizeResources(
+    await resolveAgentPersonalGitHubRepositoryResources({
+      grant: input.grant,
+      workspaceId: input.workspaceId,
+      settings: input.settings,
+      resources: input.payload.agentConfig.resources ?? [],
+      services: agentPersonalGitHubRepositoryServices({
+        db: input.db,
+        settings: input.settings,
+        workspaceId: input.workspaceId,
+        accountId: input.grant.accountId,
+        githubPersonalFetch: input.githubPersonalFetch,
+      }),
+    }),
+  );
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
     input.workspaceId,
@@ -2595,7 +2519,15 @@ async function validateScheduledTaskAgentConfig(input: {
   const retainTools = unchangedCreationField("tools");
   const requestedTools = retainTools
     ? input.payload.agentConfig.tools
-    : validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
+    : // Tools may name the servers the task attaches to each chat it starts, as
+      // a session create's may; those servers are validated below.
+      validateToolRefs(
+        input.payload.agentConfig.tools ?? [],
+        settingsWithSessionMcpServerInputs(
+          runtimeSettings,
+          input.payload.agentConfig.mcpServers ?? [],
+        ),
+      );
   const workspace = await requireWorkspace(input.db, input.workspaceId);
   if (
     parent?.tenancy?.visibility === "private" &&
@@ -2617,15 +2549,13 @@ async function validateScheduledTaskAgentConfig(input: {
   // turned off; its `tools` are then added on top. An edit keeps the policy
   // the schedule already follows. Only a new schedule created with a list of
   // tools and no policy gets exactly that list.
-  // A knowledge sync reads one source and never follows the defaults.
-  const toolPolicy =
-    existingChat || input.payload.agentConfig.knowledgeSource
-      ? undefined
-      : (input.payload.agentConfig.toolPolicy ??
-        input.existingToolPolicy ??
-        (retainTools || (input.toolsProvided ?? true)
-          ? undefined
-          : { mode: "workspace_default" as const, excludedMcpServerIds: [] }));
+  const toolPolicy = existingChat
+    ? undefined
+    : (input.payload.agentConfig.toolPolicy ??
+      input.existingToolPolicy ??
+      (retainTools || (input.toolsProvided ?? true)
+        ? undefined
+        : { mode: "workspace_default" as const, excludedMcpServerIds: [] }));
   const tools = requestedTools;
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
@@ -2659,7 +2589,6 @@ async function validateScheduledTaskAgentConfig(input: {
           )
         : null;
     const privateDestination =
-      workspace.kind === "personal" ||
       (target?.visibility === "user_private" &&
         target.ownerSubjectId === fileActor.privateFileOwnerSubjectId) ||
       (target?.memoryScope === "user" &&
@@ -2687,6 +2616,18 @@ async function validateScheduledTaskAgentConfig(input: {
     );
   }
   const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
+  // Servers attached to each chat the task starts pass the same checks as a
+  // session-create attach. They carry no static headers.
+  const mcpServers = input.payload.agentConfig.mcpServers;
+  if (mcpServers?.length && !unchangedCreationField("mcpServers")) {
+    validateSessionMcpServersForCreate(runtimeSettings, input.grant, mcpServers);
+    for (const server of mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(input.db, {
+        target: { accountId: input.grant.accountId, workspaceId: input.workspaceId },
+        url: server.url,
+      });
+    }
+  }
   if (requestedMaxDepth !== undefined && !unchangedCreationField("maxNestedAgentDepth")) {
     const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
     const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
@@ -2699,13 +2640,25 @@ async function validateScheduledTaskAgentConfig(input: {
       !hasPermission(input.grant.permissions, "workspace:admin")
     ) {
       throw new HTTPException(403, {
-        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; only a workspace admin can raise it`,
       });
     }
   }
   const { toolPolicy: _requestedToolPolicy, ...requestedConfig } = input.payload.agentConfig;
+  // Inline Skills are validated like a session create's and stored normalized.
+  let skills: ScheduledTaskAgentConfig["skills"];
+  if (requestedConfig.skills !== undefined) {
+    const parsed = SessionSkills.safeParse(requestedConfig.skills);
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: `agentConfig.skills is invalid: ${parsed.error.issues[0]?.message ?? "invalid Skill"}`,
+      });
+    }
+    skills = parsed.data;
+  }
   const validated = {
     ...requestedConfig,
+    ...(skills !== undefined ? { skills } : {}),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
@@ -2795,16 +2748,16 @@ export function validateIncidentTelemetryPreflightSelection(
       message: "incidentTelemetryPreflight.dataSource.route must use a selected first-party tool",
     });
   }
-  if (route.kind === "variable_set") {
-    const declaredSets = new Set(preflight.requiredVariableSetNames);
-    const declaredVariables = new Set(preflight.requiredVariableNames);
+  if (route.kind === "vault") {
+    const declaredVaults = new Set(preflight.requiredVaultNames);
+    const declaredSecrets = new Set(preflight.requiredSecretNames);
     if (
-      !declaredSets.has(route.variableSetName) ||
-      route.variableNames.some((name) => !declaredVariables.has(name))
+      !declaredVaults.has(route.vaultName) ||
+      route.secretNames.some((name) => !declaredSecrets.has(name))
     ) {
       throw new HTTPException(422, {
         message:
-          "incidentTelemetryPreflight.dataSource.route variable metadata must be declared as required",
+          "incidentTelemetryPreflight.dataSource.route vault metadata must be declared as required",
       });
     }
   }

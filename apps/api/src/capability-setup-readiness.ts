@@ -14,7 +14,11 @@ import type { CapabilityCatalogItem, Session } from "@opengeni/contracts";
  */
 export type CapabilitySetupReadiness = "ready" | "assumed_ready" | "not_ready" | "not_applicable";
 
-const SELF_REPORTING_CAPABILITY_IDS = new Set(["api:connected-machine", "api:github-app"]);
+const SELF_REPORTING_CAPABILITY_IDS = new Set([
+  "api:connected-machine",
+  "api:github-app",
+  "api:github-personal",
+]);
 
 /** Built-in servers are not tool-policy ids; their tools are chosen by name. */
 const BUILT_IN_SERVER_IDS = new Set(["opengeni", "files", "docs"]);
@@ -36,7 +40,8 @@ export function capabilitySetupReadiness(
   if (item.surfaceType === "first_party_fiken" && item.metadata.connectionStatus !== "active") {
     return "not_ready";
   }
-  if (item.kind === "skill") return "ready";
+  // Installed Skills and plugins reach the agent without a tool selection.
+  if (item.kind === "skill" || item.kind === "plugin") return "ready";
   // The same selection the clients write when attaching a capability to a chat.
   const serverIds = new Set(item.tools.map((tool) => tool.id));
   if (item.kind === "mcp" && item.runtime.mcpServerId) serverIds.add(item.runtime.mcpServerId);

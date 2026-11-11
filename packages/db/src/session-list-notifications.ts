@@ -1,10 +1,12 @@
 import postgres from "postgres";
 import { setTimeout as delay } from "node:timers/promises";
+import { sql } from "drizzle-orm";
 import {
   DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
   isDatabaseAuthenticationFailure,
   type RotatingDatabasePassword,
 } from "./database-credentials";
+import type { Database } from "./database";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 
 export const SESSION_LIST_NOTIFICATION_CHANNEL = "opengeni_session_lists";
@@ -16,6 +18,12 @@ export type SessionListDatabaseChange = {
   sessionId: string | null;
   subjectId: string | null;
   all: boolean;
+  /**
+   * The author's own draft changed: their composer draft in `sessionId`, or
+   * their new-chat draft when `sessionId` is null. Only that author's own
+   * streams act on it; it is never a session-list change.
+   */
+  draft?: true;
 };
 export type SessionListNotification =
   | { type: "connected" | "disconnected" }
@@ -39,10 +47,29 @@ function parseChange(payload: string): SessionListDatabaseChange | null {
     typeof row.workspaceId !== "string" ||
     (row.sessionId !== null && typeof row.sessionId !== "string") ||
     (row.subjectId !== null && typeof row.subjectId !== "string") ||
-    typeof row.all !== "boolean"
+    typeof row.all !== "boolean" ||
+    (row.draft !== undefined && row.draft !== true) ||
+    (row.draft === true && typeof row.subjectId !== "string")
   )
     return null;
   return row as SessionListDatabaseChange;
+}
+
+/**
+ * Tell the author's other devices that their draft changed, when this
+ * transaction commits. The hint names no content: a device that follows it
+ * reads the draft again through its own authorized, author-only read.
+ */
+export async function notifyActorDraftChanged(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; sessionId: string | null },
+): Promise<void> {
+  await db.execute(
+    sql`select pg_notify(${SESSION_LIST_NOTIFICATION_CHANNEL}, json_build_object(
+      'schema', current_schema(), 'workspaceId', ${input.workspaceId}::text,
+      'sessionId', ${input.sessionId}::text, 'subjectId', ${input.subjectId}::text,
+      'all', false, 'draft', true)::text)`,
+  );
 }
 
 /**

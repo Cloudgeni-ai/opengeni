@@ -1,4 +1,5 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { BillingCreditNotification } from "@opengeni/contracts/billing-credit-notifications";
 import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
 export type {
   SessionUsageLimit,
@@ -30,11 +31,25 @@ export type {
   InsightsCallsScope,
 } from "./insights-usage";
 import type {
+  ClientModelResidencyV1,
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  ScheduledTaskSkill,
   SessionAutomationWaitSummary,
+  SessionAvatar,
 } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { ScheduledTaskSkill } from "@opengeni/contracts";
+export type {
+  McpElicitationAnswer,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
+} from "@opengeni/contracts";
+import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -284,6 +299,8 @@ export type ToolGatewayTargetApprovalRequest = {
   operationId: string;
   arguments: Record<string, unknown>;
   expectedDefinitionDigest: string;
+  /** "Always allow for this Site" (this person, this Site, this tool and connection). Site context only. */
+  rememberForSite?: boolean;
   siteArtifactId?: string;
   siteVersionId?: string;
 };
@@ -293,6 +310,38 @@ export type ToolGatewayTargetApprovalResponse = {
   tool: ToolGatewayResolvedTool;
   approvalToken: string;
   expiresAt: string;
+};
+/** The viewer's own accounts for a Site's declared tool (host code only). */
+export type ToolGatewaySiteConsentRequest = {
+  identity: ToolGatewayIdentity;
+  siteArtifactId: string;
+  siteVersionId: string;
+  /** The exact arguments, to review what the call would do on the selected account. */
+  arguments?: Record<string, unknown>;
+};
+export type ToolGatewaySiteConsentAccount = {
+  identity: ToolGatewayIdentity;
+  connector: string;
+  account: string;
+};
+/** The provider's own reading of the call (for Gmail, the message as it would be sent). */
+export type ToolGatewaySiteConsentReview = {
+  kind: "generic" | "gmail";
+  email?: {
+    from: string;
+    to: string;
+    cc: string;
+    bcc: string;
+    subject: string;
+    attachments: number;
+  };
+};
+export type ToolGatewaySiteConsentResponse = {
+  version: 1;
+  accounts: ToolGatewaySiteConsentAccount[];
+  selected: ToolGatewayIdentity | null;
+  review: ToolGatewaySiteConsentReview | null;
+  connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
@@ -401,6 +450,8 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
+  /** This server can hold an incoming connection until Answer. Requires a gated audio device. */
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider:
@@ -458,7 +509,7 @@ export type RealtimeVoiceSettings = {
 export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
-export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeState = "preparing" | "active" | "ended";
 export type SessionRealtimeEndReason =
   | "user_stop"
   | "browser_unload"
@@ -486,6 +537,7 @@ export type BeginSessionRealtimeRequest = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  incomingCall?: { callId: string; device: string; answered?: boolean | undefined } | undefined;
 };
 
 export type RenewSessionRealtimeRequest = {
@@ -819,23 +871,28 @@ export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
       excludedMcpServerIds?: string[] | undefined;
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     }
   | {
       mode: "explicit";
       tools: ToolRef[];
       firstPartyMcpTools: FirstPartyMcpToolName[];
+      firstPartyMcpPermissions?: Permission[] | undefined;
       expectedVersion: number;
     };
 
 /**
  * The person finished setup from a capability card the agent posted in this
  * chat. The server wakes the agent once per card so it continues the request
- * that needed the capability.
+ * that needed the capability. Name the capability from an agent's
+ * recommendation card, or the connected account from that account's own card
+ * (for example after allowing more access); the account continues only once
+ * it is active and holds the access the card asked for.
  */
-export type ContinueAfterCapabilitySetupRequest = {
-  capabilityId: string;
-};
+export type ContinueAfterCapabilitySetupRequest =
+  | { capabilityId: string }
+  | { connectionId: string };
 
 /** Why no continuation was sent. Each is a normal outcome, not an error. */
 export type CapabilitySetupContinuationSkipReason =
@@ -1044,10 +1101,30 @@ export type ConnectionMetadata = {
   verifiedInstallAt?: string | null;
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
+  /**
+   * Whether this OAuth MCP account can be told apart from another account of
+   * the same service: `verified` (its account is known), `reconnect` (sign in
+   * again once before adding another), or `single` (the service doesn't say
+   * which account it is, so each person can connect one). Absent for other
+   * connections and from older servers.
+   */
+  accountIdentity?: "verified" | "reconnect" | "single" | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Your own login only: whether it works for your messages in the workspace
+   * this list was read from. It does in your Personal workspace and in each
+   * shared workspace where it is turned on; it starts on where it was added.
+   */
+  turnedOnHere?: boolean | undefined;
+  /**
+   * The standing grant that turns your own login on here; revoke it with
+   * `revokeUserResourceGrant` to stop using the login here. Null in your
+   * Personal workspace, which needs none.
+   */
+  turnedOnHereGrantId?: string | null | undefined;
 };
 
 /** Where a brokered credential is written on each outbound provider request. */
@@ -1138,6 +1215,8 @@ export type PersonalGitHubConnectionStatusResponse = {
   enabled: boolean;
   connection: ConnectionMetadata | null;
   reviewUrl: string | null;
+  /** "All my repositories" can be turned on. Absent from older servers. */
+  allRepositoriesAvailable?: boolean | undefined;
 };
 
 export type PersonalGitHubDisconnectRequest = {
@@ -1179,16 +1258,31 @@ export type PersonalGitHubRepositorySelectionState = {
   credentialBindingId: string;
   providerPrincipalId: string;
   selectionGeneration: number;
+  /**
+   * "All my repositories": every repository the person can access on GitHub,
+   * up to this access. Null (or absent from older servers) means only
+   * `repositories`, which are kept while the mode is on.
+   */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
   repositories: PersonalGitHubSelectedRepository[];
 };
 
 export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
+  /** The saved per-repository choice. */
   selectedAccess: PersonalGitHubRepositoryAccess | null;
+  /**
+   * The access Opengeni may use now: the saved choice, or in "All my
+   * repositories" that mode's access lowered to GitHub's permission. Null
+   * when not usable; absent from older servers, where `selectedAccess` is it.
+   */
+  effectiveAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesOptions = {
   cursor?: number | undefined;
   limit?: number | undefined;
+  /** Find repositories by `owner/name` across everything the person can access (not paged). */
+  query?: string | undefined;
 };
 
 export type ListPersonalGitHubRepositoriesResponse = {
@@ -1208,6 +1302,8 @@ export type ReplacePersonalGitHubRepositorySelectionsRequest = {
   expectedSelectionGeneration: number;
   idempotencyKey: string;
   repositories: PersonalGitHubRepositorySelectionInput[];
+  /** Turn "All my repositories" on with this access, or off with null. Omitted keeps it. */
+  allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null | undefined;
 };
 
 export type VerifyPersonalGitHubRepositorySelectionsRequest = {
@@ -1717,6 +1813,54 @@ export type UpdateSessionVisibilityResponse = {
   revokedGrantCount: number;
 };
 
+/** One message a share link shows: the person's or the reply, as text. */
+export type SharedSessionMessage = {
+  role: "user" | "assistant";
+  text: string;
+  /**
+   * The name the chat shows for the person who sent a message, never an
+   * email address or id. Absent for replies, and when the chat has no such
+   * name for them.
+   */
+  sender?: string;
+};
+
+/** A chat's live read-only share link, as its owner sees it. */
+export type SessionShareLink = {
+  shareId: string;
+  /** The page anyone with the link opens. */
+  url: string;
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  /** Messages the link shows. */
+  messageCount: number;
+  createdAt: string;
+  /** When the snapshot behind the link was last taken. */
+  updatedAt: string;
+};
+
+/** Whether the person can share a chat here, and their live link. */
+export type SessionShareLinkState = {
+  /** False when this deployment has turned share links off. */
+  enabled: boolean;
+  link: SessionShareLink | null;
+};
+
+export type SessionShareLinkList = {
+  links: SessionShareLink[];
+};
+
+/** What anyone holding a share link reads, without signing in. */
+export type SharedSession = {
+  title: string;
+  /** When the snapshot was taken. */
+  sharedAt: string;
+  messages: SharedSessionMessage[];
+  /** Earlier messages left out to keep the snapshot within its size. */
+  omittedMessageCount: number;
+};
+
 export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
@@ -1791,6 +1935,14 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Full configuration, requested explicitly with sessions:control permission. */
+export type SessionConfiguration = Session;
+
+/** Chat rendering projection. Older servers may still include configuration. */
+export type ChatSession = Omit<Session, "instructions" | "skills" | "effectiveTools"> &
+  Partial<Pick<Session, "instructions" | "skills" | "effectiveTools">>;
+export type SessionResponseMode = "full" | "chat";
+
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
   reason:
@@ -1844,12 +1996,19 @@ export type Session = {
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
-  // Per-session agent persona/system instructions supplied at create; null when
-  // the session carried none. Org-visible metadata, never a timeline event.
+  /** Display-only one-line description of what this chat is for. Never sent to the model. */
+  description?: string | null | undefined;
+  /** Display-only avatar. Never sent to the model. */
+  avatar?: SessionAvatar | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
+  /**
+   * Repositories a person removed from this chat, newest per repository. The
+   * agent can't attach one again; a person attaching it again ends its record.
+   */
+  removedRepositories?: SessionRemovedRepository[] | undefined;
   skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
@@ -1871,12 +2030,6 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetIds?: string[] | undefined;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
@@ -1890,7 +2043,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Capability-level view of what a configured session can use; null for legacy. */
+  /** Capability-level catalog; absent on compact chat responses, null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -1943,6 +2096,11 @@ export type Session = {
   pinVersion?: number;
   /** Personal explicit acknowledgment state. */
   unread?: boolean;
+  /**
+   * True when this failed session's failure was consumed by its parent agent,
+   * which owns the follow-up. Absent when false and on older servers.
+   */
+  failureHandled?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -1960,6 +2118,11 @@ export type Session = {
    * independent of the personal `archived` flag. Absent on older servers.
    */
   retention?: SessionRetention | undefined;
+  /**
+   * Whether the next turns run unattended: no person will see or answer a
+   * question until the task ends. Absent on older servers (attended).
+   */
+  unattended?: boolean | undefined;
   /** Optimistic archive-state revision. */
   archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
@@ -1972,6 +2135,8 @@ export type Session = {
         waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
+        /** Paused descendants whose work is parked for Resume. Absent from older servers. */
+        pausedWorkDescendants?: number | undefined;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         unreadFailedDescendants?: number | undefined;
@@ -2007,7 +2172,7 @@ export type Session = {
 };
 
 /** Additive receipt returned by POST /sessions. */
-export type CreateSessionResponse = Session & {
+export type CreateSessionResponse<S extends ChatSession = Session> = S & {
   initialTurnId: string | null;
 };
 
@@ -2023,6 +2188,7 @@ export type SessionListEntry = Pick<
   | "workspaceId"
   | "accountId"
   | "status"
+  | "activeTurnId"
   | "backgroundCommandActivity"
   | "hasSchedules"
   | "hasUpcomingSchedules"
@@ -2030,6 +2196,8 @@ export type SessionListEntry = Pick<
   | "automationWait"
   | "title"
   | "titleSource"
+  | "description"
+  | "avatar"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -2041,6 +2209,7 @@ export type SessionListEntry = Pick<
   | "pinnedAt"
   | "pinVersion"
   | "unread"
+  | "failureHandled"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -2067,6 +2236,19 @@ export type SessionListEntry = Pick<
    */
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  /**
+   * Newest turn in execution order: the last queued turn, else the executing
+   * turn, else the most recently finished one. Null when the session has no
+   * turn; absent from older servers and SDK-projected full pages.
+   */
+  latestTurn?: SessionListLatestTurn | null | undefined;
+};
+
+export type SessionListLatestTurn = {
+  id: string;
+  status: SessionTurnStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
   projection: "summary";
@@ -2122,14 +2304,16 @@ export type SiteConversationGroup = {
   pinnedAt?: string | null;
 };
 
-export type SessionListResponse = {
+export type SessionListResponse<S extends ChatSession = Session> = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
   contentArchivedOnly?: true;
   /** Receipt for the started-or-messaged-by-you filter. */
   mineOnly?: true;
-  pinned: Session[];
+  /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
+  sessionIdsApplied?: true;
+  pinned: S[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
@@ -2148,7 +2332,7 @@ export type SessionListResponse = {
   siteGroups?: SiteConversationGroup[];
   /** True when Site rows beyond the server bound were omitted. */
   siteGroupsTruncated?: true;
-  sessions: Session[];
+  sessions: S[];
   nextCursor: string | null;
 };
 
@@ -2285,6 +2469,8 @@ export type SessionRetention = {
   archive: {
     state: "archiving" | "archived";
     archivedAt: string | null;
+    /** Someone restored the chat; its stored content is being put back. */
+    restoring?: true | undefined;
   } | null;
 };
 
@@ -2292,29 +2478,52 @@ export type UpdateSessionRetentionRequest = {
   keepLive: boolean;
 };
 
+/** Turn a chat's unattended mode on or off from its next turn. */
+export type UpdateSessionUnattendedRequest = {
+  unattended: boolean;
+};
+
+/**
+ * `archived: true` archives a root chat and its sub-chats; it is refused
+ * (409 `session_archive_blocked`, blockers of kind `active_sub_chat`) while a
+ * sub-chat is still in use, unless each is listed in `confirmActiveSubChats`.
+ * `archived: false` brings the chat back at any time: exactly as it was within
+ * the undo window, and later with stored content restored in the background.
+ */
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ids of sub-chats still in use to archive (and stop) too. */
+  confirmActiveSubChats?: string[];
+  /** Ignored; kept for older clients. */
   clientEventId?: string;
+  /** Ignored; there is one kind of archive. Kept for older clients. */
   mode?: "pause_and_archive" | "hide_for_me";
+  /** Ignored; archiving stops running work itself. Kept for older clients. */
   confirmPause?: boolean;
+  /** Ignored; kept for older clients. */
   expectedVersion?: number;
 };
 
-export type LineageNode = {
-  session: SessionSummary;
-  children: LineageNode[];
+export type LineageNode<S extends ChatSession = Session> = {
+  session: S;
+  children: LineageNode<S>[];
 };
 
-export type SessionLineageResponse = {
+export type SessionLineageResponse<S extends ChatSession = Session> = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
   /** What the automations continuing the requested session are waiting for. */
   sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
-  ancestors: SessionSummary[];
-  children: LineageNode[];
+  ancestors: S[];
+  children: LineageNode<S>[];
   truncated: boolean;
 };
+
+export type ChatCreateSessionResponse = CreateSessionResponse<ChatSession>;
+export type ChatSessionListResponse = SessionListResponse<ChatSession>;
+export type ChatSessionLineageResponse = SessionLineageResponse<ChatSession>;
+export type ChatLineageNode = LineageNode<ChatSession>;
 
 export type SessionTurnStatus =
   | "queued"
@@ -2480,6 +2689,10 @@ export type HumanInputOption = {
   id: string;
   label: string;
   description?: string | null | undefined;
+  /** The agent's suggestion; mark it, never pre-select it. */
+  recommended?: boolean | null | undefined;
+  /** A short sample of what the option produces, shown as-is (monospace). */
+  preview?: string | null | undefined;
 };
 
 export type SkillReviewReference = {
@@ -2502,6 +2715,11 @@ export type HumanInputQuestion = {
   /** Required exactly when `kind` is "secret"; null otherwise. */
   secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
+  /**
+   * A yes/no decision: a single_select with exactly two options, the action
+   * first and the way out second, answered with two buttons.
+   */
+  confirm?: boolean | null | undefined;
   allowOther: boolean;
   validation?:
     | {
@@ -2522,7 +2740,9 @@ export type HumanInputAnswer = {
 
 export type HumanInputResponse =
   | { outcome: "answered"; answers: HumanInputAnswer[] }
-  | { outcome: "skipped" | "expired" | "cancelled" };
+  /** `agentDecides`: the person chose "Let the agent decide". */
+  | { outcome: "skipped"; agentDecides?: true | undefined }
+  | { outcome: "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
   | {
@@ -2531,7 +2751,12 @@ export type SubmitHumanInputResponseRequest =
       /** Write-only secret values; never echoed in events or responses. */
       secretAnswers?: HumanInputSecretAnswer[] | undefined;
     }
-  | { outcome: "skipped" };
+  /**
+   * `agentDecides`: "Let the agent decide". The asking agent makes its own best
+   * choice; accepted even when the request does not allow an ordinary skip, but
+   * never for secret questions, Skill reviews or secret approvals.
+   */
+  | { outcome: "skipped"; agentDecides?: true | undefined };
 
 export type SessionHumanInputRequest = {
   id: string;
@@ -2574,6 +2799,8 @@ export const SESSION_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.notification.posted",
   "session.notification.withdrawn",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
@@ -2668,12 +2895,15 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.profile_set",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
   "session.skills.updated",
+  "session.resources.removed",
+  "session.resources.added",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -3565,17 +3795,17 @@ export type IncidentTelemetrySeriesMetadata = {
 export type IncidentTelemetryDataRoute =
   | { kind: "mcp"; serverId: string }
   | { kind: "first_party"; tool: FirstPartyMcpToolName }
-  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "vault"; vaultName: string; secretNames: string[] }
   | { kind: "rig_credential_hook"; credentialHookId: string };
 
 export type IncidentTelemetryPreflight = {
   requiredResources: ResourceRef[];
   requiredMcpServerIds: string[];
   requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
-  requiredFirstPartyMcpPermissions: Permission[];
+  requiredFirstPartyMcpPermissions: KnownPermission[];
   requiredRig: { name: string; credentialHookIds: string[] } | null;
-  requiredVariableSetNames: string[];
-  requiredVariableNames: string[];
+  requiredVaultNames: string[];
+  requiredSecretNames: string[];
   dataSource: {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
@@ -3594,16 +3824,16 @@ export type IncidentTelemetryPreflightInput = Omit<
   | "requiredFirstPartyMcpTools"
   | "requiredFirstPartyMcpPermissions"
   | "requiredRig"
-  | "requiredVariableSetNames"
-  | "requiredVariableNames"
+  | "requiredVaultNames"
+  | "requiredSecretNames"
 > & {
   requiredResources?: ResourceRef[] | undefined;
   requiredMcpServerIds?: string[] | undefined;
   requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
-  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredFirstPartyMcpPermissions?: KnownPermission[] | undefined;
   requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
-  requiredVariableSetNames?: string[] | undefined;
-  requiredVariableNames?: string[] | undefined;
+  requiredVaultNames?: string[] | undefined;
+  requiredSecretNames?: string[] | undefined;
 };
 
 export type ScheduledTaskAgentConfig = {
@@ -3617,6 +3847,7 @@ export type ScheduledTaskAgentConfig = {
   pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Skip an occurrence instead of running without an unusable pinned account. */
   pinnedAccountsRequired?: true | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -3643,13 +3874,25 @@ export type ScheduledTaskAgentConfig = {
   maxNestedAgentDepth?: number | undefined;
   /** Seconds a run may wait on a person before the scheduler answers for it. */
   approvalTimeoutSeconds?: number | undefined;
+  /** Whether the chats this task starts run unattended; see the request type. */
+  unattended?: boolean | undefined;
+  /** Remote MCP servers attached to each chat the task starts. */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /** Memory, agent reach and inline Skills of each chat the task starts. */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
+
+/** A session-create MCP server without static headers, for chats a task starts. */
+export type ScheduledTaskMcpServer = Omit<SessionMcpServerInput, "headers">;
 
 export type ScopedKnowledgeScope =
   | { kind: "organization"; workspaceId: null; subjectId: null }
   | { kind: "workspace"; workspaceId: string; subjectId: null }
   | { kind: "personal"; workspaceId: string | null; subjectId: string };
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncLimits = {
   maxItems: number;
   maxBytes: number;
@@ -3708,15 +3951,17 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
   /** Vaults every run may resolve secret references from (the task vault is always included). */
   vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
+  /**
+   * Present and true when the task was created locked: only its creator (the
+   * same key or signed service identity) can change, run, resume or delete
+   * it, never an agent. A workspace admin can still pause it.
+   */
+  creatorLocked?: true | undefined;
   createdAt: string;
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
@@ -3859,6 +4104,34 @@ export type CreateSessionRequest = {
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
   /**
+   * No person will see or answer questions until the task ends (an API
+   * automation or other headless run). The agent is told so and resolves open
+   * choices itself instead of asking; tools that wait for a person are not
+   * offered, and a call that needs someone's approval is refused instead of
+   * waiting. A person's later message does not change it; turn it off with
+   * `updateSessionUnattended`. Not inherited by child sessions, and a fork
+   * reads as attended. Servers that predate it ignore it.
+   */
+  unattended?: boolean | undefined;
+  /**
+   * Start the chat with an agent the caller can use: it follows the agent's
+   * current Instructions. Its First message is not sent; the app puts it in
+   * the composer instead.
+   */
+  agentId?: string | undefined;
+  /**
+   * The new chat's name, description and avatar, as if a person set them (a
+   * bot started from a template, for example). Display metadata only; never
+   * sent to the model.
+   */
+  profile?:
+    | {
+        title?: string | undefined;
+        description?: string | undefined;
+        avatar?: SessionAvatar | undefined;
+      }
+    | undefined;
+  /**
    * `realtime` creates an idle session shell so realtime voice can be the
    * first interaction. `standard` is the explicit default; `createSession`
    * sends it with a usage limit so servers that predate limits reject the
@@ -3867,6 +4140,15 @@ export type CreateSessionRequest = {
   startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
+  /**
+   * Tools `modelContext` is for, such as the tool that reaches the open
+   * document it names, or the tools an application's MCP server publishes for
+   * the record it names (by their published names). The first turn loads them
+   * before its first model request, as a tool search by name would, so it can
+   * use them without searching; the session's tools are unchanged. Decided
+   * once at creation; names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
   /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser
@@ -3907,14 +4189,22 @@ export type CreateSessionRequest = {
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
-  goal?: GoalSpec | undefined;
+  /**
+   * The session goal. When omitted on a top-level `unattended: true` create
+   * with an `initialMessage`, Opengeni sets a goal that stands for that
+   * message, so the run keeps going until the agent completes or pauses it.
+   * `null` creates the session without a goal.
+   */
+  goal?: GoalSpec | null | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
-  // Exact actor-private pre-session draft revision represented by this create.
-  // The server consumes only this revision after durable initialization.
+  // The caller's new-chat draft revision this create was composed from. The
+  // create is never refused over it: once the session is accepted, the server
+  // clears that draft only while it is still at this revision or holds exactly
+  // what was sent, so a newer draft saved on another device stays.
   expectedNewSessionDraftRevision?: number | undefined;
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
@@ -3929,7 +4219,7 @@ export type CreateSessionRequest = {
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  /** Atomically attach the server-derived personal rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -4040,6 +4330,7 @@ export type FirstPartyMcpToolName =
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"
+  | "call_user"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
@@ -4109,6 +4400,7 @@ export type FirstPartyMcpToolName =
   | "session_steer"
   | "session_human_input_respond"
   | "set_other_session_title"
+  | "bot_template_save"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"
@@ -4138,6 +4430,8 @@ export type FirstPartyMcpToolName =
   | "secret_get"
   | "secret_move"
   | "secret_delete"
+  | "secret_profile_get"
+  | "secret_profile_set"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -4148,6 +4442,7 @@ export type FirstPartyMcpToolName =
   | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
+  | "github_repository_attach"
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"
@@ -4179,6 +4474,9 @@ export type FirstPartyMcpToolName =
   | "scheduled_task_runs_list"
   | "event_sources_list"
   | "events_get"
+  | "event_sources_create_webhook"
+  | "event_sources_update"
+  | "event_sources_delete"
   | "slack_bot_list_channels"
   | "slack_bot_search"
   | "slack_bot_channel_history"
@@ -4192,6 +4490,10 @@ export type FirstPartyMcpToolName =
   | "slack_bot_delete_message"
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
+  | "slack_agent_handoff"
+  | "slack_agent_suggest"
+  | "slack_agent_chats"
+  | "slack_agent_propose"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -4362,6 +4664,13 @@ export type ClientModel = {
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
+  /**
+   * Transient availability hint. `reason: "region_restricted"`: the workspace
+   * is EU-only and this model's route is not EU by its residency record.
+   */
+  availability?: ModelAvailabilityV1 | undefined;
+  /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+  residency?: ClientModelResidencyV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -4376,6 +4685,7 @@ export type ModelAvailabilityV1 = {
     | "policy_blocked"
     | "unsupported"
     | "credits_disabled"
+    | "region_restricted"
     | null;
   checkedAt: string | null;
 };
@@ -4409,9 +4719,36 @@ export type WorkspaceModelCatalogModel = ClientModel & {
     | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
-  /** Exact workspace-policy verdict without exposing provider identity. */
+  /**
+   * Set on the person's own subscription models while the organization's plan
+   * doesn't include them: the plan they need. Absent when the model can run,
+   * and from older servers.
+   */
+  requiredPlan?: OwnSubscriptionPlan | undefined;
+  /**
+   * Exact verdict of the policy the workspace runs with (its own lists within
+   * its organization's, and its credit switch), without exposing provider
+   * identity.
+   */
   policyAllowed?: boolean | undefined;
+  /**
+   * False when the organization's allowlist, a ceiling the workspace's own
+   * list can't widen, excludes the model. Absent when the organization allows
+   * every model, and from older servers. Ignores the credit switch.
+   */
+  organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
+};
+
+/**
+ * The plan an organization needs before its own subscriptions run, from the
+ * plan catalog: its key, name and monthly USD price in micros (null when
+ * custom-priced).
+ */
+export type OwnSubscriptionPlan = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
@@ -4437,6 +4774,12 @@ export type WorkspaceModelCatalogResponse = {
    * Opengeni credit balance. Null when the deployment does not bill credits.
    */
   creditsSelection?: DefaultModelSelection | null | undefined;
+  /**
+   * Present while the organization's plan doesn't include its own
+   * subscriptions: the plan that does. Absent when they can run, and from
+   * older servers.
+   */
+  ownSubscriptionPlan?: OwnSubscriptionPlan | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -4493,7 +4836,8 @@ export type ModelConnectionAccessKind =
   | "claude_subscription"
   | "opper"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  | "openai_compatible";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
@@ -4518,6 +4862,7 @@ export type ClaudeUsageWindow = {
     | "seven_day"
     | "seven_day_opus"
     | "seven_day_sonnet"
+    | "seven_day_fable"
     | "seven_day_overage_included"
     | "overage";
   usedPercent: number | null;
@@ -4602,8 +4947,83 @@ export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewa
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
 /**
+ * The reasoning levels a model on an OpenAI-compatible endpoint accepts as
+ * `reasoning_effort`, lowest first, and the one it uses by default.
+ */
+export type CompatibleModelReasoning = {
+  efforts: ReasoningEffort[];
+  defaultEffort: ReasoningEffort;
+};
+
+/**
+ * One model of an organization's OpenAI-compatible endpoint. `reasoning` is
+ * null when it declares no reasoning levels: chats then offer no reasoning
+ * choice and send no `reasoning_effort`.
+ */
+export type OrganizationCompatibleEndpointModel = OrganizationProviderCustomModel & {
+  reasoning: CompatibleModelReasoning | null;
+};
+
+/**
+ * An organization's own OpenAI-compatible endpoint: an organization model
+ * account like its OpenAI key, of which it can connect several. Its key is
+ * write-only; its base URL, API format and name are non-secret.
+ */
+export type OrganizationCompatibleEndpoint = {
+  id: string;
+  status: "active" | "revoked";
+  version: number;
+  /** The public HTTPS base URL, usually ending in `/v1`. */
+  baseUrl: string;
+  /** `chat` for Chat Completions, `responses` for the Responses API. */
+  api: "chat" | "responses";
+  label: string | null;
+  /** The endpoint's active models. */
+  models: OrganizationCompatibleEndpointModel[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationCompatibleEndpointsResponse = {
+  endpoints: OrganizationCompatibleEndpoint[];
+};
+/**
+ * Connect an endpoint with its first model; the API checks it with a short
+ * test request first. Without `reasoning`, the model's levels are read from
+ * the endpoint's model listing when it publishes them; `null` declares none.
+ */
+export type CreateOrganizationCompatibleEndpointRequest = {
+  operationId: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api?: "chat" | "responses" | undefined;
+  label?: string | undefined;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+export type ReplaceOrganizationCompatibleEndpointKeyRequest = {
+  operationId: string;
+  expectedVersion: number;
+  apiKey: string;
+};
+/** Add a model to an endpoint; `reasoning` works as when connecting the endpoint. */
+export type CreateOrganizationCompatibleEndpointModelRequest = {
+  operationId: string;
+  upstreamModelId: string;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+/**
+ * Set one endpoint model's reasoning levels: given levels, `null` for none,
+ * or omitted to read them again from the endpoint's model listing.
+ */
+export type SetOrganizationCompatibleEndpointModelReasoningRequest = {
+  expectedVersion: number;
+  reasoning?: CompatibleModelReasoning | null | undefined;
+};
+
+/**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
- * that dimension; an empty array is an explicit total block.
+ * that dimension; an empty array is an explicit total block. A model runs only
+ * when both this list and `organization` allow it.
  */
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
@@ -4613,7 +5033,10 @@ export type WorkspaceModelAccessPolicy = {
    * default it follows, or no restriction. Absent from older servers.
    */
   source?: "workspace" | "organization" | "none" | undefined;
-  /** The organization default the workspace follows without its own policy. */
+  /**
+   * The organization's list: what the workspace uses without its own policy,
+   * and a ceiling its own policy can only narrow.
+   */
   organization?: {
     allowedProviders: string[] | null;
     allowedModels: string[] | null;
@@ -4629,6 +5052,8 @@ export type WorkspaceModelAccessPolicy = {
 /**
  * Model defaults every workspace in an organization follows until it sets its
  * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ * The allowlists are the exception: a ceiling every workspace stays within,
+ * which a workspace's own allowlist can only narrow.
  */
 export type OrganizationModelDefaults = {
   sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
@@ -4727,6 +5152,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4760,6 +5190,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4913,15 +5345,80 @@ export type UpdateOrganizationAgentAdminAccessRequest = {
 };
 
 /**
+ * The organization's EU-only inference setting. When on, every model call for
+ * its workspaces runs on an EU route or not at all. Any member can read it;
+ * owners and admins can turn it on, and only an owner or admin in the app in a
+ * browser can turn it off (`canTurnOff`).
+ */
+export type OrganizationInferenceResidency = {
+  organizationId: string;
+  euOnly: boolean;
+  /** 0 until the setting is first changed. */
+  version: number;
+  updatedAt: string | null;
+  /** Whether the caller may turn EU-only off: only an owner or admin in a browser. */
+  canTurnOff: boolean;
+  changed?: boolean | undefined;
+};
+
+/**
+ * Turn EU-only on or off. `expectedVersion` is the current `version` (a stale
+ * one is `409`); `operationId` makes a retry safe. Changes answer `503` while
+ * the deployment doesn't allow them yet.
+ */
+export type UpdateOrganizationInferenceResidencyRequest = {
+  euOnly: boolean;
+  expectedVersion: number;
+  operationId: string;
+};
+
+/** Model-backed features besides the chat model, as reported in `ClientConfig.inferenceFeatures`. */
+export type InferenceFeatureId =
+  | "web_search"
+  | "image_generation"
+  | "video_generation"
+  | "realtime_voice"
+  | "voice_input"
+  | "meeting_transcription"
+  | "live_transcription"
+  | "knowledge_embeddings"
+  | "code_search";
+
+/**
+ * Why the server switched a feature off. `region_restricted`: the workspace
+ * is EU-only and the feature has no EU route here ("Not supported in EU").
+ */
+export type FeatureUnavailableReason = "region_restricted";
+
+/** One feature's availability for the caller's workspace. */
+export type InferenceFeatureAvailability = {
+  id: InferenceFeatureId;
+  available: boolean;
+  unavailableReason: FeatureUnavailableReason | null;
+};
+
+/**
  * An organization's privacy choices, after the deployment's limits. A product
  * that embeds Opengeni can only narrow these; `limits` says which are fixed.
  */
 export type OrganizationPrivacySettings = {
   organizationId: string;
+  /**
+   * Whether members can connect machines of their own (Only me machines).
+   * Off: only owners and admins can connect new ones; machines already
+   * connected keep working. Older servers omit it: members can.
+   */
+  membersConnectOwnMachines?: boolean;
   /** Who sees new chats and schedules unless the person picks otherwise. */
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
   personalWorkspaces: boolean;
+  /**
+   * The most each person can spend from the organization's credits in their
+   * own Personal workspace each calendar month (UTC), in USD micros; null for
+   * no limit. Work paid by their own model plans or keys doesn't count.
+   */
+  personalWorkspaceMonthlyCredits: number | null;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -4936,10 +5433,14 @@ export type OrganizationPrivacySettings = {
 };
 
 export type UpdateOrganizationPrivacySettingsRequest = {
+  /** Off: only owners and admins connect new machines of their own. */
+  membersConnectOwnMachines?: boolean;
   defaultVisibility?: "private" | "workspace";
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
   personalWorkspaces?: boolean;
+  /** USD micros a month per person; null removes the limit. */
+  personalWorkspaceMonthlyCredits?: number | null;
 };
 
 /**
@@ -5101,6 +5602,12 @@ export type CodexAccount = {
   ownInWorkspaceIds?: string[];
   /** The organization's list only: who the account reaches. */
   reach?: SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there by
+   * its owner, and that workspace can only remove it. Absent from older servers.
+   */
+  ownerWorkspaceId?: string | null;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -5281,6 +5788,11 @@ export type CodexConnectPoll =
       plan?: string | null;
       accountId?: string;
       isActive?: boolean;
+      /**
+       * Opengeni's Codex models this account offers, read once from its live
+       * model list at connect time. Absent when that read failed.
+       */
+      models?: Array<{ id: string; label: string }>;
     };
 
 /**
@@ -5432,6 +5944,41 @@ export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
+/**
+ * The installed SDK version, sent on every request for server diagnostics. It never
+ * changes authorization or compatibility admission.
+ */
+export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
+
+/** JSON content negotiation for the chat projection, using the existing CORS-safe Accept header. */
+export const OPENGENI_SESSION_CHAT_ACCEPT = "application/json; opengeni-session=chat" as const;
+
+/**
+ * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
+ * A host that serves the Opengeni API or its session proxy from a different origin
+ * than its web app must allow all of them in `Access-Control-Allow-Headers`;
+ * otherwise browser preflights fail and nothing loads. Headers your app adds itself
+ * (through the client's `headers` option) need allowing too. The `asUser` and
+ * `asService` attribution headers are server-only and deliberately absent.
+ */
+export const OPENGENI_BROWSER_REQUEST_HEADERS = [
+  "accept",
+  "authorization",
+  "content-type",
+  "range",
+  // Deployment-key auth mode (`ClientAuth`).
+  "x-opengeni-access-key",
+  // Browser account session-set mutations.
+  "x-opengeni-actor-epoch",
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  "x-opengeni-session-csrf",
+  // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
+  "x-opengeni-session-id",
+] as const;
+
+export { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
@@ -5450,6 +5997,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Connect provider offers "Claude Code (API key)". Absent when not offered. */
+  claudeCodeApiKeyEnabled?: boolean | undefined;
   /**
    * Organization admins may connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity (the operator offers it). Absent otherwise.
@@ -5544,6 +6093,13 @@ export type ClientConfig = {
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   /**
+   * EU-only inference: each model-backed feature's region availability for the
+   * caller's workspace. `unavailableReason: "region_restricted"` means the
+   * workspace is EU-only and the feature has no EU route here. Absent on older
+   * servers.
+   */
+  inferenceFeatures?: InferenceFeatureAvailability[] | undefined;
+  /**
    * Present only when this deployment archives idle sessions: after `idleDays`
    * without activity a session (unless kept live) becomes read-only.
    */
@@ -5603,10 +6159,20 @@ export type ClientConfig = {
 export type ClientVoiceInputConfig = {
   available: boolean;
   providers?: VoiceInputProviderId[] | undefined;
+  /** Every model a dictation may name, of each ready provider. */
+  models?: DictationModelOption[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
   resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+/** A model a dictation can name, such as for one desktop dictation shortcut. */
+export type DictationModelOption = {
+  providerId: VoiceInputProviderId;
+  providerName: string;
+  model: string;
+  name: string;
 };
 
 export type ClientResumableVoiceInputConfig = {
@@ -5614,93 +6180,6 @@ export type ClientResumableVoiceInputConfig = {
   maxSizeBytes: number;
   maxChunkSizeBytes: number;
   providerSegmentSeconds: number;
-};
-
-export type TranscriptionRecordingErrorCode =
-  | "permission_denied"
-  | "not_supported"
-  | "network"
-  | "provider"
-  | "policy_blocked"
-  | "timeout"
-  | "cancelled"
-  | "unavailable"
-  | "too_large"
-  | "invalid_audio"
-  | "unknown"
-  | "insufficient_credits"
-  | "allowance_exhausted"
-  | "monthly_model_cost_limit";
-
-export type TranscriptionRecordingState =
-  | "uploading"
-  | "segmenting"
-  | "ready"
-  | "transcribing"
-  | "complete"
-  | "failed"
-  | "discarded";
-
-export type TranscriptionRecordingSegmentState =
-  | "preparing"
-  | "pending"
-  | "transcribing"
-  | "complete"
-  | "failed";
-
-export type TranscriptionRecordingSegment = {
-  segmentNumber: number;
-  state: TranscriptionRecordingSegmentState;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  byteLength: number;
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-};
-
-export type TranscriptionRecording = {
-  id: string;
-  workspaceId: string;
-  mimeType: string;
-  state: TranscriptionRecordingState;
-  nextChunkNumber: number;
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  segmentCount: number;
-  completedSegmentCount: number;
-  transcriptText: string | null;
-  languages: string[];
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-  objectsCleaned: boolean;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-};
-
-export type TranscriptionRecordingResponse = {
-  recording: TranscriptionRecording;
-  segments: TranscriptionRecordingSegment[];
-  retryAfterMilliseconds?: number;
-};
-
-export type TranscriptionRecordingListResponse = {
-  recordings: TranscriptionRecording[];
-};
-
-export type TranscriptionRecordingChunk = {
-  chunkNumber: number;
-  byteLength: number;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  deduplicated: boolean;
-};
-
-export type UploadTranscriptionRecordingChunkResponse = {
-  recording: TranscriptionRecording;
-  chunk: TranscriptionRecordingChunk;
 };
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
@@ -5801,6 +6280,12 @@ export type ManagedOrganizationMembership = {
    * longer sees or starts new work there. Absent means on.
    */
   personalWorkspacesEnabled?: boolean | undefined;
+  /**
+   * The person's current answer to "How do you want to use Opengeni?" for
+   * this organization: get help with everyday things, add agents to a product,
+   * or run agents in the cloud. Absent when the server keeps no answer for them.
+   */
+  signupUseCase?: "everyday" | "embed" | "cloud" | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {
@@ -5812,13 +6297,15 @@ export type UserResourceKind =
   | "document"
   | "variable_set"
   | "rig"
-  | "connected_machine";
+  | "connected_machine"
+  | "subscription_connection";
 export type UserResourceGrantAction =
   | "connection.use"
   | "document.read"
   | "variable_set.use"
   | "rig.use"
-  | "connected_machine.use";
+  | "connected_machine.use"
+  | "subscription_connection.use";
 export type UserResourceAuthorityGrant = {
   grantId: string;
   targetWorkspaceId: string;
@@ -5863,7 +6350,9 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: Exclude<UserResourceKind, "connection">;
+      /** `connection` turns your own login on for your messages in this
+       * workspace (its `authorityId` from `listOwnConnectionAccounts`). */
+      resourceKind: UserResourceKind;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -5882,6 +6371,52 @@ export type RevokeUserResourceGrantResponse = {
     status: "revoked";
     revokedAt: string;
   };
+};
+/** Your own things that you turn on workspace by workspace. */
+export type OwnResourceReachKind = "connection" | "subscription_connection" | "connected_machine";
+/** One of your workspaces in "Where it works" for your own login, plan or machine. */
+export type OwnResourceReachWorkspace = {
+  workspaceId: string;
+  name: string;
+  /** Your Personal workspace. */
+  personal: boolean;
+  /** The workspace this was asked from. */
+  current: boolean;
+  /** It works here for your own messages. Nobody else's messages ever use it. */
+  on: boolean;
+  /** Always on here: logins and plans in your Personal workspace. */
+  alwaysOn: boolean;
+  /** You may turn it on or off here. */
+  canChange: boolean;
+};
+export type OwnResourceReachResponse = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type SetOwnResourceReachRequest = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  on: boolean;
+};
+export type SetOwnResourceReachResponse = { workspace: OwnResourceReachWorkspace };
+/** One of your own logins, model plans or machines, with where it works. */
+export type OwnResource = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** A login's or plan's account (its email when known), or a machine's name. */
+  name: string;
+  /** Login: the service it signs in to. Plan: the provider (`codex`, `claude`, `xai`). Machine: null. */
+  provider: string | null;
+  /** Plan only: the plan the provider reports, when known. */
+  plan: string | null;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type OwnResourcesResponse = {
+  /** Logins, then plans, then machines, each by name. */
+  resources: OwnResource[];
 };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
@@ -6216,6 +6751,18 @@ export type ListOrganizationMembersResponse = {
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
 };
+/** An active person in the organization, by name only. */
+export type OrganizationMemberName = {
+  /** The organization membership id. */
+  id: string;
+  name: string | null;
+  you: boolean;
+};
+/** `available` is false until the deployment's database grants the names list. */
+export type ListOrganizationMemberNamesResponse = {
+  available: boolean;
+  members: OrganizationMemberName[];
+};
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
   membership: OrganizationMember;
@@ -6248,6 +6795,17 @@ export type Workspace = {
 export type WorkspaceDefaultExecutionTarget =
   | { kind: "managed" }
   | { kind: "machine"; targetSandboxId: string };
+
+/**
+ * `GET/PUT /v1/workspaces/:id/my-default-execution-target`: the caller's own
+ * placement for the new chats they start in the workspace ("Your default
+ * machine"). Null follows the workspace default. `usable` is false when the
+ * saved machine is no longer available to them.
+ */
+export type MemberDefaultExecutionTarget = {
+  target: WorkspaceDefaultExecutionTarget | null;
+  usable: boolean;
+};
 
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
@@ -6336,6 +6894,9 @@ export type SlackChannelRoute = {
   slackChannelId: string;
   targetWorkspaceId: string;
   targetWorkspaceName: string | null;
+  /** Set when a Slack agent answers in this channel. */
+  slackAgentId?: string | null | undefined;
+  slackAgentName?: string | null | undefined;
   source: "picker" | "admin";
   updatedAt: string;
 };
@@ -6347,7 +6908,12 @@ export type SlackChannelRouteListResponse = {
 
 export type UpdateSlackChannelRoutesRequest = {
   connectionId: string;
-  routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
+  routes: Array<{
+    slackChannelId: string;
+    targetWorkspaceId: string | null;
+    /** A Slack agent working in `targetWorkspaceId`; omitted or null is plain Opengeni. */
+    slackAgentId?: string | null | undefined;
+  }>;
 };
 
 export type VoiceInputProviderId =
@@ -6604,6 +7170,17 @@ export type OrganizationMcpConnection = {
   lastUsedAt: string | null;
   expiresAt: string;
   revokedAt: null;
+  /**
+   * Set when it connected automatically, through an issuer the organization
+   * trusts (auto-connect). Its access is that issuer's, changed by an admin.
+   */
+  autoConnect?: { trustedIssuerId: string; issuerName: string } | null;
+  /**
+   * Listed agents: whether the caller can disconnect this one. Everyone
+   * disconnects their own; owners and admins anyone's, except only an owner an
+   * owner's.
+   */
+  canDisconnect?: boolean;
 };
 
 export type OrganizationMcpConnectionList = {
@@ -6634,6 +7211,11 @@ export type PersonalApiKey = {
   expiresAt: string | null;
   lastUsedAt: string | null;
   createdAt: string;
+  /**
+   * Listed keys: whether the caller can revoke this one. Everyone revokes their
+   * own; owners and admins anyone's, except only an owner an owner's.
+   */
+  canRevoke?: boolean;
 };
 
 export type ListPersonalApiKeysResponse = {
@@ -6712,6 +7294,14 @@ export type InboxItem = {
   eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
+  /**
+   * An approval whose tool's MCP server asks the person a question in the
+   * middle of the call: the title is then the server's question. A `confirm`
+   * is answered with Allow or Deny (send `elicitationRound: round` with the
+   * approval); a `form` is answered in the session, where the approval card
+   * shows its fields. Null or absent otherwise.
+   */
+  serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -6741,8 +7331,21 @@ export type InboxItemLink = { url: string; label: string };
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
 
+/**
+ * The MCP server asking about an approval in the inbox, how the person
+ * answers (`confirm` has nothing to fill in, `form` has fields) and which of
+ * the call's questions it is: send `round` back as `elicitationRound`.
+ */
+export type InboxItemServerQuestion = {
+  server: string;
+  kind: "confirm" | "form";
+  round: number;
+};
+
 export type ListInboxResponse = {
   items: InboxItem[];
+  /** Organization billing notices for the recipient; not workspace inbox items. */
+  billingNotifications?: BillingCreditNotification[];
   /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */
   needsYouCount: number;
   /** Open, unsnoozed, unread items of any kind. */
@@ -6866,7 +7469,15 @@ export type NativeAppToken = {
  * `needs_input` (a question or an approval), `reply_ready` (a turn finished),
  * `failed` (a turn failed) and `agent` (the agent chose to notify).
  */
-export type NativePushRule = "needs_input" | "reply_ready" | "failed" | "agent";
+export type NativePushRule =
+  | "needs_input"
+  | "reply_ready"
+  | "failed"
+  | "agent"
+  /** Agents working for this person may ring this phone (off unless the person turns it on). */
+  | "call"
+  /** Agents of other members of a shared workspace may ring it too; needs `call`. */
+  | "call_members";
 
 export type RegisterNativePushDeviceInput = {
   platform: NativeAppPlatform;
@@ -6877,6 +7488,8 @@ export type RegisterNativePushDeviceInput = {
   /** The APNs device token (hex) or FCM registration token. */
   token: string;
   rules: NativePushRule[];
+  /** iOS PushKit token that agent calls ring; iOS keeps no call rules without it. */
+  voipToken?: string | null;
 };
 
 /** This app credential's push registration. */
@@ -6886,6 +7499,43 @@ export type NativePushDevice = {
   environment: "development" | "production";
   token: string;
   rules: NativePushRule[];
+  voipToken?: string | null;
+  updatedAt: string;
+};
+
+/** Where an agent's call to a person stands. */
+export type AgentCallState = "ringing" | "answered" | "declined" | "missed" | "cancelled";
+
+/**
+ * An agent ringing a person's phones (`call_user`). Only the person called can
+ * read, answer or decline it. Answering opens the chat's voice call.
+ */
+export type AgentCall = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  /** Who the ring screen shows as calling. */
+  callerLabel: string | null;
+  /** Why the agent calls, in a few words. */
+  reason: string;
+  state: AgentCallState;
+  ringUntil: string;
+  createdAt: string;
+  endedAt: string | null;
+  /** Whether this phone (app credential) took the call; null when unknown. */
+  answeredHere: boolean | null;
+};
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. Agents
+ * count them alongside the person's Opengeni app phones.
+ */
+export type AgentCallHostPhones = {
+  /** How many of the person's phones the product rings for agents, 1..20. */
+  phones: number;
+  /** Whether agents working for other members of a shared workspace may ring them too. */
+  teammates: boolean;
   updatedAt: string;
 };
 
@@ -6975,6 +7625,23 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The Slack account this request links, shown to the person linking while
+   * it is prepared so they see whose account it is, when Slack says who it is.
+   */
+  slackAccountLabel?: string | null | undefined;
+  /**
+   * Whether the person linking may link this Slack account now by confirming
+   * it (`linkSlackUserAsOrganizationMember` with this request's `version`).
+   * Preparing a request never links it.
+   */
+  canLink?: boolean | undefined;
+  /**
+   * @deprecated Use `canLink` and `slackAccountLabel`. Set when `canLink` is
+   * true because the person is a member of the organization without access
+   * to the workspace.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {
@@ -7139,7 +7806,10 @@ export type UpdateSessionGoalRequest =
     };
 
 export type UpdateSessionRequest = {
-  title: string;
+  title?: string | undefined;
+  /** Empty string clears the description. */
+  description?: string | null | undefined;
+  avatar?: SessionAvatar | null | undefined;
 };
 
 // --- Operator context controls (/clear, /compact) ----------------------------
@@ -7216,6 +7886,14 @@ export type ComposerDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the draft has no model choice of its own: `model`,
+   * `reasoningEffort` and `latencyMode` are then the chat's current settings
+   * and follow every later change to them (for example by the agent). Send a
+   * model with this draft only after the person picks one. Absent from
+   * servers that predate it, which means false.
+   */
+  policyFollowsSession?: boolean | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -7265,6 +7943,12 @@ export type NewSessionDraft = {
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
+  /**
+   * Read-only: the caller's own default placement for new chats ("Your default
+   * machine") when usable now. A fresh form starts on it ahead of the
+   * workspace default. Older servers omit it.
+   */
+  memberDefaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   updatedAt: string | null;
 };
 
@@ -7334,6 +8018,8 @@ export type SessionSystemUpdatePayload =
         eventType: "sandbox.command.output.delta";
         commandId: string;
       };
+      /** Bounded start and end of the output (absent for lost commands and older results). */
+      output?: string | undefined;
       [key: string]: unknown;
     }
   | ({
@@ -7550,13 +8236,34 @@ export type DeleteSessionQueueItemRequest = {
 
 export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
-  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
-> & { expectedRevision: number };
+  | "revision"
+  | "sourceTurnId"
+  | "sourceTurnVersion"
+  | "updatedAt"
+  | "policyFollowsSession"
+  | "model"
+  | "reasoningEffort"
+  | "latencyMode"
+> & {
+  expectedRevision: number;
+  /**
+   * The person's pick in the composer. Omit all three to keep (or return)
+   * the draft to the chat's own settings, so it follows later changes.
+   */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+};
 
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;
   clientEventId: string;
-  delivery: "send" | "steer";
+  /**
+   * `steer_or_send` lets the server steer while a turn runs (or is about to
+   * start) and otherwise send; see `steerMessage`. `routing` in the
+   * response says which it chose.
+   */
+  delivery: "send" | "steer" | "steer_or_send";
   controlEtag?: string;
   modelContext?: string;
   /** IANA time zone of the sender; see `UserMessageEventInput`. */
@@ -7580,7 +8287,7 @@ export type SubmitComposerDraftResponse = {
 
 export type SaveNewSessionDraftRequest = Omit<
   NewSessionDraft,
-  "revision" | "selectionHistory" | "updatedAt"
+  "revision" | "selectionHistory" | "updatedAt" | "memberDefaultExecutionTarget"
 > & {
   expectedRevision: number;
 };
@@ -7594,6 +8301,7 @@ export type ScheduledTaskAgentConfigInput = {
    * omitted runs follow the workspace's agent defaults.
    */
   agent?: AgentConfigRequest | undefined;
+  /** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
@@ -7625,6 +8333,39 @@ export type ScheduledTaskAgentConfigInput = {
    * the question as a labelled system decision. Omitted: waits indefinitely.
    */
   approvalTimeoutSeconds?: number | undefined;
+  /**
+   * Whether each chat this task starts runs unattended: no person answers
+   * during the run, so the agent is told to settle open choices itself and
+   * report what is left for a person, and calls that need someone's approval
+   * are refused instead of waiting. `true` or `false` is a fixed choice.
+   * Omitted: unattended by default, unless `approvalTimeoutSeconds` is set;
+   * the default ends when a person writes in the chat. A task that posts into
+   * an existing chat follows that chat.
+   */
+  unattended?: boolean | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
+  /**
+   * Remote MCP servers attached to each chat the task starts, as on session
+   * create. Static headers are not stored: credentials come from the
+   * workspace credential provider or `connectionRef`.
+   */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /**
+   * Memory, agent reach and inline Skills of each chat the task starts, as on
+   * session create. Only a task that starts its own chats can carry them.
+   */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
+  /**
+   * Opengeni tools and permissions of each chat the task starts, as on
+   * session create. Set once at creation (an update that names them is
+   * refused); omitted, an agent's task keeps its own chat's selection and any
+   * other task follows the defaults. Permissions must be held by the creating
+   * credential. Only a task that starts its own chats can carry them.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -7661,8 +8402,15 @@ export type CreateAgentScheduledTaskRequest = {
   /** Vault narrowing for every run; omission adds none. */
   vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Lock the task to its creator: only the same key or signed service
+   * identity can later change, run, resume or delete it, and no agent can.
+   * A workspace admin can still pause it. Set once at creation.
+   */
+  creatorLocked?: boolean | undefined;
 };
 
+/** @deprecated Integration Knowledge sync was removed; servers refuse this with 410. It goes in the next SDK major. */
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
@@ -7686,6 +8434,8 @@ export type CreateSessionScheduledTaskRequest = {
   /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
   events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Lock the task to its creator; see the agent-task request. */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateScheduledTaskRequest =
@@ -7732,6 +8482,7 @@ export type UpdateScheduledTaskRequest = {
 
 export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
+/** @deprecated Integration Knowledge sync was removed; current servers never return it. It goes in the next SDK major. */
 export type KnowledgeSourceSyncRunSummary = {
   phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
   scanned: number;
@@ -7970,8 +8721,6 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
-  defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
@@ -7985,8 +8734,9 @@ export type RigVerificationHealth = {
 };
 
 /**
- * Workspace-shared channel organizing root sessions ("workstreams") by work
- * type in the rail. Pure organizational metadata.
+ * A project ("channel") organizing root sessions ("workstreams") by work type
+ * in the rail. Pure organizational metadata, shared with the workspace or
+ * Only me, like a chat.
  */
 export type Channel = {
   id: string;
@@ -7994,8 +8744,20 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  /**
+   * Shown to people instead of the folder icon, like a chat's avatar. Absent
+   * from servers that predate project profiles.
+   */
+  avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
+  /**
+   * Who sees it: the workspace, or only its owner ("private", Only me). An
+   * Only me project holds only its owner's own Only me chats and Sites.
+   * Absent from servers that predate project audiences, where every project
+   * is shared.
+   */
+  visibility?: "private" | "workspace" | undefined;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -8004,12 +8766,26 @@ export type Channel = {
 export type CreateChannelRequest = {
   name: string;
   description?: string;
+  avatar?: SessionAvatar | null;
+  /**
+   * Omitted, a person's project is shared with the workspace and an agent's
+   * follows its chat: Only me when made in an Only me chat.
+   */
+  visibility?: "private" | "workspace";
 };
 
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  /** null clears it; omitted keeps it. */
+  avatar?: SessionAvatar | null;
   pinned?: boolean;
+  /**
+   * "workspace" shares the owner's Only me project with the workspace. A
+   * shared project cannot be made Only me; only its owner, signed in,
+   * changes it.
+   */
+  visibility?: "workspace";
 };
 
 /** Complete workspace project order. It is replaced atomically after a drag. */
@@ -8037,6 +8813,58 @@ export type Rig = {
   versionCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Where it works; present only for organization rigs. */
+  reach?: OrganizationComputeReach | null | undefined;
+};
+
+/**
+ * Where an organization machine or rig works: always in the workspace it was
+ * connected from or made in (`homeWorkspaceId`), plus every shared workspace
+ * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export type OrganizationComputeReach = {
+  homeWorkspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+/** PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach body:
+ * an organization owner or admin changes where an organization machine or rig
+ * works. The ids are the organization's shared workspaces. */
+export type UpdateOrganizationComputeReachRequest = {
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+export type OrganizationComputeReachResponse = {
+  reach: OrganizationComputeReach;
+};
+
+/** An organization machine or rig, wherever it works: its name and where it
+ * works. Machines carry the id of their sandbox, which machine pages open by. */
+export type OrganizationComputeSummary = {
+  id: string;
+  name: string;
+  sandboxId?: string | null | undefined;
+  reach: OrganizationComputeReach;
+};
+
+/** GET .../organization-machines: every organization machine, wherever it
+ * works, for organization owners and admins. `complete` is always true;
+ * servers before migration 1272 could list only the ones that work in the
+ * requested workspace and sent false. */
+export type ListOrganizationMachinesResponse = {
+  machines: OrganizationComputeSummary[];
+  complete: boolean;
+};
+
+/** GET .../organization-rigs: every organization sandbox environment,
+ * wherever it works, for organization owners and admins. `complete` as for
+ * machines. */
+export type ListOrganizationRigsResponse = {
+  rigs: OrganizationComputeSummary[];
+  complete: boolean;
 };
 
 export type RigChangeKind = "setup_append" | "definition_edit";
@@ -8169,6 +8997,12 @@ export type FileAsset = {
   scope?: "workspace" | "personal" | undefined;
   /** The person who alone can share the file or limit it to themselves. */
   ownerSubjectId?: string | null | undefined;
+  /**
+   * An Only me file's other workspaces of the organization where it also
+   * works, besides the one that stores it and its owner's Personal workspace;
+   * null for every workspace. Absent for workspace files.
+   */
+  reachWorkspaceIds?: string[] | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -8191,6 +9025,13 @@ export type UpdateFileVisibilityRequest = {
   visibility: "private" | "workspace";
 };
 export type UpdateFileVisibilityResponse = { file: FileAsset };
+
+/** Where an Only me file works besides its own workspace and its owner's Personal workspace. */
+export type UpdateFileReachRequest = {
+  /** The owner's other workspaces of this organization; null for all of them. */
+  reachWorkspaceIds: string[] | null;
+};
+export type UpdateFileReachResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
@@ -8325,6 +9166,8 @@ export type VideoGenerationFundingOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** `region_restricted` when EU-only inference switched this source off. */
+  unavailableCode?: FeatureUnavailableReason | undefined;
 };
 
 export type WorkspaceVideoGenerationSettings = {
@@ -8863,120 +9706,6 @@ export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" 
 };
 export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
 
-// --- Opengeni Review Bot ------------------------------------------------------------
-
-export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
-export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
-
-export type CreatePrReviewAppRegistrationRequest = {
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl?: string | undefined;
-  appId?: string | undefined;
-  credentialKind: PrReviewCredentialKind;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret: string;
-  webhookUsername?: string | undefined;
-};
-
-export type UpdatePrReviewAppRegistrationRequest = {
-  name?: string | undefined;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret?: string | undefined;
-  webhookUsername?: string | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewAppRegistration = {
-  id: string;
-  sourceId: string;
-  accountId: string;
-  workspaceId: string;
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl: string;
-  appId: string | null;
-  installationId: string | null;
-  providerAccountLogin: string | null;
-  providerAccountType: "User" | "Organization" | null;
-  credentialKind: PrReviewCredentialKind;
-  hasCredential: boolean;
-  accessTokenExpiresAt: string | null;
-  webhookAuthKind: PrReviewWebhookAuthKind;
-  hasWebhookSecret: boolean;
-  webhookUsername: string | null;
-  webhookPath: string;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CreatePrReviewRepositoryBindingRequest = {
-  registrationId: string;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string | number;
-  installationId?: string | number | undefined;
-  projectId?: string | number | undefined;
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type UpdatePrReviewRepositoryBindingRequest = {
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewRepositoryBinding = {
-  id: string;
-  triggerId: string;
-  accountId: string;
-  workspaceId: string;
-  registrationId: string;
-  provider: PrReviewProvider;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string;
-  installationId: string | null;
-  projectId: string | null;
-  model: string | null;
-  additionalInstructions: string | null;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ListPrReviewConfigurationResponse = {
-  registrations: PrReviewAppRegistration[];
-  repositories: PrReviewRepositoryBinding[];
-};
-
-export type PrReviewManagedGitHubInstallation = {
-  registrationId: string;
-  installationId: string;
-  accountLogin: string | null;
-  configureUrl: string | null;
-  repositoryCount: number;
-};
-
-export type PrReviewManagedGitHubSetup = {
-  configured: boolean;
-  status: "unavailable" | "not_connected" | "connected";
-  appName: "Opengeni Lens" | "OpenGeni Lens";
-  connectUrl: string | null;
-  installations: PrReviewManagedGitHubInstallation[];
-  missing: string[];
-};
-
 // --- Capabilities ---------------------------------------------------------------
 
 export type CapabilityKind = "mcp" | "api" | "skill" | "plugin";
@@ -9020,7 +9749,7 @@ export type CapabilityLifecycle = {
   status: CapabilityLifecycleStatus;
   readiness: CapabilityReadiness;
   detail: string | null;
-  managedBy: "deployment" | "platform" | "workspace" | null;
+  managedBy: "deployment" | "platform" | "workspace" | "organization" | null;
 };
 
 export type CapabilityRuntime = {
@@ -9093,6 +9822,13 @@ export type CapabilityCatalogItem = {
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
+  /**
+   * Whether the viewer may remove this custom MCP server from the workspace
+   * (`removeCapabilityInstallation` on the client): integration admins
+   * remove any, a member only one they turned on, while it is on. Older
+   * servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type CapabilityInstallation = {
@@ -9108,9 +9844,19 @@ export type CapabilityInstallation = {
   updatedAt: string;
 };
 
+export type RemoveCapabilityInstallationResponse = {
+  /** The installation that was removed. */
+  removed: CapabilityInstallation;
+};
+
 export type CapabilityCatalogResponse = {
   items: CapabilityCatalogItem[];
   installations: CapabilityInstallation[];
+  /**
+   * Who the organization lets turn integrations on: members (the default) or
+   * only integration admins. Older servers omit it; treat that as members.
+   */
+  memberIntegrationSetup?: "members" | "admins" | undefined;
 };
 
 export type CreateCapabilityCatalogItemRequest = {
@@ -9301,6 +10047,11 @@ export type IntegrationFacetBindingSummary = {
   updatedAt: string;
   directlyOwned: boolean;
   owners: CapabilityComponentOwner[];
+  /**
+   * Whether the caller may remove it: admins remove anything, a member only
+   * what they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type IntegrationInstanceFacetsResponse = {
@@ -9536,6 +10287,27 @@ export type ApiIntegrationInstallationSummary = {
   approvalRequiredToolCount: number;
   revisionId: string;
   contentSha256: string;
+  /**
+   * Set on an instance a Personal workspace carries for its owner from another
+   * workspace where they connected it "Only me"; it is managed there.
+   */
+  personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
+  /**
+   * Set when the organization serves it here (organization settings manage
+   * it); `enabledHere` is false while this workspace turned it off.
+   */
+  organizationConnector?: {
+    connectorId: string;
+    login: "each_person" | "organization_key" | "none";
+    /** How the API authenticates: what a person adds when each person signs in. */
+    auth: ApiIntegrationAuthPreview;
+    enabledHere: boolean;
+  };
+  /**
+   * Whether the caller may remove this instance: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListApiIntegrationsResponse = {
@@ -9665,6 +10437,11 @@ export type PluginInstallationSummary = {
   status: "active" | "needs_attention";
   installedAt: string;
   updatedAt: string;
+  /**
+   * Whether the caller may remove this plugin: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListInstalledPluginsResponse = {
@@ -9867,6 +10644,10 @@ export type {
   SubscriptionPlan,
   SubscriptionPlanCatalog,
   BillingSubscriptionCatalog,
+  BillingAutoTopUpSettings,
+  UpdateBillingAutoTopUpRequest,
+  CreateBillingAutoTopUpSetupSessionRequest,
+  CreateBillingAutoTopUpSetupSessionResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -9881,6 +10662,18 @@ export type BillingBalance = {
   currency: "usd";
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
+  /** Credits outside plan credit (top-ups, operator grants). API usage spends only this. */
+  creditsMicros?: number | undefined;
+  /** Credit debt from API usage. Plan credit never repays it. */
+  apiDebtMicros?: number | undefined;
+  /** Paid plan credit the own-key platform fee may draw (app use only). */
+  paidPlanCreditMicros?: number | undefined;
+  /** Paid-for credits the own-key platform fee may draw. */
+  paidCreditsMicros?: number | undefined;
+  /** Own-key platform fees charged this calendar month (UTC). */
+  byokPlatformFeeMonthMicros?: number | undefined;
+  /** Own-key fees that ran past paid credit; the next top-up repays it. */
+  byokFeeDebtMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
   heldCreditMicros?: number | undefined;
   heldGeneralCreditMicros?: number | undefined;
@@ -9893,6 +10686,8 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "agent_run.completed",
   "model.tokens",
   "model.cost",
+  "model.provider_cost",
+  "model.estimated_provider_cost",
   "file.uploaded",
   "file.deleted",
   "document.indexed",
@@ -9912,6 +10707,8 @@ export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
 export type UsageEventType = KnownUsageEventType | (string & {});
 
 export type UsageEvent = {
+  /** Caller attribution only; does not select the payer or workspace. */
+  tenantLabel?: string | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
@@ -10300,6 +11097,14 @@ export type SessionApprovalRequest = {
   name: string;
   /** Tool arguments as the model produced them (usually a JSON string). */
   arguments: unknown;
+  /**
+   * Present when the tool's MCP server stopped mid-call to ask the person
+   * (form elicitation). Approving sends `elicitationRound: elicitation.round`
+   * and the answers as `content`, keyed by `requests[].id` and then by field
+   * name; omitted fields take the form's defaults. Rejecting tells the server
+   * the person declined.
+   */
+  elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
 };
 
@@ -10311,6 +11116,10 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Answers to the approval's `elicitation` forms; only with `approve`. */
+    content?: McpElicitationContent | undefined;
+    /** The `elicitation.round` an approval answers; required to approve one. */
+    elicitationRound?: number | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
@@ -10497,8 +11306,10 @@ export type ChangeMachineAudienceRequest = MachineAudiencePreviewRequest & {
 
 /** What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays. `make_only_me` / `pause`: a schedule that runs on the machine.
- * `remove_first`: the same computer is connected a second time. */
+ * stays. `pause`: another person's schedule that runs on the machine; the new
+ * owner's own schedules keep running and are not listed. `make_only_me` is no
+ * longer produced. `remove_first`: the same computer is connected a second
+ * time. */
 export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
 
 /** One thing an audience change affects. Another member's private chat or
@@ -10525,6 +11336,7 @@ export type MachineAudienceSummary = {
   keptChats: number;
   keptSharedChats: number;
   movedOffChats: number;
+  /** No longer produced: always 0. */
   schedulesMadeOnlyMe: number;
   schedulesPaused: number;
   stoppedTurns: number;
@@ -10617,6 +11429,8 @@ export type MachineView = {
    * session boxes; null limits on a real machine mean unrestricted. */
   operationPolicy: MachineOperationPolicy | null;
   metrics: MetricSample | null;
+  /** Where an organization machine works; null for every other machine. */
+  reach?: OrganizationComputeReach | null;
 };
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
@@ -10636,6 +11450,19 @@ export type SessionMachineAccess = {
    *  brings them to the agent; moving the chat to a machine the sender may
    *  use runs them. Older servers omit it. */
   waitingMessages?: SessionWaitingMessages[] | undefined;
+  /** The next saved message is the machine owner's own and was approved for
+   *  other machines, not this one, so it can't start here and no recheck
+   *  helps: it runs after the chat moves to a machine it was approved for, or
+   *  it is removed and sent again here. Older servers omit it. */
+  queuedTurnNotApprovedHere?: boolean | undefined;
+  /** Where that message may run: the owner's personal machines it was
+   *  approved for. Listed only for its sender; empty for everyone else. */
+  queuedTurnApprovedMachines?: SessionApprovedMachine[] | undefined;
+};
+
+export type SessionApprovedMachine = {
+  sandboxId: string;
+  machineName: string;
 };
 
 export type SessionWaitingMessages = {
@@ -10665,6 +11492,12 @@ export type MachinesResponse = {
   activeEpoch: number;
   machines: MachineView[];
   sessionMachineAccess?: SessionMachineAccess | null | undefined;
+  /**
+   * False when the organization lets only its owners and admins connect new
+   * machines of their own: an Only me machine, or any machine in a Personal
+   * workspace. Omitted for an agent listing its own chat, and by older servers.
+   */
+  canConnectOwnMachine?: boolean | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
@@ -10729,6 +11562,7 @@ export type SwapActiveSandboxResponse = {
     | "concurrent_swap"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"
+    | "machine_access_required"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";
@@ -10854,7 +11688,13 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
-  /** Organization-pool grants; null for every shared workspace, including new ones. */
+  /**
+   * The shared workspaces that may use the account; null for every shared
+   * workspace, including new ones. A workspace's own account always keeps
+   * serving its workspace. On a workspace's own route this is the list of
+   * workspaces it serves, and only workspaces the caller also administers
+   * can be added.
+   */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   /**
@@ -10865,6 +11705,13 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * Explicit consent to make a workspace's own account the organization's, so
+   * that workspace's admins no longer manage it. Required on the organization
+   * route before it can serve every shared workspace, Personal workspaces or
+   * chosen people.
+   */
+  moveToOrganization?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -10952,6 +11799,7 @@ export type UpdateSessionMcpToolPermissionsRequest = {
 export type AgentCapabilityId =
   | "webSearch"
   | "humanInput"
+  | "notifications"
   | "skills"
   | "goals"
   | "subagents"
@@ -10963,7 +11811,8 @@ export type AgentCapabilityId =
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
-  | "workspaceAdmin";
+  | "workspaceAdmin"
+  | "privacyFacts";
 
 /** `read` reads installed Skills; `manage` also changes them. */
 export type AgentSkillsCapability = "read" | "manage" | false;
@@ -10971,6 +11820,7 @@ export type AgentSkillsCapability = "read" | "manage" | false;
 export type AgentCapabilityToggles = {
   webSearch?: boolean | undefined;
   humanInput?: boolean | undefined;
+  notifications?: boolean | undefined;
   skills?: AgentSkillsCapability | undefined;
   goals?: boolean | undefined;
   subagents?: boolean | undefined;
@@ -10983,6 +11833,7 @@ export type AgentCapabilityToggles = {
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
   workspaceAdmin?: boolean | undefined;
+  privacyFacts?: boolean | undefined;
 };
 
 /**
@@ -11019,6 +11870,7 @@ export type WorkspaceAgentDefaults = {
 export type ResolvedAgentCapabilities = {
   webSearch: boolean;
   humanInput: boolean;
+  notifications: boolean;
   skills: AgentSkillsCapability;
   goals: boolean;
   subagents: boolean;
@@ -11031,6 +11883,7 @@ export type ResolvedAgentCapabilities = {
   workspaceFiles: boolean;
   workspaceConnectors: boolean;
   workspaceAdmin: boolean;
+  privacyFacts: boolean;
 };
 
 export type ResolvedAgentConfig = {
@@ -11079,6 +11932,25 @@ export type UpdateSessionSkillsRequest = {
   expectedVersion: number;
 };
 
+/**
+ * `POST .../sessions/:id/resources/remove`. Removes attached repositories from
+ * the session and its child sessions. Access ends on the next Git or GitHub
+ * call; the next turn removes the repository folders. Repositories that are
+ * not attached are ignored.
+ */
+export type RemoveSessionResourcesRequest = {
+  resources: Array<{ kind: "repository"; uri: string }>;
+};
+
+/** One repository removed from a session (`Session.removedRepositories`). */
+export type SessionRemovedRepository = {
+  id: string;
+  resource: RepositoryResourceRef;
+  removedAt: string;
+  /** True until the next turn has removed the folder from the sandbox. */
+  sandboxCleanupPending: boolean;
+};
+
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */
 export type UpdateSessionAgentRequest = {
   agent: AgentConfigRequest;
@@ -11095,6 +11967,8 @@ export type ClientAgentConfig = {
     id: AgentCapabilityId;
     available: boolean;
     reason?: string | undefined;
+    /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+    code?: FeatureUnavailableReason | undefined;
   }>;
 };
 

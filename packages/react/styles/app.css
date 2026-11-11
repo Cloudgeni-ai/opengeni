@@ -233,7 +233,7 @@
    utilities must beat these element-level defaults. */
 @layer base {
   ::selection {
-    background: color-mix(in oklch, var(--color-brand) 45%, transparent);
+    background: var(--og-color-text-selection);
     color: var(--color-fg);
   }
 
@@ -352,6 +352,18 @@
    remains readable. */
 .toaster [data-sonner-toast] > * {
   transition: none;
+}
+
+/* An unexpected failure's "Copy details" (lib/toast) is a quiet text action,
+   not the toast's call to action. */
+.toaster [data-sonner-toast] [data-button].og-toast-details {
+  background: transparent;
+  color: var(--og-color-fg-muted);
+  padding-inline: 4px;
+}
+.toaster [data-sonner-toast] [data-button].og-toast-details:hover {
+  color: var(--og-color-fg);
+  text-decoration: underline;
 }
 
 /* A theme flip swaps every token at once; no control animates through the

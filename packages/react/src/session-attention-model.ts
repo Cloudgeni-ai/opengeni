@@ -1,4 +1,5 @@
 import type { SessionEvent } from "@opengeni/sdk";
+import { isNoReplyText } from "@opengeni/contracts/no-reply";
 
 // Keep this client scheduling predicate aligned with the meaningful-attention
 // predicate in packages/db/src/session-meaningful-events.ts. The server remains
@@ -44,7 +45,11 @@ export function sessionAttentionReadThroughSequence(events: readonly SessionEven
         : {};
     if (
       event.type === "agent.message.completed" &&
-      (payload.phase === "commentary" || payload.text == null || payload.text === "")
+      (payload.phase === "commentary" ||
+        payload.text == null ||
+        payload.text === "" ||
+        // An answer of exactly NO_REPLY is nothing for the person.
+        (typeof payload.text === "string" && isNoReplyText(payload.text)))
     )
       continue;
     if (event.type === "turn.completed") {
@@ -54,6 +59,12 @@ export function sessionAttentionReadThroughSequence(events: readonly SessionEven
       if (Object.hasOwn(payload, "maintenance") || Object.hasOwn(payload, "segmentLimit")) continue;
       const output = payload.output ?? payload.result;
       if ((output == null || output === "") && (payload.reply == null || payload.reply === ""))
+        continue;
+      if (
+        typeof payload.output === "string" &&
+        isNoReplyText(payload.output) &&
+        (payload.reply == null || payload.reply === "")
+      )
         continue;
     }
     return event.sequence;

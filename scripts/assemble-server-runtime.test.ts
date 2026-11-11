@@ -1,17 +1,44 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   API_RUNTIME_EXTERNALS,
+  API_RUNTIME_COMMAND_ENTRIES,
+  API_RUNTIME_PACKAGE_SCRIPTS,
   WORKER_RUNTIME_EXTERNALS,
   DATABASE_COMMAND_RUNNERS,
   finalizeCommandEntry,
 } from "./assemble-server-runtime";
 import { PACKAGE_ASSET_RUNTIME_EXTERNALS } from "./build-runtime-processes";
 
+const repositoryRoot = resolve(import.meta.dir, "..");
+
 const guardedSource =
   "export async function runMigrateCli() {}\nif (import.meta.main) await runMigrateCli();\n";
+
+test("the API image keeps the model catalog upsert command the ops workflow runs", () => {
+  expect(API_RUNTIME_PACKAGE_SCRIPTS).toContain("model-catalog:upsert");
+  expect(API_RUNTIME_COMMAND_ENTRIES.map(([, path]) => path)).toContain(
+    "scripts/upsert-model-catalog.ts",
+  );
+});
+
+test("every kept API root script resolves to a file the image bundles", async () => {
+  const manifest = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const bundled = new Set(API_RUNTIME_COMMAND_ENTRIES.map(([, path]) => path));
+  for (const script of API_RUNTIME_PACKAGE_SCRIPTS) {
+    const command = manifest.scripts[script];
+    expect(command, script).toBeString();
+    // A root script that runs a repository script directly needs that script
+    // bundled at the same path, or `bun run <script>` fails in the image.
+    for (const [, path] of command!.matchAll(/\bbun (scripts\/[\w.-]+\.ts)\b/g)) {
+      expect(bundled.has(path!), `${script} runs ${path}`).toBe(true);
+    }
+  }
+});
 
 test("only the worker image retains the native Documents parser", () => {
   expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");

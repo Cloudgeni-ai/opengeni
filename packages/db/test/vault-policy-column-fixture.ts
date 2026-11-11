@@ -122,19 +122,22 @@ const laterCapabilities = new Set([
   "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
   "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
   "target-schema runtime capability mutate_managed_passkey(text, text, jsonb) is missing or ambiguous",
+  "runtime definer session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer) is missing or ambiguous",
+  "runtime definer redact_session_secret_cells_v1(uuid, text, jsonb) is missing or ambiguous",
 ]);
 
 /**
  * A fixture stopped before 0761, 0768, 0769, the machine-audience migration,
- * 0978, 0984 and 0998 has no exhausted-schedule outbox, predicate, visibility
- * preview, foreign authority inventory, audience change, machine-owner lookup,
- * connected-command re-arm or managed passkey mutation, so current readiness
- * reports them missing.
- * Drop exactly those messages (and only that table from a combined
+ * 0978, 0984, 0998 and 1091 has no exhausted-schedule outbox, predicate,
+ * visibility preview, foreign authority inventory, audience change,
+ * machine-owner lookup, connected-command re-arm, managed passkey mutation or
+ * passkey table, or secret scrub routines, so current readiness reports them
+ * missing.
+ * Drop exactly those messages (and only those tables from a combined
  * "... tables are missing" line).
  */
 export function withoutAbsentLaterPosture(violations: readonly string[]): string[] {
-  const table = "scheduled_task_schedule_outbox";
+  const tables = new Set(["scheduled_task_schedule_outbox", "auth_passkeys"]);
   const kept: string[] = [];
   for (const violation of violations) {
     if (laterCapabilities.has(violation)) continue;
@@ -146,7 +149,7 @@ export function withoutAbsentLaterPosture(violations: readonly string[]): string
       const others = violation
         .slice(prefix.length)
         .split(", ")
-        .filter((name) => name !== table);
+        .filter((name) => !tables.has(name));
       if (others.length > 0) kept.push(`${prefix}${others.join(", ")}`);
       continue;
     }

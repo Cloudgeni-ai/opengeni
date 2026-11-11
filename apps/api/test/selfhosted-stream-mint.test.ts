@@ -165,7 +165,6 @@ const baseSession = {
   activeEpoch: 7,
   // Minimal remaining Session fields (types require them but mints don't read them).
   accountId: "acc",
-  environmentId: null,
   status: "idle" as const,
   goal: null,
   goalStatus: null,

@@ -8,6 +8,68 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+The console, mobile and packaged chat UI explicitly select `client.withSessionResponse("chat")`.
+These SDK clients send `Accept: application/json; opengeni-session=chat` on JSON requests. Session
+responses for chat reads, lists and mutations then omit `instructions`, `skills`
+and `effectiveTools`. Console/mobile chat views and embedded conversations use this
+small response. The console's Agent tool details and “create agent from chat” read
+`client.getSessionConfiguration(workspaceId, sessionId)` explicitly. The SDK's
+default remains the full response with required `Session` fields, so upgrading a
+server or SDK alone does not break existing field readers. Compact clients return
+`ChatSession`; callers needing configuration use the explicit method, or
+`GET /v1/workspaces/{workspaceId}/sessions/{sessionId}/configuration`, with
+`sessions:control` and access to the session. The packaged relay refuses that read
+and `model-context` when `createSession` makes setup server-owned. This does not
+change stored configuration, worker input or agent-facing MCP reads. Older APIs
+retain their old response until upgraded. Requests without this Accept preference retain the
+historical full response for previously shipped clients. Custom browser relays
+must add this Accept preference themselves, not let a browser choose the legacy response.
+The packaged relay does this automatically. This is an additive rollout; a future
+default change requires a separate compatibility decision after old clients migrate.
+Using the existing `Accept` header adds no CORS preflight requirement on older APIs.
+
+```ts
+const client = new OpenGeniClient({ baseUrl }); // existing full SDK contract
+const chatClient = client.withSessionResponse("chat"); // separate client; leaves client unchanged
+const chat = await chatClient.getSession(workspaceId, sessionId); // ChatSession
+const configuration = await chatClient.getSessionConfiguration(workspaceId, sessionId); // Session
+```
+
+Public React hooks, `OpenGeniProvider` and `createEmbeddedSessionClient` honor the
+client supplied by the application; they do not switch an existing full client
+to compact responses. For a custom chat, pass `chatClient` to the provider or
+hook. Passing the compact client directly to a hook also selects its compact
+return type; existing default/full hook callers retain the full `Session` type.
+The packaged chat's own clients explicitly opt in.
+Exported structural clients and annotated hook options also default to full
+responses. Custom compact wrappers can write `SessionClientLike<ChatClient>` or
+`UseSessionOptions<ChatClient>` (with `ChatClient` imported from the SDK). The
+embedded adapter preserves the input client's full or compact return contract.
+
+For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
+allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response
+headers. The API and packaged relay share the response list; server-route adapters
+inherit it. Preserve those headers at every hop, including same-origin relays.
+Missing history metadata produces one SDK console warning per client, naming the
+unreadable headers and the exposure configuration to fix. See
+[the proxy guide](../docs-site/integrate/proxy-from-any-backend.mdx#headers).
+
+API and SDK/embedded requests use credits, not monthly app-plan credit.
+Connected AI subscriptions are for paid-plan app work and cannot serve API
+requests; an explicit selection returns `subscription_api_unavailable` (403),
+and an omitted model skips subscription defaults. Own provider API keys remain
+supported. Their platform fee is configuration-driven; at
+`OPENGENI_BYOK_PLATFORM_FEE_BPS=0` there is no fee or paid-credit admission
+requirement for it. See [billing-origin.md](billing-origin.md) for funding and
+the existing internal-account legacy terms.
+
+A self-hosted operator that owns the subscriptions it connects can let its own
+product's API requests use them by setting
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` on the deployment (default
+`false`); the operator is responsible for its provider's terms. See
+[deployment.md](deployment.md) and
+[billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
+
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
@@ -102,6 +164,8 @@ Opengeni's own create request, limited by the user's permissions. With the
 hook, chat setup is server-owned: the hook returns the complete create
 request, so it is where the server chooses the agent, Skills, tools, and model
 policy, and the proxy refuses the routes that would change that setup later:
+
+<!-- doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" -->
 
 ```ts
 createSession: ({ initialMessage, idempotencyKey }) => ({
@@ -213,6 +277,9 @@ never changes an existing membership. It also never runs for SDK per-user
 workspaces (external source `opengeni-sdk:user-isolation:*`): those stay
 single-user, and the SDK adds their owner explicitly with a stable onboarding
 key. It never runs when the request needs a permission outside the defaults.
+That includes renaming a workspace, its instructions and its custom model
+entries: those take people who can start chats there acting as themselves,
+which a product's user never is, so a refused request creates nothing.
 The identity is re-checked as active under the same lock, and the grant
 writes the same receipt and `organization_workspace_lifecycle_events` row as
 explicit onboarding, attributed to the key. A user removed from a shared
@@ -228,6 +295,16 @@ permissions up front, and `updateExternalWorkspaceMember` with a new
 `operationId` changes an existing member's permissions, including one created
 automatically. Explicit onboarding after a user's first request returns a `409`
 when its permissions differ from the automatic defaults; update instead.
+
+Products that already own their users' roles can skip that mirroring:
+`asUser(user, { source, membership: { permissions } })` states the user's
+permissions on every request, and the API makes the stored grant equal to them
+before it authorizes the request. It creates a missing member, writes only when
+the grant differs, applies the same ceiling and last-administrator rules as the
+explicit endpoints, and loses to a revoke that happened while the request was in
+flight. Work that runs later without a request uses the last stated grant.
+Removing a user is still an explicit revoke. See
+[state membership on each request](external-membership-operations.md#state-membership-on-each-request).
 
 ### Configure the agent
 
@@ -245,6 +322,8 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | Capability | Lets the agent |
 | --- | --- |
 | `humanInput` | pause and ask the person for a decision or missing detail |
+| `notifications` | notify the person, withdraw notifications, tidy their inbox and call them (off in `"none"`) |
+| `privacyFacts` | answer privacy, retention and provider questions from the deployment's facts (off in `"none"`) |
 | `webSearch` | search the public web |
 | `media` | generate images and videos |
 | `goals` | work toward a goal across many turns |
@@ -264,6 +343,24 @@ tools and runtime mechanics are not capabilities and are never toggled. A
 capability the deployment does not offer is reported off in `agent.unavailable`;
 requesting it returns 422 `agent_capability_unavailable`. Child sessions may
 only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
+
+Every built-in tool and prompt section follows what the session can use, so
+`"none"` pays only for what is relevant on each call: a neutral identity
+without a shared workspace; `request_human_input` with the secret kind only
+under `secrets` and Skill reviews only under `skills: "manage"`, and not at all
+when nobody can answer (a session created with `unattended: true`, or
+`humanInput: false`; an API-started session keeps it because the backend can
+answer, and a child session because its parent agent can);
+`wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
+`browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
+on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
+search only when a tool is
+deferred (an `optional` or connection-backed eager server still counts as
+deferred); no Skill index without Skills. Sessions with a feature get the same
+prompt as before. Saved workspace defaults and schedules keep notifications
+and privacy facts under `"none"`. `GET .../model-context` returns the latest
+request's provider body; on the native Anthropic route it also lists the
+instructions, their layers and each tool.
 
 `identity` replaces only how Opengeni introduces the agent. `instructions` is
 the session `instructions` field. The prompt order is identity, Opengeni's
@@ -556,6 +653,13 @@ beyond the creating session. Omitting `firstPartyMcpTools` inherits the
 deployment's non-connector default catalog, and omitting `tools` inherits
 workspace MCP defaults; explicit empty arrays suppress those respective
 selections.
+
+A scheduled task the app creates takes the same two fields in its
+`agentConfig` for the chats it starts; without them its runs get the
+deployment defaults, not the selection of the app's other chats. They are set
+once at creation, so give an older task the app's selection by creating it
+again. Create a user's schedules as that user (`asUser`): an ownerless task has
+nobody to notify, and its runs are not offered `notify_user` or `call_user`.
 
 Creating a workspace does not create a dedicated cluster or permanently
 running sandbox. It adds control-plane state and may require per-workspace
@@ -1077,10 +1181,12 @@ Integration lifecycle:
    stable instance key, Connection, and selected operations. Operations the
    preview marks `approvalMode: "ask"` pause for human approval on every call;
    for unattended or scheduled work, list the ones policy permits in
-   `autoApprovedTools` (`capabilities:manage`; curated definitions may keep specific operations human-approved;
-   re-checked against organization integration policy; declarative, so an
-   update that omits it restores approval). Connector Block, session approval
-   policy, and action policies still apply.
+   `autoApprovedTools` (`capabilities:manage`; members, who hold
+   `connections:write`, install without it; curated definitions may keep
+   specific operations human-approved; re-checked against organization
+   integration policy; an update that omits it keeps an earlier choice only for
+   the same account and unchanged operations, otherwise approval is restored).
+   Connector Block, session approval policy, and action policies still apply.
 6. Persist the returned non-secret instance/server identifiers and select that
    server in sessions.
 
@@ -1258,6 +1364,27 @@ and its resolver also applies to `Markdown` rendered by a custom
 `renderMessageText`. `OpenGeniLinkProvider` sets a resolver for a whole
 subtree. An unresolved target renders as text marked unavailable, never as a
 broken link, and the Site tool row hides its Open action.
+
+#### Interactive answers
+
+When an agent offers concrete options to choose from, the bundled `visualize`
+Skill has it write an `opengeni-ui` fence: one JSON object with the options,
+the fields to compare and whether the person may pick. The conversation draws
+it natively (no frame, no script) as cards, a sortable table and an optional
+bar chart, and picking sends one ordinary user message such as
+`Compare these in detail: A and B`.
+
+`SessionConversation` and the React Native `NativeSessionScreen` wire this up
+themselves: the pick goes through the composer's Send, and the answer is read
+only when the session has ended or is an imported archive. What a person
+picked or sent is remembered per browser in `localStorage`; on React Native,
+pass `answerStore` (any `{ get, set }` such as AsyncStorage) to keep it across
+launches. A custom `MessageTimeline` wraps itself in
+`InteractiveAnswerProvider` with `send`, `scope` (the session id), `store` and
+`readOnly`; without `send`, options can still be filtered and compared but not
+picked. The renderer-neutral parser and selection logic are in
+`@opengeni/react/interactive-answer-model`. Older clients and other channels
+show the fence as a JSON code block.
 
 Your product's own links are separate from Opengeni objects. When your
 instructions or tools teach the agent to link your records and pages, for

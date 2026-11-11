@@ -120,13 +120,11 @@ function payload(
 
 // Public usage/settings shapes now run only through core compatibility projections.
 beforeEach(() => {
-  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("core");
   const alias = spyOn(opengeniDb, "resolveSubscriptionCoreCodexConnectionId").mockImplementation(
     async (_db, input) => input.connectionId,
   );
   const wake = spyOn(opengeniDb, "deliverSubscriptionCoreCodexWake").mockResolvedValue(undefined);
   restores.push(
-    () => cutover.mockRestore(),
     () => alias.mockRestore(),
     () => wake.mockRestore(),
   );
@@ -280,6 +278,8 @@ describe("PATCH /codex/settings — rotation settings", () => {
       accountId: ACCOUNT,
       workspaceId: WS,
       subjectId: "tester",
+      // A delegated bearer is never the verified Personal owner (migration 1233).
+      personalWorkspaceOwnerVerified: false,
       rotationEnabled: true,
     });
   });
@@ -378,7 +378,7 @@ describe("PATCH /codex/source — core source refusal", () => {
   test("maps a permission source refusal to 403", async () => {
     const mutation = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource").mockRejectedValue(
       new opengeniDb.SubscriptionCoreCodexSourceRefusedError(
-        "missing permission to change this workspace's Codex source",
+        "You don't have permission to change this workspace's Codex source.",
         "forbidden",
       ),
     );

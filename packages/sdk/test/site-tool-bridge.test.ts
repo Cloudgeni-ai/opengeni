@@ -102,6 +102,10 @@ test("Site HTTP forwarding refuses every route outside SITE_OPERATIONS before an
     ["GET", "/v1/workspaces/site-host/sessions?channelId=project"],
     ["DELETE", "/v1/workspaces/site-host/sessions/session-1"],
     ["POST", "/v1/workspaces/site-host/tools/calls"],
+    // Consent is host-only: Site code cannot describe, approve or skip it.
+    ["POST", "/v1/workspaces/site-host/tools/target-approvals"],
+    ["POST", "/v1/workspaces/site-host/tools/site-consent"],
+    ["POST", "/v1/workspaces/site-host/tools/approvals"],
   ] as const)
     await expect(request(method, path)).rejects.toThrow("Unsupported");
   expect(requests).toEqual([]);

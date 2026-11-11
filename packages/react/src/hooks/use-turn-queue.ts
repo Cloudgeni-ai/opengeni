@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   EffectiveSessionControl,
@@ -68,7 +69,7 @@ export type QueueRecallResult =
   /** Anything else (offline, draft changed, a mutation in flight); the queue shows why. */
   | { status: "failed" };
 
-export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
+export type UseTurnQueueOptions = EmbeddedSessionClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
   };
@@ -222,12 +223,18 @@ export function useTurnQueue(
   );
 
   const load = useCallback(
-    async (rejectOnFailure = false): Promise<void> => {
+    async (rejectOnFailure = false, fresh = false): Promise<void> => {
       if (!sessionId) return;
       const ownedTargetKey = `${workspaceId}\u0000${sessionId}`;
       const ticket = ++readGeneration.current;
       try {
-        const fetched = await client.getQueue(workspaceId, sessionId);
+        // A refresh for an observed event must not join a read that started
+        // before the event: that read can return the state the event replaced
+        // (for example a stopping attempt that has since quiesced), and no
+        // later event would correct it.
+        const fetched = fresh
+          ? await client.getQueue(workspaceId, sessionId, { fresh: true })
+          : await client.getQueue(workspaceId, sessionId);
         if (targetKeyRef.current !== ownedTargetKey) return;
         transientStreakRef.current = null;
         cancelTransientRetry();
@@ -269,7 +276,7 @@ export function useTurnQueue(
               cancelTransientRetry();
               transientRetryTimerRef.current = setTimeout(() => {
                 transientRetryTimerRef.current = null;
-                if (targetKeyRef.current === ownedTargetKey) void loadRef.current();
+                if (targetKeyRef.current === ownedTargetKey) void loadRef.current(false, fresh);
               }, step.delayMs);
             }
           } else {
@@ -319,15 +326,20 @@ export function useTurnQueue(
     };
   }, [cancelTransientRetry, load, enabled, pageLive, options.pollIntervalMs]);
 
+  // Every read that follows an observed change (an event, a reconnect, a
+  // failed mutation) is fresh. If one of them joined an older in-flight read,
+  // that stale result could become the newest accepted read and discard the
+  // fresh one. Only the first read and polling may share a read.
+  const loadFresh = useCallback(() => load(false, true), [load]);
   useEffect(() => {
-    if (enabled && workspaceControlEvent) void load();
-  }, [enabled, load, workspaceControlEvent]);
+    if (enabled && workspaceControlEvent) void loadFresh();
+  }, [enabled, loadFresh, workspaceControlEvent]);
   useEffect(() => {
     if (!sessionId || !enabled) return;
-    return registerSessionReconciler(sessionId, "queue", load);
-  }, [enabled, load, registerSessionReconciler, sessionId]);
+    return registerSessionReconciler(sessionId, "queue", loadFresh);
+  }, [enabled, loadFresh, registerSessionReconciler, sessionId]);
 
-  const scheduleRefresh = useDebouncedCallback(() => void load());
+  const scheduleRefresh = useDebouncedCallback(() => void loadFresh());
   const freshSnapshot = stateTargetKey === targetKey ? snapshot : null;
   const freshLoading = stateTargetKey === targetKey ? loading : enabled;
   useSessionEventTrigger(
@@ -342,7 +354,7 @@ export function useTurnQueue(
       readThrough: projectionReadThrough(freshSnapshot, freshLoading),
       refresh: scheduleRefresh,
     },
-    async () => await load(true),
+    async () => await load(true, true),
   );
   // Until the first read lands, show the queue as it was when this
   // conversation was last left (only when the host retains reads). Commands
@@ -397,7 +409,7 @@ export function useTurnQueue(
           if (failure.quietWhenGone) {
             // Reconcile first: a prompt that already left the queue is the
             // caller's quiet outcome, never a flash of queue error.
-            await load();
+            await loadFresh();
             const stillWaiting = snapshotRef.current?.items.some(
               (candidate) => candidate.id === turnId,
             );
@@ -406,7 +418,7 @@ export function useTurnQueue(
             }
           } else {
             setMutationError(asError(cause));
-            await load();
+            await loadFresh();
           }
         }
         return null;
@@ -419,7 +431,7 @@ export function useTurnQueue(
         }
       }
     },
-    [acceptSnapshot, load, sessionId, targetKey],
+    [acceptSnapshot, loadFresh, sessionId, targetKey],
   );
 
   const moveTurn = useCallback(
@@ -491,7 +503,7 @@ export function useTurnQueue(
       if (targetKeyRef.current !== ownedTargetKey) return false;
       if (!turn) {
         setMutationError(new Error(t("hooks.useTurnQueue.thatQueuedPromptChangedBefore")));
-        await load();
+        await loadFresh();
         return false;
       }
       const optimistic: AcceptedQueueSteer = {
@@ -543,7 +555,7 @@ export function useTurnQueue(
       );
       return accepted;
     },
-    [client, load, mutate, sessionId, targetKey, workspaceId, t],
+    [client, loadFresh, mutate, sessionId, targetKey, workspaceId, t],
   );
 
   const removeTurn = useCallback(

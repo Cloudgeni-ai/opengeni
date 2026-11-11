@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql, type SQL } from "drizzle-orm";
@@ -12,7 +12,6 @@ import {
   withWorkspaceSubjectRls,
   type Database,
 } from "../src";
-import { parseConcurrentIndexMigration } from "../src/migrate";
 
 let shared: SharedTestDatabase;
 let driver: postgres.Sql;
@@ -48,21 +47,6 @@ type PlanNode = {
   Plans?: PlanNode[];
 };
 
-test("personal-state probe index is rolling, concurrent and idempotent", async () => {
-  const migration = "0901_session_personal_state_probes.sql";
-  const source = await readFile(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
-  expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-  const parsed = parseConcurrentIndexMigration(migration, source)!;
-  expect(parsed.indexName).toBe("session_pins_session_subject_idx");
-  await shared.admin.unsafe(parsed.statement);
-  await shared.admin.unsafe(parsed.statement);
-  const [index] =
-    await shared.admin`select indisvalid, indisready, pg_get_indexdef(indexrelid) as definition
-    from pg_index where indexrelid='session_pins_session_subject_idx'::regclass`;
-  expect(index).toMatchObject({ indisvalid: true, indisready: true });
-  expect(index!.definition).toContain("(session_id, subject_id)");
-});
-
 test("shallow workspace totals only read cursors contributing to unarchived groups", async () => {
   const identity = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -96,12 +80,17 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
         parent_id, root_id, 'idle', jsonb_build_object('ordinal', ordinal) from generated
     `);
   });
+  // Archiving a chat archives its whole tree.
+  await withWorkspaceSessionActivityRls(db, grant.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      update sessions set archived_at = now()
+      where workspace_id = ${grant.workspaceId}
+        and (metadata->>'ordinal')::int <= ${archivedRoots}
+    `);
+  });
   await shared.admin`insert into session_pins(account_id, workspace_id, subject_id, session_id,
-    pinned, pinned_at, archived, archived_at, acknowledged_sequence, actively_working)
-    select account_id, workspace_id, ${grant.subjectId}, id, false, null,
-      parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots},
-      case when parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots}
-        then now() else null end, 0, false
+    pinned, pinned_at, acknowledged_sequence, actively_working)
+    select account_id, workspace_id, ${grant.subjectId}, id, false, null, 0, false
     from sessions where workspace_id=${grant.workspaceId}`;
   // A generic plan estimates average workspace/subject cardinalities. One
   // populated workspace hides the bad nested-loop choice made when a large

@@ -1,4 +1,4 @@
-import { fileOwnerContextForAccess } from "@opengeni/core";
+import { fileOwnerContextForAccess, MissingPermissionRefusal } from "@opengeni/core";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
@@ -42,12 +42,13 @@ import {
   reclassifyDocumentAuthority,
   runDocumentDefaultCollectionBackfill,
 } from "@opengeni/documents";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "../mcp/transport";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   requireAccessGrant,
-  requireAccountAdminAuthorizationStamp,
+  requireOrganizationAdministrationStamp,
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrantAuthorization,
   knowledgeContextForAccess,
 } from "@opengeni/core";
@@ -55,6 +56,7 @@ import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
+import { requireCallingWorkspaceContentExchange } from "../mcp/workspace-content-flow";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -63,7 +65,6 @@ import {
 import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
-import { routeRetired } from "../http/deprecation";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -138,9 +139,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
-    const accountAdminAuthorization = requireAccountAdminAuthorizationStamp(authorization);
+    const accountAdminAuthorization = requireOrganizationAdministrationStamp(authorization);
     const payload = await parseRequestJson(c, RunDocumentDefaultCollectionBackfillRequest);
     try {
       return c.json(
@@ -168,7 +169,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
       status: 400,
@@ -181,7 +182,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             ...query,
           }),
         ),
@@ -200,7 +201,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const runId = RunDocumentDefaultCollectionBackfillRequest.shape.runId.safeParse(
       c.req.param("runId"),
@@ -219,7 +220,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             runId: runId.data,
             ...query,
           }),
@@ -239,7 +240,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
       status: 400,
@@ -252,7 +253,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             ...query,
           }),
         ),
@@ -276,10 +277,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = await parseRequestJson(c, AddDocumentRequest);
-    const organizationAuthorityGranted =
-      access.accountGrant?.permissions.includes("account:admin") === true;
+    const organizationAuthorityGranted = hasAccountAdminAuthority(access);
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     try {
       const document = await addDocumentToBase(db, {
@@ -348,7 +348,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const payload = await parseRequestJson(c, ReclassifyDocumentAuthorityRequest);
       const accountAdminAuthorized = hasAccountAdminAuthority(authorization);
       const accountAdminAuthorization = accountAdminAuthorized
-        ? requireAccountAdminAuthorizationStamp(authorization)
+        ? requireOrganizationAdministrationStamp(authorization)
         : null;
       try {
         const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
@@ -360,7 +360,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             payload.targetAuthorityKind === "organization") &&
           !accountAdminAuthorization
         ) {
-          throw new HTTPException(403, { message: "missing permission: account:admin" });
+          throw new MissingPermissionRefusal("account:admin");
         }
         return c.json(
           DocumentAuthorityReclassification.parse(
@@ -573,21 +573,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  for (const path of [
-    "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
-    "/v1/workspaces/:workspaceId/knowledge/search",
-  ]) {
-    app.post(path, async (c) => {
-      await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
-      throw routeRetired(
-        "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
-        "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
-      );
-    });
-  }
-
-  // Compatibility upload endpoint. Retained originals and extracted text now
-  // enter canonical Knowledge. Agent findings use ordinary accepted turns.
+  // Upload endpoint. Retained originals and extracted text enter canonical
+  // Knowledge. Agent findings use ordinary accepted turns.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
@@ -611,10 +598,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Personal source retention requires verified ownership",
       });
-    const organizationAuthorityGranted =
-      access.accountGrant?.permissions.includes("account:admin") === true;
+    const organizationAuthorityGranted = hasAccountAdminAuthority(access);
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     try {
       let fileId: string;
@@ -790,7 +776,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const server = buildWorkspaceToolGatewayMcpServer(
@@ -815,8 +801,13 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
-      const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+      const transport = createApiMcpTransport({ enableJsonResponse: true });
       const server = buildDocumentsMcpServer(
         db,
         grant.accountId,
@@ -846,7 +837,7 @@ function dropFilename(preferred: string | undefined): string {
 function documentHttpException(error: unknown): HTTPException {
   const message = documentDomainErrorMessage(error);
   if (message.includes("organization document") && message.includes("exact account authority")) {
-    return new HTTPException(403, { message: "missing permission: account:admin" });
+    return new MissingPermissionRefusal("account:admin");
   }
   if (message.includes("not found")) {
     return new HTTPException(404, { message });
@@ -917,10 +908,11 @@ function documentDomainErrorMessage(error: unknown): string {
   return message;
 }
 
+/** The organization's owner or admins (organization administration). */
 function hasAccountAdminAuthority(
   authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
 ): boolean {
-  return authorization.accountGrant?.permissions.includes("account:admin") === true;
+  return authorizationHoldsOrganizationAdministration(authorization);
 }
 
 function requireOrganizationDocumentAuthority(
@@ -928,6 +920,6 @@ function requireOrganizationDocumentAuthority(
   organizationAuthorityGranted: boolean,
 ): void {
   if (authorityKind === "organization" && !organizationAuthorityGranted) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
 }

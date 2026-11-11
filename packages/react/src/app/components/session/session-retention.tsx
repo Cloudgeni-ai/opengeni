@@ -1,13 +1,15 @@
 /**
- * Idle-session archive in the session view. A deployment may move chats that
- * have had no activity for a while into long-term storage: the conversation
- * stays readable, but the chat can no longer continue. This is separate from
- * the personal "Archive" action, which only hides a chat from your own list.
+ * Archived chats in the session view. A chat is archived when someone with
+ * control archives it, or when the deployment archives it after a long idle
+ * period. Its content then moves to long-term storage: the conversation stays
+ * readable, but the chat can't continue until someone restores it, which
+ * puts its content back. Its work can also continue in a new chat that links
+ * to it.
  *
- * - ReadOnlySessionNotice: the calm notice above a read-only chat's timeline.
+ * - ReadOnlySessionNotice: the calm notice above an archived chat's timeline.
  * - KeepActiveSetting: the per-chat exemption, a switch in the Agent tab.
  */
-import { ArchiveIcon, PlusIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, SquarePenIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../../lib/toast";
 
@@ -21,11 +23,15 @@ import { apiErrorFacts } from "../../../ui/api-error";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import type { Session } from "../../types";
 
-/** The chat's long-term storage state, or null while it is live. */
+/**
+ * The chat's archive state, or null while it is live. An archived chat whose
+ * content is not stored yet is "archiving": it is already read-only.
+ */
 export function sessionReadOnlyArchive(
-  session: Pick<Session, "retention">,
+  session: Pick<Session, "retention" | "archived" | "archivedAt">,
 ): NonNullable<NonNullable<Session["retention"]>["archive"]> | null {
-  return session.retention?.archive ?? null;
+  if (session.retention?.archive) return session.retention.archive;
+  return session.archived ? { state: "archiving", archivedAt: null } : null;
 }
 
 function idlePeriod(idleDays: number | undefined): string {
@@ -35,45 +41,84 @@ function idlePeriod(idleDays: number | undefined): string {
 
 export function ReadOnlySessionNotice(props: {
   session: Session;
-  /** The deployment's idle period, when it still archives chats. */
-  idleDays?: number | undefined;
-  onNewSession: () => void;
+  /** Starts a new chat that continues this one's work. */
+  onContinue: () => void;
+  /**
+   * Brings the chat (and the sub-chats archived with it) back, so it can
+   * continue here. Only for a chat this person can archive, and not for a
+   * sub-chat: that is restored with the chat that started it.
+   */
+  onRestore?: (() => Promise<boolean>) | undefined;
 }) {
   const archive = sessionReadOnlyArchive(props.session);
+  const [restoreRequested, setRestoreRequested] = useState(false);
   if (!archive) return null;
   const moving = archive.state === "archiving";
+  const restoring = archive.restoring === true || restoreRequested;
+  const restore = props.onRestore;
   return (
     <Notice
       tone="muted"
       icon={<ArchiveIcon className="size-4" aria-hidden="true" />}
-      title="This chat is read-only"
+      title={restoring ? "Restoring this chat" : "This chat is archived"}
       actionLayout="responsive"
       action={
-        <Button
-          type="button"
-          size="sm"
-          onClick={props.onNewSession}
-          className="shrink-0 pointer-coarse:h-11"
-        >
-          <PlusIcon aria-hidden="true" />
-          New chat
-        </Button>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {restore ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={restoring}
+              onClick={() => {
+                setRestoreRequested(true);
+                // Resolves false when nothing started; the button comes back.
+                void restore().then(
+                  (started) => setRestoreRequested(started),
+                  () => setRestoreRequested(false),
+                );
+              }}
+              className="shrink-0 pointer-coarse:h-11"
+            >
+              <ArchiveRestoreIcon aria-hidden="true" />
+              {restoring ? "Restoring…" : "Restore chat"}
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            size="sm"
+            onClick={props.onContinue}
+            className="shrink-0 pointer-coarse:h-11"
+          >
+            <SquarePenIcon aria-hidden="true" />
+            Continue in a new chat
+          </Button>
+        </div>
       }
     >
-      <p data-read-only-session={archive.state} className="mt-0.5 text-fg-muted">
-        {moving ? (
+      <p
+        data-read-only-session={restoring ? "restoring" : archive.state}
+        className="mt-0.5 text-fg-muted"
+      >
+        {restoring ? (
           <>
-            It had no activity for {idlePeriod(props.idleDays)} and is moving to long-term storage.
+            Its content is coming back from long-term storage, with the sub-chats archived with it.
+            It can continue here once that's done.
           </>
+        ) : moving ? (
+          <>It is moving to long-term storage.</>
         ) : archive.archivedAt ? (
           <>
-            It moved to long-term storage <RelativeTime date={archive.archivedAt} inSentence />{" "}
-            after {idlePeriod(props.idleDays)} without activity.
+            It moved to long-term storage <RelativeTime date={archive.archivedAt} inSentence />.
           </>
         ) : (
-          <>It moved to long-term storage after {idlePeriod(props.idleDays)} without activity.</>
-        )}{" "}
-        You can read the whole conversation, but not continue it.
+          <>It is in long-term storage.</>
+        )}
+        {restoring ? null : restore ? (
+          <> You can read the whole conversation. Restore it to continue here.</>
+        ) : (
+          <> You can read the whole conversation, but not continue it here.</>
+        )}
       </p>
     </Notice>
   );
@@ -140,7 +185,7 @@ export function KeepActiveSetting(props: {
       // Sits directly under its section heading: drop the row's own top padding.
       className="-mt-3"
       label="Keep this chat active"
-      description={`Chats with no activity for ${idlePeriod(props.idleDays)} become read-only and move to long-term storage. Turn this on for a long-running agent you come back to.`}
+      description={`Chats with no activity for ${idlePeriod(props.idleDays)} are archived to long-term storage. Turn this on for a long-running agent you come back to.`}
       error={error}
       control={
         <Switch

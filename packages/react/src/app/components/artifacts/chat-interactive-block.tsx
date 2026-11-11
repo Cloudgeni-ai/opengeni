@@ -6,6 +6,7 @@ import { useAppContext } from "../../app-context";
 import { useAppearance } from "../../lib/appearance";
 import { useAppApi } from "../../lib/app-api";
 import { createSiteToolBridge } from "../../lib/site-tool-bridge";
+import { useSiteToolConsentHost } from "../../lib/site-tool-consent";
 
 export type ChatInteractiveBlockProps = {
   workspaceId: string;
@@ -18,6 +19,7 @@ export function ChatInteractiveBlock(props: ChatInteractiveBlockProps) {
   const { resolvedTheme } = useAppearance();
   const { client } = useAppContext();
   const api = useAppApi();
+  const consent = useSiteToolConsentHost();
   const { workspaceId } = props;
   const toolBridge = useCallback<SiteToolBridgeFactory>(
     (site) => {
@@ -28,10 +30,11 @@ export function ChatInteractiveBlock(props: ChatInteractiveBlockProps) {
             artifactId: site.artifactId,
             siteVersionId: site.siteVersionId,
             requestedTools: site.requestedTools,
+            consent,
           })
         : createSiteToolBridge(api, scope);
     },
-    [api, client, workspaceId],
+    [api, client, consent, workspaceId],
   );
   return (
     <SharedChatInteractiveBlock

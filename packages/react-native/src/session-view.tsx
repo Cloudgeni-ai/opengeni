@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -19,18 +20,25 @@ import {
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
+  ResourceRef,
   SessionHumanInputRequest,
   SessionTurn,
 } from "@opengeni/sdk";
 import type {
   ActivityItem,
+  StoredFileSource,
   TimelineGroup,
   TimelineItem,
   ToolCallItem,
 } from "@opengeni/react/session";
-import { isAgentWorkHumanInput, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  isAgentWorkHumanInput,
+  sessionStatusItemDisplayStatus,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
+import { StoredFileImage, useNativeComposerAttachments } from "./stored-file-image";
 import { useOpenNativeLink } from "./links";
 import {
   DEFAULT_OPENGENI_NATIVE_LABELS,
@@ -132,7 +140,7 @@ export interface NativeComposerSurfaceContext {
 export type NativeComposerSurfaceRenderer = (context: NativeComposerSurfaceContext) => ReactNode;
 
 export interface OpenGeniNativeSessionViewProps {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   theme?: OpenGeniNativeTheme | undefined;
   labels?: Partial<OpenGeniNativeLabels> | undefined;
   header?: ReactNode | undefined;
@@ -320,6 +328,7 @@ function NativeSessionViewBody({
               labels={labels}
               onRemoveRestoredResource={controller.composer.removeRestoredResource}
               restoredResources={controller.composer.restoredResources}
+              fileSource={controller.composer.fileSource}
               theme={theme}
             />
             <Composer
@@ -575,7 +584,7 @@ function ConnectionBanner({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   formatError?: ((error: Error) => string) | undefined;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
@@ -873,7 +882,7 @@ function timelineTitle(
     case "startup-phase":
       return labels.activity;
     case "session-status":
-      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
+      return nativeSessionStatusLabel(sessionStatusItemDisplayStatus(item), labels);
     case "human-input":
       return labels.humanInputAsked;
     case "goal":
@@ -1042,11 +1051,9 @@ function SessionStatusRow({
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
-  const label = nativeSessionStatusLabel(
-    item.blocked ? "blocked" : item.status,
-    labels,
-  ).toLocaleLowerCase();
-  const dotColor = sessionStatusColor(item.blocked ? "blocked" : item.status, theme);
+  const status = sessionStatusItemDisplayStatus(item);
+  const label = nativeSessionStatusLabel(status, labels).toLocaleLowerCase();
+  const dotColor = sessionStatusColor(status, theme);
   const relativeTime = formatNativeRelativeTime(item.occurredAt, labels);
 
   return (
@@ -1132,7 +1139,7 @@ function timelineSummary(
     case "startup-phase":
       return nativeTimelineStatusLabel(item.status, labels);
     case "session-status":
-      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
+      return nativeSessionStatusLabel(sessionStatusItemDisplayStatus(item), labels);
     case "human-input":
       return nativeHumanInputSummary(item, labels);
     case "goal":
@@ -1163,7 +1170,7 @@ function ApprovalSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1214,7 +1221,7 @@ function SessionSurfaces({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1262,7 +1269,7 @@ function QueueSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1665,16 +1672,30 @@ export function OpenGeniNativeAttachmentStrip({
   labels,
   onRemoveRestoredResource,
   restoredResources = NO_RESTORED_RESOURCES,
+  fileSource,
   theme,
 }: {
   attachments: NativeFileAttachmentsResult;
   labels: OpenGeniNativeLabels;
   onRemoveRestoredResource?: ((index: number) => void) | undefined;
   restoredResources?: readonly unknown[] | undefined;
+  /** Where stored files are read from; defaults to the attachments' own chat. */
+  fileSource?: StoredFileSource | undefined;
   theme: OpenGeniNativeTheme;
 }) {
   const error = attachments.error;
-  if (attachments.attachments.length === 0 && restoredResources.length === 0 && !error) return null;
+  const source = fileSource ?? attachments.fileSource;
+  // Restored files show as the files they are (images as pictures); other
+  // restored references keep a plain chip.
+  const restoredFiles = restoredResources.filter(isRestoredFileResource);
+  const items = useNativeComposerAttachments(source, attachments.attachments, restoredFiles);
+  const restoredFileIndexes = restoredResources.flatMap((resource, index) =>
+    isRestoredFileResource(resource) ? [index] : [],
+  );
+  const otherRestored = restoredResources.flatMap((resource, index) =>
+    isRestoredFileResource(resource) ? [] : [index],
+  );
+  if (items.length === 0 && otherRestored.length === 0 && !error) return null;
 
   return (
     <ScrollView
@@ -1701,53 +1722,83 @@ export function OpenGeniNativeAttachmentStrip({
           />
         </View>
       ) : null}
-      {attachments.attachments.map((attachment) => (
-        <View
-          key={attachment.id}
-          style={[
-            styles.attachmentChip,
-            { backgroundColor: theme.colors.elevated, borderColor: theme.colors.border },
-          ]}
-        >
-          <Text numberOfLines={1} style={[styles.attachmentName, { color: theme.colors.text }]}>
-            {attachment.name}
-          </Text>
-          <Text
+      {items.map((attachment) => {
+        const restoredIndex =
+          attachment.restoredIndex === undefined
+            ? undefined
+            : restoredFileIndexes[attachment.restoredIndex];
+        return (
+          <View
+            key={attachment.id}
             style={[
-              styles.helpText,
-              {
-                color:
-                  attachment.status === "failed" ? theme.colors.danger : theme.colors.mutedText,
-              },
+              styles.attachmentChip,
+              { backgroundColor: theme.colors.elevated, borderColor: theme.colors.border },
             ]}
           >
-            {attachment.status === "preparing"
-              ? labels.preparingAttachment
-              : attachment.status === "uploading"
-                ? labels.uploading
-                : attachment.status === "failed"
-                  ? labels.uploadFailed
-                  : formatBytes(attachment.sizeBytes)}
-          </Text>
-          <View style={styles.buttonRow}>
-            {attachment.status === "failed" ? (
-              <ActionButton
-                label={labels.retryUpload}
-                onPress={() => void attachments.retry(attachment.id)}
-                theme={theme}
-                variant="quiet"
+            {attachment.kind === "image" && (attachment.previewUri || attachment.file) ? (
+              <StoredFileImage
+                source={source}
+                file={attachment.file}
+                localUri={attachment.previewUri}
+                style={[styles.attachmentThumbnail, { borderColor: theme.colors.border }]}
+                fallback={
+                  <View
+                    style={[
+                      styles.attachmentThumbnail,
+                      {
+                        borderColor: theme.colors.border,
+                        backgroundColor: theme.colors.background,
+                      },
+                    ]}
+                  />
+                }
               />
             ) : null}
-            <ActionButton
-              label={labels.removeAttachment}
-              onPress={() => attachments.remove(attachment.id)}
-              theme={theme}
-              variant="quiet"
-            />
+            <Text numberOfLines={1} style={[styles.attachmentName, { color: theme.colors.text }]}>
+              {attachment.name}
+            </Text>
+            <Text
+              style={[
+                styles.helpText,
+                {
+                  color:
+                    attachment.status === "failed" ? theme.colors.danger : theme.colors.mutedText,
+                },
+              ]}
+            >
+              {attachment.status === "preparing"
+                ? labels.preparingAttachment
+                : attachment.status === "uploading"
+                  ? labels.uploading
+                  : attachment.status === "failed"
+                    ? labels.uploadFailed
+                    : formatBytes(attachment.sizeBytes)}
+            </Text>
+            <View style={styles.buttonRow}>
+              {attachment.status === "failed" ? (
+                <ActionButton
+                  label={labels.retryUpload}
+                  onPress={() => void attachments.retry(attachment.id)}
+                  theme={theme}
+                  variant="quiet"
+                />
+              ) : null}
+              <ActionButton
+                label={labels.removeAttachment}
+                onPress={() =>
+                  restoredIndex === undefined
+                    ? attachments.remove(attachment.id)
+                    : onRemoveRestoredResource?.(restoredIndex)
+                }
+                theme={theme}
+                variant="quiet"
+                disabled={restoredIndex !== undefined && !onRemoveRestoredResource}
+              />
+            </View>
           </View>
-        </View>
-      ))}
-      {restoredResources.map((_resource, index) => (
+        );
+      })}
+      {otherRestored.map((index) => (
         <View
           // oxlint-disable-next-line react/no-array-index-key -- restored refs are opaque and positional
           key={`restored-${index}`}
@@ -1772,6 +1823,17 @@ export function OpenGeniNativeAttachmentStrip({
   );
 }
 
+function isRestoredFileResource(
+  resource: unknown,
+): resource is Extract<ResourceRef, { kind: "file" }> {
+  return (
+    typeof resource === "object" &&
+    resource !== null &&
+    (resource as { kind?: unknown }).kind === "file" &&
+    typeof (resource as { fileId?: unknown }).fileId === "string"
+  );
+}
+
 function Composer({
   accessory,
   controller,
@@ -1782,7 +1844,7 @@ function Composer({
   theme,
 }: {
   accessory?: ReactNode | undefined;
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   renderActions?: NativeComposerActionRenderer | undefined;
   renderComposer?: NativeComposerRenderer | undefined;
@@ -2300,6 +2362,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   attachmentName: { fontSize: 13, fontWeight: "600" },
+  attachmentThumbnail: { width: 44, height: 44, borderRadius: 8, borderWidth: 1 },
   composerDock: { paddingHorizontal: 12, paddingTop: 5, paddingBottom: 8, gap: 5 },
   composerContainer: {
     width: "100%",

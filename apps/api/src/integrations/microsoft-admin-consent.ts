@@ -1,4 +1,8 @@
 import type { IntegrationDefinition } from "@opengeni/capabilities";
+import {
+  MICROSOFT_ADMIN_CONSENT_STATE,
+  microsoftAdminConsentUrl as adminConsentUrl,
+} from "@opengeni/contracts/connect";
 
 /**
  * Microsoft 365 organizations can require an administrator to approve an app
@@ -10,29 +14,29 @@ import type { IntegrationDefinition } from "@opengeni/capabilities";
  */
 
 /** State value that marks the admin-consent round trip on the shared callback. */
-export const MICROSOFT_ADMIN_CONSENT_STATE = "microsoft_admin_consent";
+export { MICROSOFT_ADMIN_CONSENT_STATE };
 
-const GRAPH_RESOURCE = "https://graph.microsoft.com";
-const OIDC_SCOPES = new Set(["offline_access", "openid", "profile", "email"]);
 // AADSTS65001 consent missing, 90093/90094/90095 the user may not grant these
 // permissions and an administrator has to.
 const ADMIN_REQUIRED_CODES = /AADSTS(65001|90093|90094|90095)\b/;
 
-/** Organization-wide approval link an administrator opens to approve the app. */
+/**
+ * Organization-wide approval link an administrator opens to approve the app,
+ * for the Graph permissions of every given definition at once, so approving
+ * mail also covers calendar and a person adding it later needs no new approval.
+ */
 export function microsoftAdminConsentUrl(input: {
   clientId: string;
   redirectUri: string;
-  definition: IntegrationDefinition;
+  definitions: readonly IntegrationDefinition[];
 }): string {
-  const scopes = input.definition.authentication.scopes
-    .filter((scope) => !OIDC_SCOPES.has(scope))
-    .map((scope) => (scope.includes("://") ? scope : `${GRAPH_RESOURCE}/${scope}`));
-  const url = new URL("https://login.microsoftonline.com/organizations/v2.0/adminconsent");
-  url.searchParams.set("client_id", input.clientId);
-  url.searchParams.set("scope", scopes.join(" "));
-  url.searchParams.set("redirect_uri", input.redirectUri);
-  url.searchParams.set("state", MICROSOFT_ADMIN_CONSENT_STATE);
-  return url.toString();
+  return adminConsentUrl({
+    clientId: input.clientId,
+    redirectUri: input.redirectUri,
+    scopes: [
+      ...new Set(input.definitions.flatMap((definition) => definition.authentication.scopes)),
+    ],
+  });
 }
 
 /** True when Microsoft says only an administrator can grant the requested access. */

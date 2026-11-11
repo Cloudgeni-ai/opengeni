@@ -68,17 +68,24 @@ test("docs and non-package paths select no units without treating missing tests 
 
 test("product plus release note selects units, but changeset cannot mask another broad fence", () => {
   const paths = [".changeset/example.md", "packages/runtime/src/index.ts"];
+  const promptLock = "packages/runtime/test/agent-instructions/legacy-prompt-lock.test.ts";
   const product = createImpactPlan(paths);
-  expect(product.mode).toBe("full");
-  expect(selectPrFastPlan(product, ["packages/runtime"]).unitTests).toHaveLength(PR_UNIT_FILE_CAP);
+  // A changeset note no longer fences; the product change selects its own plan.
+  expect(product.mode).toBe("focused");
+  // The capped runtime units plus the pinned prompt lock.
+  const units = selectPrFastPlan(product, ["packages/runtime"]).unitTests;
+  expect(units).toHaveLength(PR_UNIT_FILE_CAP + 1);
+  expect(units[0]).toBe(promptLock);
   for (const fence of ["package.json", ".github/workflows/pr-ci.yml"]) {
     const broad = createImpactPlan([...paths, fence]);
     expect(selectPrFastPlan(broad, ["packages/runtime"]).prAdmissionUnits.reason).toBe(
       "broad-impact-deferred-to-batch",
     );
-    // Only the inventory test for the changed workflow, never the capped units.
+    // Only the inventory tests for the changed areas, never the capped units.
     expect(selectPrFastPlan(broad, ["packages/runtime"]).unitTests).toEqual(
-      fence.startsWith(".github/") ? ["scripts/workflow-execution-graph.test.ts"] : [],
+      fence.startsWith(".github/")
+        ? ["scripts/workflow-execution-graph.test.ts", promptLock]
+        : [promptLock],
     );
   }
 });
@@ -121,7 +128,7 @@ test("inventory tests run whenever their area changes, beyond the cap and broad 
     },
     dirs,
   );
-  expect(migration.unitTests).toEqual(["scripts/release-schema-contract.test.ts"]);
+  expect(migration.unitTests).toEqual(["scripts/check-migration-immutability.test.ts"]);
   // Inventory tests need not be in the impact plan's list, only exist; docs
   // plans never run units.
   const web = selectPrFastPlan(

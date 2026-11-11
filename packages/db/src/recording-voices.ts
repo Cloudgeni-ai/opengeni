@@ -8,7 +8,7 @@
 
 import { resolveWorkspaceRecordingSettings, type RecordingTrackSource } from "@opengeni/contracts";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { recordingVoiceChannelValues } from "./recordings-schema";
 
@@ -116,6 +116,69 @@ export function suggestSpeakersByVoice(input: {
     used.add(pair.personId);
   }
   return suggestions;
+}
+
+/**
+ * Which of the voices diarized in one call is a known person's: the one most
+ * like their voiceprints, when it reaches the suggestion threshold and has
+ * enough speech to judge. Null when none does.
+ */
+export function voiceMatchingVoiceprints(input: {
+  voices: ReadonlyArray<{
+    speaker: string;
+    speechMilliseconds: number;
+    embedding: readonly number[];
+  }>;
+  model: string;
+  known: readonly KnownVoice[];
+}): string | null {
+  let speaker: string | null = null;
+  let best = VOICE_SUGGESTION_THRESHOLD;
+  for (const voice of input.voices) {
+    if (voice.speechMilliseconds < MIN_VOICE_SPEECH_MILLISECONDS) continue;
+    for (const known of input.known) {
+      if (known.model !== input.model) continue;
+      const score = cosineSimilarity(voice.embedding, known.embedding);
+      if (score >= best) {
+        best = score;
+        speaker = voice.speaker;
+      }
+    }
+  }
+  return speaker;
+}
+
+/**
+ * A workspace member's voiceprints, when they agreed to be remembered: how
+ * the person recording is found among the voices on their own microphone.
+ */
+export async function memberVoiceprints(
+  db: Database,
+  input: { workspaceId: string; memberSubjectId: string },
+): Promise<KnownVoice[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) =>
+    tx
+      .select({
+        personId: schema.recordingVoiceprints.personId,
+        model: schema.recordingVoiceprints.model,
+        embedding: schema.recordingVoiceprints.embedding,
+      })
+      .from(schema.recordingVoiceprints)
+      .innerJoin(
+        schema.recordingPeople,
+        and(
+          eq(schema.recordingPeople.workspaceId, schema.recordingVoiceprints.workspaceId),
+          eq(schema.recordingPeople.id, schema.recordingVoiceprints.personId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingVoiceprints.workspaceId, input.workspaceId),
+          eq(schema.recordingPeople.memberSubjectId, input.memberSubjectId),
+          isNotNull(schema.recordingPeople.voiceConsent),
+        ),
+      ),
+  );
 }
 
 /** Whether the workspace recognizes voices. */
@@ -284,6 +347,32 @@ export async function syncSpeakerVoice(
         eq(schema.recordingSpeakerVoices.speakerLabel, voice.speakerLabel),
       ),
     );
+}
+
+/**
+ * Take a recording's voices out of every voiceprint they taught, and drop
+ * them, as the recording is deleted: a voiceprint only holds the speakers
+ * currently named as the person in recordings that still exist. Nothing is
+ * left to learn from or subtract again, so repeating it changes nothing.
+ */
+export async function releaseRecordingVoices(
+  tx: Database,
+  input: { workspaceId: string; recordingId: string },
+): Promise<void> {
+  const where = and(
+    eq(schema.recordingSpeakerVoices.workspaceId, input.workspaceId),
+    eq(schema.recordingSpeakerVoices.recordingId, input.recordingId),
+  );
+  const voices = await tx
+    .select()
+    .from(schema.recordingSpeakerVoices)
+    .where(where)
+    .orderBy(schema.recordingSpeakerVoices.versionId, schema.recordingSpeakerVoices.speakerLabel)
+    .for("update");
+  for (const voice of voices) {
+    if (voice.learnedPersonId) await adjustVoiceprint(tx, voice, voice.learnedPersonId, -1);
+  }
+  if (voices.length > 0) await tx.delete(schema.recordingSpeakerVoices).where(where);
 }
 
 /**

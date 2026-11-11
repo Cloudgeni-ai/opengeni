@@ -626,7 +626,16 @@ test("published hosts run named queries as the verified viewer; guests only ever
         audience: "everyone",
       },
     ],
-    ["my_vote", { sql: "SELECT choice, :viewer_kind AS kind FROM votes WHERE voter = :viewer" }],
+    [
+      "my_vote",
+      {
+        sql: "SELECT choice, :viewer_kind AS kind, :viewer_access AS access FROM votes WHERE voter = :viewer",
+      },
+    ],
+    [
+      "whoami",
+      { sql: "SELECT :viewer_access AS access, :viewer_email AS email", audience: "everyone" },
+    ],
     ["everything", { sql: "SELECT * FROM votes", audience: "managers" }],
     [
       "sign_guestbook",
@@ -724,7 +733,16 @@ test("published hosts run named queries as the verified viewer; guests only ever
   // SQLite counts the row and its primary-key index entry.
   expect(voted.json.rowsWritten).toBeGreaterThanOrEqual(1);
   const mine = await run("my_vote", {}, signedIn);
-  expect(mine.json.rows).toEqual([{ choice: "tacos", kind: "user" }]);
+  expect(mine.json.rows).toEqual([{ choice: "tacos", kind: "user", access: "member" }]);
+  // Guests are told apart from people; they never have an email.
+  const guestWho = await run("whoami", {}, guest);
+  expect(guestWho.json.rows).toEqual([{ access: "guest", email: null }]);
+  // Neither value can be supplied by the page.
+  for (const param of ["viewer_access", "viewer_email"]) {
+    const forged = await run("whoami", { [param]: "x" }, guest);
+    expect(forged.status).toBe(422);
+    expect(forged.json.error.details).toMatchObject({ code: "validation", param });
+  }
 
   // Guests run only `everyone` queries and never supply the viewer.
   const results = await run("results", { poll: "lunch" }, guest);
@@ -1252,6 +1270,13 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
       ["mine", { sql: "SELECT note FROM notes WHERE who = :viewer ORDER BY rowid" }],
       ["board", { sql: "SELECT note FROM notes ORDER BY rowid", audience: "everyone" }],
       ["everything", { sql: "SELECT who, note FROM notes ORDER BY rowid", audience: "managers" }],
+      [
+        "whoami",
+        {
+          sql: "SELECT :viewer_access AS access, :viewer_email AS email, :viewer_kind AS kind",
+          audience: "everyone",
+        },
+      ],
     ] as const)
       expect((await s.define(f.owner, name, definition)).status).toBe(201);
   }
@@ -1463,6 +1488,16 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
         ]);
       }
       expect((await ok("site_sql_run", { name: "board" })).rows.length).toBeGreaterThan(0);
+      // How the viewer reaches the Site and their verified email come from
+      // the server: members through the workspace, the invited person by
+      // their invitation, guests with no email.
+      expect((await ok("site_sql_run", { name: "whoami" })).rows).toEqual([
+        kind === "member"
+          ? { access: "member", email: null, kind: "user" }
+          : kind === "invited"
+            ? { access: "invited", email: invitedEmail, kind: "user" }
+            : { access: "guest", email: null, kind: "guest" },
+      ]);
       expect(await refused("site_sql_run", { name: "everything" })).toMatchObject({
         code: "forbidden",
       });

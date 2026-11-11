@@ -59,7 +59,10 @@ services:
       SQL_VIS_MAX_CONNS: "2"
       SQL_VIS_MAX_IDLE_CONNS: "2"
       BIND_ON_IP: 0.0.0.0
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+      # One task-queue partition so queued turns start in arrival order.
+      DYNAMIC_CONFIG_FILE_PATH: /etc/opengeni/temporal/dynamicconfig.yaml
+    volumes:
+      - ./docker/temporal/dynamicconfig.yaml:/etc/opengeni/temporal/dynamicconfig.yaml:ro
     depends_on:
       postgres:
         condition: service_healthy

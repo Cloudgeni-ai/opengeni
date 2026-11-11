@@ -98,13 +98,19 @@ export type ManagedAuthEmailThrottle = {
  * distributed attacker may make up to `perEmailMax` attempts per window
  * against one email, and can deny that email's password sign-in for the rest
  * of the window once it spends them.
+ *
+ * Email sign-in uses one-hour windows: at most 100 password attempts per
+ * account in each window from all addresses together (OWASP ASVS / ADA CASA
+ * 1.1.1 allow no more than 100 failed attempts per hour on one account), and
+ * 20 in each window from one address. A window starts with the first attempt
+ * after the previous one ended, so these are per-hour budgets, never more.
  */
 export const MANAGED_AUTH_EMAIL_THROTTLES = {
   "/sign-in/email": {
     purpose: "sign_in",
-    windowSeconds: 15 * 60,
-    perSourceMax: 10,
-    perEmailMax: 50,
+    windowSeconds: 60 * 60,
+    perSourceMax: 20,
+    perEmailMax: 100,
   },
   "/sign-up/email": {
     purpose: "sign_up",
@@ -256,25 +262,33 @@ export async function consumeManagedAuthEmailThrottle(
  * `auth.api.*` calls, so the product session-set sign-in is covered too. The
  * per-(email, address) window is consumed first; only an attempt it admits
  * counts toward the email's shared window.
+ *
+ * `admit` runs after the throttle for every request the throttle lets through,
+ * so a refusal it makes is still rate limited like any other attempt.
  */
-export function createManagedAuthEmailThrottleHook(db: Pick<Database, "execute">, secret: string) {
+export function createManagedAuthEmailThrottleHook(
+  db: Pick<Database, "execute">,
+  secret: string,
+  admit?: (ctx: { path: string; body: unknown }) => Promise<void>,
+) {
   return createAuthMiddleware(async (ctx) => {
     const throttle = managedAuthEmailThrottleFor(ctx.path);
-    if (!throttle) return;
     const email = (ctx.body as { email?: unknown } | undefined)?.email;
-    if (typeof email !== "string" || !email.trim()) return;
-    const source = managedAuthThrottleSource(ctx.headers);
-    const perSource = await consumeManagedAuthEmailThrottle(db, {
-      key: managedAuthEmailSourceThrottleKey(secret, throttle.purpose, email, source),
-      windowSeconds: throttle.windowSeconds,
-      max: throttle.perSourceMax,
-    });
-    if (!perSource.allowed) throw new ManagedAuthEmailThrottleError(perSource.retryAfterSeconds);
-    const perEmail = await consumeManagedAuthEmailThrottle(db, {
-      key: managedAuthEmailThrottleKey(secret, throttle.purpose, email),
-      windowSeconds: throttle.windowSeconds,
-      max: throttle.perEmailMax,
-    });
-    if (!perEmail.allowed) throw new ManagedAuthEmailThrottleError(perEmail.retryAfterSeconds);
+    if (throttle && typeof email === "string" && email.trim()) {
+      const source = managedAuthThrottleSource(ctx.headers);
+      const perSource = await consumeManagedAuthEmailThrottle(db, {
+        key: managedAuthEmailSourceThrottleKey(secret, throttle.purpose, email, source),
+        windowSeconds: throttle.windowSeconds,
+        max: throttle.perSourceMax,
+      });
+      if (!perSource.allowed) throw new ManagedAuthEmailThrottleError(perSource.retryAfterSeconds);
+      const perEmail = await consumeManagedAuthEmailThrottle(db, {
+        key: managedAuthEmailThrottleKey(secret, throttle.purpose, email),
+        windowSeconds: throttle.windowSeconds,
+        max: throttle.perEmailMax,
+      });
+      if (!perEmail.allowed) throw new ManagedAuthEmailThrottleError(perEmail.retryAfterSeconds);
+    }
+    await admit?.({ path: ctx.path, body: ctx.body });
   });
 }

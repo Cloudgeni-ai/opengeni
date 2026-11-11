@@ -3,6 +3,7 @@
 // (/dev/session-timeline). Deep link: opengeni://lab?scenario=working&scheme=dark&chrome=0
 import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import { InteractiveAnswerProvider } from "@opengeni/react/interactive-answer-model";
 import {
   AnnotationsChip,
   AnnotationsSheet,
@@ -23,6 +24,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppThemeProvider } from "@/theme";
 
 type Params = { scenario?: LabScenarioId; scheme?: "light" | "dark"; chrome?: string };
+
+const labSend = async () => true;
 
 export default function ReferenceLab() {
   const params = useLocalSearchParams<Params>();
@@ -94,18 +97,21 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
           />
         </View>
       ) : null}
-      <MessageTimeline
-        key={scenario.id}
-        events={scenario.events}
-        status={scenario.running ? "running" : "idle"}
-        renderMarkdown={renderMarkdown}
-        onCopy={(text) => void copyText(text)}
-        contentInsetTop={showChrome ? 16 : 64 - insets.top}
-        onAnnotate={addAnnotation}
-        draftAnnotations={annotations}
-        onDraftAnnotationSelect={selectAnnotation}
-        annotationRevealRef={reveal}
-      />
+      {/* Picks in interactive answers "send" without leaving the lab. */}
+      <InteractiveAnswerProvider send={labSend} scope={`lab-${scenario.id}`}>
+        <MessageTimeline
+          key={scenario.id}
+          events={scenario.events}
+          status={scenario.running ? "running" : "idle"}
+          renderMarkdown={renderMarkdown}
+          onCopy={(text) => void copyText(text)}
+          contentInsetTop={showChrome ? 16 : 64 - insets.top}
+          onAnnotate={addAnnotation}
+          draftAnnotations={annotations}
+          onDraftAnnotationSelect={selectAnnotation}
+          annotationRevealRef={reveal}
+        />
+      </InteractiveAnswerProvider>
       {annotations.length > 0 ? (
         <View style={{ padding: 12, paddingBottom: insets.bottom + 12 }}>
           <AnnotationsChip

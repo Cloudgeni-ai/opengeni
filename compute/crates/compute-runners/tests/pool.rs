@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_runners::compute::Compute;
+use compute_runners::github::wire::{Message, RawMessage};
 use compute_runners::github::{Credentials, Github, Removed, Scope};
 use compute_runners::pool::{self, BORN_KEY, ID_KEY, JIT_ENV, NAME_KEY, POOL_KEY, Pool};
 use fake::{Fake, Sandbox};
@@ -356,6 +357,107 @@ async fn a_message_whose_jobs_were_not_acquired_is_offered_again() {
     done.await.unwrap();
 }
 
+/// A message as the queue would send it: `jobs` and the jobs assigned.
+fn message(id: u64, jobs: &serde_json::Value, assigned: u32) -> Message {
+    let raw: RawMessage = serde_json::from_value(json!({
+        "messageId": id,
+        "messageType": "RunnerScaleSetJobMessages",
+        "body": jobs.to_string(),
+        "statistics": {"totalAssignedJobs": assigned},
+    }))
+    .unwrap();
+    Message::decode(&raw).unwrap()
+}
+
+/// Runner starts fail for want of room; GitHub takes back the jobs it
+/// assigned, which no runner took in time, so they no longer count as
+/// assigned, though they stay queued until a runner registers. The idle
+/// runner the pool had all along does not count: once there is room,
+/// fresh runners start for the jobs taken back, and only those.
+#[tokio::test]
+async fn jobs_github_took_back_get_fresh_runners_once_there_is_room() {
+    let fake = Fake::start().await;
+    let mut pool = pool(&fake, 1).await;
+    let ours = key(&fake);
+    {
+        // The idle runner asked for, settled long ago.
+        let mut world = fake.world();
+        world.runners.insert(7, ("ci-000000000007".into(), false));
+        world.sandboxes.insert(
+            "sbx-idle".into(),
+            Sandbox {
+                template: "runner-base".into(),
+                metadata: BTreeMap::from([
+                    (POOL_KEY.into(), ours.clone()),
+                    (NAME_KEY.into(), "ci-000000000007".into()),
+                    (ID_KEY.into(), "7".into()),
+                    (BORN_KEY.into(), "1000".into()),
+                ]),
+                env: BTreeMap::new(),
+            },
+        );
+    }
+    pool.reconcile().await.unwrap();
+    assert_eq!(fake.world().sandboxes.len(), 1, "the idle runner is kept");
+
+    // No host has room: the runners for two jobs assigned fail to start.
+    fake.world().create_failures = 1000;
+    pool.handle(&message(
+        1,
+        &json!([
+            {"messageType": "JobAssigned", "runnerRequestId": 31},
+            {"messageType": "JobAssigned", "runnerRequestId": 32},
+        ]),
+        2,
+    ))
+    .await;
+    // GitHub takes both back: completed, canceled, with no runner.
+    pool.handle(&message(
+        2,
+        &json!([
+            {"messageType": "JobCompleted", "runnerRequestId": 31, "runnerName": "", "result": "canceled"},
+            {"messageType": "JobCompleted", "runnerRequestId": 32, "result": "canceled"},
+        ]),
+        0,
+    ))
+    .await;
+    pool.reconcile().await.unwrap();
+    {
+        let world = fake.world();
+        assert_eq!(world.sandboxes.len(), 1, "{:#?}", world.sandboxes);
+        assert!(
+            world.sandboxes.contains_key("sbx-idle"),
+            "nothing goes meanwhile"
+        );
+        assert_eq!(world.runners.len(), 1, "a failed start's registration goes");
+    }
+
+    // Room returns: the next check starts a fresh runner for each job
+    // taken back.
+    let tried = 1000 - fake.world().create_failures;
+    assert!(tried >= 6, "each scale tried again: {tried}");
+    fake.world().create_failures = 0;
+    pool.reconcile().await.unwrap();
+    let fresh = |fake: &Fake| {
+        fake.world()
+            .sandboxes
+            .keys()
+            .filter(|id| *id != "sbx-idle")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let started = fresh(&fake);
+    assert_eq!(started.len(), 2, "{:#?}", fake.world().sandboxes);
+    assert_eq!(fake.world().runners.len(), 3);
+
+    // Owed no more: later checks start nothing, and the old idle runner
+    // makes way for the fresh ones.
+    pool.reconcile().await.unwrap();
+    pool.reconcile().await.unwrap();
+    assert_eq!(fresh(&fake), started);
+    assert!(fake.world().killed.contains(&"sbx-idle".to_owned()));
+}
+
 #[tokio::test]
 async fn registrations_without_a_sandbox_go() {
     let fake = Fake::start().await;
@@ -502,4 +604,141 @@ async fn a_runner_is_busy_only_when_github_says_its_job_runs() {
     assert_eq!(fake.world().connections, connections);
     assert_eq!(github.remove_runner(60).await.unwrap(), Removed::Busy);
     assert_eq!(fake.world().connections, connections + 1);
+}
+
+/// A warm template's builder takes one of the pool's places: an idle
+/// runner makes way for it, the pool keeps one runner fewer and tells
+/// GitHub it takes one job fewer while it builds, and gets the place back
+/// after.
+#[tokio::test]
+async fn a_builder_takes_one_of_the_pools_places() {
+    let fake = Fake::start().await;
+    let pool = pool(&fake, 4).await;
+    let room = pool.room();
+    let ours = key(&fake);
+    {
+        // Four idle runners, settled long ago: the pool's every place.
+        let mut world = fake.world();
+        for id in 1..=4u64 {
+            let name = format!("ci-00000000000{id}");
+            world.runners.insert(id, (name.clone(), false));
+            world.sandboxes.insert(
+                format!("sbx-{id}"),
+                Sandbox {
+                    template: "runner-base".into(),
+                    metadata: BTreeMap::from([
+                        (POOL_KEY.into(), ours.clone()),
+                        (NAME_KEY.into(), name),
+                        (ID_KEY.into(), id.to_string()),
+                        (BORN_KEY.into(), "1000".into()),
+                    ]),
+                    env: BTreeMap::new(),
+                },
+            );
+        }
+    }
+    let (leading_tx, mut leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let done = tokio::spawn(async move {
+        pool::listen(pool, "replica-a", &leading_tx, &stopping)
+            .await
+            .unwrap();
+    });
+    until_leading(&mut leading, true).await;
+    fake.until("four places offered", |world| world.capacity == Some(4))
+        .await;
+
+    let place = tokio::time::timeout(Duration::from_secs(10), room.take())
+        .await
+        .expect("an idle runner makes way");
+    assert_eq!(fake.world().sandboxes.len(), 3);
+    fake.until("three places offered", |world| world.capacity == Some(3))
+        .await;
+
+    // Four jobs: three run, the fourth waits for the builder.
+    fake.send(
+        &json!([
+            {"messageType": "JobAvailable", "runnerRequestId": 21},
+            {"messageType": "JobAvailable", "runnerRequestId": 22},
+            {"messageType": "JobAvailable", "runnerRequestId": 23},
+            {"messageType": "JobAvailable", "runnerRequestId": 24},
+        ]),
+        4,
+    );
+    fake.until("the message handled", |world| world.messages.is_empty())
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.world().sandboxes.len(), 3, "the builder's place stays");
+
+    drop(place);
+    fake.until("the place back with the pool", |world| {
+        world.sandboxes.len() == 4 && world.capacity == Some(4)
+    })
+    .await;
+
+    stop.cancel();
+    done.await.unwrap();
+}
+
+/// A builder taking its place while the pool is still starting a runner
+/// is seen as soon as that start ends, not at the next check.
+#[tokio::test]
+async fn a_builder_taking_its_place_during_a_scale_is_seen() {
+    let fake = Fake::start().await;
+    let pool = pool(&fake, 4).await;
+    let room = pool.room();
+    let ours = key(&fake);
+    {
+        // Three idle runners settled long ago; the fourth starts slowly.
+        let mut world = fake.world();
+        for id in 1..=3u64 {
+            let name = format!("ci-00000000000{id}");
+            world.runners.insert(id, (name.clone(), false));
+            world.sandboxes.insert(
+                format!("sbx-{id}"),
+                Sandbox {
+                    template: "runner-base".into(),
+                    metadata: BTreeMap::from([
+                        (POOL_KEY.into(), ours.clone()),
+                        (NAME_KEY.into(), name),
+                        (ID_KEY.into(), id.to_string()),
+                        (BORN_KEY.into(), "1000".into()),
+                    ]),
+                    env: BTreeMap::new(),
+                },
+            );
+        }
+        world.create_delay = Duration::from_millis(500);
+    }
+    let (leading_tx, mut leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let done = tokio::spawn(async move {
+        pool::listen(pool, "replica-a", &leading_tx, &stopping)
+            .await
+            .unwrap();
+    });
+    until_leading(&mut leading, true).await;
+
+    // The pool has counted the fourth runner before it starts.
+    let place = tokio::time::timeout(Duration::from_secs(10), room.take())
+        .await
+        .expect("an idle runner makes way within a scale, not at the next check");
+    {
+        let world = fake.world();
+        assert_eq!(world.sandboxes.len(), 3, "{:#?}", world.sandboxes);
+        assert!(
+            world
+                .sandboxes
+                .values()
+                .any(|sandbox| sandbox.metadata[BORN_KEY] != "1000"),
+            "the runner started stays; a settled idle one went"
+        );
+    }
+    fake.until("three places offered", |world| world.capacity == Some(3))
+        .await;
+    drop(place);
+    stop.cancel();
+    done.await.unwrap();
 }

@@ -10,6 +10,7 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   bindAuthorizedGitHubInstallationRepositories,
+  applyGitHubInstallationRepositoryObservation,
   bindGitHubInstallationRepositories,
   buildConnectionTokenResolver,
   claimCodemodeOperation,
@@ -131,7 +132,11 @@ describe("API component integration", () => {
 
   test("configured browser principals pass the CORS preflight", async () => {
     const app = createApp({
-      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      // Local access mode grants CORS only to this stack's own web origin.
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        webBaseUrl: "http://127.0.0.1:24000",
+      }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
@@ -152,29 +157,49 @@ describe("API component integration", () => {
     );
   });
 
-  test("customer OpenAI and Azure keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
+  test("customer OpenAI, Azure and OpenAI-compatible keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       environmentsEncryptionKey: environmentsTestKey,
     });
     let probeStatus = 200;
+    const probeUrls: string[] = [];
+    const listingUrls: string[] = [];
     const app = createApp({
       settings,
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      directModelFetch: (async () =>
-        Response.json(
+      directModelFetch: (async (url: string, init?: RequestInit) => {
+        // A compatible endpoint's reasoning levels are read from its /models entry.
+        if ((init?.method ?? "GET") === "GET") {
+          listingUrls.push(url);
+          return url === "https://models.customer.test/v1/models/customer-model"
+            ? Response.json({
+                id: "customer-model",
+                supported_reasoning_efforts: ["low", "high"],
+                reasoning_effort: "high",
+              })
+            : new Response("not found", { status: 404 });
+        }
+        probeUrls.push(url);
+        return Response.json(
           probeStatus === 200
-            ? { status: "completed" }
+            ? { status: "completed", choices: [{ message: { role: "assistant", content: "OK" } }] }
             : { error: { message: "customer-test-secret" } },
           { status: probeStatus },
-        )) as typeof fetch,
+        );
+      }) as typeof fetch,
     });
     const workspaceId = await defaultWorkspaceId(app);
-    for (const provider of ["openai", "azure_openai"] as const) {
+    for (const provider of ["openai", "azure_openai", "openai_compatible"] as const) {
       const payload = {
-        providerDomain: provider === "openai" ? "api.openai.com" : "customer.openai.azure.com",
+        providerDomain:
+          provider === "openai"
+            ? "api.openai.com"
+            : provider === "azure_openai"
+              ? "customer.openai.azure.com"
+              : "models.customer.test",
         kind: "api_key",
         subjectId: null,
         credential: { apiKey: "customer-test-secret" },
@@ -188,6 +213,9 @@ describe("API component integration", () => {
             model: "customer-model",
             ...(provider === "azure_openai"
               ? { endpoint: "https://customer.openai.azure.com" }
+              : {}),
+            ...(provider === "openai_compatible"
+              ? { baseUrl: "https://models.customer.test/v1/chat/completions" }
               : {}),
           },
         },
@@ -213,7 +241,33 @@ describe("API component integration", () => {
       if (create.status !== 201)
         throw new Error(`Customer connection failed: ${create.status} ${await create.text()}`);
       expect(create.status).toBe(201);
-      const connection = ((await create.json()) as { connection: { id: string } }).connection;
+      expect(probeUrls.at(-1)).toBe(
+        provider === "openai"
+          ? "https://api.openai.com/v1/responses"
+          : provider === "azure_openai"
+            ? "https://customer.openai.azure.com/openai/v1/responses"
+            : "https://models.customer.test/v1/chat/completions",
+      );
+      const created = (
+        (await create.json()) as {
+          connection: { id: string; metadata: { directModelProvider: Record<string, unknown> } };
+        }
+      ).connection;
+      const connection = created;
+      if (provider === "openai_compatible")
+        // The pasted operation path is trimmed before the base URL is stored.
+        expect(created.metadata.directModelProvider.baseUrl).toBe(
+          "https://models.customer.test/v1",
+        );
+      if (provider === "openai_compatible")
+        expect(created.metadata.directModelProvider.reasoning).toEqual({
+          efforts: ["low", "high"],
+          defaultEffort: "high",
+        });
+      else expect(created.metadata.directModelProvider.reasoning).toBeUndefined();
+      expect(listingUrls.every((url) => url.startsWith("https://models.customer.test/"))).toBe(
+        true,
+      );
       const replay = await app.request(workspacePath(workspaceId, "/connections"), {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -234,6 +288,11 @@ describe("API component integration", () => {
       };
       const model = catalogBody.models.find((row) => row.id.includes(connection.id))!;
       expect(model).toBeDefined();
+      expect(
+        model.id.startsWith(
+          provider === "openai_compatible" ? "workspace-compatible-" : "workspace-",
+        ),
+      ).toBe(true);
       expect(model.cost).toBe("workspace");
       expect(model.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
       expect(model.availability.selectable).toBe(true);
@@ -286,6 +345,32 @@ describe("API component integration", () => {
       await expect(
         loadDirectModelProviderConnection(dbClient.db, settings, workspaceId, model.id),
       ).rejects.toThrow("no longer available");
+    }
+    for (const directModelProvider of [
+      // A private or loopback address is refused before any request.
+      { provider: "openai_compatible", model: "model", baseUrl: "https://10.0.0.8/v1" },
+      { provider: "openai_compatible", model: "model", baseUrl: "https://localhost/v1" },
+      { provider: "openai_compatible", model: "model", baseUrl: "http://models.customer.test/v1" },
+      // The key is bound to the base URL's own host.
+      { provider: "openai_compatible", model: "model", baseUrl: "https://elsewhere.test/v1" },
+    ]) {
+      const before = probeUrls.length;
+      const refused = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          providerDomain: "models.customer.test",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "private-key" },
+          grantedScopes: [],
+          operationId: crypto.randomUUID(),
+          verifyModelAccess: true,
+          metadata: { credentialRole: "direct_openai_compatible", directModelProvider },
+        }),
+      });
+      expect(refused.status).toBe(422);
+      expect(probeUrls.length).toBe(before);
     }
     const invalid = await app.request(workspacePath(workspaceId, "/connections"), {
       method: "POST",
@@ -5886,7 +5971,9 @@ describe("API component integration", () => {
               suspended: false,
             }
           : null,
-      listRepositories: async () => [adminRepository, readOnlyRepository],
+      // The installation shares only the admin repository; the workspace
+      // allowlists follow GitHub's list, so the read-only one is never usable.
+      listRepositories: async () => [adminRepository],
     };
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -5935,8 +6022,8 @@ describe("API component integration", () => {
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
     // One GitHub installation can be deliberately delegated into two Opengeni
-    // workspaces, but each workspace owns an independent exact allowlist and
-    // an independent consumed owner-authority proof.
+    // workspaces; each workspace has its own binding, allowlist and consumed
+    // owner-authority proof.
     await Promise.all([
       bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,
@@ -6121,6 +6208,210 @@ describe("API component integration", () => {
     );
   });
 
+  test("a chat whose automatically attached repository lost GitHub access still accepts follow-ups", async () => {
+    const installationId = 238826628;
+    const repository = (id: number, name: string) => ({
+      id,
+      installationId,
+      fullName: `acme/${name}`,
+      name,
+      private: true,
+      htmlUrl: `https://github.com/acme/${name}`,
+      cloneUrl: `https://github.com/acme/${name}.git`,
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    });
+    const optionalRepository = repository(2001, "optional-repository");
+    const explicitRepository = repository(2002, "explicit-repository");
+    let installed = true;
+    const githubAppApi = {
+      getInstallation: async ({ installationId: requested }: { installationId: number }) =>
+        installed && requested === installationId
+          ? {
+              installationId,
+              accountId: 9101,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            }
+          : null,
+      listRepositories: async () => (installed ? [optionalRepository, explicitRepository] : []),
+    };
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      publicBaseUrl: "https://api.opengeni.test",
+      githubAppId: "12345",
+      githubClientId: "test-client-id",
+      githubClientSecret: "test-client-secret",
+      githubAppSlug: "opengeni-test-app",
+      githubAppPrivateKey: generateKeyPairSync("rsa", { modulusLength: 2048 })
+        .privateKey.export({ type: "pkcs8", format: "pem" })
+        .toString(),
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubAppApi,
+    });
+    const context = await defaultAccessContext(app);
+    const workspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Revoked repository follow-up workspace",
+      }),
+    });
+    expect(workspaceResponse.status).toBe(201);
+    const revokedWorkspaceId = ((await workspaceResponse.json()) as { id: string }).id;
+    await defaultAccessContext(app);
+    const authorityCheckedAt = new Date();
+    await bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: revokedWorkspaceId,
+      installationId,
+      githubAccountId: 9101,
+      accountLogin: "acme",
+      accountType: "Organization",
+      linkedBySubjectId: context.subjectId,
+      githubActorId: 9102,
+      githubActorLogin: "acme-owner",
+      authorityKind: "organization_owner",
+      authorityCheckedAt,
+      authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
+      authorityNonce: `revoked-${crypto.randomUUID()}`,
+      repositoryIds: [optionalRepository.id, explicitRepository.id],
+      eventRouteSecret: null,
+    });
+    const repositoryResource = (
+      repo: ReturnType<typeof repository>,
+      optional: boolean,
+    ): Record<string, unknown> => ({
+      kind: "repository",
+      uri: repo.cloneUrl,
+      ref: repo.defaultBranch,
+      provider: "github",
+      githubInstallationId: installationId,
+      githubRepositoryId: repo.id,
+      ...(optional ? { optional: true } : {}),
+    });
+    const createRepositorySession = async (resource: Record<string, unknown>) => {
+      const created = await app.request(workspacePath(revokedWorkspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ initialMessage: "Start with a repository", resources: [resource] }),
+      });
+      expect(created.status).toBe(202);
+      return ((await created.json()) as { id: string }).id;
+    };
+    const optionalSessionId = await createRepositorySession(
+      repositoryResource(optionalRepository, true),
+    );
+    const explicitSessionId = await createRepositorySession(
+      repositoryResource(explicitRepository, false),
+    );
+
+    // The GitHub App is uninstalled: its webhook removes every repository.
+    installed = false;
+    await applyGitHubInstallationRepositoryObservation(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: revokedWorkspaceId,
+      installationId,
+      observation: { kind: "remove", repositoryIds: "all", observedAt: new Date() },
+    });
+
+    const followUp = async (sessionId: string) =>
+      await app.request(workspacePath(revokedWorkspaceId, `/sessions/${sessionId}/events`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "user.message", payload: { text: "And a follow-up" } }),
+      });
+
+    // The automatically attached repository no longer blocks the chat; the
+    // worker drops it for the turn and reports it as skipped.
+    const accepted = await followUp(optionalSessionId);
+    expect(accepted.status).toBe(202);
+
+    // The composer sends through its saved draft; that path accepts it too.
+    const draftPath = workspacePath(
+      revokedWorkspaceId,
+      `/sessions/${optionalSessionId}/composer-draft`,
+    );
+    const current = (await (await app.request(draftPath)).json()) as {
+      revision: number;
+      model: string;
+      reasoningEffort: string;
+      latencyMode: string;
+    };
+    const composed = {
+      text: "A follow-up from the composer",
+      annotations: [],
+      resources: [],
+      model: current.model,
+      reasoningEffort: current.reasoningEffort,
+      latencyMode: current.latencyMode,
+    };
+    const saved = await app.request(draftPath, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...composed, expectedRevision: current.revision }),
+    });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    const savedDraft = (await saved.json()) as { revision: number };
+    const submitted = await app.request(`${draftPath}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...composed,
+        expectedDraftRevision: savedDraft.revision,
+        clientEventId: `submit-${crypto.randomUUID()}`,
+        delivery: "send",
+      }),
+    });
+    expect(submitted.status, await submitted.clone().text()).toBe(202);
+
+    // A repository the person attached explicitly is still refused, and the
+    // refusal says which one so it can be removed or restored.
+    const refused = await followUp(explicitSessionId);
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message:
+          "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
+        retryable: false,
+        details: {
+          code: "github_repository_unavailable",
+          repositories: ["acme/explicit-repository"],
+        },
+      },
+    });
+
+    // Adding a repository that lost access is still refused for any chat.
+    const addRevoked = await app.request(
+      workspacePath(revokedWorkspaceId, `/sessions/${optionalSessionId}/events`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          payload: {
+            text: "Use the other repository too",
+            resources: [repositoryResource(explicitRepository, false)],
+          },
+        }),
+      },
+    );
+    expect(addRevoked.status).toBe(422);
+    expect(
+      ((await addRevoked.json()) as { error: { details?: { code?: string } } }).error.details?.code,
+    ).toBe("github_repository_unavailable");
+  });
+
   test("configured-token browser handoff preserves Opengeni grant but still requires GitHub owner proof", async () => {
     const stateSecret = "github-owner-authority-state";
     const delegationSecret = "test-delegation-secret";
@@ -6246,7 +6537,7 @@ describe("API component integration", () => {
   // exercised against real Postgres in apps/api/test/knowledge-*.test.ts. These
   // HTTP checks pin the cutover and public entry lifecycle, replacing the old
   // document-index and Memory authoring API fixtures.
-  test("retired Memory and document search routes direct callers to Knowledge", async () => {
+  test("retired Memory routes direct callers to Knowledge", async () => {
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -6258,7 +6549,6 @@ describe("API component integration", () => {
     for (const [method, path] of [
       ["GET", "/knowledge/memories"],
       ["POST", "/knowledge/memories"],
-      ["POST", "/knowledge/search"],
     ] as const) {
       const response = await app.request(workspacePath(workspaceId, path), {
         method,
@@ -6388,7 +6678,6 @@ describe("API component integration", () => {
       status: string;
       model: string;
       temporalWorkflowId: string;
-      environmentId: string | null;
     }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
@@ -6403,12 +6692,11 @@ describe("API component integration", () => {
     });
     expect(listed.sessions.some((session) => session.id === created.id)).toBe(true);
 
-    const fetched = await callMcpTool<{
-      id: string;
-      environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
+    const fetched = await callMcpTool<{ id: string }>(mcp, "session_get", {
+      sessionId: created.id,
+      detail: "full",
+    });
     expect(fetched.id).toBe(created.id);
-    expect(fetched.environmentId).toBeNull();
     const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
       mcp,
       "session_get",
@@ -7332,7 +7620,9 @@ describe("API component integration", () => {
       },
     );
     expect(deniedRotate.status).toBe(403);
-    expect(await deniedRotate.text()).toContain("missing permission: mcp_servers:attach");
+    expect(await deniedRotate.json()).toMatchObject({
+      error: { details: { code: "missing_permission", permission: "mcp_servers:attach" } },
+    });
 
     const deniedCreate = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
@@ -7353,7 +7643,9 @@ describe("API component integration", () => {
       },
     });
     expect(deniedCreate.status).toBe(403);
-    expect(await deniedCreate.text()).toContain("missing permission: mcp_servers:attach");
+    expect(await deniedCreate.json()).toMatchObject({
+      error: { details: { code: "missing_permission", permission: "mcp_servers:attach" } },
+    });
 
     const collision = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
@@ -8141,6 +8433,78 @@ describe("API component integration", () => {
     });
     expect(link.installUrl).toContain(`/v1/workspaces/${grant.workspaceId}/github/connect?state=`);
     expect(link.linkUrl).toBe(link.installUrl);
+    // Both identities in one answer: personal sign-in is off on this deployment.
+    expect((link as unknown as { personal: Record<string, unknown> }).personal).toMatchObject({
+      enabled: false,
+      connected: false,
+      status: "disabled",
+      connectUrl: null,
+    });
+
+    const personalDeps = {
+      ...mcpDeps,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        // The person's links open the web console, not the API origin.
+        webBaseUrl: "https://app.opengeni.test/",
+        integrationsEnabled: true,
+        githubPersonalOauthEnabled: true,
+        githubPersonalOauthClientId: "personal-client-id",
+        githubPersonalOauthClientSecret: "personal-client-secret",
+        ...configuredGitHub,
+      }),
+    };
+    const withPersonal = await callMcpTool<{
+      status: string;
+      personal: {
+        enabled: boolean;
+        connected: boolean | null;
+        status: string;
+        login: string | null;
+        repositoryCount: number | null;
+        connectUrl: string | null;
+        manageUrl: string | null;
+      };
+    }>(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link", {});
+    expect(withPersonal.status).toBe("unbound");
+    expect(withPersonal.personal).toMatchObject({
+      enabled: true,
+      connected: false,
+      status: "not_connected",
+      login: null,
+      repositoryCount: null,
+      manageUrl: null,
+      connectUrl: `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub&github=personal`,
+    });
+    const memberPersonal = await callMcpTool<{
+      installUrl: string | null;
+      personal: { status: string; connectUrl: string | null };
+    }>(
+      buildOpenGeniMcpServer(personalDeps, {
+        ...grant,
+        permissions: ["github:use", "connections:read"],
+      }),
+      "github_connect_link",
+      {},
+    );
+    expect(memberPersonal.installUrl).toBeNull();
+    // Without github:manage the agent still has a link to the GitHub settings,
+    // where an admin installs the app on another account.
+    expect((memberPersonal as unknown as { settingsUrl: string | null }).settingsUrl).toBe(
+      `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub`,
+    );
+    expect(memberPersonal.personal).toMatchObject({ status: "not_connected", connectUrl: null });
+    // Personal guidance reaches the agent only where personal sign-in exists.
+    const describedTool = (server: unknown, name: string) =>
+      (server as { _registeredTools?: Record<string, { description?: string }> })
+        ._registeredTools?.[name]?.description ?? "";
+    expect(
+      describedTool(buildOpenGeniMcpServer(mcpDeps, grant), "github_connect_link"),
+    ).not.toContain("github_personal__");
+    expect(
+      describedTool(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link"),
+    ).toContain("github_personal__*");
 
     const useOnlyLink = await callMcpTool<{
       status: string;

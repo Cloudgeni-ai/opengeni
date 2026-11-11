@@ -1,8 +1,6 @@
-// Claude usage routes by Claude's provider route (design 5.3, Claude track
-// C2a, EP-N24 and EP-S13). db accessors are spied: on the core and
-// maintenance routes every legacy Claude accessor is poisoned, so a route
-// that reached legacy state fails loudly; on the legacy route the legacy
-// handlers answer exactly as before after one route read.
+// Claude usage routes on the shared core (design 5.3, Claude track C2a,
+// EP-N24 and EP-S13). db accessors are spied: every legacy Claude accessor is
+// poisoned, so a route that reached legacy state fails loudly.
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { stampDelegatedHumanAuthorization } from "@opengeni/core";
@@ -84,10 +82,6 @@ function mock<K extends keyof typeof opengeniDb>(name: K, impl: (...args: never[
   return spy as unknown as { mock: { calls: unknown[][] } };
 }
 
-function route(value: "legacy" | "core" | "maintenance") {
-  return mock("readSubscriptionCoreProviderRouteForWorkspace", async () => value);
-}
-
 const observedAt = "2026-10-11T12:00:00.000Z";
 function connectionRow(patch: Record<string, unknown> = {}) {
   return {
@@ -136,7 +130,6 @@ const organizationPath = `/v1/organizations/${ACCOUNT}/claude/accounts/${CONNECT
 
 describe("workspace Claude usage on the core route", () => {
   test("GET projects the connection's core quota, with no legacy read", async () => {
-    const read = route("core");
     const target = mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
       connectionId: CONNECTION,
       scope: "organization",
@@ -148,11 +141,6 @@ describe("workspace Claude usage on the core route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toEqual(storedUsage);
-    expect(read.mock.calls[0]![1]).toEqual({
-      accountId: ACCOUNT,
-      workspaceId: WS,
-      provider: "claude",
-    });
     expect(target.mock.calls[0]![1]).toEqual({
       accountId: ACCOUNT,
       workspaceId: WS,
@@ -162,7 +150,6 @@ describe("workspace Claude usage on the core route", () => {
   });
 
   test("an account the caller cannot see is not found; a malformed id is refused first", async () => {
-    route("core");
     mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => null);
     const missing = await app().request(workspacePath, {
       headers: { authorization: await bearer(["workspace:read"]) },
@@ -174,28 +161,7 @@ describe("workspace Claude usage on the core route", () => {
     expect(malformed.status).toBe(400);
   });
 
-  test("maintenance is a typed 503", async () => {
-    route("maintenance");
-    const target = mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => {
-      throw new Error("maintenance must not read the core");
-    });
-    for (const [path, method] of [
-      [workspacePath, "GET"],
-      [`${workspacePath}/refresh`, "POST"],
-    ] as const) {
-      const response = await app().request(path, {
-        method,
-        headers: { authorization: await bearer(["workspace:read", "workspace:admin"]) },
-      });
-      expect(response.status).toBe(503);
-      const body = (await response.json()) as { error: { details?: { reason?: string } } };
-      expect(body.error.details?.reason).toBe("subscription_core_cutover_disabled");
-    }
-    expect(target.mock.calls).toHaveLength(0);
-  });
-
   test("POST refreshes a workspace connection live and wakes waiters on recovery", async () => {
-    route("core");
     mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
       connectionId: CONNECTION,
       scope: "workspace",
@@ -221,7 +187,6 @@ describe("workspace Claude usage on the core route", () => {
   });
 
   test("a failed wake never fails the committed read", async () => {
-    route("core");
     mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
       connectionId: CONNECTION,
       scope: "workspace",
@@ -243,7 +208,6 @@ describe("workspace Claude usage on the core route", () => {
   });
 
   test("the legacy authority checks apply by the connection's scope", async () => {
-    route("core");
     const refresh = mock("refreshSubscriptionCoreClaudeWorkspaceUsage", async () => {
       throw new Error("must not refresh");
     });
@@ -285,7 +249,6 @@ describe("workspace Claude usage on the core route", () => {
 
 describe("organization Claude usage on the core route", () => {
   test("GET projects the organization connection; POST refreshes it through the administrator seam", async () => {
-    route("core");
     // The organization administrator check, with no legacy Claude read.
     const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
     const row = mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () => connectionRow());
@@ -327,7 +290,6 @@ describe("organization Claude usage on the core route", () => {
   });
 
   test("POST keeps reconnect for a connection that needs a new sign-in, with no provider read", async () => {
-    route("core");
     mock("assertOrganizationCodexAdministrator", async () => undefined);
     mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () =>
       connectionRow({ status: "needs_relogin" }),
@@ -343,21 +305,5 @@ describe("organization Claude usage on the core route", () => {
     expect(relogin.status).toBe(200);
     expect(((await relogin.json()) as { refreshStatus: string }).refreshStatus).toBe("reconnect");
     expect(wakes).toEqual([]);
-  });
-});
-
-describe("the legacy route (no Claude cutover receipt)", () => {
-  test("fails closed after one route read without reading any account", async () => {
-    const read = route("legacy");
-    const core = mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => {
-      throw new Error("the legacy route must not read the core");
-    });
-    const response = await app().request(workspacePath, {
-      headers: { authorization: await bearer(["workspace:read"]) },
-    });
-    expect(response.status).toBe(503);
-    expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(read.mock.calls).toHaveLength(1);
-    expect(core.mock.calls).toHaveLength(0);
   });
 });

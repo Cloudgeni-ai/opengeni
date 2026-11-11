@@ -1,7 +1,23 @@
 # Migrations
 
 Each `NNNN_slug.sql` file is one forward-only migration. Shipped files are
-frozen; fix forward with a new file.
+frozen; fix forward with a new file. The `migration-immutability` CI guard
+fails any change to an existing file here other than adding a new one.
+
+The `0977_baseline_NN.sql` parts are the schema that migrations 0000-0977
+produced, and they replace those files. A fresh database applies the parts in
+order. A database whose ledger already records every replaced name records the
+parts without running them. A database that stopped partway through the old
+chain must first be upgraded with the last release that shipped the individual
+files. `packages/db/src/migration-baseline.ts` lists both sets of names. The
+parts share ordinal 0977 by design, and the ordinals and immutability guards
+read that list: the replaced names are retired, so the guards accept the
+parts and the deletion of the replaced files.
+
+The parts create foreign keys in the order the old chain created them, not
+alphabetically. Postgres fires a table's foreign-key cascade triggers in
+creation order, so this keeps cascading deletes (for example deleting an
+account) running in the same order as on a database built from the old chain.
 
 Line 1 declares the deployment mode. **Rolling is the default:**
 

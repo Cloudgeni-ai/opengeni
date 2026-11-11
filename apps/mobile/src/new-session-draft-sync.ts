@@ -2,6 +2,7 @@ import {
   useNewSessionDraft,
   type NewSessionDraftEditable,
 } from "@opengeni/react/new-session-draft";
+import type { ChatClient } from "@opengeni/sdk";
 import type { NativeFileAttachmentsResult } from "@opengeni/react-native";
 import type { LatencyMode, OpenGeniClient, ReasoningEffort, ResourceRef } from "@opengeni/sdk";
 import { useMemo } from "react";
@@ -13,7 +14,7 @@ import { gitHubRepositoryResource, type NewSessionOptions } from "@/new-session-
  * across leaving the screen, relaunching and other devices (and the web).
  */
 export function useHomeDraftSync(input: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string | null;
   text: string;
   setText(text: string): void;
@@ -48,7 +49,7 @@ export function useHomeDraftSync(input: {
     modelProvided: input.modelProvided,
     selectedProjectChannelId: choices.channelId,
     options: {
-      ...(choices.visibility === "private" ? { visibility: "private" as const } : {}),
+      ...(options.ready && options.visibilityChosen ? { visibility: choices.visibility } : {}),
       ...(choices.targetSandboxId ? { targetSandboxId: choices.targetSandboxId } : {}),
       ...(choices.excludedConnectorIds.length > 0
         ? { excludedMcpServerIds: choices.excludedConnectorIds }
@@ -68,7 +69,7 @@ export function useHomeDraftSync(input: {
         input.applyModel(remote.model, remote.reasoningEffort, remote.latencyMode);
       }
       options.apply({
-        visibility: remote.options.visibility ?? "workspace",
+        ...(remote.options.visibility ? { visibility: remote.options.visibility } : {}),
         targetSandboxId: remote.options.targetSandboxId ?? null,
         channelId: remote.selectedProjectChannelId ?? null,
         excludedConnectorIds: remote.options.excludedMcpServerIds ?? [],

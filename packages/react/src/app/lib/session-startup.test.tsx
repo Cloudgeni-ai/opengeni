@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { Session, SessionTurn } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionTurn } from "@opengeni/sdk";
 import { conversationTimeline } from "../../session";
 import { sessionInputWait } from "./session-rail";
 import {
@@ -186,4 +186,30 @@ test("reopening a stalled queued session keeps the wait chip absent", () => {
       }),
     ),
   ).toBeNull();
+});
+
+test("a chat in a panel times its own start under a shell that follows no chat", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const value = session();
+  // The Site view's shell has no page chat; the side chat brings its own clock.
+  const render = (panelClock: boolean) => (
+    <SessionStartupProvider session={null}>
+      {panelClock ? (
+        <SessionStartupProvider session={value}>
+          <Probe value={value} />
+        </SessionStartupProvider>
+      ) : (
+        <Probe value={value} />
+      )}
+    </SessionStartupProvider>
+  );
+  try {
+    await act(async () => root.render(render(false)));
+    expect(container.textContent).toBe("");
+    await act(async () => root.render(render(true)));
+    expect(container.textContent).toBe("starting");
+  } finally {
+    await act(async () => root.unmount());
+  }
 });

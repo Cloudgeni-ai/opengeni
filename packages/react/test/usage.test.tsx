@@ -277,6 +277,33 @@ describe("UsageMemberList", () => {
     await over.unmount();
   });
 
+  test("shares are of the period's whole budget, spent grant credits included", async () => {
+    // Bought credits only, a quarter of them spent this period.
+    const r = await renderComponent(
+      <UsageMemberList
+        usage={usage(
+          [
+            member("a", { limit: 20_000_000, used: 10_000_000 }),
+            member("b", { limit: 20_000_000, used: 0 }),
+          ],
+          {
+            limit: 40_000_000,
+            used: 10_000_000,
+            remaining: 30_000_000,
+            includedCredits: 0,
+            grantsRemaining: 30_000_000,
+          },
+        )}
+        memberDefault="equal_share"
+      />,
+    );
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Equal share · 50%");
+    // An even split of the whole budget needs no oversubscription note.
+    expect(text).not.toContain("Member limits add up to");
+    await r.unmount();
+  });
+
   test("the slider saves a share rule; Default restores the workspace default", async () => {
     const saved: { subject: string; rule: unknown }[] = [];
     const r = await renderComponent(

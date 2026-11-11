@@ -56,12 +56,22 @@ const settings = testSettings({
   codexConnectedAppsEnabled: true,
 });
 
-// Current-core setup adapters retain the historical scenarios' compact fixture
-// vocabulary. Every exercised HTTP route and credential/Apps operation is live
-// production core code; no retired persistence helper is executed here.
-type CredentialFixtureInput = Parameters<
-  typeof import("../../../packages/db/test/fixtures/legacy-codex").upsertCodexSubscriptionCredential
->[1];
+// Compact setup adapters over the live core connection operations.
+type CredentialFixtureInput = {
+  accountId: string;
+  workspaceId: string;
+  credentialEncrypted: string;
+  chatgptAccountId: string | null;
+  chatgptUserId?: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  accountEmail?: string | null;
+  label?: string | null;
+  connectedBySubjectId?: string | null;
+};
 async function upsertCodexSubscriptionCredential(db: Database, input: CredentialFixtureInput) {
   const result = await connectSubscriptionCoreCodexConnection(db, {
     ...input,
@@ -2113,127 +2123,113 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
     await admin`
       insert into subscription_connection_aliases (account_id, provider, alias_connection_id, connection_id)
       values (${accountId}::uuid, 'codex', ${alias}::uuid, ${connectionId}::uuid)`;
-    await admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
-    try {
-      const consumedBefore = provider.consumeBodies.length;
-      // Through the legacy alias: prepare, then redeem, then replay.
-      const prepared = await prepare(api, workspaceId, alias, "credit-reset");
-      expect(prepared.response.status).toBe(200);
-      const redeem = (attemptId: string, confirmationToken: string, headers = browserHeaders()) =>
-        api.request(`/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/redeem`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            attemptId,
-            creditId: "credit-reset",
-            confirmationToken,
-            confirmation: "REDEEM_USAGE_LIMIT_RESET",
-          }),
-        });
-      const redeemed = await redeem(prepared.attemptId, prepared.body.confirmationToken);
-      expect(redeemed.status).toBe(200);
-      expect((await redeemed.json()) as any).toMatchObject({
+    const consumedBefore = provider.consumeBodies.length;
+    // Through the legacy alias: prepare, then redeem, then replay.
+    const prepared = await prepare(api, workspaceId, alias, "credit-reset");
+    expect(prepared.response.status).toBe(200);
+    const redeem = (attemptId: string, confirmationToken: string, headers = browserHeaders()) =>
+      api.request(`/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/redeem`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          attemptId,
+          creditId: "credit-reset",
+          confirmationToken,
+          confirmation: "REDEEM_USAGE_LIMIT_RESET",
+        }),
+      });
+    const redeemed = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+    expect(redeemed.status).toBe(200);
+    expect((await redeemed.json()) as any).toMatchObject({
+      status: "completed",
+      outcome: "reset",
+    });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    const [attempt] = await admin<{ credential_id: string; upstream: string }[]>`
+      select credential_id::text as credential_id, upstream_idempotency_key::text as upstream
+      from codex_reset_redemption_attempts where id = ${prepared.attemptId}::uuid`;
+    // The ledger holds the canonical core id; the provider saw its one key.
+    expect(attempt!.credential_id).toBe(connectionId);
+    expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
+    // Single use: a lost response replays the durable outcome, no second consume.
+    const replay = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+    expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    // The canonical id reaches the same connection.
+    expect(
+      (await prepare(api, workspaceId, connectionId, "credit-ambiguous")).response.status,
+    ).toBe(200);
+
+    // A bearer and another organization's administrator are refused before
+    // any provider call.
+    const bearer = await api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+      {
+        method: "POST",
+        headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
+        body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
+      },
+    );
+    expect(bearer.status).toBe(403);
+    const stranger = await prepare(
+      api,
+      workspaceId,
+      alias,
+      "credit-reset",
+      undefined,
+      browserHeaders(OTHER_COOKIE),
+    );
+    expect(stranger.response.status).toBeGreaterThanOrEqual(403);
+    const agentPayload = JSON.stringify({
+      attemptId: crypto.randomUUID(),
+      creditId: "credit-reset",
+    });
+    const agentRequest = new Request(
+      `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(agentPayload)),
+        },
+        body: agentPayload,
+      },
+    );
+    stampDelegatedHumanAuthorization(agentRequest, {
+      organizationId: accountId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      permissions: ["connections:write", "workspace:read"] as never,
+      workspaceScope: { kind: "all" },
+    });
+    // An agent acting as the person prepares as them on the core too.
+    const agentResponse = await api.fetch(agentRequest);
+    expect(agentResponse.status).toBe(200);
+    expect(((await agentResponse.json()) as any).confirmationToken).toEqual(expect.any(String));
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+    // The overview serves the core pool with redemption authority for the browser human.
+    const overview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+      headers: browserHeaders(),
+    });
+    expect(overview.status).toBe(200);
+    const body = (await overview.json()) as any;
+    expect(Object.keys(body.accounts)).toEqual([connectionId]);
+    expect(body.accounts[connectionId]).toMatchObject({
+      canRedeem: true,
+      canResumeRedemption: true,
+      redemptionAccess: { ownership: "current_human" },
+      usage: { source: "provider" },
+      resetCredits: { source: "provider", detailState: "detailed" },
+    });
+    expect(body.accounts[connectionId].redemptions).toEqual([
+      expect.objectContaining({
+        attemptId: prepared.attemptId,
         status: "completed",
         outcome: "reset",
-      });
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-      const [attempt] = await admin<{ credential_id: string; upstream: string }[]>`
-        select credential_id::text as credential_id, upstream_idempotency_key::text as upstream
-        from codex_reset_redemption_attempts where id = ${prepared.attemptId}::uuid`;
-      // The ledger holds the canonical core id; the provider saw its one key.
-      expect(attempt!.credential_id).toBe(connectionId);
-      expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
-      // Single use: a lost response replays the durable outcome, no second consume.
-      const replay = await redeem(prepared.attemptId, prepared.body.confirmationToken);
-      expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-      // The canonical id reaches the same connection.
-      expect(
-        (await prepare(api, workspaceId, connectionId, "credit-ambiguous")).response.status,
-      ).toBe(200);
-
-      // A bearer and another organization's administrator are refused before
-      // any provider call.
-      const bearer = await api.request(
-        `/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
-        {
-          method: "POST",
-          headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
-          body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
-        },
-      );
-      expect(bearer.status).toBe(403);
-      const stranger = await prepare(
-        api,
-        workspaceId,
-        alias,
-        "credit-reset",
-        undefined,
-        browserHeaders(OTHER_COOKIE),
-      );
-      expect(stranger.response.status).toBeGreaterThanOrEqual(403);
-      const agentPayload = JSON.stringify({
-        attemptId: crypto.randomUUID(),
-        creditId: "credit-reset",
-      });
-      const agentRequest = new Request(
-        `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
-        {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            "content-type": "application/json",
-            "content-length": String(Buffer.byteLength(agentPayload)),
-          },
-          body: agentPayload,
-        },
-      );
-      stampDelegatedHumanAuthorization(agentRequest, {
-        organizationId: accountId,
-        subjectId: `user:${OWNER_USER_ID}`,
-        permissions: ["connections:write", "workspace:read"] as never,
-        workspaceScope: { kind: "all" },
-      });
-      // An agent acting as the person prepares as them on the core too.
-      const agentResponse = await api.fetch(agentRequest);
-      expect(agentResponse.status).toBe(200);
-      expect(((await agentResponse.json()) as any).confirmationToken).toEqual(expect.any(String));
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-
-      // The overview serves the core pool with redemption authority for the browser human.
-      const overview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
-        headers: browserHeaders(),
-      });
-      expect(overview.status).toBe(200);
-      const body = (await overview.json()) as any;
-      expect(Object.keys(body.accounts)).toEqual([connectionId]);
-      expect(body.accounts[connectionId]).toMatchObject({
-        canRedeem: true,
-        canResumeRedemption: true,
-        redemptionAccess: { ownership: "current_human" },
-        usage: { source: "provider" },
-        resetCredits: { source: "provider", detailState: "detailed" },
-      });
-      expect(body.accounts[connectionId].redemptions).toEqual([
-        expect.objectContaining({
-          attemptId: prepared.attemptId,
-          status: "completed",
-          outcome: "reset",
-        }),
-      ]);
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-
-      // A disabled cutover row fails closed with the typed 503.
-      await admin`update subscription_provider_cutovers set enabled = false
-        where account_id = ${accountId}::uuid and provider = 'codex'`;
-      expect((await prepare(api, workspaceId, alias, "credit-reset")).response.status).toBe(503);
-    } finally {
-      await admin`delete from subscription_provider_cutovers
-        where account_id = ${accountId}::uuid and provider = 'codex'`;
-    }
+      }),
+    ]);
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
   });
 
   test("an organization administrator redeems an organization account that serves no workspace from the organization page, as can an agent acting as them; bearers and strangers are refused", async () => {
@@ -2241,10 +2237,6 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
     const organizationId = ((await access.json()) as AccessContext).defaultAccountId!;
-    await admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
     const connection = await upsertOrganizationCodexSubscriptionCredential(client.db, {
       organizationId,
       actorSubjectId: `user:${OWNER_USER_ID}`,
@@ -2286,113 +2278,106 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         }),
       });
     const consumedBefore = provider.consumeBodies.length;
-    try {
-      // The account's page shows its resets with redemption authority.
-      const overview = await api.request(`${base}/overview`, { headers: browserHeaders() });
-      expect(overview.status).toBe(200);
-      const before = (await overview.json()) as any;
-      expect(before).toMatchObject({
-        accountId: connection.id,
-        canRedeem: true,
-        canResumeRedemption: true,
-        redemptionAccess: { ownership: "current_human" },
-        resetCredits: { source: "provider", detailState: "detailed", availableCount: 2 },
-      });
-      expect(
-        before.resetCredits.credits
-          .filter((credit: any) => credit.actionable)
-          .map((c: any) => c.id),
-      ).toEqual(["credit-reset", "credit-ambiguous"]);
+    // The account's page shows its resets with redemption authority.
+    const overview = await api.request(`${base}/overview`, { headers: browserHeaders() });
+    expect(overview.status).toBe(200);
+    const before = (await overview.json()) as any;
+    expect(before).toMatchObject({
+      accountId: connection.id,
+      canRedeem: true,
+      canResumeRedemption: true,
+      redemptionAccess: { ownership: "current_human" },
+      resetCredits: { source: "provider", detailState: "detailed", availableCount: 2 },
+    });
+    expect(
+      before.resetCredits.credits.filter((credit: any) => credit.actionable).map((c: any) => c.id),
+    ).toEqual(["credit-reset", "credit-ambiguous"]);
 
-      const attemptId = crypto.randomUUID();
-      const prepared = await orgPrepare("credit-reset", attemptId);
-      expect(prepared.status).toBe(200);
-      const { confirmationToken } = (await prepared.json()) as any;
-      const redeemed = await orgRedeem(attemptId, confirmationToken);
-      expect(redeemed.status).toBe(200);
-      expect((await redeemed.json()) as any).toMatchObject({
-        status: "completed",
-        outcome: "reset",
-      });
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-      const [attempt] = await admin<
-        { credential_id: string; account_id: string; upstream: string }[]
-      >`select credential_id::text as credential_id, account_id::text as account_id,
-          upstream_idempotency_key::text as upstream
-        from codex_reset_redemption_attempts where id = ${attemptId}::uuid`;
-      expect(attempt).toMatchObject({ credential_id: connection.id, account_id: organizationId });
-      expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
-      // Single use: a lost response replays the durable outcome.
-      const replay = await orgRedeem(attemptId, confirmationToken);
-      expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-      const after = (await (
-        await api.request(`${base}/overview`, { headers: browserHeaders() })
-      ).json()) as any;
-      expect(after.redemptions).toEqual([
-        expect.objectContaining({ attemptId, status: "completed", outcome: "reset" }),
-      ]);
+    const attemptId = crypto.randomUUID();
+    const prepared = await orgPrepare("credit-reset", attemptId);
+    expect(prepared.status).toBe(200);
+    const { confirmationToken } = (await prepared.json()) as any;
+    const redeemed = await orgRedeem(attemptId, confirmationToken);
+    expect(redeemed.status).toBe(200);
+    expect((await redeemed.json()) as any).toMatchObject({
+      status: "completed",
+      outcome: "reset",
+    });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    const [attempt] = await admin<
+      { credential_id: string; account_id: string; upstream: string }[]
+    >`select credential_id::text as credential_id, account_id::text as account_id,
+        upstream_idempotency_key::text as upstream
+      from codex_reset_redemption_attempts where id = ${attemptId}::uuid`;
+    expect(attempt).toMatchObject({ credential_id: connection.id, account_id: organizationId });
+    expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
+    // Single use: a lost response replays the durable outcome.
+    const replay = await orgRedeem(attemptId, confirmationToken);
+    expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    const after = (await (
+      await api.request(`${base}/overview`, { headers: browserHeaders() })
+    ).json()) as any;
+    expect(after.redemptions).toEqual([
+      expect.objectContaining({ attemptId, status: "completed", outcome: "reset" }),
+    ]);
 
-      // Refused before any provider call: a bearer, a stranger and an agent
-      // acting as the administrator (who may still read the resets).
-      const bearer = await orgPrepare("credit-ambiguous", crypto.randomUUID(), {
-        ...browserHeaders(),
-        authorization: "Bearer not-a-person",
+    // Refused before any provider call: a bearer, a stranger and an agent
+    // acting as the administrator (who may still read the resets).
+    const bearer = await orgPrepare("credit-ambiguous", crypto.randomUUID(), {
+      ...browserHeaders(),
+      authorization: "Bearer not-a-person",
+    });
+    expect(bearer.status).toBe(403);
+    const stranger = await orgPrepare(
+      "credit-ambiguous",
+      crypto.randomUUID(),
+      browserHeaders(OTHER_COOKIE),
+    );
+    expect(stranger.status).toBeGreaterThanOrEqual(403);
+    const agent = (path: string, method: "GET" | "POST") => {
+      const payload =
+        method === "POST"
+          ? JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-ambiguous" })
+          : undefined;
+      const request = new Request(`${PUBLIC_ORIGIN}${base}${path}`, {
+        method,
+        headers: {
+          accept: "application/json",
+          ...(payload
+            ? {
+                "content-type": "application/json",
+                "content-length": String(Buffer.byteLength(payload)),
+              }
+            : {}),
+        },
+        ...(payload ? { body: payload } : {}),
       });
-      expect(bearer.status).toBe(403);
-      const stranger = await orgPrepare(
-        "credit-ambiguous",
-        crypto.randomUUID(),
-        browserHeaders(OTHER_COOKIE),
-      );
-      expect(stranger.status).toBeGreaterThanOrEqual(403);
-      const agent = (path: string, method: "GET" | "POST") => {
-        const payload =
-          method === "POST"
-            ? JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-ambiguous" })
-            : undefined;
-        const request = new Request(`${PUBLIC_ORIGIN}${base}${path}`, {
-          method,
-          headers: {
-            accept: "application/json",
-            ...(payload
-              ? {
-                  "content-type": "application/json",
-                  "content-length": String(Buffer.byteLength(payload)),
-                }
-              : {}),
-          },
-          ...(payload ? { body: payload } : {}),
-        });
-        stampDelegatedHumanAuthorization(request, {
-          organizationId,
-          subjectId: `user:${OWNER_USER_ID}`,
-          permissions: ["account:read", "account:admin"] as never,
-          workspaceScope: { kind: "all" },
-        });
-        return api.fetch(request);
-      };
-      // An agent acting as the administrator prepares and reads as them.
-      const agentPrepare = await agent("/reset-credits/prepare", "POST");
-      expect(agentPrepare.status).toBe(200);
-      expect(((await agentPrepare.json()) as any).confirmationToken).toEqual(expect.any(String));
-      const agentRead = await agent("/overview", "GET");
-      expect(agentRead.status).toBe(200);
-      expect((await agentRead.json()) as any).toMatchObject({
-        redemptionAccess: { ownership: "current_human" },
-        resetCredits: { availableCount: 2 },
+      stampDelegatedHumanAuthorization(request, {
+        organizationId,
+        subjectId: `user:${OWNER_USER_ID}`,
+        permissions: ["account:read", "account:admin"] as never,
+        workspaceScope: { kind: "all" },
       });
-      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      return api.fetch(request);
+    };
+    // An agent acting as the administrator prepares and reads as them.
+    const agentPrepare = await agent("/reset-credits/prepare", "POST");
+    expect(agentPrepare.status).toBe(200);
+    expect(((await agentPrepare.json()) as any).confirmationToken).toEqual(expect.any(String));
+    const agentRead = await agent("/overview", "GET");
+    expect(agentRead.status).toBe(200);
+    expect((await agentRead.json()) as any).toMatchObject({
+      redemptionAccess: { ownership: "current_human" },
+      resetCredits: { availableCount: 2 },
+    });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
-      // A workspace-managed account is not reachable through the organization route.
-      const missing = await api.request(
-        `/v1/organizations/${organizationId}/codex/accounts/${crypto.randomUUID()}/overview`,
-        { headers: browserHeaders() },
-      );
-      expect(missing.status).toBe(404);
-    } finally {
-      await admin`delete from subscription_provider_cutovers
-        where account_id = ${organizationId}::uuid and provider = 'codex'`;
-    }
+    // A workspace-managed account is not reachable through the organization route.
+    const missing = await api.request(
+      `/v1/organizations/${organizationId}/codex/accounts/${crypto.randomUUID()}/overview`,
+      { headers: browserHeaders() },
+    );
+    expect(missing.status).toBe(404);
   });
 });

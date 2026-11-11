@@ -32,6 +32,24 @@ test("a table cell macOS repeats under its AXColumn is one element to a locator"
   );
 });
 
+test("a macOS combo box reads as a combobox whose value can be set, like a popup button", () => {
+  const [combo, popup] = projectElements(
+    [
+      { role: "AXComboBox", label: "City", value: "Oslo", actions: ["AXConfirm", "AXShowMenu"] },
+      { role: "AXPopUpButton", label: "Size", value: "Medium", actions: ["AXPress"] },
+    ].map((element, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      ...element,
+    })),
+    "macos",
+  );
+  expect(combo).toMatchObject({ role: "combobox", name: "City", value: "Oslo" });
+  expect(combo!.actions).toContain("set_value");
+  expect(popup).toMatchObject({ role: "combobox", name: "Size", value: "Medium" });
+  expect(popup!.actions).toContain("set_value");
+});
+
 test("an exact name is the whole name in any case and spacing", () => {
   const [save, saveAs] = projectElements(
     ["  Save  changes ", "Save changes as"].map((label, offset) => ({
@@ -50,6 +68,31 @@ test("an exact name is the whole name in any case and spacing", () => {
   expect(() => locate([save!, saveAs!], exact("Save"))).toThrow(
     "CUA locator must resolve to exactly one observed element",
   );
+});
+
+test("a Windows title bar does not offer set_value, though CUA lists its read-only value", () => {
+  const [titleBar, field] = projectElements(
+    [
+      {
+        element_index: 0,
+        element_token: "snapshot:0",
+        role: "TitleBar",
+        label: "Untitled - Notepad",
+        value: "Untitled - Notepad",
+        actions: ["set_value"],
+      },
+      {
+        element_index: 1,
+        element_token: "snapshot:1",
+        role: "Edit",
+        label: "Text Editor",
+        actions: ["set_value", "scroll"],
+      },
+    ],
+    "windows",
+  );
+  expect(titleBar!.actions).toEqual([]);
+  expect(field).toMatchObject({ role: "textbox", actions: ["set_value"] });
 });
 
 test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {

@@ -5,10 +5,32 @@
 import { describe, expect, test } from "bun:test";
 import {
   slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingProviderTracking,
   stripProviderCitationMarkers,
 } from "../src/integrations/slack-mrkdwn";
 
 describe("slackMrkdwnFromMarkdown", () => {
+  test("shows Claude citation tags as their quoted text, linked when resolved, outside code", () => {
+    // Built from escapes so no tool that acts on citation tags rewrites this file.
+    const tag = (index: string, inner: string) =>
+      `\u003ccite index="${index}">${inner}\u003c/cite>`;
+    const markdown = [
+      `Vals describes it as ${tag("23-5", '"a fresh set of 66 tasks"')}.`,
+      "```",
+      tag("1-1", "kept"),
+      "```",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(markdown)).toBe(
+      ['Vals describes it as "a fresh set of 66 tasks".', "```", tag("1-1", "kept"), "```"].join(
+        "\n",
+      ),
+    );
+    // A tag the worker already linked arrives as an ordinary Markdown link.
+    expect(slackMrkdwnFromMarkdown('See ["a quote"](https://www.vals.ai/b).')).toBe(
+      'See <https://www.vals.ai/b|"a quote">.',
+    );
+  });
+
   test("rewrites a typical agent reply into Slack formatting", () => {
     const reply = [
       "## Deploy check",
@@ -183,6 +205,30 @@ describe("slackMrkdwnFromMarkdown", () => {
 
     expect(slackMrkdwnFromMarkdown(answer)).toBe(
       "The *v2 API* is deprecated and ends in March.\nUse <https://example.com/v3|v3> instead.",
+    );
+  });
+});
+
+describe("source links from a hosted web search", () => {
+  const answer = [
+    "Rule 4-1 applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)).",
+    "Video: https://example.com/watch?v=abc&utm_source=openai",
+    "`https://example.com/code?utm_source=openai`",
+  ].join("\n");
+
+  test("post without the tracking the search tagged on, keeping page parameters and code", () => {
+    expect(slackMrkdwnFromMarkdown(answer)).toBe(
+      [
+        "Rule 4-1 applies (<https://example.com/rules/4-1|example.com>).",
+        "Video: https://example.com/watch?v=abc",
+        "`https://example.com/code?utm_source=openai`",
+      ].join("\n"),
+    );
+  });
+
+  test("keep the earlier rendering reachable for operations bound to it", () => {
+    expect(slackMrkdwnKeepingProviderTracking(answer)).toContain(
+      "<https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai|example.com>",
     );
   });
 });

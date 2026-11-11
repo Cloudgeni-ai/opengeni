@@ -231,8 +231,8 @@ export async function wakeSubscriptionCoreWaitersAndDeliver(
 /**
  * What core placement says about a blocked turn now: run, wait (with its
  * reason, earliest reset and quarantine end), revoked (the exact accepted
- * turn no longer authorizes core use) or paused (the cutover is switched off;
- * the work stays parked). Due quarantines are returned to service first, and
+ * turn no longer authorizes core use) or paused (the blocked turn is no
+ * longer live; the work stays parked). Due quarantines are returned to service first, and
  * a recovery wakes the account's other waiters.
  */
 export async function evaluateCoreCodexBlockedTurn(
@@ -263,8 +263,6 @@ export async function evaluateCoreBlockedTurn(
   switch (evaluation.kind) {
     case "not_visible":
       return { kind: "revoked" };
-    case "cutover_not_enabled":
-      return { kind: "paused" };
     case "run":
       return { kind: "run" };
     case "wait":
@@ -345,8 +343,6 @@ async function evaluateFailoverBlockedTurn(
   switch (evaluation.kind) {
     case "not_visible":
       return { kind: "revoked" };
-    case "cutover_not_enabled":
-      return { kind: "paused" };
     case "run":
       return { kind: "run", candidateProviders: evaluation.candidateProviders ?? [] };
     case "wait":

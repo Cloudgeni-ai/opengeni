@@ -92,8 +92,12 @@ export function ComputerUseRow({ desktop, onAllowPermissions, className }: Compu
       description = (
         <span className="flex items-start gap-1.5 text-danger">
           <CircleAlertIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
-          <span className="min-w-0">
-            {computerUseProblemText(state, machineName, t, desktop.labels)}
+          <span className="flex min-w-0 flex-col gap-0.5">
+            <span>{computerUseProblemText(state, machineName, t, desktop.labels)}</span>
+            {/* What turning on waits for is the reason; the agent's own words are the detail. */}
+            {state.problem === "stalled" && state.detail ? (
+              <span className="break-words text-fg-muted">{state.detail}</span>
+            ) : null}
           </span>
         </span>
       );
@@ -141,7 +145,12 @@ export function ComputerUseNotice({
   const machineName = desktop.computer.status?.machineName || "this computer";
   const detail =
     state.kind === "problem"
-      ? computerUseProblemText(state, machineName, t, desktop.labels)
+      ? [
+          computerUseProblemText(state, machineName, t, desktop.labels),
+          state.problem === "stalled" ? state.detail : null,
+        ]
+          .filter(Boolean)
+          .join(" ")
       : state.kind === "needs_permission"
         ? computerUsePermissionText(state.appName ?? desktop.productName, t)
         : undefined;

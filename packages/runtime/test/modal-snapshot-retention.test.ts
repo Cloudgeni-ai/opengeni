@@ -356,6 +356,38 @@ describe("Opengeni Modal 0.9 snapshot policy", () => {
     expect(session.state.snapshotFilesystemTimeoutMs).toBe(120_000);
   });
 
+  // Regression (DC-G2): a zero-holder drain waited 60 s and Modal's own hard
+  // snapshot deadline was the same 60 s, so a workspace whose snapshot needed
+  // longer could never finish. The drain now passes its own provider budget
+  // with the capture; the caller's wait stays separate.
+  test.each(["snapshot_directory", "snapshot_filesystem"] as const)(
+    "a drain's provider timeout replaces the session's wait-sized Modal deadline (%s)",
+    async (persistence) => {
+      const snapshot = mock(async (..._args: unknown[]) => ({ imageId: "im-drain" }));
+      const session = fakeSession(
+        persistence,
+        persistence === "snapshot_directory"
+          ? { snapshotDirectory: snapshot }
+          : { snapshotFilesystem: snapshot },
+      );
+      session.state.snapshotFilesystemTimeoutMs = 60_000;
+
+      installOpenGeniModalSnapshotPolicy(session);
+      await session.persistWorkspace({
+        requestId: SNAPSHOT_REQUEST_ID,
+        providerTimeoutMs: 600_000,
+      } as never);
+      const params = snapshot.mock.calls[0]?.[persistence === "snapshot_directory" ? 1 : 0];
+      expect(params).toEqual({ timeoutMs: 600_000, ttlMs: null, snapshotId: SNAPSHOT_REQUEST_ID });
+      // The serialized session keeps its configured value for ordinary captures.
+      expect(session.state.snapshotFilesystemTimeoutMs).toBe(60_000);
+
+      await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
+      const ordinary = snapshot.mock.calls[1]?.[persistence === "snapshot_directory" ? 1 : 0];
+      expect(ordinary).toEqual({ timeoutMs: 60_000, ttlMs: null, snapshotId: SNAPSHOT_REQUEST_ID });
+    },
+  );
+
   test("restores an explicitly present undefined directory timeout exactly", async () => {
     const snapshotDirectory = mock(async (_path: string, _params?: unknown) => ({
       imageId: "im-dir",

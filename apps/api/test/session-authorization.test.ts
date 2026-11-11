@@ -22,6 +22,7 @@ const root = `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/${ses
 
 const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
+  ["GET", "/configuration", "session.tool_policy.write"],
   ["PATCH", "", "session.title.write"],
   ["DELETE", "", "session.delete"],
   ["PUT", "/pin", "session.pin.write"],
@@ -30,8 +31,12 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["PUT", "/visibility", "session.visibility.write"],
   ["GET", "/visibility/preview", "session.visibility.write"],
   ["POST", "/forks", "session.fork.create"],
+  ["GET", "/share-link", "session.read"],
+  ["PUT", "/share-link", "session.share_link.write"],
+  ["DELETE", "/share-link", "session.share_link.write"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
+  ["POST", "/resources/remove", "session.resources.write"],
   ["POST", "/mcp-credentials/rotate", "session.mcp.credentials.rotate"],
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],

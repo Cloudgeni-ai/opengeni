@@ -7,7 +7,8 @@ import type {
 import type { ApiIntegrationRuntime } from "@opengeni/db";
 import { integrationDefinitionCategory } from "./capabilities";
 
-const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
+// Accepted turns keep the labels they were admitted with, including the older words.
+const ACCOUNT_SCOPE_SUFFIX = / · (?:Yours|Shared|Only me|This workspace)$/u;
 
 /**
  * The kind of need an account serves: its connector's catalog category. The
@@ -19,15 +20,21 @@ export function connectedAccountKind(category: string | null | undefined): strin
   return category && category !== "integrations" && category !== "custom" ? category : undefined;
 }
 
-/** "alice@example.com · Only me" → "alice@example.com". */
+/** "alice@example.com · Yours" → "alice@example.com". */
 export function accountIdentity(binding: McpConnectionAccountBinding): string {
   return binding.accountLabel.replace(ACCOUNT_SCOPE_SUFFIX, "") || binding.accountLabel;
+}
+
+/** Who can use the account, in the words people see: "Yours" or "Shared". */
+function accountScope(binding: McpConnectionAccountBinding): "Yours" | "Shared" {
+  return binding.subjectScope === "subject" ? "Yours" : "Shared";
 }
 
 /**
  * The labels of one connector's accounts in a turn. People only need the
  * account to tell several apart. Two accounts with the same identity (personal
- * and workspace) keep their scope to stay distinct.
+ * and workspace) keep their scope to stay distinct. The model always sees the
+ * scope, so a personal and a shared account never read the same.
  */
 function accountRouteLabels(
   connector: string,
@@ -42,9 +49,9 @@ function accountRouteLabels(
         ? undefined
         : identities.indexOf(identity) === identities.lastIndexOf(identity)
           ? identity
-          : binding.accountLabel;
+          : `${identity} · ${accountScope(binding)}`;
     return {
-      model: `${connector} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`,
+      model: `${connector} — ${identity} · ${accountScope(binding)}`,
       connector,
       providerDomain: binding.providerDomain,
       ...(account ? { account } : {}),
@@ -55,6 +62,24 @@ function accountRouteLabels(
 
 /** Expand only after canonical tool-policy admission. Aliases are execution
  * identities, never an alternate way to gain admission to a connector. */
+/**
+ * Why a selected connection-backed connector has no account route this turn:
+ * no account was accepted for it (`no_account`), the accepted accounts no
+ * longer fit its current setup (`account_setup_changed`), or it uses the
+ * superseded host sign-in (`unsupported_sign_in`).
+ */
+export type McpAccountRouteGapReason =
+  | "no_account"
+  | "account_setup_changed"
+  | "unsupported_sign_in";
+
+/** A selected connector the expansion dropped, so the turn can say so. */
+export type McpAccountRouteGap = {
+  id: string;
+  name: string;
+  reason: McpAccountRouteGapReason;
+};
+
 export function expandMcpAccountRoutes(input: {
   settings: Settings;
   tools: ToolRef[];
@@ -65,11 +90,18 @@ export function expandMcpAccountRoutes(input: {
   settings: Settings;
   tools: ToolRef[];
   accountLabels: ReadonlyMap<string, McpAccountRouteLabel>;
+  /** Selected connectors left without any account route, sorted by id. */
+  unavailable: McpAccountRouteGap[];
 } {
   // Only historical work has no binding snapshot. A present empty snapshot is
   // an explicit lack of account authority, never a request for current defaults.
   if (input.bindings == null) {
-    return { settings: input.settings, tools: input.tools, accountLabels: new Map() };
+    return {
+      settings: input.settings,
+      tools: input.tools,
+      accountLabels: new Map(),
+      unavailable: [],
+    };
   }
   const configured = new Map(input.settings.mcpServers.map((server) => [server.id, server]));
   const byCanonical = new Map<string, McpConnectionAccountBinding[]>();
@@ -99,15 +131,30 @@ export function expandMcpAccountRoutes(input: {
   const servers: Settings["mcpServers"] = [];
   const tools: ToolRef[] = [];
   const accountLabels = new Map<string, McpAccountRouteLabel>();
+  const unavailable = new Map<string, McpAccountRouteGap>();
+  const gap = (
+    canonical: Settings["mcpServers"][number],
+    reason: McpAccountRouteGapReason,
+  ): void => {
+    unavailable.set(canonical.id, {
+      id: canonical.id,
+      name: canonical.name ?? canonical.id,
+      reason: canonical.connectionRef?.authoritySource === "host" ? "unsupported_sign_in" : reason,
+    });
+  };
   for (const tool of input.tools) {
     const bindings = byCanonical.get(tool.id);
     const canonical = configured.get(tool.id);
     // A connector reconfigured after acceptance (removed, made public, or moved
     // to another provider) drops its frozen account routes. The route is
     // never rebound to the new configuration, and the rest of the turn keeps
-    // its other tools instead of failing on one stale connector.
+    // its other tools instead of failing on one stale connector. A selected
+    // connector that was accepted with no account at all (the person was not
+    // signed in, or their sign-in was not usable in this workspace then) is
+    // dropped too. Both are reported, never silently missing.
     if (!bindings || !canonical?.connectionRef) {
       if (!canonical?.connectionRef) tools.push(tool);
+      else gap(canonical, "no_account");
       continue;
     }
     const usable = bindings.filter(
@@ -116,6 +163,7 @@ export function expandMcpAccountRoutes(input: {
         canonical.connectionRef!.providerDomain === binding.providerDomain &&
         (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
     );
+    if (usable.length === 0) gap(canonical, "account_setup_changed");
     const connector = canonical.name ?? canonical.id;
     const labels = accountRouteLabels(
       connector,
@@ -147,6 +195,9 @@ export function expandMcpAccountRoutes(input: {
     },
     tools,
     accountLabels,
+    unavailable: [...unavailable.values()].sort((left, right) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+    ),
   };
 }
 
@@ -158,8 +209,14 @@ export function expandApiIntegrationAccountRoutes(input: {
   tools: readonly ToolRef[];
 }): ApiIntegrationRuntime[] {
   const selected = new Set(input.tools.map((tool) => tool.id));
+  // An organization's "each person signs in" integration is a per-person
+  // selector with no account of its own: it runs only through an accepted
+  // account route below, never as it is.
   if (input.bindings == null)
-    return input.integrations.filter((item) => selected.has(item.serverId));
+    return input.integrations.filter(
+      (item) =>
+        selected.has(item.serverId) && (!item.connectionRef || !!item.connectionRef.connectionId),
+    );
   const acceptedBindings = input.bindings;
   return input.integrations.flatMap((integration) => {
     const bindings = acceptedBindings.filter(

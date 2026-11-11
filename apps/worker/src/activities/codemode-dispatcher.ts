@@ -25,6 +25,7 @@ import {
   type SessionEvent,
   type ToolDisplayMetadata,
   type ToolFamily,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
@@ -47,6 +48,7 @@ import {
   publishDurableSessionEvents,
   type EventBus,
 } from "@opengeni/events";
+import { isMcpAccountParameterChoiceError } from "@opengeni/runtime";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 export type CodemodeDispatcherScope = {
@@ -95,6 +97,12 @@ export class CodemodeAttemptDispatcher {
     /** Content-free analytics family for a catalog entry; event enrichment only. */
     private readonly toolFamily?: (entry: AttemptToolCatalogEntry) => ToolFamily | null,
     private readonly approvalWait?: { beginWait(): (accepted: boolean) => void },
+    /**
+     * No person answers during this session: a call that needs approval is
+     * refused at once (prepared like a non-waiting client, so no approval
+     * request is opened) instead of durably waiting for a decision.
+     */
+    private readonly unattended = false,
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -418,7 +426,7 @@ export class CodemodeAttemptDispatcher {
     let preparedCall: Awaited<ReturnType<AttemptToolEnvironment["prepareCall"]>>;
     let releaseWait: ((accepted: boolean) => void) | undefined;
     try {
-      if (operation.durableApproval) {
+      if (operation.durableApproval && !this.unattended) {
         if (!this.approvalWait) throw new Error("Durable approval yield is unavailable");
         // The wait gate is sealed while a model request is in flight or the
         // stream is settling. A call arriving then cannot durably wait, but it
@@ -480,7 +488,10 @@ export class CodemodeAttemptDispatcher {
       await this.settleWithOutput(operation, claimId, {
         state: "failed",
         errorCode: errorCode(error, signal, false),
-        errorMessage: safeErrorMessage(error),
+        errorMessage:
+          this.unattended && error instanceof AttemptToolApprovalRequiredError
+            ? UNATTENDED_APPROVAL_REFUSAL_TEXT
+            : safeErrorMessage(error),
       });
       return;
     }
@@ -517,7 +528,9 @@ export class CodemodeAttemptDispatcher {
         errorCode: errorCode(error, signal, true),
         errorMessage: !knownPreExecution
           ? outcomeUnknownMessage(error, signal)
-          : safeErrorMessage(error),
+          : this.unattended && error instanceof AttemptToolApprovalRequiredError
+            ? UNATTENDED_APPROVAL_REFUSAL_TEXT
+            : safeErrorMessage(error),
       });
     }
   }
@@ -767,6 +780,10 @@ function boundedUtf16(value: string, max: number): string {
 }
 
 function safeErrorMessage(error: unknown): string {
+  if (isMcpAccountParameterChoiceError(error)) {
+    // Nothing was sent; the message names the account's values to choose from.
+    return boundedUtf16(error.message, CODEMODE_ERROR_MESSAGE_MAX);
+  }
   if (isSecretReferenceError(error)) {
     // References and the ready ask card only; never values.
     const output = error.toModelOutput();

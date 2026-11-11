@@ -21,8 +21,6 @@ export type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
-  DispatchAutomationRunInput,
-  DispatchAutomationRunResult,
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   IndexDocumentInput,
@@ -42,8 +40,6 @@ export type {
   ReconcileSessionAttemptQuiescenceResult,
   FailSessionAttemptInput,
   FailSessionAttemptResult,
-  RunKnowledgeSourceSyncBatchInput,
-  RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
   VideoGenerationReconcileResult,
@@ -118,9 +114,6 @@ export const expireSessionInteractionIntervention =
 export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
-export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;
-export const settleAutomationRunFailure = defaultControlActivities.settleAutomationRunFailure;
-export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
@@ -138,11 +131,17 @@ export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUp
 export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
+export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;
+export const storeArchivedSession = defaultControlActivities.storeArchivedSession;
+export const restoreArchivedSessions = defaultControlActivities.restoreArchivedSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
 export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
+export const scanRecordingSpeakers = defaultControlActivities.scanRecordingSpeakers;
 export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
+export const archiveDeletedMeetingSummaries =
+  defaultControlActivities.archiveDeletedMeetingSummaries;
 export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
 export const expireDictation = defaultControlActivities.expireDictation;
 export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
@@ -154,7 +153,10 @@ export const failBrowserRecording = defaultControlActivities.failBrowserRecordin
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
+export const recordRecentTurnTimingProfiles =
+  defaultControlActivities.recordRecentTurnTimingProfiles;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

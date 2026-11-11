@@ -134,7 +134,18 @@ export type IntegrationLinkOption = {
   label: string;
   description?: string | undefined;
   disabled?: boolean | undefined;
-  action: { label: string; onClick: () => void };
+  /** `ariaLabel` names the action when its label alone is ambiguous (e.g. "Unlink"). */
+  action: { label: string; onClick: () => void; ariaLabel?: string | undefined };
+  /** A second, usually destructive, action for the same row (e.g. "Unlink"). */
+  secondaryAction?:
+    | {
+        label: string;
+        onClick: () => void;
+        ariaLabel?: string | undefined;
+        /** Renders in the destructive tone (still confirm before destroying). */
+        destructive?: boolean | undefined;
+      }
+    | undefined;
   disclosureId?: string | undefined;
 };
 
@@ -142,6 +153,38 @@ export type IntegrationOption =
   | IntegrationToggleOption
   | IntegrationChoiceOption
   | IntegrationLinkOption;
+
+/**
+ * A named part of one integration with its own identity and single action,
+ * for an integration that connects in more than one way (GitHub: the
+ * person's own account and the workspace app). Rendered after About.
+ */
+export type IntegrationSection = {
+  id: string;
+  title: string;
+  /** What this part means for the person, in one short sentence or two. */
+  description: string;
+  /** One short state line, such as "Connected as @octo · 3 repos". */
+  status?: string | undefined;
+  /** The one action for this part. Omitted when the viewer cannot act. */
+  action?:
+    | {
+        label: string;
+        onClick: () => void;
+        disabled?: boolean | undefined;
+        busy?: boolean | undefined;
+        /** Emphasise the action (the next step). Defaults to a quiet row button. */
+        primary?: boolean | undefined;
+        /**
+         * The Connect catalog provider this action starts, so a deployment or
+         * grant that cannot start it hides the action instead of failing.
+         */
+        connectProviderId?: string | undefined;
+      }
+    | undefined;
+  /** Why there is no action, or what happens instead. */
+  note?: string | undefined;
+};
 
 /**
  * Closed footer set. `connected` and `repair` both render Reconnect + Disconnect
@@ -228,6 +271,8 @@ export type IntegrationViewModel = {
   chip: IntegrationChip;
   connection: IntegrationFact[];
   access?: IntegrationAccess | undefined;
+  /** Named parts with their own action, shown before Access and Settings. */
+  sections?: IntegrationSection[] | undefined;
   options: IntegrationOption[];
   footer: IntegrationFooter;
   /** Optional progressive disclosure for integrations with a simple everyday surface. */

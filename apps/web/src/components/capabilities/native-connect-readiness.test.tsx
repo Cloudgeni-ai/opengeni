@@ -103,7 +103,6 @@ describe("native connection readiness", () => {
     for (const [row, provider] of [
       ["slack", "slack-personal"],
       ["github", "github-app"],
-      ["google-drive", "google-drive-knowledge"],
       ["outlook-mail", "microsoft-outlook-mail"],
       ["outlook-calendar", "microsoft-outlook-calendar"],
       ["outlook-contacts", "microsoft-outlook-contacts"],
@@ -149,10 +148,10 @@ describe("native connection readiness", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  test("connected, attention, and historical management survive unavailable setup", () => {
+  test("connected and attention management survive unavailable setup", () => {
     const remove = mock(() => {});
     for (const label of ["Connected", "Needs attention"] as const) {
-      const connected = model("google-drive", {
+      const connected = model("onedrive", {
         chip: { label, tone: label === "Connected" ? "ok" : "warn" },
         footer: {
           kind: label === "Connected" ? "connected" : "repair",
@@ -165,23 +164,25 @@ describe("native connection readiness", () => {
       expect(guarded.footer).toBe(connected.footer);
       expect(guarded.chip).toBe(connected.chip);
     }
-    const historical = model("atlassian", {
-      chip: { label: "Retired", tone: "plain" },
-      footer: { kind: "actions", primary: { label: "Disconnect", onClick: remove } },
-    });
-    expect(nativeIntegrationVisible(historical, catalog([]), false)).toBe(true);
-    expect(nativeIntegrationModel(historical, catalog([]), false, () => {})).toBe(historical);
   });
 
-  test("personal GitHub availability does not enable an unavailable workspace App", () => {
+  test("each GitHub section keeps only an action its own provider can start", () => {
+    const connect = mock(() => {});
+    const install = mock(() => {});
     const fresh = model("github", {
-      footer: { kind: "actions", primary: { label: "Set up workspace App", onClick: () => {} } },
-      options: [
+      footer: { kind: "actions" },
+      sections: [
         {
-          kind: "link",
-          id: "github-personal-identity",
-          label: "Your GitHub identity",
-          action: { label: "Connect", onClick: () => {} },
+          id: "github-personal",
+          title: "Your GitHub",
+          description: "Work appears under your name.",
+          action: { label: "Connect", onClick: connect, connectProviderId: "github-personal" },
+        },
+        {
+          id: "github-app",
+          title: "Opengeni app",
+          description: "Work appears as the Opengeni bot.",
+          action: { label: "Install app", onClick: install, connectProviderId: "github-app" },
         },
       ],
     });
@@ -191,65 +192,38 @@ describe("native connection readiness", () => {
     ]);
     const guarded = nativeIntegrationModel(fresh, personalOnly, false, () => {});
     expect(nativeIntegrationVisible(guarded, personalOnly, false)).toBe(true);
-    expect(guarded.footer.kind).toBe("locked");
-    expect(guarded.options).toHaveLength(1);
-    expect(
-      nativeIntegrationModel(fresh, catalog([["github-app", "available"]]), false, () => {})
-        .options,
-    ).toEqual([]);
-    const connectedPersonal = {
+    expect(guarded.chip).toBe(fresh.chip);
+    expect(guarded.sections?.[0]?.action?.onClick).toBe(connect);
+    expect(guarded.sections?.[1]?.action).toBeUndefined();
+    expect(guarded.sections?.[1]?.note).toBeTruthy();
+    const appOnly = nativeIntegrationModel(
+      fresh,
+      catalog([["github-app", "available"]]),
+      false,
+      () => {},
+    );
+    expect(appOnly.sections?.[0]?.action).toBeUndefined();
+    expect(appOnly.sections?.[1]?.action?.onClick).toBe(install);
+    const loading = nativeIntegrationModel(
+      fresh,
+      { status: "loading", providers: [] },
+      false,
+      () => {},
+    );
+    expect(loading.sections?.every((section) => section.action?.disabled === true)).toBe(true);
+    const chooseRepos = {
       ...fresh,
-      chip: { label: "Connected", tone: "ok" } as const,
-      options: [
-        {
-          ...fresh.options[0]!,
-          kind: "link",
-          action: { label: "Manage", onClick: () => {} },
-        } as const,
-      ],
+      sections: [{ ...fresh.sections![0]!, action: { label: "Choose repos", onClick: connect } }],
     };
-    const managed = nativeIntegrationModel(connectedPersonal, catalog([]), false, () => {});
-    expect(managed.options).toEqual(connectedPersonal.options);
-    expect(managed.footer.kind).toBe("locked");
-  });
-
-  test("Drive write setup is checked separately from its existing read connection", () => {
-    const connected = model("google-drive", {
-      chip: { label: "Connected", tone: "ok" },
-      footer: { kind: "connected", onReconnect: () => {}, onDisconnect: () => {} },
-      options: [
-        {
-          kind: "toggle",
-          id: "google-drive-publish",
-          label: "Publish",
-          checked: false,
-          onChange: () => {},
-        },
-      ],
-    });
-    expect(
-      nativeIntegrationModel(
-        connected,
-        catalog([["google-drive-knowledge", "available"]]),
-        false,
-        () => {},
-      ).options,
-    ).toEqual([]);
-    const published = {
-      ...connected,
-      options: [
-        { ...connected.options[0]!, kind: "toggle", checked: true, onChange: () => {} } as const,
-      ],
-    };
-    expect(nativeIntegrationModel(published, catalog([]), false, () => {}).options).toEqual(
-      published.options,
+    expect(nativeIntegrationModel(chooseRepos, catalog([]), false, () => {}).sections).toEqual(
+      chooseRepos.sections,
     );
   });
 
   test("new account controls use their own provider readiness without disabling existing account repair", () => {
     const add = mock(() => {});
     const change = mock(() => {});
-    const drive = model("google-drive", {
+    const drive = model("onedrive", {
       chip: { label: "Connected", tone: "ok" },
       access: {
         title: "Connected accounts",
@@ -267,14 +241,14 @@ describe("native connection readiness", () => {
       },
       footer: { kind: "connected", onReconnect: change, onDisconnect: change },
     });
-    const readOnly = catalog([["google-drive-knowledge", "available"]]);
+    const readOnly = catalog([["microsoft-outlook-mail", "available"]]);
     const guarded = nativeIntegrationModel(drive, readOnly, false, () => {});
     expect(guarded.access?.onEdit).toBeUndefined();
     expect(guarded.access?.editLabel).toBeUndefined();
     expect(guarded.access?.items).toBe(drive.access?.items);
     expect(guarded.footer).toBe(drive.footer);
     expect(
-      nativeIntegrationModel(drive, catalog([["google-drive", "available"]]), false, () => {})
+      nativeIntegrationModel(drive, catalog([["microsoft-onedrive", "available"]]), false, () => {})
         .access?.onEdit,
     ).toBe(add);
     const folders = {
@@ -284,35 +258,11 @@ describe("native connection readiness", () => {
     expect(nativeIntegrationModel(folders, catalog([]), false, () => {}).access).toBe(
       folders.access,
     );
-    for (const id of ["outlook-mail", "outlook-calendar", "outlook-contacts", "onedrive"]) {
+    for (const id of ["outlook-mail", "outlook-calendar", "outlook-contacts", "sharepoint"]) {
       expect(
         nativeIntegrationModel({ ...drive, id }, catalog([]), false, () => {}).access?.onEdit,
       ).toBeUndefined();
     }
-    const github = model("github", {
-      chip: { label: "Connected", tone: "ok" },
-      access: { title: "Repositories", items: [] },
-      footer: {
-        kind: "actions",
-        primary: { label: "Connect another account", onClick: add },
-        secondary: { label: "Disconnect workspace App", onClick: change },
-      },
-    });
-    const blocked = nativeIntegrationModel(github, catalog([]), false, () => {});
-    expect(blocked.footer.kind).toBe("actions");
-    if (blocked.footer.kind === "actions") {
-      expect(blocked.footer.primary).toBeUndefined();
-      expect(blocked.footer.secondary?.onClick).toBe(change);
-    }
-    const repair = {
-      ...github,
-      footer: {
-        ...github.footer,
-        kind: "actions",
-        primary: { label: "Repair workspace App", onClick: change },
-      } as const,
-    };
-    expect(nativeIntegrationModel(repair, catalog([]), false, () => {}).footer).toBe(repair.footer);
   });
 
   test("saved native credentials and disabled social history remain reachable before catalog enablement", () => {

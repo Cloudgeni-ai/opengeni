@@ -31,6 +31,7 @@ import {
   createDb,
   createConnection,
   encryptEnvironmentValue,
+  recordSiteToolAllowance,
   updateConnectorToolPermissionPolicies,
   createOrganizationApiKey,
   createSession,
@@ -1511,7 +1512,10 @@ test("published page tools: declarations, audiences, live membership and approva
         approvalToken,
       });
       expect(targeted.status, JSON.stringify(targeted.json)).toBe(409);
-      expect(targeted.json.error.message).toBe("tool_gateway_approval_required");
+      // A published page has no Opengeni frame to confirm in.
+      expect(targeted.json.error.details.code).toBe(
+        approvalToken ? "tool_gateway_approval_required" : "site_tool_consent_requires_opengeni",
+      );
     }
     expect(f.provider.calls).toHaveLength(0);
     const visitor = visitorId();
@@ -1555,7 +1559,9 @@ test("published page tools: declarations, audiences, live membership and approva
 // Regression: Bendik's newsletter Site could not send Gmail after he set the
 // recommended-Ask "Send message" tool to Allow. Sites call through targeted
 // resolve/invoke, so a saved Allow must make that path work, and switching the
-// tool back to Ask must stop the next call before the provider is reached.
+// tool back to Ask must stop the next call before the provider is reached. On a
+// published hostname that call cannot be confirmed in the page; the viewer's
+// own "Always allow for this Site" still applies there.
 test("published page tools: a saved Allow makes a recommended-Ask connection tool callable through targeted invoke", async () => {
   const f = await pageToolsFixture({ requireApproval: ["search_documents"] });
   try {
@@ -1583,15 +1589,113 @@ test("published page tools: a saved Allow makes a recommended-Ask connection too
       toolNames: [f.prod.identity.toolName],
       policy: "ask",
     });
-    const asked = await f.post("invoke", {
+    // The earlier definition said Allow: it is stale, not silently approved.
+    const stale = await f.post("invoke", {
       target: { identity: f.prod.identity },
       operationId: crypto.randomUUID(),
       expectedDefinitionDigest: resolved.json.definitionDigest,
       arguments: { query: "after ask" },
     });
-    expect(asked.status, JSON.stringify(asked.json)).toBe(404);
-    expect(asked.json.error.message).toBe("tool_unavailable");
+    expect(stale.status, JSON.stringify(stale.json)).toBe(409);
+    expect(stale.json.error.details.code).toBe("tool_definition_stale");
+    const current = await f.post("resolve", { target: { identity: f.prod.identity } });
+    expect(current.status, JSON.stringify(current.json)).toBe(200);
+    expect(current.json.entry.approval).toBe("human");
+    const invokeAsked = () =>
+      f.post("invoke", {
+        target: { identity: f.prod.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: current.json.definitionDigest,
+        arguments: { query: "after ask" },
+      });
+    const asked = await invokeAsked();
+    expect(asked.status, JSON.stringify(asked.json)).toBe(409);
+    expect(asked.json.error.message).toBe("Open this Site in Opengeni to confirm this action.");
+    expect(asked.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
     expect(f.provider.calls).toHaveLength(2);
+    // Another person's allowance, or one for another connection, changes nothing.
+    const allowance = {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      siteId: f.site.id,
+      serverId: "grafana",
+      toolName: f.prod.identity.toolName,
+    };
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+    });
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.member.subjectId,
+      connectionId: f.staging.connection.id,
+    });
+    expect((await invokeAsked()).status).toBe(409);
+    expect(f.provider.calls).toHaveLength(2);
+    // The viewer's own "Always allow for this Site" for this connection runs it.
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.member.subjectId,
+      connectionId: f.prod.connection.id,
+    });
+    const allowed = await invokeAsked();
+    expect(allowed.status, JSON.stringify(allowed.json)).toBe(200);
+    expect(allowed.json.result.content[0].text).toBe("found document for after ask");
+    expect(f.provider.calls).toHaveLength(3);
+    expect(f.callAuthorizations.at(-1)).toBe("Bearer page-prod");
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+// A Site that declares the connector itself runs on each viewer's own account.
+// A viewer with several accounts must choose, which a published page cannot
+// ask; their own "Always allow for this Site" on one account chooses it.
+test("published page tools: a declared connector runs on the viewer's own account", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const canonical = { serverId: "grafana", toolName: "search_documents" };
+    const site = await f.publish("Canonical page tools", "workspace", [canonical]);
+    const publication = await f.publication(f.owner, site.id, "PUT", {
+      agent: { enabled: false },
+    });
+    expect(publication.status, JSON.stringify(publication.json)).toBe(201);
+    const host = String(publication.json.hostname);
+    const session = await f.signIn(f.member, host);
+    const post = (method: string, body: unknown) =>
+      f.gateway(host, "POST", `/tools/${method}`, { session, body });
+    const invoke = () =>
+      post("invoke", {
+        target: { identity: canonical },
+        operationId: crypto.randomUUID(),
+        arguments: { query: "canonical" },
+      });
+    const choose = await invoke();
+    expect(choose.status, JSON.stringify(choose.json)).toBe(409);
+    expect(choose.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
+    expect(f.provider.calls).toHaveLength(0);
+    await recordSiteToolAllowance(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.member.subjectId,
+      siteId: site.id,
+      serverId: "grafana",
+      toolName: "search_documents",
+      connectionId: f.personal.connection.id,
+    });
+    const ran = await invoke();
+    expect(ran.status, JSON.stringify(ran.json)).toBe(200);
+    expect(ran.json.tool.entry.identity).toEqual(f.personal.identity);
+    expect(f.callAuthorizations).toEqual(["Bearer page-personal"]);
+    // Another member's own account route is not declared here.
+    const foreign = await post("invoke", {
+      target: { identity: f.foreign.identity },
+      operationId: crypto.randomUUID(),
+      arguments: { query: "foreign" },
+    });
+    expect(foreign.status).toBe(403);
+    expect(f.provider.calls).toHaveLength(1);
   } finally {
     f.close();
   }
@@ -1946,9 +2050,46 @@ test("guests reach Site Data only through each collection's guest rule", async (
   expect(foreign.status).not.toBe(200);
   // A record the guest does not own is not an audience refusal: it keeps its Site Data code.
   expect(foreign.json.error?.details?.code).not.toBe("not_available_for_viewer");
-  // Files are for signed-in viewers only.
-  const files = await data("GET", "/files");
-  expect(files.status).toBe(403);
+  // Files: guests list and open shared files only; uploads, deletes and private files stay closed.
+  const ownerUpload = async (name: string, scope: "shared" | "private") => {
+    const response = await f.app.request(
+      `${f.sites}/${site.id}/files?name=${encodeURIComponent(name)}&scope=${scope}`,
+      {
+        method: "POST",
+        headers: { ...f.owner.headers, "content-type": "text/plain" },
+        body: `${name} body`,
+      },
+    );
+    expect(response.status, await response.clone().text()).toBe(201);
+    return String(((await response.json()) as { id: string }).id);
+  };
+  const sharedFile = await ownerUpload("shared.txt", "shared");
+  const privateFile = await ownerUpload("private.txt", "private");
+  // Its own visitor and client address, so the guest write limits below start fresh.
+  const fileGuest = { visitor: visitorId(), clientIp: "198.51.100.90" };
+  const guestFiles = (method: string, path: string, body?: unknown) =>
+    f.gateway(site.host, method, `/published-artifacts/current${path}`, {
+      ...fileGuest,
+      ...(body === undefined ? {} : { body }),
+    });
+  const files = await guestFiles("GET", "/files");
+  expect(files.status, JSON.stringify(files.json)).toBe(200);
+  expect(files.json.files.map((file: any) => file.name)).toEqual(["shared.txt"]);
+  const opened = await guestFiles("GET", `/files/${sharedFile}`);
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json.file.name).toBe("shared.txt");
+  expect(String(opened.json.url)).toStartWith("https://storage.example.test/");
+  expect((await guestFiles("GET", `/files/${privateFile}`)).status).toBe(404);
+  const guestUpload = await guestFiles("POST", "/files?name=guest.json", { from: "guest" });
+  expect(guestUpload.status, JSON.stringify(guestUpload.json)).toBe(403);
+  expect(guestUpload.json.error.details).toMatchObject({ reason: "guest_access" });
+  const deleted = await guestFiles("DELETE", `/files/${sharedFile}`);
+  expect(deleted.status).toBe(403);
+  expect(deleted.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    reason: "guest_access",
+  });
+  expect((await guestFiles("GET", `/files/${sharedFile}`)).status).toBe(200);
   // A signed-in member reads collections closed to guests.
   const session = await f.signIn(f.member, site.host);
   expect((await data("POST", "/data/query", { collection: "notes" }, { session })).status).toBe(
@@ -2262,7 +2403,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     "/takedown",
   );
   expect(readOnlyTakedown.status).toBe(403);
-  expect(code(readOnlyTakedown)).toBeUndefined();
+  expect(code(readOnlyTakedown)).toBe("missing_permission");
   expect(JSON.stringify(readOnlyTakedown.json)).toContain("artifacts:publish");
   // A signed-in member is talking to the Site's assistant when it is taken down.
   const memberToken = await f.signIn(f.member, site.host);
@@ -2316,7 +2457,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
 
   const readOnlyRestore = await f.publication(readOnly, site.id, "POST", {}, "/restore");
   expect(readOnlyRestore.status).toBe(403);
-  expect(code(readOnlyRestore)).toBeUndefined();
+  expect(code(readOnlyRestore)).toBe("missing_permission");
   // The takedown revoked every viewer session and cancelled the running conversation.
   const [revoked] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;
@@ -3749,13 +3890,15 @@ test("published Site models follow the database catalog for members and guests w
       agent: { enabled: true, model },
     });
     const session = await f.signIn(f.member, site.host);
-    const consoleCatalog = await f.api(
+    const apiCatalog = await f.api(
       f.member,
       "GET",
       `/v1/config/client?workspaceId=${f.workspace.id}`,
     );
-    expect(consoleCatalog.status, JSON.stringify(consoleCatalog.json)).toBe(200);
-    expect(consoleCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    expect(apiCatalog.status, JSON.stringify(apiCatalog.json)).toBe(200);
+    // The host's API credential cannot use subscriptions; the signed-in Site
+    // member below is app work and retains their connected subscription.
+    expect(apiCatalog.json.models.map((entry: { id: string }) => entry.id)).toEqual([creditModel]);
     const memberCatalog = await f.gateway(site.host, "GET", "/model-catalog", { session });
     expect(memberCatalog.status, JSON.stringify(memberCatalog.json)).toBe(200);
     expect(memberCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);

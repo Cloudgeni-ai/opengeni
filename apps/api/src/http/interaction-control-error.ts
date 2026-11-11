@@ -14,6 +14,27 @@ import { ApiHttpError } from "./api-error";
 
 export type InteractionControlSurface = "browser" | "computer";
 
+/**
+ * What the failed Connected Machine request was for: opening the live view a
+ * person watches, running an action, a read that changes nothing, or any
+ * other request (opening, selecting or closing a tab, resuming or ending the
+ * session, recordings, saving downloads). Failures are worded for it, since a
+ * click that timed out has nothing to do with a live view, and a read that
+ * timed out is safe to repeat where a request may already have run. Opening
+ * the browser or computer (`open`) gets its own next step, since the request
+ * that failed was the open itself.
+ */
+export type InteractionControlRequest = "live_view" | "action" | "read" | "open" | "request";
+
+/** The request kind of a browser or computer route's channel operation. */
+export function interactionControlRequestFor(operation: string): InteractionControlRequest {
+  if (operation === "browser.action" || operation === "computer.action") return "action";
+  if (operation === "browser.attach" || operation === "computer.attach") return "live_view";
+  if (operation === "browser.read" || operation === "computer.read") return "read";
+  if (operation === "browser.create" || operation === "computer.create") return "open";
+  return "request";
+}
+
 /** `details.code` of the 504 for an action that outlived its own deadline. */
 export const INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE = "INTERACTION_ACTION_DEADLINE_EXCEEDED";
 
@@ -93,6 +114,7 @@ export function legacyInteractionCapacityError(
 export function interactionControlApiError(
   error: unknown,
   surface: InteractionControlSurface,
+  request: InteractionControlRequest,
 ): ApiHttpError | null {
   const controlError =
     error instanceof SelfhostedControlError
@@ -110,13 +132,18 @@ export function interactionControlApiError(
       ? { controlRequestId: controlError.controlRequestId }
       : {}),
   });
-  const ruling = publicControlFailureRuling(controlError, surface, controlFailureCode);
+  const ruling =
+    request === "live_view"
+      ? publicControlFailureRuling(controlError, surface, controlFailureCode)
+      : requestControlFailureRuling(controlError, surface, request, controlFailureCode);
   return new ApiHttpError(ruling.status, {
     code: ruling.code,
     message: ruling.message,
     retryable: controlError.retryable,
     outcomeUnknown:
-      controlError.code === AgentErrorCode.ERROR_CODE_TIMEOUT && !controlError.neverSent,
+      request !== "read" &&
+      controlError.code === AgentErrorCode.ERROR_CODE_TIMEOUT &&
+      !controlError.neverSent,
     details,
   });
 }
@@ -234,4 +261,110 @@ function publicControlFailureRuling(
 
 function safeControlRequestId(value: string | null): value is string {
   return value !== null && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value);
+}
+
+/** The ruling for a failed action, read or other request: it names that
+ * request and says what to do next. One that timed out after it reached the
+ * machine says its outcome is unknown, unless it only reads. */
+function requestControlFailureRuling(
+  error: SelfhostedControlError,
+  surface: InteractionControlSurface,
+  request: "action" | "read" | "open" | "request",
+  code: InteractionControlFailureCode,
+): { status: number; code: ErrorCode; message: string } {
+  const what = `this ${surface} ${request === "action" ? "action" : "request"}`;
+  switch (code) {
+    case "consent_required":
+      return {
+        status: 403,
+        code: "forbidden",
+        message: `Screen access is not enabled on this connected machine, so ${what} could not run. Turn screen control on with connected_machine_enable_screen_control; on a Mac, the person must also allow Opengeni under Privacy & Security in System Settings.`,
+      };
+    case "unsupported":
+      return {
+        status: 409,
+        code: "conflict",
+        // A browser request is unsupported when the machine's agent has no
+        // browser controller (it could not find one when it started) or one
+        // too old for the request.
+        message:
+          surface === "browser"
+            ? `This connected machine's Opengeni agent cannot run ${what}: its browser controller is missing or too old. Update or reinstall the agent on that machine; retrying will not help until then.`
+            : `This connected machine does not support ${what}.`,
+      };
+    case "not_found":
+      return {
+        status: 404,
+        code: "not_found",
+        message:
+          request === "open"
+            ? surface === "browser"
+              ? "The connected machine's browser controller stopped while the browser was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine."
+              : "The connected machine's screen controller stopped while the computer was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine."
+            : surface === "browser"
+              ? `The connected machine's browser controller is not running, so ${what} could not run. Open the browser again with browser_open, then look at the page before repeating it.`
+              : `The connected machine's screen controller is not running, so ${what} could not run. Open the computer again with computer_open, then look at the screen before repeating it.`,
+      };
+    case "fenced":
+      return {
+        status: 409,
+        code: "conflict",
+        message: `The ${surface} session on the connected machine changed while ${what} was running.`,
+      };
+    case "agent_offline":
+      return {
+        status: 503,
+        code: "upstream_unavailable",
+        message: `The connected machine is offline, so ${what} did not complete.`,
+      };
+    case "draining":
+      return {
+        status: 503,
+        code: "upstream_unavailable",
+        message: `The connected machine is busy and could not run ${what}.`,
+      };
+    case "timeout":
+      return {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          request === "read"
+            ? `The connected machine did not answer ${what} in time. It only reads, so it is safe to retry.`
+            : error.neverSent
+              ? `The connected machine did not answer in time, so ${what} was not sent. It is safe to retry.`
+              : request === "request" || request === "open"
+                ? `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "browser" : "screen"} before repeating it.`
+                : `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "page" : "window"} before doing anything again; do not repeat the action automatically.`,
+      };
+    case "payload_too_large":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine's reply to ${what} was larger than its transport allows.`,
+      };
+    case "stream":
+      return {
+        status: error.retryable ? 503 : 502,
+        code: "upstream_unavailable",
+        message: `The connection to the connected machine failed during ${what}.`,
+      };
+    case "protocol":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine returned an invalid reply to ${what}.`,
+      };
+    case "os":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine's operating system could not run ${what}.`,
+      };
+    case "unknown":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine could not complete ${what}.`,
+      };
+  }
 }

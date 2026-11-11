@@ -10,45 +10,57 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  * system instructions. These digests track the reviewed upstream legacy
  * composition, including goal-completion, child-answer delivery and durable
  * Codemode approval guidance and the secrets overhaul's removal of the retired
- * variable_set_list / variableSetIds wording. Reviewed instruction changes update their locks;
- * Modular composition must never change legacy bytes as a side effect.
+ * variable_set_list / variableSetIds wording, and proceeding past blocked
+ * routine, reversible steps, the Skill index reading Skills by name, and
+ * answering privacy questions from `privacy_facts`, and the shorter Codemode
+ * directive and its background-process credential lifetime, and the search
+ * rule that no longer assumes `rg`, and the wait rules
+ * that the `wait_for_input` description now states once; `unattended` pins the
+ * unattended-session CORE paragraph, which no other case carries. Reviewed
+ * instruction changes update their locks; Modular composition must never
+ * change legacy bytes as a side effect.
  */
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
   default: {
-    chars: 34158,
-    sha256: "981bf4d38d268a317a308f1f05033d8405f615fd6e933e3669dba00dc12e7174",
+    chars: 33625,
+    sha256: "bf091f3f87565485294cf4a2fdd93b9bafb22fe8d100f9e6e2ad9e8e4da46078",
     layers: "operational_contract,persona_and_core",
   },
   environment_and_rig: {
-    chars: 35032,
-    sha256: "47a94d748d8274ced214b223e3621234e37ffec0ddc2e609a9da65cf9ff4921d",
+    chars: 34499,
+    sha256: "0f11a109f90fd51da1ec3271a4394a1da1b6c5b264d3a8179c2659ad9e1d1bec",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_with_marker: {
-    chars: 32748,
-    sha256: "ec650896f12711cdfd6fb56db66be22efa0cc1be06a2f797eea302ca10f30276",
+    chars: 32215,
+    sha256: "67c833070b58fceae16a09e2f68ed154357d5a7d79d4b81b4668827f046fd987",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_without_marker: {
-    chars: 32748,
-    sha256: "ec650896f12711cdfd6fb56db66be22efa0cc1be06a2f797eea302ca10f30276",
+    chars: 32215,
+    sha256: "67c833070b58fceae16a09e2f68ed154357d5a7d79d4b81b4668827f046fd987",
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 38875,
-    sha256: "427f195af77495d498498048955b578b938423c0b202f186490acc001321b27b",
+    chars: 38065,
+    sha256: "66681fd516e90ee3807a6a302fea31a79b4040f5ffa6c53826fc7d37419f6692",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 37974,
-    sha256: "4592cd3801e921d3fb7ec7b0c30af92a748a55208017aa2dce4a422a5dea8982",
+    chars: 37079,
+    sha256: "0393593326c5feb83f7e8ca7125b1b7bfd1f4a7f4e3473b9e0d667d0dd769ff4",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },
   selfhosted_with_bindings: {
-    chars: 34158,
-    sha256: "981bf4d38d268a317a308f1f05033d8405f615fd6e933e3669dba00dc12e7174",
+    chars: 33625,
+    sha256: "bf091f3f87565485294cf4a2fdd93b9bafb22fe8d100f9e6e2ad9e8e4da46078",
+    layers: "operational_contract,persona_and_core",
+  },
+  unattended: {
+    chars: 34163,
+    sha256: "4dca91aee899af87050f3632c19290c07feb8c4be829d09f36e73e46cb2a237c",
     layers: "operational_contract,persona_and_core",
   },
 };

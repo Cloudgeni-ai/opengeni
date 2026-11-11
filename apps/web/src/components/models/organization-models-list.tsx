@@ -1,4 +1,5 @@
 import { possessive } from "./possessive";
+import type { ChatClient } from "@opengeni/sdk";
 import { AccountGroupRows, groupEntry, type GroupEntry } from "./account-fold";
 import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
 import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
@@ -37,7 +38,11 @@ import {
   providerListed,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { codexAccountName, codexUsageReadings, planLabel } from "@/components/codex-connection";
+import {
+  CompatibleEndpointView,
+  type OrganizationCompatibleEndpoints,
+} from "@/components/models/organization-compatible-endpoints";
+import { codexAccountName, codexUsageWindows, planLabel } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import {
   AllowedModelsRow,
@@ -89,7 +94,7 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
@@ -160,6 +165,17 @@ export interface ModelsWorkspace {
   personal: boolean;
   /** The viewer can change its default model and Allowed models. */
   canManage: boolean;
+  /**
+   * The viewer can't change its models but opens its page to connect and
+   * manage their own subscriptions ("Only me"), a member who can manage
+   * connections there, or to add and remove its custom models
+   * (`customModels`).
+   */
+  connectOwn?: boolean | undefined;
+  /** The viewer adds and removes its custom models without managing it. */
+  customModels?: boolean | undefined;
+  /** False when the viewer can't connect their own subscriptions there. */
+  ownSubscriptions?: boolean | undefined;
   /** Its saved default model, if any (from the workspace's settings). */
   savedDefaultModel: string | null;
 }
@@ -186,7 +202,7 @@ export interface WorkspaceModelsSnapshot {
 }
 
 async function readWorkspaceModels(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspace: ModelsWorkspace,
   claudeEnabled: boolean,
   /**
@@ -277,7 +293,7 @@ async function readWorkspaceModels(
 
 /** Reads each workspace once, through that workspace, and keeps the results by id. */
 function useWorkspaceSnapshots(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaces: readonly ModelsWorkspace[],
   claudeEnabled: boolean,
   /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
@@ -341,12 +357,13 @@ export function OrganizationModelsList({
   orgGrok,
   orgClaude,
   orgGateways,
+  orgCompatible,
   liveCodexUsage,
   onOpenAccount,
   onOpenWorkspace,
   onConnect,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string | undefined;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
@@ -374,6 +391,8 @@ export function OrganizationModelsList({
   orgGrok: SuperGrokSubscriptions;
   orgClaude: ClaudeSubscriptions;
   orgGateways: Record<GatewayId, ProviderConnection>;
+  /** The organization's OpenAI-compatible endpoints; owners and admins only. */
+  orgCompatible?: OrganizationCompatibleEndpoints | undefined;
   /** Weekly usage by account, as the settings workspace reads the accounts it uses. */
   liveCodexUsage: Readonly<Record<string, ReactNode>>;
   /** Opens an organization account (`org:...`). */
@@ -628,13 +647,15 @@ export function OrganizationModelsList({
   }
 
   const orgKeyIds = administrator ? GATEWAYS.filter((id) => providerListed(orgGateways[id])) : [];
+  const orgEndpoints = administrator && orgCompatible ? orgCompatible.endpoints : [];
   const loadingAccounts =
     loadingWorkspaces ||
     (administrator &&
       (orgCodex.loading ||
         (!orgGrok.unavailable && orgGrok.loading) ||
         (claudeEnabled && orgClaude.loading) ||
-        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled)));
+        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled) ||
+        Boolean(orgCompatible?.loading)));
   const visible: Record<AccountGroupId, boolean> = {
     codex:
       groups.codex.length > 0 ||
@@ -654,6 +675,7 @@ export function OrganizationModelsList({
     !visible.claude &&
     !visible.supergrok &&
     orgKeyIds.length === 0 &&
+    orgEndpoints.length === 0 &&
     keyRows.length === 0;
   const connect = (
     <RowButton variant="default" onClick={onConnect}>
@@ -788,7 +810,10 @@ export function OrganizationModelsList({
               administrator && !orgGrok.unavailable ? orgGrok.loadError : null,
               () => void orgGrok.refresh(),
             )}
-            {credits.visible || keyRows.length > 0 || orgKeyIds.length > 0 ? (
+            {credits.visible ||
+            keyRows.length > 0 ||
+            orgKeyIds.length > 0 ||
+            orgEndpoints.length > 0 ? (
               <AccountGroupHeading>Pay as you go</AccountGroupHeading>
             ) : null}
             <OpenGeniCreditsRow
@@ -805,6 +830,23 @@ export function OrganizationModelsList({
                 onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
               />
             ))}
+            {orgCompatible
+              ? orgEndpoints.map((endpoint) => (
+                  <CompatibleEndpointView
+                    key={`org:compatible:${endpoint.id}`}
+                    endpoints={orgCompatible}
+                    connectionId={endpoint.id}
+                  >
+                    {(state) => (
+                      <OrganizationKeyRow
+                        state={state}
+                        labels={labels}
+                        onOpen={() => onOpenAccount(accountKey("compatible", endpoint.id, true))}
+                      />
+                    )}
+                  </CompatibleEndpointView>
+                ))
+              : null}
             {keyRows}
           </RowList>
         )}
@@ -949,7 +991,7 @@ export function OrganizationModelsList({
  * What every workspace starts with: the default model, Allowed models and
  * compaction limits. A workspace follows each until its admins change it.
  */
-export function OrganizationDefaultsSection({
+function OrganizationDefaultsSection({
   organizationName,
   anchorWorkspaceId,
   defaults,
@@ -1005,21 +1047,14 @@ export function OrganizationDefaultsSection({
 
 export { possessive };
 
-/** Cached weekly usage an account carries, for a row with no live reading. */
+/** The cached usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {
-  const readings = codexUsageReadings(
+  const windows = codexUsageWindows(
     { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
     Date.now(),
   );
-  const weekly = readings[0]!;
-  if (weekly.percent === null) return null;
-  return (
-    <UsageReadout
-      percent={weekly.percent}
-      window="this week"
-      resets={usageResets(readings, weekly.label)}
-    />
-  );
+  if (windows.length === 0) return null;
+  return <SubscriptionUsageCell windows={windows} />;
 }
 
 type AccountGroupId = "codex" | "claude" | "supergrok";
@@ -1144,7 +1179,7 @@ function OrganizationCodexRow({
     account,
     !workspaceOwned,
   );
-  const readings = codexUsageReadings(live.data?.usage, Date.now());
+  const windows = codexUsageWindows(live.data?.usage, Date.now());
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const reconnect = account.status !== "active";
   return (
@@ -1163,15 +1198,11 @@ function OrganizationCodexRow({
         ) : workspaceOwned ? (
           usage
         ) : live.loading ? (
-          <UsageReadout percent={null} window="this week" loading />
+          <SubscriptionUsageCell windows={[]} loading />
         ) : live.error || live.data?.status === "error" ? (
           <span className="text-xs text-fg-muted">Usage unavailable</span>
         ) : live.data ? (
-          <UsageReadout
-            percent={readings[0]!.percent}
-            window="this week"
-            resets={usageResets(readings, readings[0]!.label)}
-          />
+          <SubscriptionUsageCell windows={windows} />
         ) : (
           usage
         ),
@@ -1224,6 +1255,23 @@ function WorkspaceRow({
   ) : (
     <LogoTile name={workspace.name} />
   );
+  if (!workspace.canManage && workspace.connectOwn) {
+    return (
+      <ListRow
+        leading={leading}
+        title={title}
+        meta={[
+          workspace.customModels
+            ? workspace.ownSubscriptions === false
+              ? "Custom models"
+              : "Custom models and your own subscriptions"
+            : "Your own subscriptions",
+        ]}
+        indicator="open"
+        onOpen={onOpen}
+      />
+    );
+  }
   if (!workspace.canManage) {
     return (
       <ListRow

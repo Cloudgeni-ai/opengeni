@@ -260,7 +260,8 @@ export function subscriptionCoreCodexProvider(
 ): SubscriptionCoreProvider<SubscriptionCoreCodexTokens> {
   return {
     adapter: subscriptionCoreCodexAdapter(deps),
-    // A session whose history was compacted remotely continues on Codex only.
+    // Automatic failover keeps a remote_v2 session on Codex: only a turn on
+    // another model the user chose rebuilds its history in portable form.
     sessionCompactionLock: sql`session.codex_compaction_mode = 'remote_v2'`,
     errors: {
       leaseLost: () => new SubscriptionCoreCodexLeaseLostError(),

@@ -25,20 +25,6 @@ import { splitStatements, stripComments, stripRoutineBodies } from "./migration-
 
 export { MIGRATIONS_DIR } from "./migration-rls-backfills";
 
-/**
- * Migrations that shipped with an advisory fence after a table lock. Their
- * bytes are frozen by the release schema-contract hash ladder and they have
- * already run, so they are recorded here instead of rewritten.
- *
- * DO NOT add to this list. Take advisory fences before the first table lock,
- * or drop a fence the held table locks already make redundant.
- */
-export const GRANDFATHERED_LOCK_ORDER_MIGRATIONS: readonly string[] = [
-  "0478_sender_owned_connections.sql",
-  "0673_delete_stranded_completed_turn_tool_receipts.sql",
-  "0720_scheduled_task_audience.sql",
-];
-
 export type LockOrderFinding = {
   file: string;
   /** 1-based statement ordinal of the first table lock. */
@@ -110,15 +96,4 @@ export function analyzeMigrationLockOrder(migrationsDir: string): LockOrderFindi
     if (finding) findings.push(finding);
   }
   return findings;
-}
-
-export function unreviewedLockOrderFindings(
-  findings: readonly LockOrderFinding[],
-): LockOrderFinding[] {
-  return findings.filter((finding) => !GRANDFATHERED_LOCK_ORDER_MIGRATIONS.includes(finding.file));
-}
-
-export function staleLockOrderAllowlistEntries(migrationsDir: string): string[] {
-  const files = new Set(readdirSync(migrationsDir));
-  return GRANDFATHERED_LOCK_ORDER_MIGRATIONS.filter((file) => !files.has(file));
 }

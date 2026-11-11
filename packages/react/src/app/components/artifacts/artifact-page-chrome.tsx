@@ -82,13 +82,19 @@ export function useArtifactFullView(): [boolean, (fullView: boolean) => void] {
   return [fullView, setFullView];
 }
 
-/** "← Artifacts", keeping the way back to the session it was opened from. */
-export function useArtifactsBackLink(workspaceId: string, fromSession?: string): DetailBackLink {
+/**
+ * "← Artifacts", keeping the way back to the session it was opened from.
+ * The page's query comes from the current address, or from `from` when the
+ * caller holds it (the Site view, whose own address is the Site's).
+ */
+export function useArtifactsBackLink(
+  workspaceId: string,
+  fromSession?: string,
+  from?: Pick<ArtifactReturnSearch, "q" | "kind" | "sort" | "status">,
+): DetailBackLink {
   const navigate = useNavigate();
-  const search = artifactLibrarySearch(
-    artifactLibraryFilters(useSearch({ strict: false })),
-    fromSession,
-  );
+  const current: ArtifactReturnSearch = useSearch({ strict: false });
+  const search = artifactLibrarySearch(artifactLibraryFilters(from ?? current), fromSession);
   const query = useStringifySearch()(search);
   return {
     label: "Artifacts",

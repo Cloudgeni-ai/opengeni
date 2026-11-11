@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { UnsettledCleanupError } from "./cleanup-error";
-import { TypedSecretMemory } from "./typed-secrets";
 import {
   INTERACTION_MAX_CLIPBOARD_BYTES,
   ComputerNativeResult,
@@ -11,7 +10,6 @@ import {
   InteractionSecretValueError,
   materializeComputerActionSecrets,
   materializeComputerNativeSecrets,
-  redactInteractionSecretValues,
   type ComputerActionCommand,
   type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
@@ -109,13 +107,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
   >();
   private stillSequence = 0;
 
-  /** Secret values typed in this session; redacted from everything it returns,
-   * since desktop accessibility trees and window titles show field values. */
-  private readonly typedSecrets: TypedSecretMemory;
-
   constructor(options: ComputerDriverOptions) {
     this.computerSessionId = options.computerSessionId;
-    this.typedSecrets = TypedSecretMemory.forSession("computer", options.computerSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.client = options.client;
     this.clientFactory = options.clientFactory;
@@ -128,15 +121,13 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();
     try {
-      return this.typedSecrets.redact(
-        (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
-          // Only the listing marks the current target; observations and
-          // receipts name their own.
-          this.projectTarget(target, target.id === this.current),
-        ),
+      return (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
+        // Only the listing marks the current target; observations and
+        // receipts name their own.
+        this.projectTarget(target, target.id === this.current),
       );
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
@@ -193,9 +184,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
         return { ...observed, frameId };
       });
       this.current = observation.target.id;
-      return this.typedSecrets.redact(this.projectObservation(observation));
+      return this.projectObservation(observation);
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
@@ -210,35 +201,28 @@ export class ComputerDriver implements ComputerInteractionDriver {
         );
       await client.validateNative(command);
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
-    this.typedSecrets.remember(command.secretValues);
-    const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeNativeCommandSecrets(command);
     try {
       const client = await this.activeClient();
       if (!client.callNative)
         throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
-      return ComputerNativeResult.parse(
-        redactInteractionSecretValues(
-          {
-            target: null,
-            computerSessionId: this.computerSessionId,
-            controllerGeneration: this.controllerGeneration,
-            tool: command.tool,
-            ...(await client.callNative(materialized)),
-          },
-          secretValues,
-        ),
-      );
+      return ComputerNativeResult.parse({
+        target: null,
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        tool: command.tool,
+        ...(await client.callNative(materialized)),
+      });
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
-        const message = driverErrorMessage(error.message, secretValues);
+        const message = driverErrorMessage(error.message);
         if (!error.dispatched) {
           throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
@@ -256,7 +240,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
       this.assertActionBatch(command, client);
       await client.validate(nativeCommand(command));
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
@@ -265,14 +249,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<ComputerObservationValue | null> {
     this.assertOpen();
-    this.typedSecrets.remember(command.secretValues);
-    const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeActionCommandSecrets(command);
     // A stand-in names an element's label, which could show a typed secret.
-    const standIn = trace
-      ? (item: ComputerBackendRoleStandIn) =>
-          trace.record(redactInteractionSecretValues(item, secretValues))
-      : undefined;
+    const standIn = trace ? (item: ComputerBackendRoleStandIn) => trace.record(item) : undefined;
     const unconfirmed = trace ? () => trace.record(COMPUTER_UNCONFIRMED_INPUT_TRACE) : undefined;
     try {
       const client = await this.activeClient();
@@ -282,25 +261,18 @@ export class ComputerDriver implements ComputerInteractionDriver {
       const observation = await client
         .dispatch(native, standIn, unconfirmed)
         .catch(async (error: unknown) => {
-          // A pasted value stays on the seat clipboard, where clipboard reads
-          // would expose it; text with resolved secrets is never pasted.
-          const text =
-            this.capabilities.clipboard && command.secretValues === undefined
-              ? untypeableText(materialized, error)
-              : null;
+          const text = this.capabilities.clipboard ? untypeableText(materialized, error) : null;
           if (text === null) throw error;
           return await pasteText(client, native, text);
         });
       // An action that opened a window returns that window, and leaves the
       // computer in it.
       this.current = observation?.target.id ?? command.targetId;
-      return observation === null
-        ? null
-        : redactInteractionSecretValues(this.projectObservation(observation), secretValues);
+      return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
-        const message = driverErrorMessage(error.message, secretValues);
+        const message = driverErrorMessage(error.message);
         if (!error.dispatched) {
           const definite = new InteractionDefiniteDriverError(code, message, error.retryable);
           definite.details = error.details;
@@ -336,7 +308,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
       });
       return this.projectFrame(frame, 0);
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
@@ -370,16 +342,14 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async clipboard(): Promise<ComputerClipboardValue> {
     this.assertOpen();
     try {
-      return this.typedSecrets.redact(
-        ComputerClipboard.parse({
-          computerSessionId: this.computerSessionId,
-          controllerGeneration: this.controllerGeneration,
-          ...(await this.readWithRecovery(async (client) => await client.clipboard())),
-          observedAt: this.now().toISOString(),
-        }),
-      );
+      return ComputerClipboard.parse({
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        ...(await this.readWithRecovery(async (client) => await client.clipboard())),
+        observedAt: this.now().toISOString(),
+      });
     } catch (error) {
-      throw predispatchError(error, this.typedSecrets.merged());
+      throw predispatchError(error);
     }
   }
 
@@ -824,17 +794,11 @@ function recoverableNativeFailure(error: unknown): boolean {
 
 const DRIVER_ERROR_MAX_CHARS = 1_200;
 
-/** A backend failure's text as the caller sees it: typed secrets are redacted
- * from the full text before it is bounded, so clipping cannot leave part of a
- * secret behind. */
-function driverErrorMessage(
-  message: string,
-  secretValues: Parameters<typeof redactInteractionSecretValues>[1],
-): string {
-  const redacted = redactInteractionSecretValues(message, secretValues);
-  return redacted.length > DRIVER_ERROR_MAX_CHARS
-    ? `${redacted.slice(0, DRIVER_ERROR_MAX_CHARS - 1)}…`
-    : redacted;
+/** A backend failure's text as the caller sees it, bounded. */
+function driverErrorMessage(message: string): string {
+  return message.length > DRIVER_ERROR_MAX_CHARS
+    ? `${message.slice(0, DRIVER_ERROR_MAX_CHARS - 1)}…`
+    : message;
 }
 
 function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCommand {
@@ -878,7 +842,6 @@ function materializeNativeCommandSecrets(command: ComputerNativeCommand): Comput
 }
 
 const UNTYPEABLE_CHARACTER = /keymap cannot type Unicode scalar U\+[0-9A-F]+; use clipboard paste/u;
-
 /** Text the native keymap refused before emitting any key, so all of it is
  * still untyped. Line breaks and tabs are keys with their own effect (submit,
  * focus change) and are never replaced by a paste. */
@@ -903,13 +866,39 @@ function untypeableText(command: ComputerActionCommand, error: unknown): string 
   return text;
 }
 
-/** Types `text` by writing the seat clipboard and pasting it into the same
- * target. Both steps are validated before the clipboard changes. */
+/** The Linux helper's paste that carries its own text: it pastes `text` into
+ * the target and then puts the person's previous clipboard text back once the
+ * target has read it. */
+const RESTORING_PASTE_ADAPTER = "opengeni.native.linux.v1";
+
+/** Types `text` by pasting it into the same target. The Linux helper restores
+ * the previous clipboard afterwards; elsewhere, or with an older helper that
+ * refuses text on a paste, the seat clipboard is written and keeps the text.
+ * Every step is validated before the clipboard changes. */
 async function pasteText(
   client: ComputerBackend,
   command: ComputerBackendActionCommand,
   text: string,
 ): Promise<ComputerBackendObservation | null> {
+  if (client.identity.adapterId === RESTORING_PASTE_ADAPTER) {
+    const restoring = {
+      ...command,
+      action: { type: "clipboard", operation: "paste", text },
+    } as const;
+    const supported = await client.validate(restoring).then(
+      () => true,
+      (error: unknown) => {
+        if (
+          error instanceof ComputerBackendError &&
+          (error.code === "invalid_action" || error.code === "unsupported")
+        ) {
+          return false;
+        }
+        throw error;
+      },
+    );
+    if (supported) return await client.dispatch(restoring);
+  }
   const write = { ...command, action: { type: "clipboard", operation: "write", text } } as const;
   const paste = { ...command, action: { type: "clipboard", operation: "paste" } } as const;
   await client.validate(write);
@@ -919,17 +908,14 @@ async function pasteText(
 }
 
 /** A read or validation failure as the caller sees it; the backend's text
- * (which can carry CUA's own words) is redacted like any other error. */
-function predispatchError(
-  error: unknown,
-  secretValues: Parameters<typeof redactInteractionSecretValues>[1],
-): Error {
+ * (which can carry CUA's own words) is bounded like any other error. */
+function predispatchError(error: unknown): Error {
   if (!(error instanceof ComputerBackendError)) {
     return error instanceof Error ? error : new Error(String(error));
   }
   return new InteractionControllerError(
     interactionErrorCode(error.code),
-    driverErrorMessage(error.message, secretValues),
+    driverErrorMessage(error.message),
     error.retryable,
   );
 }

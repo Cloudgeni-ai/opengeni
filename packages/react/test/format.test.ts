@@ -7,6 +7,7 @@ import {
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
   CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
   composerSubmissionErrorMessage,
   composerSubmissionCanRetry,
   formatClockTime,
@@ -21,9 +22,22 @@ import {
   tryParseJson,
 } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { englishMessages } from "../src/messages/en";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
+
+// A refused or waiting message stays visible in the chat or composer, so no
+// refusal or status line reassures that it is saved. (The admission notice's
+// own copy has the same rule in its tests.)
+test("no send refusal or chat status says the message is saved", () => {
+  const saying = Object.entries(englishMessages).filter(
+    ([key, value]) =>
+      !key.startsWith("sessionAdmission.") &&
+      /\b(?:your|the|their) messages?(?: and attachments)? (?:is|are|stays?) saved\b/i.test(value),
+  );
+  expect(saying).toEqual([]);
+});
 
 describe("failure presentation", () => {
   test("database failures show a safe explanation without altering stored diagnostics", () => {
@@ -226,6 +240,22 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ detail: "insufficient Opengeni credits" })).toBe(true);
   });
 
+  test("matches the refusal of an own-key turn that has no paid credit", () => {
+    expect(isCreditExhaustion("Add credits to use your own key.")).toBe(true);
+    expect(
+      isCreditExhaustion({ error: "Activity task failed: Upgrade to Pro to use your own key." }),
+    ).toBe(true);
+  });
+
+  test("matches the refusal of an API turn that has no credits", () => {
+    expect(isCreditExhaustion("API usage uses credits, not your plan credit.")).toBe(true);
+    expect(
+      isCreditExhaustion({
+        error: "Activity task failed: API usage uses credits, not your plan credit.",
+      }),
+    ).toBe(true);
+  });
+
   test("matches the budget_exhausted segment limit on its own", () => {
     expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
     expect(
@@ -241,6 +271,110 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ error: "connection reset by peer" })).toBe(false);
     expect(isCreditExhaustion({ segmentLimit: "max_turns" })).toBe(false);
     expect(isCreditExhaustion({ error: null, detail: null, segmentLimit: null })).toBe(false);
+  });
+
+  test("own-key and API refusals are credit stops with their own sentences", () => {
+    const ownKey = "Activity task failed: Add credits to use your own key.";
+    const api = "API usage uses credits, not your plan credit.";
+    expect(isCreditExhaustion(ownKey)).toBe(true);
+    expect(isCreditExhaustion({ detail: api })).toBe(true);
+    expect(humanizeFailureReason(englishText, ownKey)).toBe(
+      "Add credits to use your own key. The conversation is preserved.",
+    );
+    expect(humanizeFailureReason(englishText, api)).toBe(
+      "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+    );
+    expect(creditExhaustionText(englishText, null, ownKey)).toBe(
+      "Add credits to use your own key. The conversation is preserved.",
+    );
+    expect(creditExhaustionText(englishText, "insufficient workspace credits")).toBe(
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
+    );
+    const upgrade = "Activity task failed: Upgrade to Pro to use your own key.";
+    expect(isCreditExhaustion(upgrade)).toBe(true);
+    expect(humanizeFailureReason(englishText, upgrade)).toBe(
+      "Upgrade to Pro to use your own key. The conversation is preserved.",
+    );
+  });
+});
+
+describe("composer own-key and API refusals", () => {
+  const refusal = (message: string, details: Record<string, unknown>) =>
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: { status: 402, code: "payment_required", message, retryable: false, details },
+      }),
+    );
+
+  test("name their one fix instead of suggesting another model", () => {
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Add credits to use your own key.", {
+          code: "byok_paid_credit_required",
+          action: { type: "add_credits", href: "/billing" },
+        }),
+      ),
+    ).toBe("Add credits to use your own key.");
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Upgrade to Pro to use your own key.", {
+          code: "byok_paid_credit_required",
+          action: { type: "upgrade_plan", href: "/billing" },
+        }),
+      ),
+    ).toBe("Upgrade to Pro to use your own key.");
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Upgrade to Pro to use your own subscription.", {
+          code: "subscription_plan_required",
+          action: { type: "upgrade_plan", href: "/billing" },
+        }),
+      ),
+    ).toBe("Upgrade to Pro to use your own subscription.");
+    const api = composerSubmissionErrorMessage(
+      englishText,
+      refusal("API usage uses credits, not your plan credit.", {
+        code: "api_credits_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    );
+    expect(api).toBe("API usage uses credits, not your plan credit. Add credits to continue.");
+    expect(api).not.toContain("another model");
+  });
+
+  test("tell a member who can't buy credits to ask an organization owner", () => {
+    const member = (message: string, details: Record<string, unknown>) =>
+      composerSubmissionErrorMessage(englishText, refusal(message, details), false);
+    expect(
+      member("Add credits to use your own key.", {
+        code: "byok_paid_credit_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    ).toBe("Ask an organization owner to add credits to use your own key.");
+    expect(
+      member("Upgrade to Pro to use your own key.", {
+        code: "byok_paid_credit_required",
+        action: { type: "upgrade_plan", href: "/billing" },
+      }),
+    ).toBe("Ask an organization owner to upgrade to Pro to use your own key.");
+    expect(
+      member("Upgrade to Pro to use your own subscription.", {
+        code: "subscription_plan_required",
+        action: { type: "upgrade_plan", href: "/billing" },
+      }),
+    ).toBe("Ask an organization owner to upgrade to Pro to use your own subscription.");
+    expect(
+      member("API usage uses credits, not your plan credit.", {
+        code: "api_credits_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    ).toBe(
+      "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+    );
   });
 });
 
@@ -265,6 +399,19 @@ describe("composerSubmissionErrorMessage", () => {
     expect(composerSubmissionCanRetry(error)).toBe(false);
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText)).not.toContain("free");
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText)).not.toContain("Codex");
+  });
+
+  test("the credit sentences stay true with no credit at all and with credit for other models", () => {
+    // The app's credit notice beside them says which of the two applies.
+    for (const sentence of [
+      COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText),
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
+    ]) {
+      expect(sentence).toStartWith("There aren't enough credits for this model.");
+      expect(sentence).toContain("Add credits, or choose another model.");
+      expect(sentence).not.toContain("they cover");
+      expect(sentence).not.toContain("remaining");
+    }
   });
 
   test("a published Site's assistant refusals read plainly; only busy is retryable", () => {
@@ -329,6 +476,8 @@ describe("composerSubmissionErrorMessage", () => {
     // Only the stored text survives a reload, and older APIs omit the detail code.
     for (const text of [
       COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+      // The earlier wording, from before the line stopped saying the message is saved.
+      "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
       "Opengeni API 422: model is not available: gpt-old Reference: abc.",
     ]) {
       expect(composerSubmissionErrorMessage(englishText, new Error(text))).toBe(
@@ -358,6 +507,68 @@ describe("composerSubmissionErrorMessage", () => {
       "The request could not be completed.",
     );
     expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
+  });
+
+  test("a follow-up refused for a repository that lost GitHub access names it and keeps Retry", () => {
+    const refusal = (repositories?: unknown) =>
+      new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: {
+            status: 422,
+            code: "validation_failed",
+            message:
+              "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
+            retryable: false,
+            outcomeUnknown: false,
+            details: {
+              code: "github_repository_unavailable",
+              ...(repositories === undefined ? {} : { repositories }),
+            },
+          },
+        }),
+      );
+    const generic = "The request could not be accepted. Check your input and try again.";
+    const one = composerSubmissionErrorMessage(englishText, refusal(["benyhh/grocery-bot"]));
+    expect(one).toBe(
+      "benyhh/grocery-bot is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry.",
+    );
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal(["acme/a", "acme/b", "acme/c", "acme/d"]),
+      ),
+    ).toBe(
+      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them from this chat, or restore their GitHub access, then retry.",
+    );
+    expect(composerSubmissionErrorMessage(englishText, refusal())).toBe(
+      "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry.",
+    );
+    expect(one).not.toBe(generic);
+    // Removing the repository or restoring its access makes the same Send succeed.
+    expect(composerSubmissionCanRetry(refusal(["benyhh/grocery-bot"]))).toBe(true);
+  });
+
+  test("a follow-up 422 the server explains shows the server's reason, not 'check your input'", () => {
+    const explained = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          status: 422,
+          code: "validation_failed",
+          message: "composer draft resources must be included in the accepted resource set",
+          retryable: false,
+          outcomeUnknown: false,
+        },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(englishText, explained)).toBe(
+      "Composer draft resources must be included in the accepted resource set.",
+    );
+    const bare = new OpenGeniApiError(400, "");
+    expect(composerSubmissionErrorMessage(englishText, bare)).toBe(
+      "The request could not be accepted. Check your input and try again.",
+    );
   });
 
   test("uncertain delivery takes precedence over model-unavailable details", () => {

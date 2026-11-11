@@ -6,11 +6,15 @@ name: Cancel superseded main CI
 # 2. Main CI runs none of whose jobs has started are superseded by a newer main
 #    run, which tests a superset of their commits. Started runs always finish;
 #    the main SHA and Version merges are kept; re-runs wait six hours first.
+# 3. With MAIN_CI_DEFERRED, ordinary main pushes skip CI, and this re-runs the
+#    newest main SHA's run about every 30 minutes (MAIN_CI_INTERVAL_MINUTES)
+#    while main changes, and re-runs a failed full run's failed jobs once
+#    (docs/merge-batcher.md "Main CI cadence").
 on:
   push:
     branches: [main]
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,16 +25,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   superseded:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - name: Cancel superseded parked or not-started main CI runs
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          MAIN_CI_DEFERRED: ${{ vars.MAIN_CI_DEFERRED }}
+          MAIN_CI_INTERVAL_MINUTES: ${{ vars.MAIN_CI_INTERVAL_MINUTES }}
         run: bun scripts/ci/main-approval-superseded.ts

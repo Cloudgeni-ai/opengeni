@@ -75,7 +75,7 @@ use crate::protocol::Id;
 use crate::restore_notice::{REACH_LIMIT, Reach, reachable};
 use crate::store::Store;
 
-use super::{Event, HostAgent};
+use super::{End, Event, HostAgent};
 
 /// More time suspended than this between a check's start and its end
 /// voids it; less is the two clocks read a moment apart.
@@ -303,6 +303,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             );
         }
         slot.check = None;
-        self.lost_vm(id, incarnation);
+        self.lost_vm(id, incarnation, End::Stopped);
     }
 }

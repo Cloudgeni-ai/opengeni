@@ -1,14 +1,23 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
+import type { ChatClient } from "@opengeni/sdk";
 import {
+  approvalsDecidable,
   conversationTimeline,
   personalMachineCopy,
+  sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
+  timelineLivePause,
   useSessionStart,
+  useSessionStartupTimeline,
+  type PendingPrompt,
   type AgentMessageItem,
   type AuthNeededItem,
+  type StoredFileSource,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
+import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import {
   Component,
   useCallback,
@@ -20,15 +29,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  Pressable,
-  Text,
-  View,
-  type TextInput,
-} from "react-native";
+import { ActivityIndicator, Alert, Pressable, Text, View, type TextInput } from "react-native";
 import { annotationHasNote } from "@opengeni/react/timeline-model";
 import {
   defaultChatComposerMessages,
@@ -38,6 +39,11 @@ import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import type { NativeFileAttachmentsResult } from "../attachments";
+import {
+  StoredFileImage,
+  useNativeComposerAttachments,
+  type NativeComposerAttachment,
+} from "../stored-file-image";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { Button } from "./controls";
@@ -56,12 +62,22 @@ import {
   type NativeAnnotationLike,
 } from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  OpenGeniClient,
+  ResourceRef,
+  ChatSession as Session,
+  SessionBackgroundCommand,
+} from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
+import {
+  InteractiveAnswerProvider,
+  type InteractiveAnswerStore,
+} from "@opengeni/react/interactive-answer-model";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -73,7 +89,9 @@ export interface NativeSessionScreenProps extends Omit<
   NativeMessageTimelineProps,
   "items" | "events" | "status" | "trailing"
 > {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
+  /** The submitted first message, until its durable history is available. */
+  pendingPrompt?: PendingPrompt | null | undefined;
   /** Composer slots (products add their own actions/options here). */
   composer?:
     | Partial<
@@ -104,8 +122,16 @@ export interface NativeSessionScreenProps extends Omit<
   humanInputMessages?: HumanInputCardProps["messages"];
   /** Translations for the approval strip. */
   approvalMessages?: ApprovalStripProps["messages"];
+  /**
+   * The review each pending approval shows, as the web `ApprovalSurface`'s
+   * `loadReview`: the server's (`client.getToolActionReview`) or the host's
+   * own plain title and consequence instead of the tool's raw arguments.
+   * With `client`, an approval this resolves `null` for shows the server's
+   * saved review. See `ApprovalStrip`'s `loadReview`.
+   */
+  loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   /**
    * Let people finish an agent's "connect your account" request in the chat,
    * with the web conversation's cards: sign-in opens the system sign-in
@@ -116,6 +142,18 @@ export interface NativeSessionScreenProps extends Omit<
   inChatConnect?: NativeInChatConnectOptions | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
+  /**
+   * Show how the agent works behind the scenes: above the composer, the goal,
+   * agents and commands chips; on each turn row, the live step and step
+   * facets. Defaults to true. Set `false` for end users to whom a paused
+   * goal, a count of helper agents, a running command or a tool step means
+   * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+   * Or hide only some of them, for example `{ goal: false }` to drop the goal
+   * chip and keep helper agents and turn-row detail (see the web
+   * `AgentSignalOptions`). Queued messages, approvals and the agent's
+   * questions always show.
+   */
+  agentSignals?: AgentSignals | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
   timelineMessages?: Partial<NativeTimelineMessages> | undefined;
   /**
@@ -125,6 +163,12 @@ export interface NativeSessionScreenProps extends Omit<
    * A floating composer must report its height through `onHeightChange`.
    */
   renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
+  /**
+   * Where interactive answers (`opengeni-ui`) remember picks, filters and
+   * whether a pick was sent, for example AsyncStorage. Without it they are
+   * remembered until the app closes.
+   */
+  answerStore?: InteractiveAnswerStore | undefined;
 }
 
 export function NativeSessionScreen({
@@ -137,39 +181,54 @@ export function NativeSessionScreen({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
+  agentSignals,
   timelineMessages,
   renderComposer,
   renderMessageActions: hostMessageActions,
+  answerStore,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  const status = controller.sessionStatus;
   // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
   // not a queue, and no Steer to learn.
   return (
     <SingleSendWording enabled={controller.composer.singleSend === true}>
-      <NativeTimelineMessagesProvider messages={timelineMessages}>
-        <SessionScreenBoundary sessionId={controller.sessionId}>
-          <SessionScreenBody
-            controller={controller}
-            composer={composerSlots}
-            trailing={trailing}
-            topBar={topBar}
-            bottomInset={bottomInset}
-            keyboardBottomOffset={keyboardBottomOffset}
-            feedback={feedback}
-            humanInputMessages={humanInputMessages}
-            approvalMessages={approvalMessages}
-            client={client}
-            inChatConnect={inChatConnect}
-            models={models}
-            renderComposer={renderComposer}
-            renderMessageActions={hostMessageActions}
-            {...timelineProps}
-          />
-        </SessionScreenBoundary>
-      </NativeTimelineMessagesProvider>
+      <InteractiveAnswerProvider
+        // A pick goes out as the person's next message, through the ordinary Send.
+        send={controller.composer.send}
+        scope={controller.sessionId}
+        store={answerStore}
+        // Like the web: a cancelled or archived chat can't take another message.
+        readOnly={status === "cancelled" || controller.archived}
+      >
+        <NativeTimelineMessagesProvider messages={timelineMessages}>
+          <SessionScreenBoundary sessionId={controller.sessionId}>
+            <SessionScreenBody
+              controller={controller}
+              composer={composerSlots}
+              trailing={trailing}
+              topBar={topBar}
+              bottomInset={bottomInset}
+              keyboardBottomOffset={keyboardBottomOffset}
+              feedback={feedback}
+              humanInputMessages={humanInputMessages}
+              approvalMessages={approvalMessages}
+              loadReview={loadReview}
+              client={client}
+              inChatConnect={inChatConnect}
+              models={models}
+              agentSignals={agentSignals}
+              renderComposer={renderComposer}
+              renderMessageActions={hostMessageActions}
+              {...timelineProps}
+            />
+          </SessionScreenBoundary>
+        </NativeTimelineMessagesProvider>
+      </InteractiveAnswerProvider>
     </SingleSendWording>
   );
 }
@@ -218,6 +277,7 @@ class SessionScreenBoundary extends Component<
 
 function SessionScreenBody({
   controller,
+  pendingPrompt,
   composer: composerSlots,
   trailing,
   topBar,
@@ -226,17 +286,33 @@ function SessionScreenBody({
   feedback,
   humanInputMessages,
   approvalMessages,
+  loadReview,
   client,
   inChatConnect,
   models,
+  agentSignals,
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
-}: Omit<NativeSessionScreenProps, "timelineMessages">) {
+}: Omit<NativeSessionScreenProps, "timelineMessages" | "answerStore">) {
   const theme = useNativeTimelineTheme();
   const t = useOpenGeniText();
   const m = useNativeTimelineMessages();
+  const signals = resolveAgentSignals(agentSignals);
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
+  // With the full client, each approval card reads the server's saved review
+  // of its action after any review of the host's own: a Code Mode request
+  // carries no inline arguments, so without it the card can't say what it does.
+  const reviewWorkspaceId = controller.workspaceId;
+  const reviewSessionId = controller.sessionId;
+  const approvalReviews = useMemo<ApprovalStripProps["loadReview"]>(() => {
+    if (!client) return loadReview;
+    const saved = (approval: { id: string }) =>
+      client.getToolActionReview(reviewWorkspaceId, reviewSessionId, approval.id);
+    return loadReview
+      ? async (approval) => (await loadReview(approval)) ?? (await saved(approval))
+      : saved;
+  }, [loadReview, client, reviewWorkspaceId, reviewSessionId]);
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   const annotationReveal = useRef<AnnotationReveal | null>(null);
   const draftAnnotations = composer.annotations ?? [];
@@ -259,10 +335,19 @@ function SessionScreenBody({
   const followLatest = useCallback(() => setFollowLatestSignal((value) => value + 1), []);
   // The composer floats over the conversation; its occupied height insets the timeline.
   const [composerHeight, setComposerHeight] = useState(120);
-  const items = useMemo(
+  const conversation = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
   );
+  const items = useSessionStartupTimeline(conversation, {
+    session: controller.session.session,
+    events: controller.events,
+    optimisticMessages: composer.optimisticMessages,
+    hasNewer: false,
+    queue: queue.snapshot,
+    pendingPrompt,
+    historyReady: controller.initialHistoryReady ?? !controller.initialLoading,
+  });
   const stockAuthNeeded = useNativeInChatConnect({
     client,
     workspaceId: controller.workspaceId,
@@ -317,6 +402,7 @@ function SessionScreenBody({
         annotationRevealRef={annotationReveal}
         followLatestSignal={followLatestSignal}
         {...timelineProps}
+        agentSignals={agentSignals}
         hasOlder={controller.hasOlder}
         loadingOlder={controller.loadingOlder}
         onLoadOlder={controller.loadOlder}
@@ -338,7 +424,11 @@ function SessionScreenBody({
             : undefined)
         }
         items={items}
+        events={controller.events}
         status={status}
+        pause={timelineLivePause(
+          queue.effectiveControl ?? controller.session.session?.effectiveControl,
+        )}
         emptyState={
           empty && failed ? (
             <LoadFailure
@@ -439,7 +529,12 @@ function SessionScreenBody({
         header: (
           <>
             {composerSlots?.header}
-            <AttachmentChips attachments={attachments} />
+            <AttachmentChips
+              attachments={attachments}
+              restoredResources={composer.restoredResources}
+              onRemoveRestoredResource={composer.removeRestoredResource}
+              fileSource={composer.fileSource}
+            />
             {draftAnnotations.length > 0 && composer.removeAnnotation ? (
               <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
                 <AnnotationsChip
@@ -486,36 +581,46 @@ function SessionScreenBody({
               queue={queue}
               composer={composer}
               singleSend={composer.singleSend === true}
+              fileSource={composer.fileSource ?? attachments.fileSource}
               onComposerFocus={() => composerInput.current?.focus()}
               onReviewAnnotations={setQueuedReview}
               leading={
-                <SessionSignals
-                  goal={controller.goal}
-                  agents={controller.lineage.lineage?.children ?? []}
-                  commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
-                  onOpenSession={timelineProps.onOpenSession}
-                  models={models}
-                  readOnly={status === "failed" || status === "cancelled"}
-                  renderCommands={() =>
-                    client ? (
-                      <NativeSessionCommands
-                        client={client}
-                        workspaceId={controller.workspaceId}
-                        sessionId={controller.sessionId}
-                      />
-                    ) : null
-                  }
-                />
+                signals.goal || signals.agents || signals.commands ? (
+                  <SessionSignals
+                    goal={signals.goal ? controller.goal : null}
+                    agents={signals.agents ? (controller.lineage.lineage?.children ?? []) : []}
+                    commandsCount={
+                      signals.commands
+                        ? (controller.session.session?.backgroundCommandActivity?.count ?? 0)
+                        : 0
+                    }
+                    onOpenSession={timelineProps.onOpenSession}
+                    models={models}
+                    readOnly={status === "failed" || status === "cancelled" || controller.archived}
+                    renderCommands={() =>
+                      client ? (
+                        <NativeSessionCommands
+                          client={client}
+                          workspaceId={controller.workspaceId}
+                          sessionId={controller.sessionId}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : null
               }
             />
-            {approvals.length > 0 && status === "requires_action" ? (
+            {/* The pause's other approvals stay up while a decision resumes the turn. */}
+            {approvals.length > 0 && approvalsDecidable(status) ? (
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                onDecide={(id, decision) =>
-                  (decision === "approve" ? control.approve(id) : control.reject(id)).then(
-                    () => undefined,
-                  )
+                loadReview={approvalReviews}
+                onDecide={(id, decision, answer) =>
+                  (decision === "approve"
+                    ? control.approve(id, undefined, answer)
+                    : control.reject(id)
+                  ).then(() => undefined)
                 }
               />
             ) : null}
@@ -608,9 +713,9 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
 }
 
 /**
- * The runtime could not start this session's next step. It is not waiting on
- * the person, so it says so plainly and offers one recheck (Resume), which
- * starts the kept work again.
+ * The runtime could not start this session's next step. It says what is
+ * blocking it plainly; the kept work starts by itself once that is fixed. The
+ * machine's owner can allow it here, and an unknown failure offers Try again.
  */
 function StuckCard({
   session,
@@ -620,7 +725,7 @@ function StuckCard({
   onSessionChanged,
 }: {
   session: Session;
-  client: OpenGeniNativeSessionController["client"];
+  client: OpenGeniNativeSessionController<ChatClient>["client"];
   workspaceId: string;
   busy: boolean;
   onSessionChanged: () => Promise<void>;
@@ -629,7 +734,7 @@ function StuckCard({
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
   // The same state as the web notice: why the saved message didn't start, the
-  // machines this person may move the chat to, and one fenced recheck.
+  // machines this person may move the chat to, and the one action that fixes it.
   const start = useSessionStart({ session, onSessionChanged, client, workspaceId });
   const [failed, setFailed] = useState(false);
   // The recheck is one fenced Resume outside the session control runner, so
@@ -645,9 +750,43 @@ function StuckCard({
     start.needsDifferentMachine && start.machineAccess
       ? personalMachineCopy(t, start.machineAccess, { queued: true })
       : null;
+  // The person's own saved message was approved for another of their
+  // machines: name it and offer to run it there; a recheck can't help here.
+  const approvedTarget = start.approvedMachines[0] ?? null;
+  const approved =
+    !machine && start.approvedElsewhere && start.machineAccess
+      ? sessionAdmissionApprovedElsewhereCopy(t, start.machineAccess, approvedTarget)
+      : null;
+  const runOnApprovedMachine = start.runOnApprovedMachine;
   // The web notice's words for the known refusal; the native stuck copy when
-  // the block is only known from its status event.
-  const copy = reason ? sessionAdmissionCopy(t, reason) : null;
+  // the block is only known from its status event. Most refusals start by
+  // themselves once fixed, so they offer no button; the machine's owner gets
+  // Allow for this chat, and only an unknown failure gets Try again.
+  const copy = reason
+    ? start.needsMachineAccess && start.machineAccess
+      ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
+          canAllowHere: start.allowMachine !== undefined,
+        })
+      : sessionAdmissionCopy(t, reason)
+    : null;
+  const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;
+  const paused = session.effectiveControl.state === "paused";
+  const actionLabel = !copy
+    ? paused
+      ? null
+      : m.stuckRetry
+    : allowing
+      ? start.allowMachine
+        ? copy.action
+        : null
+      : copy.action && !paused
+        ? copy.action
+        : null;
+  const runAction = allowing ? start.allowMachine : start.recheck;
+  const tone =
+    approved || (copy && (copy.action === null || allowing))
+      ? c["status-waiting"]
+      : c["status-failed"];
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -657,19 +796,56 @@ function StuckCard({
         padding: 14,
         borderRadius: 14,
         borderWidth: 1,
-        borderColor: withAlpha(c["status-failed"], 0.3),
-        backgroundColor: withAlpha(c["status-failed"], 0.08),
+        borderColor: withAlpha(tone, 0.3),
+        backgroundColor: withAlpha(tone, 0.08),
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Icon name={approved ? "clock-3" : "circle-alert"} size={16} color={tone} />
         <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
           {machine
             ? t("sessionAdmission.needsDifferentMachineTitle")
-            : (copy?.title ?? m.stuckTitle)}
+            : (approved?.title ?? copy?.title ?? m.stuckTitle)}
         </Text>
       </View>
-      {machine ? (
+      {approved ? (
+        <>
+          <Text style={textStyle}>{approved.body}</Text>
+          <Text style={textStyle}>{approved.next}</Text>
+          {session.effectiveControl.state === "paused" ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : approved.action && approvedTarget && runOnApprovedMachine ? (
+            <Button
+              label={rechecking ? t("sessionAdmission.moving") : approved.action}
+              variant="primary"
+              busy={busy || rechecking}
+              disabled={busy || rechecking}
+              style={{ alignSelf: "flex-start" }}
+              onPress={() => {
+                if (recheckPending.current) return;
+                recheckPending.current = true;
+                setRechecking(true);
+                setFailed(false);
+                setMoveError(null);
+                runOnApprovedMachine(approvedTarget.sandboxId)
+                  .then(setMoveError, () => setFailed(true))
+                  .finally(() => {
+                    recheckPending.current = false;
+                    setRechecking(false);
+                  });
+              }}
+            />
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : machine ? (
         <>
           <Text style={textStyle}>{machine.explanation}</Text>
           <Text style={textStyle}>{machine.next}</Text>
@@ -723,6 +899,7 @@ function StuckCard({
         <>
           <Text style={textStyle}>{copy.body}</Text>
           <Text style={textStyle}>{copy.next}</Text>
+          {paused ? <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text> : null}
         </>
       ) : (
         <Text style={textStyle}>{m.stuckBody}</Text>
@@ -736,12 +913,12 @@ function StuckCard({
             color: c["status-failed"],
           }}
         >
-          {m.stuckRetryFailed}
+          {allowing ? t("sessionAdmission.allowFailed") : m.stuckRetryFailed}
         </Text>
       ) : null}
-      {machine ? null : (
+      {machine || approved || actionLabel === null || !runAction ? null : (
         <Button
-          label={m.stuckRetry}
+          label={actionLabel}
           variant="primary"
           busy={busy || rechecking}
           disabled={busy || rechecking}
@@ -751,8 +928,7 @@ function StuckCard({
             recheckPending.current = true;
             setRechecking(true);
             setFailed(false);
-            start
-              .recheck()
+            runAction()
               .catch(() => setFailed(true))
               .finally(() => {
                 recheckPending.current = false;
@@ -765,12 +941,38 @@ function StuckCard({
   );
 }
 
-/** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
-export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+/**
+ * Composer attachment chips: name, upload state, tap to retry a failure,
+ * remove. Images show as pictures, loaded from the server when there is no
+ * local photo (a restored draft, another device). `restoredResources` are
+ * files restored into the composer from a saved draft.
+ */
+export function AttachmentChips({
+  attachments,
+  restoredResources,
+  onRemoveRestoredResource,
+  fileSource,
+}: {
+  attachments: NativeFileAttachmentsResult;
+  restoredResources?: readonly ResourceRef[] | undefined;
+  onRemoveRestoredResource?: ((index: number) => void) | undefined;
+  /** Where stored files are read from; defaults to the attachments' own chat. */
+  fileSource?: StoredFileSource | undefined;
+}) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  if (attachments.attachments.length === 0) return null;
+  const source = fileSource ?? attachments.fileSource;
+  const items = useNativeComposerAttachments(
+    source,
+    attachments.attachments,
+    onRemoveRestoredResource ? restoredResources : undefined,
+  );
+  const remove = (item: NativeComposerAttachment) =>
+    item.restoredIndex === undefined
+      ? attachments.remove(item.id)
+      : onRemoveRestoredResource?.(item.restoredIndex);
+  if (items.length === 0) return null;
   return (
     <View
       style={{
@@ -781,10 +983,10 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
         paddingTop: 10,
       }}
     >
-      {attachments.attachments.map((item) => {
+      {items.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
-        if (item.kind === "image" && item.previewUri) {
+        if (item.kind === "image" && (item.previewUri || item.file)) {
           // Photos show as photos, as on the web: a thumbnail with its state on top.
           return (
             <View key={item.id} style={{ width: 56, height: 56 }}>
@@ -807,10 +1009,22 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                   backgroundColor: c["surface-2"],
                 }}
               >
-                <Image
-                  source={{ uri: item.previewUri }}
+                <StoredFileImage
+                  source={source}
+                  file={item.file}
+                  localUri={item.previewUri}
                   style={{ width: "100%", height: "100%" }}
-                  resizeMode="cover"
+                  fallback={
+                    <View
+                      style={{
+                        flex: 1,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Icon name="image" size={18} color={c["fg-subtle"]} />
+                    </View>
+                  }
                 />
                 {busy || failed ? (
                   <View
@@ -840,7 +1054,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                 accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                   name: item.name,
                 })}
-                onPress={() => attachments.remove(item.id)}
+                onPress={() => remove(item)}
                 hitSlop={8}
                 style={{
                   position: "absolute",
@@ -904,7 +1118,7 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
               accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
                 name: item.name,
               })}
-              onPress={() => attachments.remove(item.id)}
+              onPress={() => remove(item)}
               hitSlop={6}
               style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
             >
@@ -971,7 +1185,7 @@ function DraftConflictStrip(props: {
 
 /** Polls the session's commands only while the panel is open, as web does. */
 function NativeSessionCommands(props: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
 }) {

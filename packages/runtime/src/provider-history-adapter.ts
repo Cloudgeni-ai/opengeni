@@ -1,6 +1,12 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordForm,
+  withSearchRecordsAfterOpenCalls,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -18,13 +24,38 @@ export type ProviderHistoryOptions = {
    * same declaration as a developer message carrying the definitions as text.
    */
   declaresAdditionalTools?: boolean;
+  /**
+   * The session's {@link SearchRecordForm} for earlier hosted searches. Without
+   * it, each search keeps the form marked on it, else the original `assistant`.
+   * Claude's own searches that stay native for the Claude transport are marked
+   * with it, so that transport projects them in the same form when it cannot
+   * replay them natively.
+   */
+  searchRecordForm?: SearchRecordForm;
+  /**
+   * The provider that receives this Responses request. Opaque reasoning (its
+   * `encrypted_content`, or raw reasoning `content`) that another provider
+   * issued, or that `isRejectedArtifact` reports, reaches it only as readable
+   * historical text: only the issuing provider accepts it. The origin record
+   * ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so the issuing
+   * provider receives exactly the item it returned.
+   */
+  artifactScope?: string;
+  /** True for an opaque item this provider already refused to decrypt. */
+  isRejectedArtifact?: (item: Record<string, unknown>) => boolean;
 };
 
-const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
+/** The one tool-name format every Chat route and gateway accepts. */
+const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
+/**
+ * Records, on an opaque reasoning item, the provider that issued it. It is
+ * stored with the item and never sent to a provider.
+ */
+export const ARTIFACT_ORIGIN_KEY = "opengeni.artifact_origin.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
   "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
 const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
@@ -165,6 +196,160 @@ function historicalReasoningContent(text: string) {
   return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
 }
 
+function historicalReasoningMessage(text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [
+      text
+        ? historicalReasoningContent(text)
+        : {
+            type: "output_text",
+            text: "[Historical reasoning from another model is unavailable.]",
+          },
+    ],
+  };
+}
+
+function providerDataOf(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return item.providerData && typeof item.providerData === "object"
+    ? (item.providerData as Record<string, unknown>)
+    : undefined;
+}
+
+function partsText(parts: unknown): string {
+  return Array.isArray(parts)
+    ? parts
+        .filter((part) => typeof part?.text === "string")
+        .map((part) => part.text)
+        .join("")
+    : "";
+}
+
+/**
+ * Plain reasoning a Responses provider returned in the reasoning item's own
+ * `content` (for example an open-weight model behind a compatible endpoint).
+ * The SDK keeps it in providerData and spreads it back onto the wire item.
+ * OpenAI and Azure OpenAI accept no reasoning `content` at all, so it is as
+ * provider-specific as ciphertext.
+ */
+function rawResponsesReasoning(item: Record<string, unknown>): unknown[] | undefined {
+  if (item.type !== "reasoning") return undefined;
+  const raw = providerDataOf(item)?.content;
+  return Array.isArray(raw) && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * The readable form of a Responses reasoning item: its summary, else its raw
+ * reasoning, which can be far longer than a summary and is bounded like other
+ * historical facts.
+ */
+function reasoningSummaryText(item: Record<string, unknown>): string {
+  const summary = partsText(item.content);
+  if (summary) return summary;
+  const raw = partsText(rawResponsesReasoning(item));
+  return raw.length <= HISTORICAL_FACT_MAX_CHARS
+    ? raw
+    : `${raw.slice(0, HISTORICAL_FACT_MAX_CHARS)}…`;
+}
+
+/** The provider-issued ciphertext of a Responses reasoning item, if any. */
+function opaqueReasoningCiphertext(item: Record<string, unknown>): string | undefined {
+  if (item.type !== "reasoning") return undefined;
+  const metadata = providerDataOf(item);
+  for (const value of [
+    item.encrypted_content,
+    item.encryptedContent,
+    metadata?.encrypted_content,
+    metadata?.encryptedContent,
+  ])
+    if (typeof value === "string" && value.length > 0) return value;
+  return undefined;
+}
+
+/** The provider that issued this item's opaque reasoning, when it was recorded. */
+export function artifactOrigin(item: Record<string, unknown>): string | undefined {
+  const origin = providerDataOf(item)?.[ARTIFACT_ORIGIN_KEY];
+  return typeof origin === "string" ? origin : undefined;
+}
+
+/**
+ * Record the issuing provider on a reasoning item that carries ciphertext or
+ * raw provider reasoning. Every other item, and one already recorded, is
+ * returned by reference.
+ */
+export function withArtifactOrigin<T>(item: T, origin: string): T {
+  if (!item || typeof item !== "object") return item;
+  const record = item as Record<string, unknown>;
+  if (
+    (!opaqueReasoningCiphertext(record) && !rawResponsesReasoning(record)) ||
+    artifactOrigin(record) !== undefined
+  )
+    return item;
+  return {
+    ...record,
+    providerData: { ...providerDataOf(record), [ARTIFACT_ORIGIN_KEY]: origin },
+  } as T;
+}
+
+// Projections are memoized per canonical item so a repeated request reuses the
+// same projected object (the append-only Responses converter matches by identity).
+const nativeArtifactProjections = new WeakMap<object, Record<string, unknown>>();
+const foreignArtifactProjections = new WeakMap<object, Record<string, unknown>>();
+
+function memoized(
+  cache: WeakMap<object, Record<string, unknown>>,
+  item: Record<string, unknown>,
+  project: () => Record<string, unknown>,
+): Record<string, unknown> {
+  let projected = cache.get(item);
+  if (!projected) {
+    projected = project();
+    cache.set(item, projected);
+  }
+  return projected;
+}
+
+function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, unknown> {
+  const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = providerDataOf(item) ?? {};
+  const { providerData: _metadata, ...rest } = item;
+  return Object.keys(providerData).length ? { ...rest, providerData } : rest;
+}
+
+/**
+ * Opaque reasoning goes back natively only to the provider that issued it.
+ * Another provider cannot decrypt it and rejects the whole request, so it gets
+ * the readable summary instead, exactly as Claude and Chat routes already do.
+ * Untagged items (stored before origins were recorded) stay native until the
+ * provider refuses them. Raw reasoning `content` follows the same rule, except
+ * that an untagged item carrying it is always readable text, with or without
+ * ciphertext: no refusal names it (providers reject its shape, not a
+ * ciphertext), so it could otherwise fail every retry on a provider that did
+ * not issue it.
+ */
+function scopedOpaqueArtifact(
+  item: Record<string, unknown>,
+  options: ProviderHistoryOptions,
+): Record<string, unknown> | undefined {
+  const scope = options.artifactScope;
+  if (scope === undefined || item.type !== "reasoning") return undefined;
+  const origin = artifactOrigin(item);
+  const ciphertext = opaqueReasoningCiphertext(item);
+  const raw = rawResponsesReasoning(item) !== undefined;
+  if (
+    (ciphertext || raw) &&
+    ((origin !== undefined && origin !== scope) ||
+      (origin === undefined && raw) ||
+      options.isRejectedArtifact?.(item) === true)
+  )
+    return memoized(foreignArtifactProjections, item, () =>
+      historicalReasoningMessage(reasoningSummaryText(item)),
+    );
+  if (origin === undefined) return undefined;
+  return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
+}
+
 /** Opaque reasoning belongs to its native API. Foreign APIs receive only its
  * readable text (or an explicit unavailable marker), never signatures/ciphertext.
  * The canonical artifact stays intact for a later switch back to its native API.
@@ -181,28 +366,9 @@ function foreignReasoningFact(
       ? "chat"
       : "responses";
   if (nativeApi === providerApi) return undefined;
-  const content =
-    nativeApi === "chat"
-      ? chatReasoningText(item)
-      : Array.isArray(item.content)
-        ? item.content
-            .filter((part) => typeof part?.text === "string")
-            .map((part) => part.text)
-            .join("")
-        : "";
-  return {
-    type: "message",
-    role: "assistant",
-    status: "completed",
-    content: [
-      content
-        ? historicalReasoningContent(content)
-        : {
-            type: "output_text",
-            text: "[Historical reasoning from another model is unavailable.]",
-          },
-    ],
-  };
+  return historicalReasoningMessage(
+    nativeApi === "chat" ? chatReasoningText(item) : reasoningSummaryText(item),
+  );
 }
 
 /** The Chat SDK stores a complete reply message (including its role) in an
@@ -309,10 +475,19 @@ export function projectHistoryForProvider(
   const nativeClaude = providerApi === "anthropic-messages";
   // Each distinct session goal context reaches the model once per request.
   const goalOnce = collapseRepeatedSessionGoalContexts(items);
-  const projected = goalOnce.map((item) => {
-    const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
-    return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
-  });
+  // A search record never separates a tool call from its result on any API.
+  const projected = withSearchRecordsAfterOpenCalls(
+    goalOnce.map((item) => {
+      const form = options.searchRecordForm;
+      const evidence = projectHostedSearchEvidence(item, {
+        preserveAnthropicNative: nativeClaude,
+        ...(form ? { form } : {}),
+      });
+      if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
+        return withSearchRecordForm(evidence, form);
+      return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
+    }),
+  );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
@@ -402,7 +577,8 @@ function projectWireHistory(
             }
         : item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
-          : (foreignReasoningFact(item, providerApi) ??
+          : (scopedOpaqueArtifact(item, options) ??
+            foreignReasoningFact(item, providerApi) ??
             portableChatMetadata(item, items[index - 1]));
       changed ||= next !== item;
       return next;

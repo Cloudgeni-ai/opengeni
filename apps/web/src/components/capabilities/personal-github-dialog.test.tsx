@@ -82,11 +82,196 @@ describe("PersonalGitHubDialog", () => {
         (button) => button.textContent?.trim() === "Save repositories",
       );
       await act(async () => save?.click());
-      expect(onSave).toHaveBeenCalledWith([
-        { repositoryId: "101", fullName: "octocat/maintained", access: "write" },
-        { repositoryId: "102", fullName: "octocat/read-only", access: "read" },
-      ]);
+      expect(onSave).toHaveBeenCalledWith(
+        [
+          { repositoryId: "101", fullName: "octocat/maintained", access: "write" },
+          { repositoryId: "102", fullName: "octocat/read-only", access: "read" },
+        ],
+        null,
+      );
       expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("All my repositories keeps the per-repository choice for later", async () => {
+    const saved = {
+      ...repository("102", "octocat/kept"),
+      selectedAccess: "read" as const,
+      selectionGeneration: 3,
+      selectedAt: "2026-11-01T00:00:00.000Z",
+      lastVerifiedAt: "2026-11-01T00:00:00.000Z",
+    };
+    // In All my repositories the catalog marks every repository usable.
+    const listed = repository("101", "octocat/other", { selectedAccess: "read" });
+    const onSave = mock(async () => true);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const select = (label: string) =>
+      container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
+    const change = async (element: HTMLSelectElement, value: string) =>
+      await act(async () => {
+        element.value = value;
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    try {
+      await act(async () => {
+        root.render(
+          <PersonalGitHubDialog
+            open
+            onOpenChange={() => undefined}
+            login="octocat"
+            repositories={[listed]}
+            savedRepositories={[saved]}
+            allRepositoriesAccess="write"
+            allRepositoriesAvailable
+            busy={false}
+            onSave={onSave}
+            onReconnect={() => undefined}
+            onDisconnect={() => undefined}
+          />,
+        );
+      });
+      expect(select("Repositories Opengeni may use").value).toBe("all");
+      expect(select("Access to all repositories").value).toBe("write");
+      expect(container.querySelector('input[aria-label="Find a GitHub repository"]')).toBeNull();
+      await change(select("Access to all repositories"), "read");
+      const save = () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Save repositories")!
+          .click();
+      await act(async () => save());
+      expect(onSave).toHaveBeenLastCalledWith(
+        [{ repositoryId: "102", fullName: "octocat/kept", access: "read" }],
+        "read",
+      );
+      // Back to chosen repositories: the saved choice is still there.
+      await change(select("Repositories Opengeni may use"), "chosen");
+      expect(
+        container
+          .querySelector('button[aria-label="Remove octocat/kept"]')
+          ?.getAttribute("aria-pressed"),
+      ).toBe("true");
+      await act(async () => save());
+      expect(onSave).toHaveBeenLastCalledWith(
+        [{ repositoryId: "102", fullName: "octocat/kept", access: "read" }],
+        null,
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("offers All my repositories only where the deployment allows it", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = async (allRepositoriesAvailable: boolean) =>
+      await act(async () => {
+        root.render(
+          <PersonalGitHubDialog
+            open
+            onOpenChange={() => undefined}
+            login="octocat"
+            repositories={[repository("101", "octocat/one")]}
+            allRepositoriesAvailable={allRepositoriesAvailable}
+            busy={false}
+            onSave={async () => true}
+            onReconnect={() => undefined}
+            onDisconnect={() => undefined}
+          />,
+        );
+      });
+    const modeSelect = () =>
+      container.querySelector('select[aria-label="Repositories Opengeni may use"]');
+    try {
+      await render(false);
+      expect(modeSelect()).toBeNull();
+      expect(container.querySelector('button[aria-label="Allow octocat/one"]')).not.toBeNull();
+      await render(true);
+      expect(modeSelect()).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("searches GitHub past the loaded list", async () => {
+    const onSearch = mock(async (_query: string) => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <PersonalGitHubDialog
+            open
+            onOpenChange={() => undefined}
+            login="octocat"
+            repositories={[]}
+            busy={false}
+            onSave={async () => true}
+            onSearch={onSearch}
+            onReconnect={() => undefined}
+            onDisconnect={() => undefined}
+          />,
+        );
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Find a GitHub repository"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(
+          input,
+          "acme/wid",
+        );
+        const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+        const onChange = reactPropsKey
+          ? (
+              input as unknown as Record<
+                string,
+                { onChange?: (event: { target: HTMLInputElement }) => void }
+              >
+            )[reactPropsKey]?.onChange
+          : undefined;
+        if (onChange) onChange({ target: input });
+        else input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 350)));
+      expect(onSearch).toHaveBeenCalledWith("acme/wid");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("names the identity and says when repositories are still loading", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const dialog = (loading: boolean) => (
+      <PersonalGitHubDialog
+        open
+        onOpenChange={() => undefined}
+        login="octocat"
+        repositories={[]}
+        loading={loading}
+        busy={false}
+        onSave={async () => true}
+        onReconnect={() => undefined}
+        onDisconnect={() => undefined}
+      />
+    );
+    try {
+      await act(async () => root.render(dialog(true)));
+      expect(container.querySelector("h2")?.textContent).toBe("Your GitHub");
+      expect(container.textContent).toContain("Choose the repos Opengeni may use as you.");
+      expect(container.textContent).toContain("Loading repositories…");
+      await act(async () => root.render(dialog(false)));
+      expect(container.textContent).toContain("No repositories found.");
     } finally {
       await act(async () => root.unmount());
       container.remove();

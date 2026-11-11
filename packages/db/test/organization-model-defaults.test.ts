@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { readFile } from "node:fs/promises";
 
 import {
   createDb,
@@ -14,7 +13,6 @@ import {
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "../src";
-import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 // Organization model defaults: every workspace follows them until it saves
 // its own value, field by field.
@@ -59,18 +57,7 @@ async function organization(label: string) {
 }
 
 describe("organization model defaults", () => {
-  test("ships as a rolling FORCE RLS table the runtime may change", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0690_organization_model_defaults.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration.split("\n")[0]).toBe("-- deployment-mode: rolling");
-    expect(migration).toContain("FORCE ROW LEVEL SECURITY");
-    expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
-    expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
-  });
-
-  test("workspaces follow the organization's allowlist until they choose their own", async () => {
+  test("a workspace's own allowlist only narrows the organization's", async () => {
     if (!client) return;
     const db = client.db;
     const org = await organization("org-defaults-policy");
@@ -87,7 +74,7 @@ describe("organization model defaults", () => {
       allowCreditModels: true,
     });
 
-    // A workspace's own choice wins, including "allow every model".
+    // "Allow every model" in a workspace means every model the organization allows.
     await upsertWorkspaceModelPolicy(db, {
       accountId: org.accountId,
       workspaceId: org.workspaceId,
@@ -101,11 +88,46 @@ describe("organization model defaults", () => {
     });
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
-      allowedModels: null,
+      allowedModels: ["model-a"],
       allowCreditModels: true,
     });
 
-    // Removing it follows the organization again.
+    // Its own list keeps only what the organization allows.
+    await upsertWorkspaceModelPolicy(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      allowedProviders: ["openai"],
+      allowedModels: ["model-a", "model-b"],
+    });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
+      allowedProviders: ["openai"],
+      allowedModels: ["model-a"],
+      allowCreditModels: true,
+    });
+    // Providers narrow the same way.
+    await updateOrganizationModelDefaults(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      patch: { modelPolicy: { allowedProviders: ["openai", "anthropic"], allowedModels: null } },
+    });
+    await upsertWorkspaceModelPolicy(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      allowedProviders: ["anthropic", "xai"],
+      allowedModels: null,
+    });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
+      allowedProviders: ["anthropic"],
+      allowedModels: null,
+      allowCreditModels: true,
+    });
+    await updateOrganizationModelDefaults(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      patch: { modelPolicy: { allowedProviders: null, allowedModels: ["model-a"] } },
+    });
+
+    // Removing it uses the organization's list as is.
     await deleteWorkspaceModelPolicy(db, {
       accountId: org.accountId,
       workspaceId: org.workspaceId,
@@ -163,7 +185,7 @@ describe("organization model defaults", () => {
     });
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
-      allowedModels: null,
+      allowedModels: ["model-a"],
       allowCreditModels: false,
     });
     await deleteWorkspaceModelPolicy(db, {

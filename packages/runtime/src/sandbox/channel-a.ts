@@ -21,6 +21,7 @@
 // `createEditor` for text when `exec` is absent.
 
 import { createHash } from "node:crypto";
+import { gitCommandCapture } from "./git-command-capture";
 import { confinedFileReadCommand, parseConfinedFileRead } from "./confined-file-read";
 import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
@@ -330,6 +331,9 @@ export class ChannelAValidationError extends Error {
     this.name = "ChannelAValidationError";
   }
 }
+/** The requested path itself is a symbolic link, which the confined file API
+ * refuses because it cannot prove the target stays inside the workspace. */
+export class ChannelASymlinkPathError extends ChannelAValidationError {}
 /** A structurally valid Channel-A request could not be completed because the
  * sandbox/provider control plane was temporarily unavailable. Callers may retry
  * this class; it must never be presented as a bad user path. */
@@ -392,6 +396,8 @@ export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
   /** Worker lifecycle registration/cancellation, without model background adoption. */
   commandRunner?: SynchronousCommandRunner;
+  /** Stop admitting new Git reads; already-started reads retain collection/cleanup ownership. */
+  signal?: AbortSignal;
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
   // after validation against the operation's path scope.
@@ -743,6 +749,32 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
   return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
+/** Large Git captures fall back to individual files. Admit those reads lazily:
+ * eager Promise construction dispatches one physical command per file before
+ * any cancellation or failure can be observed. Preserve every file and its
+ * ordering, but join dispatched reads and stop admitting work after failure. */
+async function readGitFiles<T, R>(
+  files: readonly T[],
+  read: (file: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(files.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const index = next++;
+      try {
+        results[index] = await read(files[index]!);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await settleConcurrentReads(Array.from({ length: Math.min(4, files.length) }, worker));
+  return results;
+}
+
 function isNonReplayableCommandFault(error: unknown): boolean {
   return (
     error instanceof SynchronousCommandOutcomeUnknownError ||
@@ -755,6 +787,7 @@ function isNonReplayableCommandFault(error: unknown): boolean {
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
   private readonly commandRunner: SynchronousCommandRunner | undefined;
+  private readonly signal: AbortSignal | undefined;
   private readonly workspaceRoot: string;
   private readonly providerPathMode: "canonical" | "workspace-relative";
   private readonly fileReadScope: "workspace" | "machine";
@@ -766,6 +799,7 @@ export class SandboxChannelAService {
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
     this.commandRunner = opts.commandRunner;
+    this.signal = opts.signal;
     const workspaceRoot = opts.workspaceRoot ?? "";
     this.workspaceRoot = isConnectedMachineAbsolutePath(workspaceRoot)
       ? resolveConnectedMachinePath(workspaceRoot, undefined)
@@ -1195,7 +1229,7 @@ export class SandboxChannelAService {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
     if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
-      throw new ChannelAValidationError(`${kind} path must not be a symbolic link: ${path}`);
+      throw new ChannelASymlinkPathError(`${kind} path must not be a symbolic link: ${path}`);
     }
     if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
       throw new ChannelANotFoundError(`${kind} path not found: ${path}`);
@@ -2336,13 +2370,11 @@ export class SandboxChannelAService {
     return { sizeBytes: size, sha256: match[3]! };
   }
 
-  /** Read an exact prefix of a command's output in chunks that remain below
-   * every supported execCommand retained-output ceiling. The producer is
-   * intentionally rerun per chunk; turn-end capture calls this only after the
-   * durable mutation authority has quiesced the workspace. */
+  /** Read the sealed producer output in bounded transport chunks. Replaying
+   * Git for each chunk makes a large branch diff quadratic in output size. */
   private async readConfinedCommandPrefix(
     repo: string,
-    command: string,
+    spool: { name: string; identity: string },
     measurement: { sizeBytes: number; sha256: string },
     prefixByteLength = measurement.sizeBytes,
     initialBytes: Buffer = Buffer.alloc(0),
@@ -2365,7 +2397,7 @@ export class SandboxChannelAService {
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
     }
-    if (prefixByteLength === 0) return Buffer.alloc(0);
+
     const chunks: Buffer[] = initialBytes.byteLength > 0 ? [initialBytes] : [];
     for (
       let offset = initialBytes.byteLength;
@@ -2374,18 +2406,15 @@ export class SandboxChannelAService {
     ) {
       const expected = Math.min(GIT_COMMAND_CHUNK_BYTES, prefixByteLength - offset);
       const chunk = await this.runInConfinedDirectory(repo, {
-        cmd: [
-          PORTABLE_SHA256_FILE_FUNCTION,
-          "tmp=$(mktemp) || exit 70",
-          "trap 'rm -f \"$tmp\"' EXIT",
-          `/bin/bash --noprofile --norc -c ${shellQuote(command)} >"$tmp" 2>/dev/null`,
-          "producer_status=$?",
-          `bytes=$(wc -c <"$tmp" | tr -d ' \\n')`,
-          `sha256=$(opengeni_sha256_file "$tmp") || exit 71`,
-          `printf '${GIT_CHUNK_FRAME}\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$producer_status" "$bytes" "$sha256" ${offset} ${expected}`,
-          `if [ "$producer_status" -eq 0 ]; then tail -c +${offset + 1} "$tmp" | head -c ${expected} | base64 | tr -d '\\n'; fi`,
-          `printf '\\n${GIT_CHUNK_FRAME_END}'`,
-        ].join("; "),
+        cmd: gitCommandCapture({
+          ...spool,
+          action: "read",
+          chunkBytes: GIT_COMMAND_CHUNK_BYTES,
+          sizeBytes: measurement.sizeBytes,
+          sha256: measurement.sha256,
+          offset,
+          expected,
+        }),
         maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
       });
       if (chunk.exitCode !== 0) {
@@ -2417,7 +2446,13 @@ export class SandboxChannelAService {
       }
       chunks.push(bytes);
     }
-    return Buffer.concat(chunks, prefixByteLength);
+    const bytes = Buffer.concat(chunks, prefixByteLength);
+    if (createHash("sha256").update(bytes).digest("hex") !== measurement.sha256) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data changed during capture. Retry the operation.",
+      );
+    }
+    return bytes;
   }
 
   private async readConfinedCommandBytes(
@@ -2425,69 +2460,97 @@ export class SandboxChannelAService {
     command: string,
     maxBytes: number,
   ): Promise<{ bytes: Buffer; sizeBytes: number; truncated: boolean }> {
-    // Measure and return the first safe chunk in one provider operation. The
-    // previous measure-then-read protocol reran every Git command even when its
-    // complete output fit in one chunk, doubling latency on remote sandboxes.
-    const captured = await this.runInConfinedDirectory(repo, {
-      cmd: [
-        PORTABLE_SHA256_FILE_FUNCTION,
-        "tmp=$(mktemp) || exit 70",
-        "trap 'rm -f \"$tmp\"' EXIT",
-        `/bin/bash --noprofile --norc -c ${shellQuote(command)} >"$tmp" 2>/dev/null`,
-        "producer_status=$?",
-        `bytes=$(wc -c <"$tmp" | tr -d ' \\n')`,
-        `sha256=$(opengeni_sha256_file "$tmp") || exit 71`,
-        `capture_bytes=0; if [ "$producer_status" -eq 0 ] && [ "$bytes" -le ${maxBytes} ]; then capture_bytes="$bytes"; if [ "$capture_bytes" -gt ${GIT_COMMAND_CHUNK_BYTES} ]; then capture_bytes=${GIT_COMMAND_CHUNK_BYTES}; fi; fi`,
-        `printf '${GIT_CHUNK_FRAME}\\t%s\\t%s\\t%s\\t0\\t%s\\n' "$producer_status" "$bytes" "$sha256" "$capture_bytes"`,
-        'if [ "$capture_bytes" -gt 0 ]; then head -c "$capture_bytes" "$tmp" | base64 | tr -d \'\\n\'; fi',
-        `printf '\\n${GIT_CHUNK_FRAME_END}'`,
-      ].join("; "),
-      maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
-    });
-    if (captured.exitCode !== 0) {
-      throw new ChannelAUnavailableError(
-        "Workspace Git data is temporarily unavailable. Retry the operation.",
-      );
-    }
-    const parsed = parseGitChunkCapture(captured.stdout);
-    const sizeBytes = parsed ? Number(parsed.sizeBytes) : Number.NaN;
-    const capturedBytes = parsed ? Number(parsed.capturedBytes) : Number.NaN;
-    if (
-      !parsed ||
-      parsed.producerStatus !== "0" ||
-      !Number.isSafeInteger(sizeBytes) ||
-      sizeBytes < 0 ||
-      parsed.offset !== "0" ||
-      !Number.isSafeInteger(capturedBytes) ||
-      capturedBytes < 0 ||
-      capturedBytes !== (sizeBytes > maxBytes ? 0 : Math.min(sizeBytes, GIT_COMMAND_CHUNK_BYTES))
-    ) {
-      throw new ChannelAUnavailableError(
-        "Workspace Git data is temporarily unavailable. Retry the operation.",
-      );
-    }
-    const encoded = parsed.encoded;
-    const initialBytes = Buffer.from(encoded, "base64");
-    if (initialBytes.byteLength !== capturedBytes || initialBytes.toString("base64") !== encoded) {
-      throw new ChannelAUnavailableError(
-        "Workspace Git data is temporarily unavailable. Retry the operation.",
-      );
-    }
-    if (sizeBytes > maxBytes) {
-      return { bytes: Buffer.alloc(0), sizeBytes, truncated: true };
-    }
-    const measurement = { sizeBytes, sha256: parsed.sha256 };
-    return {
-      bytes: await this.readConfinedCommandPrefix(
-        repo,
-        command,
-        measurement,
+    // A cancelled review must not start the next queued file. Finish collection
+    // and exact spool cleanup for reads already dispatched; cancellation alone
+    // is neither provider exit proof nor permission to abandon their output.
+    if (this.signal?.aborted) throw new TurnSandboxCommandCancelledError(this.signal.reason);
+    // A private, unpredictable spool belongs to this read only. Small results
+    // are removed by the producer; multi-chunk results live until the finally.
+    const name = `opengeni-git-capture-${crypto.randomUUID()}`;
+    let identity: string | undefined;
+    let needsCleanup = false;
+    try {
+      // Measure and return the first safe chunk in one provider operation. The
+      // previous measure-then-read protocol reran every Git command even when its
+      // complete output fit in one chunk, doubling latency on remote sandboxes.
+      const captured = await this.runInConfinedDirectory(repo, {
+        cmd: gitCommandCapture({
+          name,
+          action: "capture",
+          command,
+          maxBytes,
+          chunkBytes: GIT_COMMAND_CHUNK_BYTES,
+        }),
+        maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
+      });
+      identity = /__OPENGENI_GIT_SPOOL__(\d+:\d+)/.exec(captured.stdout)?.[1];
+      needsCleanup = identity !== undefined;
+      if (captured.exitCode !== 0) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      const parsed = parseGitChunkCapture(captured.stdout);
+      const sizeBytes = parsed ? Number(parsed.sizeBytes) : Number.NaN;
+      const capturedBytes = parsed ? Number(parsed.capturedBytes) : Number.NaN;
+      if (
+        !parsed ||
+        parsed.producerStatus !== "0" ||
+        !Number.isSafeInteger(sizeBytes) ||
+        sizeBytes < 0 ||
+        parsed.offset !== "0" ||
+        !Number.isSafeInteger(capturedBytes) ||
+        capturedBytes < 0 ||
+        capturedBytes !== (sizeBytes > maxBytes ? 0 : Math.min(sizeBytes, GIT_COMMAND_CHUNK_BYTES))
+      ) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      needsCleanup = sizeBytes > GIT_COMMAND_CHUNK_BYTES && sizeBytes <= maxBytes;
+      const encoded = parsed.encoded;
+      const initialBytes = Buffer.from(encoded, "base64");
+      if (
+        initialBytes.byteLength !== capturedBytes ||
+        initialBytes.toString("base64") !== encoded
+      ) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      if (sizeBytes > maxBytes) {
+        return { bytes: Buffer.alloc(0), sizeBytes, truncated: true };
+      }
+      if (needsCleanup && !identity)
+        throw new ChannelAUnavailableError("Workspace Git capture identity is unavailable.");
+      const measurement = { sizeBytes, sha256: parsed.sha256 };
+      return {
+        bytes: await this.readConfinedCommandPrefix(
+          repo,
+          { name, identity: identity ?? "" },
+          measurement,
+          sizeBytes,
+          initialBytes,
+        ),
         sizeBytes,
-        initialBytes,
-      ),
-      sizeBytes,
-      truncated: false,
-    };
+        truncated: false,
+      };
+    } finally {
+      // Only these two exact owned entries are removable, never a recursive
+      // directory or an arbitrary provider-returned path. The helper bounds
+      // cleanup in-process. A lost initial receipt or killed worker can leave
+      // a private temporary spool; never guess its identity or delete broadly.
+      if (needsCleanup && identity)
+        await this.runInConfinedDirectory(repo, {
+          cmd: gitCommandCapture({
+            name,
+            identity: identity!,
+            action: "cleanup",
+            chunkBytes: GIT_COMMAND_CHUNK_BYTES,
+          }),
+          maxOutputTokens: 1_024,
+        }).catch(() => undefined);
+    }
   }
 
   /** Bind untracked regular-file descriptors to their repository root and lstat
@@ -2747,7 +2810,7 @@ export class SandboxChannelAService {
               };
             }),
           )
-        : settleConcurrentReads(stats.map(readTrackedFile));
+        : readGitFiles(stats, readTrackedFile);
 
     const shapeUntrackedSnapshot = (snapshot: CombinedUntrackedSnapshot): GitFileDiff => {
       let { sampled, sizeBytes, lineCount } = snapshot;
@@ -2879,8 +2942,9 @@ export class SandboxChannelAService {
               "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
             );
           }
-          return settleConcurrentReads(
-            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean).map(readUntrackedFile),
+          return readGitFiles(
+            decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean),
+            readUntrackedFile,
           );
         })();
       }
@@ -3729,7 +3793,7 @@ export class SandboxChannelAService {
         throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
       }
       if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
-        throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
+        throw new ChannelASymlinkPathError(`directory path must not be a symbolic link: ${safe}`);
       }
       if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
         throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);

@@ -65,6 +65,7 @@ import {
   listVaultItems,
   listSecretApprovalRules,
   listVaultsForSubject,
+  listOrganizationVaults,
   vaultItemCursor,
   moveVaultItem,
   readVaultFieldCiphertext,
@@ -125,6 +126,15 @@ import type { VaultRequestActor, VaultServiceDeps } from "./types";
 
 export interface VaultService {
   list(actor: VaultRequestActor, workspaceId: string): Promise<VaultSummary[]>;
+  /**
+   * Every organization vault, wherever it works, for organization owners and
+   * admins. `complete` is always true; servers before migration 1272 could
+   * list only the ones that work in this workspace and sent false.
+   */
+  listOrganization(
+    actor: VaultRequestActor,
+    workspaceId: string,
+  ): Promise<{ vaults: VaultSummary[]; complete: true }>;
   get(actor: VaultRequestActor, workspaceId: string, vaultId: string): Promise<VaultSummary>;
   create(
     actor: VaultRequestActor,
@@ -910,6 +920,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       });
       const authority = authorityOf(actor);
       return rows.map((row) => toVaultSummary(row, authority));
+    },
+
+    async listOrganization(actor, workspaceId) {
+      if (!actor.accountAdmin) {
+        throw new VaultError("vault_permission_denied", "organization vaults need account:admin");
+      }
+      const context = subjectContext(actor, workspaceId);
+      const authority = authorityOf(actor);
+      const everywhere = await listOrganizationVaults(deps.db, context, { workspaceId });
+      return { vaults: everywhere.map((row) => toVaultSummary(row, authority)), complete: true };
     },
 
     async get(actor, workspaceId, vaultId) {

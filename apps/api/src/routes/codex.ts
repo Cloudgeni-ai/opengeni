@@ -1,6 +1,7 @@
 import type { CodexRateLimitResetCreditsAccountResult } from "@opengeni/db";
 import type { CodexResetRedemptionRecovery } from "@opengeni/db";
 import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overview-budget";
+import { codexCatalogModels, codexConnectOfferedModels } from "./codex-connect-models";
 // Codex (ChatGPT) subscription connect / status / usage routes.
 //
 // Connect uses the device-code flow split into two stateless calls: `start`
@@ -12,10 +13,8 @@ import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overv
 
 import {
   environmentsEncryptionKeyBytes,
-  configuredModels,
   getSettings,
   productLabelForModelId,
-  withCodexCatalogProvider,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -216,32 +215,29 @@ export function codexModelsForPicker(
   providerLabel: string;
   api: "responses";
 }> {
-  return configuredModels(withCodexCatalogProvider(settings))
-    .filter(
-      (model) =>
-        model.providerId === CODEX_PROVIDER_ID &&
-        (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
-    )
-    .map((model) => ({
-      id: model.id,
-      label: model.label,
-      provider: CODEX_PROVIDER_ID,
-      providerLabel: CODEX_PROVIDER_LABEL,
-      api: "responses" as const,
-    }));
+  return codexCatalogModels(settings, supportedSlugs).map((model) => ({
+    id: model.id,
+    label: model.label,
+    provider: CODEX_PROVIDER_ID,
+    providerLabel: CODEX_PROVIDER_LABEL,
+    api: "responses" as const,
+  }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   getManagedSession,
   hasPermission,
+  requireAccessContext,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireCanonicalLocalAccountAdministrator,
+  resolveAccountAdminAuthorizationStamp,
   resolveCatalogSettings,
+  workspaceSettingsAuthorized,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import {
-  codexRouteDisposition,
   coreCodexUsage,
   coreCodexUsageRefresh,
   coreCodexAccounts,
@@ -269,6 +265,8 @@ import {
   requireNotAgent,
 } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { isConfiguredDeploymentKeyRequest } from "../http/auth";
 import * as z from "zod/v4";
 import {
   CodexSourceRequest,
@@ -281,6 +279,7 @@ import {
   verifyCodexRedemptionConfirmation,
 } from "../codex-redemption-security";
 import { parseRequestBody } from "../http/request-body";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 
 const CODEX_OVERVIEW_STALE_MS = 15 * 60_000;
 const CODEX_REDEMPTION_CONFIRMATION_SECONDS = 5 * 60;
@@ -298,6 +297,11 @@ const redemptionBody = redemptionPrepareBody.extend({
 type ManagedCookieHuman = {
   subjectId: string;
   browserSessionHash: string;
+  /**
+   * Admitted as an account administrator without a person (no organization
+   * membership to read people, gateways or defaults through).
+   */
+  accountAdministrator?: true;
 };
 
 /**
@@ -361,6 +365,13 @@ export async function requireOrganizationCodexHuman(
   options: {
     /** A provider sign-in step: the person does it in the browser, never an agent. */
     providerConsent?: boolean;
+    /**
+     * Also admit an account administrator the request authenticated as
+     * without a person (configured key, account-scoped key, signed
+     * delegation with account:admin). Only for routes whose database writes
+     * accept the same proof (subscription connections and their settings).
+     */
+    accountAdministrator?: boolean;
   } = {},
 ): Promise<ManagedCookieHuman> {
   if (options.providerConsent) requireNotAgent(c, "Signing in to a provider");
@@ -374,6 +385,26 @@ export async function requireOrganizationCodexHuman(
       human = {
         subjectId: agent.subjectId,
         browserSessionHash: await agentSessionHash(agent.subjectId),
+      };
+    }
+  }
+  if (
+    !human &&
+    options.accountAdministrator &&
+    (deps.settings.productAccessMode !== "local" || c.req.header("authorization"))
+  ) {
+    const context = await requireAccessContext(c, deps);
+    const stamp = await resolveAccountAdminAuthorizationStamp(c, deps, {
+      accountId: parsed.data,
+      subjectId: context.subjectId,
+    });
+    if (stamp) {
+      // No browser: a sign-in this principal starts is only ever continued by
+      // the same principal, and never matches a person's browser session.
+      return {
+        subjectId: stamp.actorSubjectId,
+        browserSessionHash: await hashCodexBrowserSession(`account-admin:${stamp.actorSubjectId}`),
+        accountAdministrator: true,
       };
     }
   }
@@ -409,6 +440,39 @@ export async function requireOrganizationCodexHuman(
     throw error;
   }
   return human;
+}
+
+/**
+ * The organization's subscription model administrator: an organization
+ * owner or admin (or an agent acting as one), or any account administrator
+ * the request authenticated as. The subscription writers accept the same
+ * set; organization gateways, defaults and reset redemption stay with people.
+ */
+export async function requireOrganizationSubscriptionAdministrator(
+  c: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  options: { providerConsent?: boolean } = {},
+): Promise<ManagedCookieHuman> {
+  return await requireOrganizationCodexHuman(c, deps, organizationId, {
+    ...options,
+    accountAdministrator: true,
+  });
+}
+
+/**
+ * The browser-origin rule for organization subscription changes. It guards
+ * cookie-authenticated requests. A request carrying its own credential (a
+ * bearer token or the deployment access key header) is not authenticated by
+ * a cookie and cannot be forged cross-site, as the workspace subscription
+ * routes already accept.
+ */
+export function requireOrganizationSubscriptionMutationOrigin(
+  c: Context,
+  deps: ApiRouteDeps,
+): void {
+  if (c.req.header("authorization") || isConfiguredDeploymentKeyRequest(c, deps.settings)) return;
+  requireSameOriginBrowserMutation(c, deps);
 }
 
 async function requireRedemptionHuman(
@@ -686,10 +750,44 @@ type CodexConnectState = {
   actorSubjectId?: string;
   deviceAuthId?: string;
   userCode?: string;
+  /**
+   * `user`: the person's own Codex subscription, connected from this
+   * workspace and kept in their own Personal workspace.
+   */
+  scope?: "user";
   iat?: number;
 };
 
 const CODEX_DEVICE_EXPIRY_SECONDS = 15 * 60; // the device code expires 15 min after start (spec §1.1)
+
+/**
+ * A workspace's Codex settings writer, after the route's `connections:write`
+ * check (as before); the database decides who changes the workspace's settings
+ * row. In a Personal workspace that is its owner acting as themselves (1233),
+ * which only `workspaceSettingsAuthorized` establishes: a delegated bearer
+ * naming the owner holds `connections:write` too.
+ */
+async function codexWorkspaceSettingsWriter(
+  deps: ApiRouteDeps,
+  authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+  workspaceId: string,
+): Promise<{
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  personalWorkspaceOwnerVerified: boolean;
+}> {
+  return {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    subjectId: authorization.grant.subjectId,
+    personalWorkspaceOwnerVerified: await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    ),
+  };
+}
 
 export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
@@ -697,40 +795,37 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexSource(c, deps, grant.accountId, workspaceId);
   });
 
   app.patch("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
     const parsed = parseRequestBody(CodexSourceRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "a valid Codex source mode is required",
     });
-    await codexRouteDisposition(deps, grant.accountId);
 
-    return await coreCodexSetSource(c, deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      mode: parsed.mode,
-    });
+    return await coreCodexSetSource(c, deps, { ...writer, mode: parsed.mode });
   });
 
   app.get("/v1/organizations/:organizationId/codex/accounts", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    await codexRouteDisposition(deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
 
     return await coreOrganizationCodexAccounts(c, deps, organizationId, human.subjectId);
   });
 
   app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/usage", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const mode = await codexRouteDisposition(deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
     if (!z.string().uuid().safeParse(credentialId).success) {
       throw new HTTPException(404, { message: "codex account not found" });
@@ -742,7 +837,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         organizationId,
         actorSubjectId: human.subjectId,
         credentialId,
-        mode,
       },
       deps.codexFetch ?? fetch,
     );
@@ -753,7 +847,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the organization's Models page (any workspace use not required).
   app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/overview", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     return await coreOrganizationCodexOverview(
       c,
       deps,
@@ -777,7 +871,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         deps,
         organizationId,
       );
-      await codexRouteDisposition(deps, organizationId);
       return await coreCodexResetPrepare(
         c,
         deps,
@@ -802,7 +895,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         deps,
         organizationId,
       );
-      await codexRouteDisposition(deps, organizationId);
       return await coreCodexResetRedeem(
         c,
         deps,
@@ -819,14 +911,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
     // Device sign-in accepts an agent acting as an admin, as the workspace
     // route does: the agent relays the short code and the person still
     // approves at OpenAI themselves. The state binds the same person.
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     // The device-code start touches no account state: public compatibility
     // (a disabled cutover still fails closed).
-    await codexRouteDisposition(deps, organizationId);
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -851,9 +942,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    await codexRouteDisposition(deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -916,7 +1006,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         id_token: tokens.idToken,
       }),
     );
-    await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexConnected(c, deps, {
       accountId: organizationId,
@@ -934,15 +1023,22 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: id.email ?? id.chatgptAccountId ?? null,
         connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
       },
+      offeredModels: async () =>
+        await codexConnectOfferedModels({
+          settings: (await resolveCatalogSettings(db, settings)).settings,
+          accessToken: tokens.accessToken,
+          chatgptAccountId: id.chatgptAccountId,
+          isFedramp: id.isFedramp,
+          fetchImpl: deps.codexFetch as CodexFetch | undefined,
+        }),
     });
   });
 
   app.post("/v1/organizations/:organizationId/codex/accounts/:accountId/activate", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
-    await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexActivate(
       c,
@@ -954,14 +1050,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/settings", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = parseRequestBody(
       SubscriptionRotationSettingsRequest,
       await c.req.json().catch(() => null),
       { status: 400, message: "rotationEnabled is required" },
     );
-    await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexSetRotation(
       c,
@@ -973,15 +1068,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId/allocator", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = parseRequestBody(
       SubscriptionAccountToggleRequest,
       await c.req.json().catch(() => null),
       { status: 400, message: "enabled and expectedVersion are required" },
     );
     const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
-    await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexAllocator(c, deps, admin, c.req.param("accountId"), parsed);
   });
@@ -990,15 +1084,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
     async (c) => {
       const organizationId = c.req.param("organizationId");
-      requireSameOriginBrowserMutation(c, deps);
-      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      requireOrganizationSubscriptionMutationOrigin(c, deps);
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
       const parsed = parseRequestBody(
         SubscriptionAccountToggleRequest,
         await c.req.json().catch(() => null),
         { status: 400, message: "enabled and expectedVersion are required" },
       );
       const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
-      await codexRouteDisposition(deps, organizationId);
 
       return await coreCodexExtraCredits(c, deps, admin, c.req.param("accountId"), parsed);
     },
@@ -1006,12 +1099,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const body = (await c.req.json().catch(() => null)) as {
       label?: unknown;
     } | null;
-    await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexRename(
       c,
@@ -1024,15 +1116,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    await codexRouteDisposition(deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
 
     return await coreCodexDisconnect(c, deps, {
       accountId: organizationId,
       workspaceId: null,
       subjectId: human.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: human.subjectId }),
     });
   });
 
@@ -1042,8 +1134,22 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     if (await managedCookieHuman(c, deps)) requireSameOriginBrowserMutation(c, deps);
+    const body = (await c.req.json().catch(() => null)) as { scope?: unknown } | null;
+    if (body?.scope !== undefined && body.scope !== "user" && body.scope !== "workspace")
+      throw new HTTPException(400, { message: "invalid Codex scope" });
+    const personal = body?.scope === "user";
+    // The person's own subscription: the verified person, with their own
+    // Personal workspace in this organization, refused before the sign-in.
+    if (personal)
+      await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
     // The device-code start touches no account state.
-    await codexRouteDisposition(deps, grant.accountId);
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -1058,6 +1164,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       actorSubjectId: grant.subjectId,
       deviceAuthId: start.deviceAuthId,
       userCode: start.userCode,
+      ...(personal ? { scope: "user" } : {}),
     });
     return c.json({
       userCode: start.userCode,
@@ -1073,7 +1180,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const connectingHuman = await managedCookieHuman(c, deps);
     if (connectingHuman) requireSameOriginBrowserMutation(c, deps);
-    await codexRouteDisposition(deps, grant.accountId);
     const { state } = (await c.req.json()) as { state?: string };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
@@ -1083,12 +1189,30 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload.workspaceId !== workspaceId ||
       payload.actorSubjectId !== grant.subjectId ||
       !payload.deviceAuthId ||
-      !payload.userCode
+      !payload.userCode ||
+      (payload.scope !== undefined && payload.scope !== "user")
     ) {
       throw new HTTPException(400, {
         message: "codex connect state is invalid or expired",
       });
     }
+    // The person's own subscription: re-checked now, before any sign-in
+    // result is read, and written in their own Personal workspace.
+    const ownWorkspace = async () => {
+      const owner = await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
+      if (owner.subjectId !== grant.subjectId || owner.accountId !== grant.accountId)
+        throw new HTTPException(403, { message: "Codex connection identity changed" });
+      return owner.workspaceId;
+    };
+    const personal = payload.scope === "user";
+    const startedIn = personal ? await ownWorkspace() : workspaceId;
     // The device code itself expires 15 minutes after start; surface that to the
     // client (the 1-hour signed-state TTL is longer than the device window).
     if (
@@ -1134,16 +1258,20 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
       });
     }
-    await codexRouteDisposition(deps, grant.accountId);
 
     // The core writer decides authority from the grant's subject: an
     // organization administrator (new or reconnected shared account), a
     // workspace administrator (reconnect of an account this workspace
-    // manages), or the person in their own Personal workspace.
+    // manages), or the person in their own Personal workspace (also when
+    // they connect their own from another workspace of the organization).
+    if (personal && (await ownWorkspace()) !== startedIn)
+      throw new HTTPException(403, { message: "Codex connection identity changed" });
     return await coreCodexConnected(c, deps, {
       accountId: grant.accountId,
-      workspaceId,
+      workspaceId: startedIn,
       subjectId: grant.subjectId,
+      ...(personal ? { personal: true } : {}),
+      ...(personal && startedIn !== workspaceId ? { addedFrom: workspaceId } : {}),
       credential: {
         credentialEncrypted: encryptEnvironmentValue(
           key,
@@ -1163,6 +1291,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: id.email ?? id.chatgptAccountId ?? null,
         connectedBySubjectId: connectingHuman?.subjectId ?? null,
       },
+      offeredModels: async () =>
+        await codexConnectOfferedModels({
+          settings: (await resolveCatalogSettings(db, settings)).settings,
+          accessToken: tokens.accessToken,
+          chatgptAccountId: id.chatgptAccountId,
+          isFedramp: id.isFedramp,
+          fetchImpl: deps.codexFetch as CodexFetch | undefined,
+        }),
     });
   });
 
@@ -1171,7 +1307,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/status", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexStatus(
       c,
@@ -1188,7 +1323,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexAccounts(c, deps, grant, workspaceId);
   });
@@ -1199,7 +1333,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // read, so an unauthenticated caller learns nothing about the cutover row.
     // The core gate fails closed without consulting the historical source.
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
-    await codexRouteDisposition(deps, accountId);
 
     return await coreCodexDesignateApps(c, deps, workspaceId, { human, accountId });
   });
@@ -1211,7 +1344,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // disabled subscriptions) must still be able to turn Apps off. Clearing
     // only removes authority; the owner/permission checks below still apply.
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
-    await codexRouteDisposition(deps, accountId);
 
     return await coreCodexClearApps(c, deps, workspaceId, { human, accountId });
   });
@@ -1220,15 +1352,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Pure pointer flip; in-flight turns pick it up on their next token fetch.
   app.post("/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
-
-    return await coreCodexActivate(
+    const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      c.req.param("accountId"),
+      workspaceId,
+      "connections:write",
     );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
+
+    return await coreCodexActivate(c, deps, writer, c.req.param("accountId"));
   });
 
   // Update rotation settings. Connection-management access. Sharded-rotation policy: the strategy picker is GONE —
@@ -1238,8 +1370,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the stored column is historical residue, not authority to restart old binaries.
   app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
 
     const body = (await c.req.json().catch(() => ({}))) as {
       rotationEnabled?: unknown;
@@ -1261,19 +1398,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
 
-    return await coreCodexSetRotation(
-      c,
-      deps,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      patch.rotationEnabled,
-    );
+    return await coreCodexSetRotation(c, deps, writer, patch.rotationEnabled);
   });
 
   // Rename an account (label only in P1).
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
 
     const accountId = c.req.param("accountId");
     const body = (await c.req.json()) as { label?: string | null };
@@ -1294,7 +1425,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
 
     const parsed = parseRequestBody(
       SubscriptionAccountToggleRequest,
@@ -1314,7 +1444,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
 
     const parsed = parseRequestBody(
       SubscriptionAccountToggleRequest,
@@ -1336,13 +1465,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexDisconnect(c, deps, {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 
@@ -1351,12 +1480,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexDisconnectAll(c, deps, {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 
@@ -1366,7 +1495,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexUsage(c, deps, grant, workspaceId, null);
   });
@@ -1376,7 +1504,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/accounts/:accountId/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexUsage(c, deps, grant, workspaceId, c.req.param("accountId"));
   });
@@ -1389,7 +1516,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/codex/usage/refresh", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexUsageRefresh(c, deps, grant, workspaceId);
   });
@@ -1400,7 +1526,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/overview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexOverview(c, deps, grant, workspaceId);
   });
@@ -1415,7 +1540,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const credentialId = c.req.param("accountId");
       const { human, accountId } = await requireRedemptionHuman(c, deps, workspaceId);
-      await codexRouteDisposition(deps, accountId);
 
       return await coreCodexResetPrepare(c, deps, {
         human,
@@ -1435,7 +1559,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const credentialId = c.req.param("accountId");
       const { human, accountId } = await requireRedemptionHuman(c, deps, workspaceId);
-      await codexRouteDisposition(deps, accountId);
 
       return await coreCodexResetRedeem(c, deps, { human, accountId, workspaceId, credentialId });
     },
@@ -1622,7 +1745,6 @@ async function coreOrganizationCodexOverview(
   rawCredentialId: string,
 ) {
   c.header("cache-control", "no-store");
-  const mode = await codexRouteDisposition(deps, organizationId);
   const target = await organizationRedemptionTarget(deps, {
     organizationId,
     subjectId: human.subjectId,
@@ -1683,7 +1805,7 @@ async function coreOrganizationCodexOverview(
       fetchOrganizationCodexUsageForAccount(
         deps.db,
         deps.settings,
-        { organizationId, actorSubjectId: human.subjectId, credentialId, mode },
+        { organizationId, actorSubjectId: human.subjectId, credentialId },
         deps.codexFetch ?? fetch,
       ),
     details: async () => {

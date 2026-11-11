@@ -43,7 +43,7 @@ import {
 // see packages/testing/src/shared-pg.ts — so the full parallel `bun test` run does
 // not spin up one container per file). The package fns connect as opengeni_app (a
 // NON-superuser, so FORCE RLS genuinely applies); accounts/workspaces are seeded as
-// the postgres superuser (bypasses RLS). pgvector image because 0000_initial does
+// the postgres superuser (bypasses RLS). pgvector image because the migration baseline does
 // CREATE EXTENSION vector. The database is dropped + the shared refcount released
 // in afterAll regardless of outcome.
 

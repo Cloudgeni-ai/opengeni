@@ -12,7 +12,9 @@ export type LabScenarioId =
   | "long"
   | "media"
   | "previewing"
-  | "math";
+  | "math"
+  | "options"
+  | "writing-options";
 
 export interface LabScenario {
   id: LabScenarioId;
@@ -418,6 +420,89 @@ function math(): LabScenario {
   return { id: "math", title: "Math", events: r.events, running: false };
 }
 
+const OPTIONS_BODY = JSON.stringify(
+  {
+    title: "Light laptops for travel",
+    fields: [
+      { key: "price", label: "Price", unit: "kr", better: "lower" },
+      { key: "weight", label: "Weight", unit: "kg", better: "lower" },
+      { key: "battery", label: "Battery", unit: "h", better: "higher" },
+      { key: "os", label: "System", filter: true },
+    ],
+    chart: "price",
+    select: { max: 2, action: "Compare these two" },
+    items: [
+      {
+        id: "air",
+        title: "MacBook Air 13 (M4)",
+        subtitle: "16 GB · 512 GB",
+        badge: "Recommended",
+        description: "The best balance of weight, battery and price.",
+        values: { price: 13990, weight: 1.24, battery: 18, os: "macOS" },
+      },
+      {
+        id: "x1",
+        title: "ThinkPad X1 Carbon",
+        subtitle: "32 GB · 1 TB",
+        badge: "Lightest",
+        description: "Under a kilo, but the priciest here.",
+        values: { price: 19990, weight: 0.99, battery: 15, os: "Windows" },
+      },
+      {
+        id: "zenbook",
+        title: "ASUS Zenbook S 14",
+        subtitle: "32 GB · 1 TB",
+        description: "OLED screen and long battery life for the price.",
+        values: { price: 14990, weight: 1.2, battery: 16, os: "Windows" },
+      },
+      {
+        id: "framework",
+        title: "Framework Laptop 13",
+        subtitle: "32 GB · 1 TB",
+        description: "Repairable and the cheapest of these.",
+        values: { price: 12490, weight: 1.3, battery: 10, os: "Linux" },
+      },
+    ],
+  },
+  null,
+  2,
+);
+
+/** The agent answers with options the person can compare and pick from. */
+function options(): LabScenario {
+  const r = recorder("lab-options");
+  const t = "turn-options";
+  r.push("user.message", { text: "Find me a light laptop for travel under 20 000 kr." }, t);
+  r.push("turn.started", {}, t, 400);
+  const text = [
+    "Four laptops fit. The MacBook Air is the best all-rounder; the ThinkPad is the lightest.",
+    "",
+    "```opengeni-ui",
+    OPTIONS_BODY,
+    "```",
+  ].join("\n");
+  r.push("agent.message.delta", { text }, t, 2_500);
+  r.push("agent.message.completed", { text }, t, 300);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "options", title: "Options to pick", events: r.events, running: false };
+}
+
+/** The same answer while the agent is still writing it: options appear as they arrive. */
+function writingOptions(): LabScenario {
+  const r = recorder("lab-writing-options");
+  const t = "turn-writing-options";
+  r.push("user.message", { text: "Find me a light laptop for travel under 20 000 kr." }, t);
+  r.push("turn.started", {}, t, 400);
+  const partial = OPTIONS_BODY.slice(0, OPTIONS_BODY.indexOf('"id": "zenbook"') + 60);
+  r.push(
+    "agent.message.delta",
+    { text: ["Four laptops fit.", "", "```opengeni-ui", partial].join("\n") },
+    t,
+    2_000,
+  );
+  return { id: "writing-options", title: "Writing options", events: r.events, running: true };
+}
+
 export function labScenarios(): LabScenario[] {
   return [
     answer(),
@@ -429,5 +514,7 @@ export function labScenarios(): LabScenario[] {
     media(),
     previewing(),
     math(),
+    options(),
+    writingOptions(),
   ];
 }

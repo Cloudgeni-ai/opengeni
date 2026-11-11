@@ -1,5 +1,463 @@
 # @opengeni/browserd
 
+## 0.4.26
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/interaction@6.14.0
+
+## 0.4.25
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/interaction@6.13.0
+
+## 0.4.24
+
+### Patch Changes
+
+- 8c1e874: A managed browser's preserved profile can be relaunched again after its Linux machine reboots. Linux can give the disk a new device number at boot, and recovery took that for a moved or copied profile and refused it, so the browser was recorded as lost. After a reboot, a profile with the same inode at the exact recorded path now counts as the same directory. Within one boot the device number must still match, and a copied or moved profile is still refused.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/interaction@6.12.0
+
+## 0.4.23
+
+### Patch Changes
+
+- 7ef5187: In the person's own Chrome, cancelling a dialog only the person can see now takes about 2 seconds instead of about 4: the checks for whether the tab's page answers wait 1 second each instead of 2. Using a tab whose page did not answer once gets the full 10 second attach time again, so a slow page is not reported as not answering forever. The messages for a dismiss that found no dialog now say only what was observed: a tab no longer in front was not hidden, a tab that was hidden for a moment is most likely busy, and a tab that cannot be hidden from here may or may not hold a dialog.
+- 8767fab: In a person's own connected Chrome, Chrome can leave a capture of a tab behind another one in its window unanswered while it draws for the next capture request, and then answers both with that drawing. Such a capture, viewport or full page, is now asked again every second with a small request while it has not answered, so these captures complete in about a second instead of stalling or timing out; a viewport capture still unanswered (or still refused as undrawn) after 5 s stops with a plain reason that suggests trying again. A capture of any other tab has the whole capture deadline instead of being cut short at 3 s. The extension transport now honours command time limits, so no connected Chrome capture waits past the capture deadline. The screenshot API now passes the stall reason, and the reason a capture of a tab Chrome had not drawn yet gave up, to the caller instead of a generic error.
+
+  Chromium serves a full-page capture by changing the tab's emulation and puts back what each capture request saw when it began, so a small request sent while a full-page capture waits puts the capture's emulation back after the capture restored the tab's own; left there, the tab stayed at the capture's size and stopped following its window. Once every request has answered, the driver now clears that emulation, which the extension now admits (`Emulation.clearDeviceMetricsOverride`, which only removes an emulated size). A tab Chrome does not show can keep the page's height as its view size until Chrome next lays it out, when it is shown or its window changes. With an older extension the clear is refused and a full-page capture of such a tab behaves as before.
+
+- 8f31114: Browser clicks reach partly visible elements:
+
+  - A click aims at a part of the element that shows and takes the pointer, including a link whose visible content lies outside its own box or only on one side of its clipped center. Only an element with no reachable visible part is refused. The search skips subtrees that are not rendered (a closed submenu), and stays bounded for large elements.
+  - A refusal made before any input was sent is a definite failure. The driver scrolling the element into view no longer turns it into an unknown outcome.
+
+- a6555b3: A managed browser without a window (headless, or offscreen on macOS) now presents a desktop mouse to pages: `(hover: hover)` and `(pointer: fine)` match, as in any desktop Chrome, so hover styles such as Tailwind's `hover:` variants apply and can be checked. Before, headless Chrome saw no input device and matched `(hover: none)` and `(pointer: none)`. A mobile viewport still presents a touch screen, and a desktop viewport or a reset no longer turns touch emulation off when it was never on, which used to drop the page back to no pointer at all.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/interaction@6.11.0
+
+## 0.4.22
+
+### Patch Changes
+
+- 2a4e056: Navigating a managed browser tab to a `javascript:` URL now completes when the script runs, instead of failing with "browser could not navigate to the requested URL (net::ERR_ABORTED)" and an unknown outcome. Chromium answers such a URL as an aborted load because it runs in the current document rather than loading a new one. The tab keeps its page, or shows the document the script returned, and later actions in a batch go on from there.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/interaction@6.10.0
+
+## 0.4.21
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/interaction@6.9.0
+
+## 0.4.20
+
+### Patch Changes
+
+- Updated dependencies [58b04d1]
+- Updated dependencies [feaecf8]
+  - @opengeni/contracts@6.8.0
+  - @opengeni/interaction@6.8.0
+
+## 0.4.19
+
+### Patch Changes
+
+- Updated dependencies [c08233e]
+- Updated dependencies [57237db]
+- Updated dependencies [cf35731]
+- Updated dependencies [4a7da4c]
+  - @opengeni/contracts@6.7.0
+  - @opengeni/interaction@6.7.0
+
+## 0.4.18
+
+### Patch Changes
+
+- 041e773: When Chrome ends a tab's debugging between an observation and the next action (another extension's frame appearing, as a password manager's menu does), the action now runs on a new attachment instead of failing with "Browser tab debugging unavailable", as long as no input was sent yet. This covers the action's pre-dispatch check of the tab and its own first reads.
+- 63bf4f9: A click whose target the page carries back out of the window just after it was scrolled to (for example a page that animates its own scroll to the accordion section an earlier click in the same batch opened) waits for the page to stop moving and scrolls to the target again, instead of failing with "out of view: nothing is at its center". A target no scroll can reach is still refused definitely.
+- a7b98ec: A click whose target is covered by something still animating away, such as a dialog fading out after its Close button was pressed in the same batch, waits for it to go (up to 1.5 s) instead of failing with "covered by … at its center". A cover that is not animating is still refused at once.
+- e912706: When Chrome ends a tab's debugging during a fill (another extension's autofill frame appearing as the field gets focus), the fill now reports completed if the field holds the requested value on the new attachment, instead of an unknown outcome.
+- 5a26902: Agents working in a sandbox or on a Connected Machine now check a change to something already running on the running system: the base sandbox instructions say to restart or reload the process that actually serves a change to a service, worker or scheduled job, exercise the real entry point and check what the user asked about, because unit tests alone do not show it works. They ask first only when a restart could disrupt others or lose work in progress. The same instructions now keep the agent's own scratch work out of the user's project: throwaway scripts and tests, and browsers, runtimes or libraries installed only for its own checks, go in a temporary directory outside the project and are removed when done, while tests the user asked for or the project expects still belong in it. Both are one clause appended to an existing line of the sandbox preamble (about 122 tokens), so sessions without a sandbox are unchanged. When the built-in browser cannot start because a machine has no Chrome or Chromium, its error now says to install one system-wide in its standard location, where the browser tool finds it, and not to install a browser or its libraries inside a project folder; when the executable it was set up to use has vanished, the error names that path.
+- Updated dependencies [2c76a2a]
+- Updated dependencies [09bc485]
+- Updated dependencies [2e72a00]
+- Updated dependencies [029497c]
+- Updated dependencies [3cb05f9]
+  - @opengeni/contracts@6.6.0
+  - @opengeni/interaction@6.6.0
+
+## 0.4.17
+
+### Patch Changes
+
+- de11774: A browser action after which the page closes its own tab, as a finished sign-in or payment popup does, now completes within moments. Before, it waited out the navigation and request settle bounds for a tab that no longer existed and then returned `outcome_unknown`, which invited the agent to check before continuing (or, on a slow machine, ran into the action deadline). The settle waits now end once the tab's attachment is gone. When the tab was not closed by a close-tab call, the receipt is `completed` with no observation and an `observation_unavailable` note saying the tab closed afterwards and to list the current tabs.
+- 0400636: A text field that a page names or labels as a password is now protected like `<input type=password>`, whatever its type. Sites that show a stored password in an ordinary text input labelled "Password" no longer have its value printed in semantic outlines, DOM reads or clipboard copies, and the value is remembered for redaction elsewhere. A field counts when its name, id, `aria-label`, placeholder, `<label for>`, wrapping `<label>` or `aria-labelledby` text, or its accessible name (shadow roots and custom elements included) calls it a password, in English and common European languages. Checkboxes and buttons such as "Show password", and "passwordless" fields, are not affected.
+- 70c726c: A browser session no longer breaks after it meets a short card security code. Known secret values from a page (such as a prefilled three-digit code) are masked wherever their characters appear, which also hit a tab's address when its port contained them (for example `47731` with the code `731`). The tab was then left with an invalid URL, and every later observation, tab list and action on that session failed with a validation error. In browser and desktop results, a text that is a whole address now keeps its scheme, host and port while its user info, path, query and fragment are still masked. Codes and card numbers stay hidden everywhere else, including where other digits touch them.
+- 6db667b: A screenshot of a tab that has not laid out its page yet (one a relaunched browser has just restored) waits for it to lay out instead of failing with "CDP returned invalid page dimensions".
+- Updated dependencies [f1998df]
+- Updated dependencies [3f9ef93]
+- Updated dependencies [ebfd447]
+- Updated dependencies [7a9c492]
+- Updated dependencies [468e8c3]
+- Updated dependencies [e4484f1]
+- Updated dependencies [7f3d037]
+- Updated dependencies [f4f82c0]
+- Updated dependencies [317fb4d]
+- Updated dependencies [033cd63]
+- Updated dependencies [b18bd6c]
+- Updated dependencies [83ccc2b]
+- Updated dependencies [da9b7e5]
+- Updated dependencies [0f7f559]
+- Updated dependencies [0f7f559]
+- Updated dependencies [de8fc61]
+- Updated dependencies [dd7759c]
+- Updated dependencies [70c726c]
+- Updated dependencies [4682263]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [52c8c3b]
+- Updated dependencies [abb4af1]
+- Updated dependencies [86e35f1]
+- Updated dependencies [0f7f559]
+  - @opengeni/contracts@6.5.0
+  - @opengeni/interaction@6.5.0
+
+## 0.4.16
+
+### Patch Changes
+
+- df10fb9: A saved browser identity now opens in the Chromium build that saved it or any newer one, so a placement whose Chromium has updated since the save keeps its sign-ins. Chromium migrates a profile forward itself, and the saved revision is never changed. Only an older build is refused, and the refusal names both versions. A placement on another operating system or architecture is still refused, and the message now says where the identity can open, or that the agent should open a new browser and sign in again.
+- 21d0e30: Browser reads hold up better and say what went wrong. Reading a page whose frames are still loading, which is common just after a browser reopens, no longer fails at once: the driver pauses briefly between its attempts, and a tab list, observation, page read or screenshot that still fails for an unclassified reason is tried once more and then reported as a retryable "unavailable" error instead of a final server error, with the driver's message logged. Actions are never repeated. Reading a page or container that holds a password, payment or private field now returns its public text with only those fields withheld, instead of withholding the whole container. A connected machine that does not answer an action in time now says that the action timed out and its outcome is unknown, instead of mentioning the live view.
+- 21d0e30: Every way an agent reads a page now withholds the same things. An observation showed the text of private and payment elements, the value of a private text area and the options of a card-expiry select, while a page read withheld exactly that text. Observations now find the page's protected elements the way page reads do and show each protected field as present, labelled and fillable, with its value, options, checked state and description withheld; protected text elsewhere is withheld too, and names or descriptions built from it (a button's contents, aria-labelledby, aria-describedby) keep only their public part. A payment-like id or name (card number, CVC, expiry) marks only a form field, so ordinary page text such as a heading with id="credit-card-offers" stays readable; an action on a protected field names it by its label, never its value. A page read no longer returns text the page does not show, such as the inside of a closed details element. A connected machine that does not answer a request in time now says whether the request may have run or was never sent, and a read says it is safe to retry; a missing controller and missing screen access say how to recover, and a controller that stops while a browser or computer is opening says to open it once more. A read the controller gave up retrying keeps the driver's error class and function in the caller's logs.
+- 610aebc: A browser click whose press never reached the page (Chrome sent it, but something outside the page took it) now says so instead of the generic "could not be confirmed": the error names the likely causes, a browser prompt holding the tab's input such as a passkey or permission request, or a frame over the element, and that clicking again will not help while a prompt stays open. It is still reported as `outcome_unknown`.
+- 940e7aa: `computer_open` with an `applicationId` targets the right window of an app that is already running. The launch is sent through the window the computer was last used in (else the focused window) instead of an arbitrary listed one, and when that window belongs to the app it is the window observed, rather than whichever of the app's windows the platform reports first (which can be one another agent works in). The launch receipt names the app window it observed as its target, so it no longer reads as having acted on an unrelated app's window. A desktop launch that finds no window of the app now observes nothing instead of passing the window it was sent through off as the app's.
+- 3805147: A browser fill whose own input navigates the page, or makes the page replace or remove the field (a one-time-code form that submits itself once complete), now reports done with the page it led to, instead of `outcome_unknown` with a raw "Cannot find context with specified id" or "Node with given id does not belong to the document" message. A field that is still there but holds a different value is still reported as `outcome_unknown`.
+- 7c3111a: A click on a control that takes the pointer only while it is hovered no longer fails now and then in cross-origin frames. Chromium sometimes sends the pointer move to the page holding the frame instead of the frame, so nothing in the frame was under the pointer and the control was refused as if it never took the pointer. The move is now sent again, up to three moves in all, while the frame shows nothing under the pointer, and the page is watched for a reaction for a full window after the last move. Controls that never take the pointer are still refused.
+- 6b24515: A browser live view opened while its page is busy now shows the page once it answers. The stream's first frame used to count timeouts toward its three-failure limit, so opening the view, or following a new tab still loading a heavy page, during a busy period of more than about 6 s failed the stream. A first frame that times out now leaves the stream open, and its first frame arrives as soon as the page answers. A first frame that fails for another reason still refuses the stream.
+
+  The same now holds for a browser on a connected machine, whose view goes through the stream relay. browserd pings a frame socket once its subscription is open, and the agent counts the stream ready at that ping instead of at the first frame, which a busy page sends only once it answers. When the agent stops waiting for a stream to be ready, it now closes that stream's browserd subscription and relay channel instead of leaving them running unpaired. While a page does not answer, its live view keeps at most one layout read waiting on it rather than sending another every frame deadline.
+
+- e3194c2: On a Mac, typing right after clicking a field now works in windows whose content is not in their accessibility tree, such as a web sign-in sheet in an iOS Simulator device: the text goes to the clicked point, in that window only. Typing there without such a click says to click the field first instead of naming driver options.
+- Updated dependencies [1f918a4]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/interaction@6.4.0
+
+## 0.4.15
+
+### Patch Changes
+
+- 263ced5: A click on a control that takes the pointer only while it is hovered now waits for the hover to take effect. After the pointer moves onto the control, the hit test is repeated on the next drawn frames, for as long as the page is watched for a reaction. This fixes intermittent refusals in cross-origin frames, where the frame's process applies the hover after the move has returned, and controls that turn on a moment after the pointer rests on them are now clicked instead of refused. Controls that never take the pointer are still refused.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [c35704f]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/interaction@6.3.0
+
+## 0.4.14
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/interaction@6.2.0
+
+## 0.4.13
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/interaction@6.1.0
+
+## 0.4.12
+
+### Patch Changes
+
+- 447e194: Streaming the live view of a tab in a person's own Chrome no longer changes how the tab looks. Each frame used to be a clipped screenshot scaled to the viewer's size, and Chrome takes a clipped screenshot by redrawing the tab itself at that size until it answers. On a 2x display, the tab the person was looking at shrank into its top-left corner on every frame (a blink several times a second). A tab Chrome was not drawing (behind another tab) never answered its capture, so the next frame's capture began on top of it, took the shrunken size for the tab's own and put it back last: the tab stayed drawn small until its window was resized. Frames of attached Chrome are now whole-viewport captures, which leave the tab untouched, scaled down to the viewer's size in browserd. For every browser, a capture of a tab is now sent only after the previous one is answered or its connection gives up on it (full-page screenshots included), within its own deadline, so a capture no longer begins on top of a slow one and leaves the tab at that capture's size. A live-view frame that finds a screenshot of the tab still running skips that round instead of counting as a failed frame, so a slow screenshot does not end the live view.
+- 205b05a: Agents can now set camera, microphone, geolocation and notifications permissions in the person's own Chrome, for the exact top-level origin (scheme, host and port) of a tab the session opened and no other session is using; the person's own tabs are refused. The first such action opens a page in the extension where the person allows it once; until then the action fails with a short message saying so. The extension records every change and lists it in its popup with Remove, Chrome shows the settings as set by an extension in its normal site settings, and setting a permission back to prompt clears it. Other permission types, and extensions without this support, fail with a clear message. The browser_act description no longer says permission actions only work in managed browsers.
+- de1ced7: In the person's own Chrome, a tab in front whose page does not answer, often because it opened a dialog (alert, confirm or prompt) while no agent was controlling it, no longer hangs every call for two minutes and then advises closing the tab. After the 10 second attach deadline the agent is told plainly that the page is busy or holds a dialog only the person can see, and that it can ask them to answer it or cancel it with `handle_dialog` dismiss. Nothing is switched or cancelled on its own. An explicit dismiss hides the tab for a moment behind a new blank tab (Chrome then closes such a dialog as Cancel), puts the tab back in front unless the person showed another tab meanwhile, and closes the blank tab. It reports the dialog cancelled only if the page answers right away afterwards; otherwise it says no dialog was found and the page is busy. Page commands in attached Chrome now time out after 30 seconds and attaching after 10 seconds, instead of waiting without a limit.
+- e1ebd25: A browser session in the person's own Chrome that continues after being idle, or after its controller restarted, no longer opens a blank tab in the person's window when none of its tabs are left. It carries on in the tab it was using, or in another tab it opened that is still open, and otherwise has no tab until it opens one. Its tools then never pick one of the person's tabs by themselves: they say the session has no tab of its own and to open one, or to name one of the person's tabs. The API tells browserd it can take a session with no tab, so browserd and the API can be deployed in either order.
+- 8af985d: Attached Chrome keeps working on sign-in pages whose password manager loads its inline menu into a frame it created blank. The extension found other extensions' frames only by their address, and such a frame's address stays blank while it shows the other extension's page, so Chrome kept refusing the tab and every call failed with "it could not be removed". The extension now also removes such a frame when it is the one place the tab can hold that page. Chrome's debugging targets show other extensions' pages only for the whole browser, and Chrome does not list every frame of a page to the extension (it omits other extensions' pages and some of the page's own, such as a data: page loaded by script into a blank frame). So the frame must be the tab's only frame the extension cannot see into and hold no frames of its own, every frame Chrome lists must have run the extension's script and said so, the page must add no frame while the extension searches and hold no other extension's page found by its address, and Chrome's debugging targets must hold another extension's page. A frame that merely does not answer is never removed, so a page's own frames (including error pages, data: frames, frames still loading or posting, and sites the person took the extension's access from) always stay; when the page holds one of those, the menu frame is not removed either, and the tab can be debugged again once the menu closes. This adds the `webNavigation` permission, which brings no new permission warning. A removal that removes nothing no longer counts towards the tab's removal limit, so it is no longer reported as an extension that keeps adding its frame.
+
+  An observation made just before Chrome ended the tab's debugging (as it does whenever another extension adds a frame) now still holds when the new attachment finds the same document. browserd used to give every new attachment a new target, document and frame generation, so an action right after a fresh observation failed with `target_stale` whenever a password manager's menu appeared in between. A new attachment now keeps the ended one's generations and element references when the tab's main frame still has the same frame and loader ids; a new document, a crash or a closed tab still gets fresh ones, and commands of the ended attachment still never reach the new one.
+
+- aedf0d7: A click in a tab that is open in the background keeps its protection against landing on something else. Chrome can take seconds to acknowledge the pointer's move in a tab it is not drawing, and the guard that holds back a press landing on anything other than the target disarmed itself on a clock that started before that move. By the time the press arrived the guard was off: a layer that the pointer's arrival opened over the target took the click, and a submit click whose page was replaced before the driver read the guard back was reported as an unknown outcome although it reached its button. The guard's clock now restarts just before the press.
+- c5e82ff: Browser Back now leaves a page that a sign-in or other redirect flow reached, instead of reporting success while the tab stays put. Back used to step exactly one history entry and count any commit as success, so two common shapes trapped it: an intermediate page that sends the tab on again as soon as Back shows it, and entries a page adds for the URL it already shows as it opens. Back now passes over an entry whose page goes on to another page by itself right after Back opened it (up to three such entries), and over entries for the current URL that the page added without any input, as Chrome's own Back button does. Entries made after input, such as a dialog that closes on Back, and entries with their own URLs stay single steps, and a page restored from the back/forward cache or one that reloads itself stays where Back left it. When every page Back could reach sends the tab on by itself, Back fails and names the page before them to navigate to instead. Forward is unchanged.
+- d5586b3: Typing into a canvas that reads key presses, such as a remote-desktop viewer, now delivers the text asked for. `type` with `mode: "keys"` presses the key a person would press on a US keyboard for each character, holding Shift for uppercase letters and shifted symbols, and a modifier in `press` (for example `Ctrl+C`) now goes down as its own key before the main key and comes up after it, also when sending the key fails. A digit or symbol in `press` is its US key too (`!` is Shift and the 1 key), and a letter in a key combination is reported lowercase unless Shift is held (`Ctrl+A` sends `a`), as a browser reports it. Viewers that forward physical keys (scancodes) used to get lowercase letters and unshifted symbols, and symbols with no key at all were dropped.
+
+  Characters with no key on a US keyboard (such as `æ` or `é`) are still sent as text only. A text field takes them, but a canvas that reads key presses may not, so when one is sent while focus is not on a text field the result is `outcome_unknown` and names those characters.
+
+  `type` without `mode: "keys"` inserts text, which Chromium silently drops when focus is not on a text field (a canvas, a button, a grid cell that is not being edited, or the page itself), while the action reported success. It now fails as `invalid_action` before anything is sent, saying to focus a text field or use `mode: "keys"`. With a locator, the target is checked before it is focused; an element that holds a text field (a wrapper that moves focus into its field) is decided by where focus lands. Code editors that take text through EditContext (Monaco, VS Code for the web) count as text fields.
+
+- 4289206: `check` now works on whatever observe shows as a checkbox, switch or radio button. A located element stands for the control it is or sits in, up to the nearest label, and a label (or text in it) stands for the control its `for` names, or else for the one checkable control it wraps, such as a box drawn with an ARIA role or a hidden input beside the label's box; a label wrapping more than one control stands for none. A native input that is not rendered, hidden or clipped away is checked through its label, never through a link in it. ARIA roles and `aria-checked` are read in any case, a checkable role after one the browser does not know counts, and a custom element that sets its role and state through `ElementInternals` is read from the accessibility tree. A disabled or `aria-disabled` control is refused at once. A box in the mixed state counts as neither checked nor unchecked, and `check` completes only when the box shows exactly the state asked for. A target that is none of these is refused with a reason that says to click it instead.
+- 12613a5: A `permission` browser action that set the permission and then lost its tab (a refused reattach or a tab that stopped answering) is now reported as `outcome_unknown` instead of `failed`, because the permission may already be set. The browser's own refusal of a setting is still reported as `failed`.
+- d4fd76d: A managed browser that was stopped (for example after going unused for 10 minutes) and relaunched now tells the agent so on the tabs it reopened. Chrome reopens those tabs at the same URLs and they keep their IDs, but each page loaded again, so text typed into it, a dialog it had open and anything else it held only in memory are gone. Before, nothing said this: an agent that came back to the tab saw an emptied page with no explanation.
+
+  The first observation of a reopened tab that the agent's own tools receive (browser_observe, the page after a browser_act, or a tab selected with browser_tabs) now carries a new optional `notice` field on `BrowserObservation`, shown to the model right after the tab line, for example: "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone." It is given once. Nothing is refused because of it: an element reference from before the reload already fails as stale, and anything else the agent does runs on the page as it now is, with the notice in the result. A caller receives notices only when it asks with the new `notices=1` query parameter (`BROWSER_OBSERVATION_NOTICES_PARAMETER`), which the API sends only for an agent's own requests, so a person watching the browser, an auth check or an API client neither sees the notice nor uses it up. Browser controllers that predate it ignore the parameter, and callers that do not send it never receive the field.
+
+  Every tab a relaunched browser reopened now answers. Chrome loads the pages of only the first few tabs it restores and leaves the rest without a renderer until they are used, which browserd reported as "This browser tab crashed", so with five or more tabs the later ones could not be used after a relaunch. browserd now starts such a tab's page the first time it is used, in the background and without switching to it, and waits briefly for it to load.
+
+  A tab showing the browser's error page (its last load failed) now also keeps its ID across a relaunch. Chrome reopens such a tab at the address it failed to load, not at its error page, so browserd now records and matches it under that address, read from the tab's history when the browser stops. Before, the tab was reported as replaced and reappeared under a new ID. Tab lists still show the error page's URL while the tab shows it.
+
+- f3813b6: A screenshot of a tab that has not drawn yet, such as one a relaunched browser has just restored, used to fail as an internal error, because Chrome refuses to capture such a tab instead of waiting. It now waits for the tab to draw, and if the tab never draws it fails as a plain, retryable screenshot timeout.
+- 9934012: On macOS, a pointer click on a browser dropdown in a window that is behind another window of the same browser is now refused like a click on its ref, instead of opening the dropdown's menu. The click is checked against the element under the point in its own window, not in whichever of the app's windows is on top there. Pins CUA 473b859d, which combines the window hit test, main-window keys and Simulator keys fixes.
+- f4c1125: On macOS, choosing an option of a dropdown no longer opens or leaves open its menu in a window behind the person's. Invoking an option of a dropdown (an item of its open menu, or the option a closed browser dropdown shows) chooses that option on the dropdown, as `set_value` does, instead of pressing the item: a browser dropdown took such a press as a choice and opened its menu again, raising its window, and a closed one's option could bring the browser down. `set_value` on a browser dropdown in a background window of the front browser now types the option's text instead of opening the menu, a menu still open after a choice is closed, and a pointer click on the option a closed browser dropdown shows is refused like one on the dropdown. A dropdown in a window that is already in front opens its menu instead of being refused, and an ARIA menu button (whose menu is drawn in the page) is no longer refused as a browser dropdown; the refusal that remains names `set_value`, and the window's own `focus` action with its target to open the menu itself, only when that focus would bring the window forward (not while someone else is using the computer). An option with no text to choose it by is refused in the background instead of pressed. A native combo box reads as a `combobox` that takes `set_value`, and its app takes the new value as chosen.
+
+  Pins CUA 81cf0b7f.
+
+- 0c12991: Clicks in a browser tab hidden behind another tab, without focus emulation, reach the page or fail plainly, and no longer take about five seconds:
+
+  - Chrome dropped the press of a click (and other non-move input) in a tab opened in the background that had never drawn, yet acknowledged it, so the click was reported done while the page got nothing. Before the first input to such a document, the driver now has the tab draw itself with a one-pixel capture, without showing it or taking focus. If the tab still cannot draw, the action fails before any input with a message saying the tab is hidden and should be activated first.
+  - The press no longer waits out Chrome's roughly five-second hold of the pointer's move to a hidden page. Sent right after the move, it has the page take the move and run its handlers first.
+  - The click guard stays armed until it has judged the press, however long the page's handlers for the pointer's arrival take, instead of disarming five seconds after it was set up. A guard that saw no press (the press went to another document, such as a frame that appeared over the target) or ran out of time before it no longer lets the click count as delivered; the outcome is reported as unknown.
+
+- 0777816: A browser live view now comes back by itself after its page was busy for a while. A page whose main thread is busy answers none of the commands a frame needs, and three frames that timed out (about 6 s) used to end the frame stream for good, so a page busy for longer froze the live view for the rest of the session even after it became responsive again. Frames that time out no longer count toward ending the stream: it keeps sampling the tab and shows it again as soon as the page answers. The same holds for a tab its browser is not drawing yet, such as one behind another tab in a person's own Chrome. The stream still ends when its tab closes, its browser goes away, or frames keep failing for any other reason.
+- 0ba40f0: On macOS, typing into a browser's address bar in the background and pressing Enter now loads the page. The text used to be written through accessibility, which the address bar shows but never takes, so Enter loaded nothing while the batch reported success; it is now typed with keystrokes the browser does take. A `computer_act` batch whose raw input (a key press, or a press the driver could only send) went unconfirmed and that changed no element now says it may not have taken effect, as a single action does. Computer sessions report `targetFocus`, whether a focus action can bring a window forward, and `computer_open` lists "window focus" under what is not available where it cannot (CUA on Windows and Linux).
+
+  Pins CUA 944b1b7f (cu-browser-field-keys merged with cu-popup-options).
+
+- 9934012: On macOS, background keys to a browser window that is not its app's main window now reach that window. A batch of cmd+L, an address and Enter used to select another window's address bar, so the address was appended to the current one instead of replacing it; the window is now made its app's main window first, behind the person's app. When its app is the one in front, or the window cannot be made main, the keys are refused before any is sent with a plain next step.
+
+  Pins CUA 473b859d, which combines the window hit test, main-window keys and Simulator keys fixes.
+
+- 9934012: On macOS, background keys to the iOS Simulator now type the right characters and keep their modifiers. Typed text used to arrive on the device as "aaaa" and Cmd+V did nothing, while the call reported the keys as sent; the Simulator now gets each character's own key and real modifier presses. Text with a character that has no key on a US keyboard fails before anything is typed.
+
+  Pins CUA 473b859d, which combines the window hit test, main-window keys and Simulator keys fixes.
+
+- 63c0865: Typing with `mode: "keys"` into split one-time-code boxes no longer drops characters on a busy machine. Between characters, a visible tab now waits for its next frame for up to a second. Before, it gave up after 50 ms, and when the frame came later than that, the next key went to the box that was already full. Hidden tabs, which draw no frames, still wait only 50 ms.
+- 5cab358: Preserve WebAuthn backup eligibility and backup state when importing vaulted passkeys into managed Chromium. Bitwarden, Vaultwarden and Proton Pass passkeys now retain the flags their authenticators used at registration, preventing relying parties from rejecting an otherwise correctly signed assertion. Hosted registrations retain their own flags. Negotiate flag support before sending it, keeping older controllers and APIs compatible with the original sync format.
+- 266f31e: Windows computer use now reports CUA's text-only value-pattern refusal as definitely not dispatched, rather than an unknown outcome, and tells the agent to click into the field and type instead. CUA does not expose the selected element's native control identity, so browserd does not bypass that refusal by guessing a control from its rectangle. This also avoids unverified password writes and casing-based guesses about masked contents. Classic Notepad fields refused by CUA still require the click-and-type path; successful CUA value writes are unchanged. A window's title bar no longer offers `set_value`, since its value is its title and cannot be set.
+- 6e2280a: Text typed on Linux X11 no longer loses or repeats characters the keyboard layout lacks (such as `ø` on a US layout or `密`) while reporting them as typed. Spare keycodes bound to such characters now stay bound for the rest of the session instead of being restored right after the action, so an application that reads the new keymap late still gets the right text; they are restored when the last session using them ends, or on the next session start after a crash. Function keys the layout lacks (F13 to F24) use the same bindings. Only when a batch needs more distinct characters than spare keycodes remain is ordinary text pasted, and the person's previous clipboard text is put back once the target has read it (it stays replaced when it held something other than text or the target did not read the paste within three seconds). A secret the layout cannot type is refused without naming the character or suggesting the clipboard.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/interaction@6.0.0
+
+## 0.4.11
+
+### Patch Changes
+
+- a6b3a97: A browser session in the person's own Chrome that ended because that Chrome reconnected (Chrome or its extension restarted) no longer answers every later call with "Only a suspended BrowserSession can be resumed". Such a session has no saved working copy, so the tools no longer try to resume it. `browser_observe`, `browser_act` and `browser_tabs` say it ended and that `browser_open` with its ID continues, and `browser_open` with its ID continues in the same Chrome profile: it reuses the chat's live session there or opens one, and its result names the new session ID.
+
+  In the person's Chrome, the empty tab a session opened now closes as soon as the session moves to another tab, instead of staying until the session is released or ends. Tabs the session did not open, tabs showing a page and tabs another session uses are never closed.
+
+- 1a4e2ec: Attached Chrome keeps working in a tab while a password manager shows its inline menu. Chrome ends the extension's debugging of a tab as soon as another extension's frame starts loading in it, and while that frame loads it can refuse every command on a new attachment without running it. The extension now removes those frames and sends a refused command again once (never onto a different attachment). Commands refused together for the same frame share one removal, so they count once against the existing limit on how often the extension removes frames, and only Chrome's actual refusal starts a removal. A removal the page does not answer within a few seconds is given up rather than holding up the tab, and a frame added back right after the removal a refusal reused is removed once more. A frame that keeps coming back fails with the existing error that names the password manager and says what to do.
+
+  browserd now treats Chrome's "Debugger is not attached" answer as the end of that attachment instead of an unclassified error, so the next call attaches again. Observations, tab state, page reads and screenshots whose attachment ends part way are read once more on a new attachment. An action whose attachment ends after input was sent is `outcome_unknown` with a fresh observation of the tab on the new attachment, so the agent can see whether the input landed; an action that ended before any input stays a definite `failed`. Chrome also gives its other-extension-frame refusal for a tab it is about to stop debugging, so with an extension that relays that refusal as is, the first one ends the attachment the same way; only a refusal that persists on a new attachment is a definite failure that says what to do, rather than a retryable error that never cleared. The tab state and page read routes of browserd no longer answer a lost attachment with a 500.
+
+- c3aa91c: Attached Chrome sessions now survive a restart of the extension's background worker. Chrome stops and restarts an extension's worker whenever it likes while it keeps the tabs and the extension's debugger attachments, but the extension used to start a new state generation with every worker, so each such restart ended every browser session on the profile. The extension now keeps its state generation and the tabs it has attached in `chrome.storage.session`, which Chrome keeps exactly as long as those attachments. A new worker checks each recorded attachment with a debugger command that changes nothing, carries on with the ones that answer, and reconnects under the same generation, so the same browser session continues on the same tabs. An attachment an earlier worker left without recording it is taken over instead of refused. Reloading or updating the extension, or restarting Chrome, still starts a new generation and ends the sessions as before. Each time a worker carries on an earlier worker's state, the extension records how many attachments it kept, how many had ended and how many tabs were closed (`stateResumptions` in the extension's local storage, the latest 20).
+
+  A command that was in flight when the worker stopped still reports its outcome as unknown, and nothing replays it. Each event poll now names the worker's event stream; browserd treats a new stream as lost event history and resynchronizes even when the new worker's sequence numbers have caught up with its cursor, and a tab whose input was in flight on the old worker can be used again once a new worker answers. Ending or leaving an attached session also no longer closes an empty tab that is still on its way to a page.
+
+- 152633f: A browser click, double-click, hover or drag that first scrolls its element into view now waits for the page to finish reacting to that scroll before it aims. Pages often change layout once they scroll (a sticky header that shrinks, directly, on the next frame or after a short debounce), which moved the element after it was measured, so the press landed on whatever took its place and the click was refused as covered at its center although nothing covered it. The driver now waits until the element's box has not changed for 150 ms of drawn frames, counted from the first frame after the scroll, or for at most 600 ms while it keeps moving; a busy browser whose frames come slowly is given until it has drawn two frames, at most 1.5 s by the driver's own clock. The wait runs in an isolated world, so page scripts that replace their timers or frame callbacks cannot hold it, including during a drag with the button held. An element already in view, which needs no scroll, and a hidden tab do not wait. When the press still falls outside the element's own box (for example the pointer's arrival collapses the panel above it), the refusal now says the element moved, names what the press fell on, says the click was not delivered and that it can be clicked again; a press inside the element's box that something else takes is still refused as covered at its center. When the page removes or replaces the element while the driver waits (a list that renders its rows anew as it scrolls), or hides it, nothing is pressed and the click is refused as no longer present, or as having no box on the page, instead of failing with the browser's raw "Could not compute box model." error.
+- fa7516a: A full-page browser screenshot no longer changes the page's layout. Chromium hides classic scrollbars for a capture beyond the viewport, so content used to widen by the scrollbar's width while it was captured, right-aligned elements moved, and the change stayed after the capture; the image was also narrower than the tab's viewport. The capture now keeps each scrollbar's space with a temporary inspector stylesheet that page scripts cannot see, re-evaluates scrollbars afterwards, and is as wide as the tab's viewport. Screenshot scale now comes from the emulated device scale factor instead of the image width, which excluded the scrollbar. When some scrollbars cannot be kept (horizontal ones, ones inside shadow trees), the browser_screenshot result and Code Mode screenshot metadata carry a short `note` saying so, and the SDK frame has `inexactScrollbars: true`.
+- 6f158a4: A managed browser no longer signs in to an account by itself through a saved passkey. Each tab's virtual authenticator holds the passkeys its user may use and answers requests without a person present, so a sign-in page that asked for passkey autofill on load (a conditional `navigator.credentials.get`, which many identity providers send on their account-chooser and identifier pages) was answered at once with a saved passkey. A fresh browser, even one with a new or empty identity, was then signed in to that account before anyone chose it, and "use another account" or signing out signed it straight back in.
+
+  Tabs and their frames, including cross-site frames that share the tab's authenticator, are now told that passkey autofill is unavailable, and an autofill request stays pending until the page cancels it, as it would in a browser where nobody picks a passkey. A passkey is still used when the page asks for one in the open, for example after a "Sign in with a passkey" click. A tab that cannot take this is given no authenticator.
+
+- f23588a: A browser tab resized with the `viewport` action can now be returned to its window's own size and scale with the new `viewport_reset` action. It ends the tab's device-metrics and touch emulation, so later observations and screenshots show the window's real size and device scale factor again, and tabs that open afterwards are no longer given the size set before. Tabs that already took that size keep it until they are reset themselves. Setting a tab's observed size back with `viewport` is not the same on a display whose own scale is fractional: the window is then a fractional CSS size, observed rounded, and Chromium lays an emulated size out in whole display pixels at an emulated scale of 1, so it can come out a pixel off; `viewport_reset` restores it exactly. In a person's own Chrome, which never admitted viewport emulation, both actions are refused plainly as unsupported without sending anything to the tab.
+
+  `viewport` and `viewport_reset` also take, and stay, while someone watches the tab live. The live view samples the tab with clipped screenshots, and Chromium changes the page's emulation for each capture and then puts back what it saw when the capture began, so a change that landed during a capture was undone a moment later, and a reset could leave the tab stuck at the old emulated size even after the view closed. Both actions now hold that tab's frame sampling off while they apply, waiting for a capture already running, and then check what the page reports: the set screen size after `viewport`, and the tab's own size and scale after `viewport_reset`. A change that still did not take is sent once more and otherwise reported as an unknown outcome that asks the agent to observe the tab, never as a success.
+
+  The same holds for a capture that is still running after the live view has closed, and for background tabs, which is where agents open their tabs. A background tab reports no window size of its own, which used to make the check skip itself and report success, and it did not lay out again after a reset until it was shown, so it stayed at the emulated layout size. The check now reads the window size from the browser, and a reset has the background tab draw itself once at its own size without showing it or taking focus. The page's size is read where page scripts cannot change it, and a page that cannot be read does not count as confirmation.
+
+- 1600e2d: A managed browser, or an attached Chrome's debugger connection, is no longer stopped as idle while the agent session that created or is using it is still working (a turn queued, running, recovering, waiting for capacity or waiting on a person) or deliberately waits (`wait_for_input`). Every two minutes the API lists the browsers held this way (`listAgentHeldBrowserSessions`, migration `1002_browser_wait_hold`) and renews a short hold on each running browser's controller (`POST /v1/browser-sessions/:id/wait-hold`, `BrowserControlClient.holdForWait`): keep it at least five more minutes. A hold only ever extends, so overlapping renewals from several API processes are harmless and nothing needs to end one; once the session neither works nor waits the renewals stop, the hold lapses and the normal idle time counts from its end. The idle release keeps the browser, tabs and page state, but never longer than `BROWSER_WAIT_HOLD_MAX_MS` (60 minutes) after the browser's last use, so a long turn or repeated waits cannot keep a browser nobody uses. Renewals reach a Connected Machine or attached Chrome as the person who most recently started a turn of the holding session, through the explicit `browser.hold` operation with no request grant; a browser held only by sessions no person started is renewed only through a sandbox's cached controller endpoint. A browser held at controller shutdown is handed off and kept by the successor, and a renewal after a restart keeps a handed-off browser the new controller has not adopted yet. A sandbox box holding such a browser is not released as idle under the same rule. A renewal never launches, recovers or counts as a use of a browser and never starts a sandbox; a controller that predates it keeps its plain idle release. Browsers that only observed, and browsers no working or waiting session holds, are released as before.
+
+  `list_agent_held_browser_sessions` ships with its runtime `EXECUTE` withheld for one release (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`), because the previous release's readiness rejects a runtime grant on a SECURITY DEFINER routine it does not know. Until a later migration grants it, the API lists nothing and renews no controller holds; the sandbox box release applies the rule from this release on.
+
+- 6b24049: Computer use on a Mac no longer refuses with "Another user's session is on this Mac's screen" while this user's session is on screen and a second user is logged in in the background. The console check took the owner of `/dev/console` as the user on screen, but that device belongs to whoever last logged in at the console. It now reads whose session is on the console from the IORegistry's `IOConsoleUsers` (and that session's lock, with `IOConsoleLocked`), falling back to `/dev/console` only when the registry cannot be read. A switch to another user, a locked screen and the login window are refused as before.
+- e555018: On macOS, a window named by its id (`cua:window:<pid>:<window>`) is a computer-use target while its app lists it on any window level, so a dialog an app raises above its working windows can be observed as well as read, and a target missing from the last listing is looked up again before it is reported gone. An element invoke the driver cannot confirm, with nothing changed after it, now gets the same "may not have taken effect" line as an unconfirmed click: some toolbar buttons that open a flyout ignore an accessibility press while their app is in the background.
+
+  A failed read of a window still on screen (a tree read or capture CUA answers with text only) is tried once more, and a second failure is refused as unavailable with what to do next, instead of an internal error; a window that closed meanwhile is reported gone. On macOS, computer listings and observations say when someone other than Opengeni used the keyboard, mouse or trackpad within the last minute (`personInputSecondsAgo`), from timers that input agents send to apps in the background does not reset; input Opengeni sent in the foreground through this computer is told apart and not reported. An accessibility action macOS answers with "cannot complete" (-25204) is checked against the windows afterwards, as -25205 already was.
+
+  Pins CUA 24a0726f: an accessibility press the app answers with "cannot complete" counts as done when its window closes within a second.
+
+- 3aa5f2c: On macOS, a computer-use batch whose earlier action closes or hides its window (a start screen's Cancel) can still open the app's menu in a later action: an accessibility action on an item of the app's menu bar no longer depends on the batch's window. A later action on an element of a window that is no longer on screen is refused before anything is sent, reported as not run rather than with an unknown outcome, and the refusal says to act on one of the app's windows that is shown. A later action looked up by role and name in such a window fails the same way at once, instead of after its whole wait. A focus action on a macOS window now brings it to the front and confirms it there, instead of being unsupported, except while someone other than Opengeni used the keyboard, mouse or trackpad within the last minute: then it is refused before anything is sent, saying to ask them first or keep working in the background.
+
+  Pins CUA bc18cf52 (`cu-menu-bar-after-window-closes` merged with `cu-office-menus` 24a0726f).
+
+- 0efac58: On macOS, Return or Enter sent to a window of a background app whose sheet holds the focus (an alert, a prompt) now presses the sheet's default button, as it would in the foreground. The posted key alone reached the sheet but never its default button, since the app looks for that key through its key window, which a background app does not have. The press goes through accessibility and does not bring the app forward; it is confirmed when the sheet closes. An ordinary window keeps the posted Return, which its fields, combo boxes, tables and search fields handle themselves.
+- bcf968a: On macOS, keys based on a reading the app did not answer are refused even after a later reading has answered, since the reading they name showed no focused element. `set_value` now tells a web `<select>`'s open menu by the item the menu marks as chosen rather than by its highlighted item, which the pointer or arrow keys can move over a neighbouring select, and when it opened a menu and then refuses, it closes that menu even if it could not tell it for the select's. Finding the read window no longer asks for more window numbers once its deadline has passed.
+
+  A sheet takes background keys for its window when the app's focused element is the sheet or lies in it (its top-level element is the sheet), as for a prompt's text field or an alert with only buttons, while a file panel whose contents another process serves shows no focused element and stays refused whatever it calls itself. When the app names no focused window, the keyboard refusal says the focus is unknown instead of naming another window. Each reading of an app's focus before background keys has one second in all, so an app that stopped answering cannot hold it for a messaging timeout per request. A window that once proved to be an unreadable sheet stops counting as one when it closes, goes off screen, no longer lies within another window of its app, or reads. When `set_value` closes a menu that outlasted its cancel, Escape is sent only while a menu window it opened is still on screen, and a refusal says when such a menu may still be open.
+
+- 22b129b: On macOS, the controls of a web page in Chrome or another Chromium app can be invoked again: Chrome lists no press action on page elements in the accessibility mode Opengeni enables, so buttons, links, checkboxes and similar page controls showed no actions and invoking them was refused. Selects still take set_value. A pointer click on Chrome's own window controls, such as a background tab, is now sent as a pixel click instead of being reported as done while nothing happened. A keyboard shortcut whose menu item macOS keeps disabled while the app is in the background (Terminal's Close Window) reports that it most likely did nothing, instead of completing.
+
+  Computer action receipts gain an optional `unconfirmedInput` field: the action's click or key press was delivered without any confirmation that the app acted on it. Controllers return it only to callers that ask with the `receiptUnconfirmedInput` query parameter. When it is set and no element changed, the agent's result says the input may not have taken effect.
+
+- 0672bf0: On GNOME Wayland, typed text is checked the way Mutter resolves it: in the active keyboard layout group and at any level Mutter can reach with Shift or AltGr. AltGr characters such as `@` on a German layout are now typed instead of refused, and Latin text is refused while a non-Latin group such as Russian is active, instead of being silently dropped. Key combinations whose key only another group has, such as Ctrl+C while Russian is active, are pressed on the physical key that gives it there, the way a person's shortcut works, instead of being reported as sent while the key was dropped. On GNOME 49 and later the active group comes from Mutter itself; on older versions text must be typeable in every group, and a shortcut key that is not in every group is pressed as its physical key. Typing waits for Xwayland to take the session's keymap, so the first text after Xwayland starts is no longer checked against its default layout.
+- b47983c: Typed text on Linux now arrives in the requested case while Caps Lock is on, instead of in inverted case while reported as sent. On GNOME Wayland (version 49 and later, which reports the locked modifiers) and on X11, each letter is sent with or without Shift so that Caps Lock turns it into the requested case; a character that cannot arrive as requested under the locked modifiers, such as a small letter while Shift is locked on GNOME, is refused with the existing "use clipboard paste" message. The Caps Lock state is never changed.
+
+  On X11, typed text also follows the active keyboard layout group: with a second layout such as Russian active, Latin text no longer arrives as the letters on the same keys in that layout while reported as sent. Text is typed on the keys that give it in the active group, or on a temporarily bound spare key, or refused with the same message. If the keyboard state cannot be read while a lock or another group is active, typing fails with the existing retryable "keyboard layout is not ready yet" message instead of sending unchecked text. On GNOME, Caps Lock stays known across a keyboard layout change.
+
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/interaction@5.5.0
+
 ## 0.4.10
 
 ### Patch Changes

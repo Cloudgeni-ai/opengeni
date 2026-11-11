@@ -33,7 +33,7 @@ import { useClientConfigFlags } from "../../../hooks/use-client-config-flags";
 import { userErrorText } from "../../../ui/api-error";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { useDesktopThisComputer } from "../desktop/this-computer";
-import { moveChatToMachine } from "../../lib/move-chat-to-machine";
+import { isPersonalMachine, moveChatToMachine } from "../../lib/move-chat-to-machine";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { useWorkspaceMachines } from "../../lib/use-workspace-machines";
 import { thisComputerReady, thisComputerNeedsPermissions } from "../../../this-computer";
@@ -127,6 +127,8 @@ export function SessionMachineCapabilityCard({
   const [outcome, setOutcome] = useState<{ sandboxId: string; text: string } | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [othersOpen, setOthersOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const setupOpener = useRef<HTMLElement | null>(null);
@@ -161,6 +163,10 @@ export function SessionMachineCapabilityCard({
   // The person can allow it right here: lead with that, other machines fold away.
   const allowHere =
     asking && fleet.canAttach && isMachineComputeSelectable(requested.state) ? requested : null;
+  // Allowing your own machine turns it on for your work in this workspace.
+  const allowOwnMachine = allowHere !== null && isPersonalMachine(allowHere);
+  // In a shared chat, people in the workspace see what the agent does on it.
+  const sharedChat = sendContext?.().personalMachineIntent?.workspaceSharedAcknowledged === true;
   const personalWorkspace =
     context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
@@ -227,7 +233,8 @@ export function SessionMachineCapabilityCard({
       setUsing(null);
       setOutcome({ sandboxId: machine.sandboxId, text });
       setAnnouncement(text);
-      focusIfIdle(cardRef.current);
+      setSettingsOpen(false);
+      requestAnimationFrame(() => focusIfIdle(cardRef.current, settingsOpener.current));
       await onConfigured?.().catch(() => {});
     },
     [canMessage, context.client, fleet, onConfigured, sendContext, sessionId, using, workspaceId],
@@ -292,179 +299,216 @@ export function SessionMachineCapabilityCard({
   const folded = allowHere !== null && !othersOpen;
   const foldable =
     allowHere !== null && (ordered.length > 0 || chromeMachine !== null || connectAnother);
+  const complete = !asking && (activeMachine !== null || desktopReady);
+  const completeLabel = activeMachine
+    ? outcome?.sandboxId === activeMachine.sandboxId
+      ? outcome.text
+      : `This chat runs on ${machineDisplayName(t, activeMachine)}`
+    : desktopReady
+      ? `Your agents can use ${desktop?.computer.status?.machineName || "this computer"}.`
+      : undefined;
+  // Keep the successful choice in the conversation, not the whole setup panel.
+  // Errors and an in-flight move still need their original controls and feedback.
+  const compact = complete && !settingsOpen && using === null && useError === null;
+  const confirmationLabel =
+    activeMachine &&
+    (outcome?.sandboxId !== activeMachine.sandboxId ||
+      outcome.text === `This chat now runs on ${machineDisplayName(t, activeMachine)}.`)
+      ? `Using ${machineDisplayName(t, activeMachine)}`
+      : completeLabel;
 
   return (
     <>
-      <SessionCapabilityFrame
-        name={asking ? requestedName : recommendation.name || "Connected Machine"}
-        subtitle={
-          asking
-            ? `${stateLabel(requested)} · ${machineScopeLabel(t, requested.scope)}`
-            : "Your computer or server"
-        }
-        logo={CONNECTED_MACHINE_LOGO}
-        typeLabel="Machine"
-        description={
-          allowHere
-            ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
-            : asking
-              ? `The agent asked to use ${requestedName}.`
-              : recommendation.rationale
-        }
-        skill={false}
-        expanded={false}
-        // Running on some other machine doesn't answer the agent's request for
-        // this one: the card stays open with Allow until the chat is on it.
-        complete={!asking && (activeMachine !== null || desktopReady)}
-        completeLabel={
-          activeMachine
-            ? outcome?.sandboxId === activeMachine.sandboxId
-              ? outcome.text
-              : `This chat runs on ${machineDisplayName(t, activeMachine)}`
-            : desktopReady
-              ? `Your agents can use ${desktop?.computer.status?.machineName || "this computer"}.`
-              : undefined
-        }
-        actionLabel={
-          allowHere
-            ? using === allowHere.sandboxId
-              ? "Allowing…"
-              : "Allow"
-            : offerThisComputer
-              ? desktop.computer.acting
-                ? "Turning on…"
-                : "Use this computer"
-              : "Connect a computer"
-        }
-        busy={allowHere ? using !== null : offerThisComputer && desktop.computer.acting}
-        actionUnavailable={allowHere || offerThisComputer ? null : actionUnavailable}
-        opensDialog={false}
-        note={
-          allowHere
-            ? ""
-            : offerThisComputer
-              ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
-              : fleet.canConnect
-                ? "You can remove a connected machine anytime from Machines."
-                : ""
-        }
-        onOpen={() => {
-          if (allowHere) return void use(allowHere);
-          if (!offerThisComputer) return openSetup();
-          if (desktop.computer.acting) return;
-          if (thisComputerNeedsPermissions(desktop.computer.status))
-            return desktop.allowPermissions();
-          // Resumes, registers afresh or starts the agent, whichever it needs,
-          // then asks for any missing permission itself.
-          void desktop.computer.turnOn().then(() => void fleet.refresh());
-        }}
-        onClose={closeSetup}
-        opener={opener}
-        cardRef={cardRef}
-        details={
-          unavailableOnDeployment || !fleet.canRead ? null : (
-            <>
-              {desktop?.computer.actionError !== null &&
-              desktop?.computer.actionError !== undefined ? (
-                <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
-                  Computer use couldn't turn on. {desktop.computer.actionError || "Try again."}
-                </Notice>
-              ) : null}
-              {/* Always mounted, so moves and new machines are announced. */}
-              <span className="sr-only" role="status" aria-live="polite">
-                {announcement}
-              </span>
-              {visibleDetails ? (
-                <div
-                  data-slot="connected-machines"
-                  className="space-y-3 border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"
-                >
-                  {useError ? (
-                    <Notice tone="failed" live="assertive" className="text-xs">
-                      {`Couldn't move this chat to ${useError.name}. ${
-                        useError.reason ??
-                        (fleet.mutationError
-                          ? userErrorText(fleet.mutationError, "Try again.")
-                          : "Try again.")
-                      }`}
-                    </Notice>
-                  ) : null}
-                  {foldable ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="-ml-2 text-fg-muted"
-                      aria-expanded={othersOpen}
-                      onClick={() => setOthersOpen((open) => !open)}
-                    >
-                      <ChevronRightIcon
-                        aria-hidden
-                        className={
-                          othersOpen ? "rotate-90 transition-transform" : "transition-transform"
-                        }
-                      />
-                      Use a different machine
-                    </Button>
-                  ) : null}
-                  {!folded && ordered.length > 0 ? (
-                    <RowList label="Connected machines" flush>
-                      {ordered.map((machine) => (
-                        <MachineRow
-                          key={machine.sandboxId}
-                          machine={machine}
-                          primary={machine.sandboxId === justConnected}
-                          canUse={fleet.canAttach}
-                          busy={using === machine.sandboxId}
-                          locked={using !== null || fleet.attaching}
-                          onUse={() => void use(machine)}
+      <span className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </span>
+      {complete ? (
+        <div
+          data-machine-confirmation=""
+          className="flex max-w-[540px] items-start gap-2 text-sm text-fg-muted"
+        >
+          <CheckIcon aria-hidden className="mt-3.5 size-4 shrink-0" />
+          <p className="min-w-0 flex-1 py-3 [overflow-wrap:anywhere]">{confirmationLabel}</p>
+          <Button
+            ref={settingsOpener}
+            variant="ghost"
+            size="sm"
+            className="min-h-11 shrink-0"
+            aria-label="Machine settings"
+            aria-expanded={!compact}
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            Settings
+            <ChevronRightIcon aria-hidden className={compact ? "" : "rotate-90"} />
+          </Button>
+        </div>
+      ) : null}
+      <div hidden={compact} data-machine-setup="">
+        <SessionCapabilityFrame
+          name={asking ? requestedName : recommendation.name || "Connected Machine"}
+          subtitle={
+            asking
+              ? `${stateLabel(requested)} · ${machineScopeLabel(t, requested.scope)}`
+              : "Your computer or server"
+          }
+          logo={CONNECTED_MACHINE_LOGO}
+          typeLabel="Machine"
+          description={
+            allowOwnMachine
+              ? "The agent asked to use this machine. Allowing it lets your agents use it in this workspace from now on, and moves this chat here."
+              : allowHere
+                ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
+                : asking
+                  ? `The agent asked to use ${requestedName}.`
+                  : recommendation.rationale
+          }
+          skill={false}
+          expanded={false}
+          // Running on some other machine doesn't answer the agent's request for
+          // this one: the card stays open with Allow until the chat is on it.
+          complete={complete}
+          completeLabel={completeLabel}
+          actionLabel={
+            allowHere
+              ? using === allowHere.sandboxId
+                ? "Allowing…"
+                : "Allow"
+              : offerThisComputer
+                ? desktop.computer.acting
+                  ? "Turning on…"
+                  : "Use this computer"
+                : "Connect a computer"
+          }
+          busy={allowHere ? using !== null : offerThisComputer && desktop.computer.acting}
+          actionUnavailable={allowHere || offerThisComputer ? null : actionUnavailable}
+          opensDialog={false}
+          note={
+            allowHere
+              ? allowOwnMachine && sharedChat
+                ? "Only your own messages run on it. This chat is shared, so people in this workspace see what the agent does there."
+                : allowOwnMachine
+                  ? "Only your own messages run on it."
+                  : ""
+              : offerThisComputer
+                ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+                : fleet.canConnect
+                  ? "You can remove a connected machine anytime from Machines."
+                  : ""
+          }
+          onOpen={() => {
+            if (allowHere) return void use(allowHere);
+            if (!offerThisComputer) return openSetup();
+            if (desktop.computer.acting) return;
+            if (thisComputerNeedsPermissions(desktop.computer.status))
+              return desktop.allowPermissions();
+            // Resumes, registers afresh or starts the agent, whichever it needs,
+            // then asks for any missing permission itself.
+            void desktop.computer.turnOn().then(() => void fleet.refresh());
+          }}
+          onClose={closeSetup}
+          opener={opener}
+          cardRef={cardRef}
+          details={
+            unavailableOnDeployment || !fleet.canRead ? null : (
+              <>
+                {desktop?.computer.actionError !== null &&
+                desktop?.computer.actionError !== undefined ? (
+                  <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
+                    Computer use couldn't turn on. {desktop.computer.actionError || "Try again."}
+                  </Notice>
+                ) : null}
+                {visibleDetails ? (
+                  <div
+                    data-slot="connected-machines"
+                    className="space-y-3 border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"
+                  >
+                    {useError ? (
+                      <Notice tone="failed" live="assertive" className="text-xs">
+                        {`Couldn't move this chat to ${useError.name}. ${
+                          useError.reason ??
+                          (fleet.mutationError
+                            ? userErrorText(fleet.mutationError, "Try again.")
+                            : "Try again.")
+                        }`}
+                      </Notice>
+                    ) : null}
+                    {foldable ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="-ml-2 text-fg-muted"
+                        aria-expanded={othersOpen}
+                        onClick={() => setOthersOpen((open) => !open)}
+                      >
+                        <ChevronRightIcon
+                          aria-hidden
+                          className={
+                            othersOpen ? "rotate-90 transition-transform" : "transition-transform"
+                          }
                         />
-                      ))}
-                    </RowList>
-                  ) : null}
-                  {!folded && chromeMachine ? (
-                    <ScreenControlStep
-                      key={chromeMachine.sandboxId}
-                      machine={chromeMachine}
-                      workspaceId={workspaceId}
-                      canManage={fleet.canManageMachine(chromeMachine)}
-                      refresh={fleet.refresh}
-                      onReconnect={() => openSetup(chromeMachine)}
-                    />
-                  ) : null}
-                  {!folded && chromeMachine ? (
-                    <ChromeStep
-                      chrome={chrome}
-                      machineName={machineDisplayName(t, chromeMachine)}
-                    />
-                  ) : null}
-                  {!folded && connectAnother ? (
-                    // Its own list after the machines and their steps: it is
-                    // not a connected machine, and it shouldn't split the chat
-                    // machine from its screen control and Chrome rows.
-                    <RowList label="Connect another computer" flush>
-                      <ListRow
-                        leading={<LogoTile icon={<PlusIcon />} />}
-                        title="Another computer"
-                        description="Not connected yet"
-                        control={
-                          <RowButton
-                            aria-label="Connect another computer"
-                            aria-haspopup="dialog"
-                            onClick={() => openSetup()}
-                          >
-                            Connect
-                          </RowButton>
-                        }
+                        Use a different machine
+                      </Button>
+                    ) : null}
+                    {!folded && ordered.length > 0 ? (
+                      <RowList label="Connected machines" flush>
+                        {ordered.map((machine) => (
+                          <MachineRow
+                            key={machine.sandboxId}
+                            machine={machine}
+                            primary={machine.sandboxId === justConnected}
+                            canUse={fleet.canAttach}
+                            busy={using === machine.sandboxId}
+                            locked={using !== null || fleet.attaching}
+                            onUse={() => void use(machine)}
+                          />
+                        ))}
+                      </RowList>
+                    ) : null}
+                    {!folded && chromeMachine ? (
+                      <ScreenControlStep
+                        key={chromeMachine.sandboxId}
+                        machine={chromeMachine}
+                        workspaceId={workspaceId}
+                        canManage={fleet.canManageMachine(chromeMachine)}
+                        refresh={fleet.refresh}
+                        onReconnect={() => openSetup(chromeMachine)}
                       />
-                    </RowList>
-                  ) : null}
-                </div>
-              ) : null}
-            </>
-          )
-        }
-      />
+                    ) : null}
+                    {!folded && chromeMachine ? (
+                      <ChromeStep
+                        chrome={chrome}
+                        machineName={machineDisplayName(t, chromeMachine)}
+                      />
+                    ) : null}
+                    {!folded && connectAnother ? (
+                      // Its own list after the machines and their steps: it is
+                      // not a connected machine, and it shouldn't split the chat
+                      // machine from its screen control and Chrome rows.
+                      <RowList label="Connect another computer" flush>
+                        <ListRow
+                          leading={<LogoTile icon={<PlusIcon />} />}
+                          title="Another computer"
+                          description="Not connected yet"
+                          control={
+                            <RowButton
+                              aria-label="Connect another computer"
+                              aria-haspopup="dialog"
+                              onClick={() => openSetup()}
+                            >
+                              Connect
+                            </RowButton>
+                          }
+                        />
+                      </RowList>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
+            )
+          }
+        />
+      </div>
       {fleet.canConnect && !unavailableOnDeployment ? (
         <ConnectMachineDialog
           open={setupOpen}
@@ -479,6 +523,7 @@ export function SessionMachineCapabilityCard({
           machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={fleet.canManage}
+          canConnectOwnMachine={fleet.canConnectOwnMachine}
           defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {

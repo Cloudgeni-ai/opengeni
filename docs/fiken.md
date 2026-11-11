@@ -35,6 +35,11 @@ delegation-snapshot lane exists for them.
   rotating refresh tokens (~24 h access-token lifetime). Passing
   `connectionId` re-authorizes an existing Fiken row in place (this also
   upgrades a pasted-token row to OAuth, preserving its default company).
+  Both start lanes sign the shared `personalOwnerVerified` claim through
+  `connectOwnerStateFields`, and the callback reads it: that is how the
+  callback finds the owner's authority in their own Personal workspace, which
+  has no workspace membership row. The connection itself stays
+  workspace-owned.
   Requires `OPENGENI_FIKEN_OAUTH_CLIENT_ID` / `OPENGENI_FIKEN_OAUTH_CLIENT_SECRET`
   (register the app in Fiken under *Rediger konto → API* with redirect URL
   `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/fiken/callback`) plus
@@ -158,5 +163,9 @@ rotating refresh tokens), tool connection resolution across both kinds,
 company-slug resolution and validation, request serialization, 401→
 `needs_reauth` vs 429/500 non-poisoning, Location-id parsing, draft
 idempotency, and audit rows — all against an injected Fiken fetch double.
+`apps/api/test/connect-personal-workspace-oauth.test.ts` drives both Fiken
+OAuth start lanes from a real managed-cookie session in the owner's Personal
+workspace and checks that a state without the claim, or one naming another
+member's Personal workspace, is refused before any provider call.
 Web connect-plan/health logic is covered in
 `apps/web/src/lib/capabilities.test.ts`.

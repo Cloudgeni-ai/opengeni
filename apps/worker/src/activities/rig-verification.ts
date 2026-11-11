@@ -42,6 +42,7 @@ import {
 import {
   buildImmutableProviderImage,
   createTurnToolCancellationController,
+  deleteComputeTemplate,
   deleteModalCheckpointSnapshot,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
@@ -59,7 +60,12 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
-import { rigProviderImageSourceImage } from "@opengeni/core";
+import {
+  rigProviderImageBuildSupported,
+  rigProviderImageContentSourceImage,
+  rigProviderImageSourceImage,
+  settingsWithProviderImageId,
+} from "@opengeni/core";
 import { currentActivityContext } from "./streaming";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -444,6 +450,12 @@ export class RigVerificationLeaseUnavailableError extends Error {
 /**
  * Run one verifier against one exactly attributed standalone sandbox.
  *
+ * Every run owns a brand-new lease group. A verification must prove a clean
+ * box, so it can never reuse an earlier run's lease: keying the lease by the
+ * change, version or build request left a cold lease behind after the first
+ * run, and every later verification of the same target then failed at once
+ * as `rearmed`/`attached` instead of creating a fresh sandbox.
+ *
  * Ordering is deliberate and source-of-truth safe:
  *   acquire spawner -> create callback -> warming instance record -> warm commit
  *   -> setup/checks. The canonical sandbox lease, not provider tags, is durable
@@ -462,7 +474,6 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     observability: ControlActivityServices["observability"];
     accountId: string;
     workspaceId: string;
-    sandboxGroupId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
     lifecycle?: RigVerificationActivityLifecycle;
@@ -481,6 +492,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
   }
 
   const holderId = `rig-verification:${dependencies.randomUUID()}`;
+  const sandboxGroupId = dependencies.randomUUID();
   const fallbackController = new AbortController();
   const signal = input.lifecycle?.signal ?? fallbackController.signal;
   const commandController = dependencies.createCancellationController(signal);
@@ -527,7 +539,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.markWarmLost(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           expectedEpoch: cleanupEpoch + 1,
           expectedInstanceId: instanceId,
         }),
@@ -536,7 +548,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.failWarming(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           expectedEpoch: cleanupEpoch,
         }),
       ),
@@ -576,7 +588,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     const lease = await dependencies.acquire(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.sandboxGroupId,
+      sandboxGroupId,
       kind: "turn",
       holderId,
       subjectId: null,
@@ -595,7 +607,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         .touchHolder(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           kind: "turn",
           holderId,
         })
@@ -605,7 +617,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderLivenessTimer.unref();
     }
     if (lease.role !== "spawner") {
-      throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, lease.role);
+      throw new RigVerificationLeaseUnavailableError(sandboxGroupId, lease.role);
     }
     ownsWarmingEpoch = true;
 
@@ -613,6 +625,11 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       dependencies.establish(input.settings, null, {
         sessionId: `${input.sessionIdPrefix}-${holderId}`,
         recovery: "create-or-restore",
+        createIdentity: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId,
+        },
         environment: {},
         onSandboxCreated: async (created) => {
           // Retain the exact handle before the durable write. If registration
@@ -623,7 +640,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           const recorded = await dependencies.recordCreated(input.db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sandboxGroupId: input.sandboxGroupId,
+            sandboxGroupId,
             expectedEpoch: lease.lease.leaseEpoch,
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
@@ -632,7 +649,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
             warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
           });
           if (!recorded.recorded) {
-            throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
+            throw new RigVerificationLeaseUnavailableError(sandboxGroupId, "fenced");
           }
 
           if (created.backendId === "modal" && !signal.aborted) {
@@ -641,7 +658,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
                 dependencies.tag(input.settings, created.instanceId, {
                   leaseId: lease.lease.id,
                   workspaceId: input.workspaceId,
-                  sandboxGroupId: input.sandboxGroupId,
+                  sandboxGroupId,
                 }),
                 signal,
               );
@@ -689,7 +706,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     const committed = await dependencies.commitWarm(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.sandboxGroupId,
+      sandboxGroupId,
       expectedEpoch: lease.lease.leaseEpoch,
       instanceId: established.instanceId,
       dataPlaneUrl: null,
@@ -698,7 +715,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
     });
     if (!committed.committed || !committed.lease) {
-      throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
+      throw new RigVerificationLeaseUnavailableError(sandboxGroupId, "fenced");
     }
     const result = await run(established, {
       signal,
@@ -754,7 +771,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           await dependencies.failWarming(input.db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sandboxGroupId: input.sandboxGroupId,
+            sandboxGroupId,
             expectedEpoch,
           });
         }
@@ -785,7 +802,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         dependencies.releaseHolder(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sandboxGroupId: input.sandboxGroupId,
+          sandboxGroupId,
           kind: "turn",
           holderId,
           idleGraceMs: RIG_VERIFICATION_RELEASE_GRACE_MS,
@@ -866,7 +883,6 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
-    defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
   return {
@@ -882,9 +898,6 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
     credentialHooks: Array.isArray(payload.credentialHooks)
       ? (payload.credentialHooks as string[])
       : baseVersion.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-      ? (payload.defaultVariableSetIds as string[])
-      : baseVersion.defaultVariableSetIds,
     changelog: typeof payload.changelog === "string" ? payload.changelog : baseVersion.changelog,
     providerImages: {},
   };
@@ -903,7 +916,6 @@ function providerImageDefinitionForChange(
       : baseVersion.setupScript,
     checks: baseVersion.checks,
     credentialHooks: baseVersion.credentialHooks,
-    defaultVariableSetIds: baseVersion.defaultVariableSetIds,
   };
 }
 
@@ -950,7 +962,6 @@ export async function verifyRigProviderImageColdBoot(
     observability: ControlActivityServices["observability"];
     accountId: string;
     workspaceId: string;
-    buildRequestId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
     imageId: string;
@@ -961,20 +972,23 @@ export async function verifyRigProviderImageColdBoot(
   dependencies: RigProviderImageColdBootDependencies = defaultRigProviderImageColdBootDependencies,
 ): Promise<string> {
   const { marker } = rigProviderImageContentMarker(input.contentHash);
+  const backend = input.settings.sandboxBackend as SandboxBackend;
   await dependencies.runOwnedSandbox(
     {
-      settings: {
-        ...input.settings,
-        modalImageId: input.imageId,
-        // The full-machine provider image is the immutable rig base. Any future
-        // workspace recovery must layer /workspace onto it, never replace it.
-        modalWorkspacePersistence: "snapshot_directory",
-      },
+      settings:
+        backend === "modal"
+          ? {
+              ...input.settings,
+              modalImageId: input.imageId,
+              // The full-machine provider image is the immutable rig base. Any future
+              // workspace recovery must layer /workspace onto it, never replace it.
+              modalWorkspacePersistence: "snapshot_directory",
+            }
+          : settingsWithProviderImageId(input.settings, backend, input.imageId),
       db: input.db,
       observability: input.observability,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sandboxGroupId: input.buildRequestId,
       rigVersionId: input.rigVersionId,
       sessionIdPrefix: input.sessionIdPrefix,
       lifecycle: input.lifecycle,
@@ -1022,23 +1036,59 @@ export async function verifyRigProviderImageColdBoot(
   return dependencies.now().toISOString();
 }
 
-export async function buildVerifiedRigProviderImage(input: {
-  settings: ControlActivityServices["settings"];
-  db: Database;
-  observability: ControlActivityServices["observability"];
-  accountId: string;
-  workspaceId: string;
-  existingVersionId?: string;
-  definition: RigProviderImageDefinition;
-  target: { kind: "change" | "version"; id: string };
-  established: EstablishedSandboxSession;
-  ownership: RigVerificationSandboxRunContext["ownership"];
-  lifecycle: RigVerificationActivityLifecycle;
-  signal: AbortSignal;
-}): Promise<RigProviderImage> {
+export type BuildVerifiedRigProviderImageDependencies = {
+  buildImage: typeof buildImmutableProviderImage;
+  verifyColdBoot: typeof verifyRigProviderImageColdBoot;
+  claim: typeof claimRigVersionProviderImageBuild;
+  finalize: typeof finalizeRigVersionProviderImageBuild;
+  /** The version's current record for the backend, as stored now. */
+  currentImage: (
+    db: Database,
+    workspaceId: string,
+    versionId: string,
+    backend: SandboxBackend,
+  ) => Promise<RigProviderImage | null>;
+  deleteComputeTemplate: typeof deleteComputeTemplate;
+};
+
+const defaultBuildVerifiedRigProviderImageDependencies: BuildVerifiedRigProviderImageDependencies =
+  {
+    buildImage: buildImmutableProviderImage,
+    verifyColdBoot: verifyRigProviderImageColdBoot,
+    claim: claimRigVersionProviderImageBuild,
+    finalize: finalizeRigVersionProviderImageBuild,
+    currentImage: async (db, workspaceId, versionId, backend) =>
+      (await getRigVersionById(db, workspaceId, versionId))?.providerImages[backend] ?? null,
+    deleteComputeTemplate,
+  };
+
+export async function buildVerifiedRigProviderImage(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    existingVersionId?: string;
+    definition: RigProviderImageDefinition;
+    target: { kind: "change" | "version"; id: string };
+    established: EstablishedSandboxSession;
+    ownership: RigVerificationSandboxRunContext["ownership"];
+    lifecycle: RigVerificationActivityLifecycle;
+    signal: AbortSignal;
+  },
+  dependencies: BuildVerifiedRigProviderImageDependencies = defaultBuildVerifiedRigProviderImageDependencies,
+): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
-  const providerSupportsBuild = providerSupportsImmutableImageBuild(backend);
-  const sourceImage = rigProviderImageSourceImage(input.settings, backend);
+  // A compute template only saves the setup script's work, and a sandbox
+  // from a template boots cold, so an environment without setup is not
+  // captured.
+  const computeWithoutSetup = backend === "compute" && !(input.definition.setupScript ?? "").trim();
+  const providerSupportsBuild =
+    providerSupportsImmutableImageBuild(backend) &&
+    rigProviderImageBuildSupported(input.settings, backend) &&
+    !computeWithoutSetup;
+  const sourceImage = rigProviderImageContentSourceImage(input.settings, backend);
   const contentHash = rigProviderImageContentHash({
     backend,
     sourceImage,
@@ -1071,8 +1121,9 @@ export async function buildVerifiedRigProviderImage(input: {
     error: null,
   };
 
+  let replaced: RigProviderImage | null = null;
   if (input.existingVersionId) {
-    const claim = await claimRigVersionProviderImageBuild(input.db, {
+    const claim = await dependencies.claim(input.db, {
       workspaceId: input.workspaceId,
       versionId: input.existingVersionId,
       image: building,
@@ -1100,11 +1151,12 @@ export async function buildVerifiedRigProviderImage(input: {
       };
     }
     building = claim.image;
+    if (claim.status === "claimed") replaced = claim.replaced;
   }
 
   const finalize = async (image: RigProviderImage): Promise<RigProviderImage> => {
     if (input.existingVersionId) {
-      const persisted = await finalizeRigVersionProviderImageBuild(input.db, {
+      const persisted = await dependencies.finalize(input.db, {
         workspaceId: input.workspaceId,
         versionId: input.existingVersionId,
         image,
@@ -1138,16 +1190,36 @@ export async function buildVerifiedRigProviderImage(input: {
   };
 
   if (!providerSupportsBuild) {
-    return await finalize({
+    const unsupported = await finalize({
       ...building,
       status: "unsupported",
       finishedAt: new Date().toISOString(),
       error: {
         code: "provider_image_build_unsupported",
-        message: `sandbox backend ${backend} does not support immutable provider image builds`,
+        message: computeWithoutSetup
+          ? "compute builds only Sandbox Environments with a setup script"
+          : backend === "compute"
+            ? "compute builds need a configured compute image and a deployment revision that identifies it"
+            : `sandbox backend ${backend} does not support immutable provider image builds`,
         retryable: false,
       },
     });
+    if (
+      unsupported.status === "unsupported" &&
+      replaced?.backend === "compute" &&
+      replaced.status === "ready" &&
+      replaced.imageId
+    ) {
+      // The record no longer names the template it replaced.
+      const template = replaced.imageId;
+      await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+        input.observability.warn("replaced compute environment template was not deleted", {
+          template,
+          error: errorMessage(error),
+        });
+      });
+    }
+    return unsupported;
   }
 
   throwIfAborted(input.signal);
@@ -1155,15 +1227,56 @@ export async function buildVerifiedRigProviderImage(input: {
     imageId: string;
     providerBindingKey: string;
   } | null = null;
+  // Whether this build made its compute template. A template found under
+  // the build's name is an earlier or concurrent build's, and stays.
+  let builtCreated = false;
   let artifactId: string | null = null;
   let coldBootValidatedAt: string | null = null;
+  /**
+   * Delete the compute template this build made, unless another build of the
+   * same name now owns it: a build that took over a stale claim captures
+   * under the same name and reuses the template, and may already have
+   * published it. When the record cannot be read, the template stays; the
+   * next build of the same content reuses it.
+   */
+  const releaseOwnComputeTemplate = async (): Promise<void> => {
+    if (backend !== "compute" || !builtIdentity || !builtCreated) return;
+    const template = builtIdentity.imageId;
+    if (input.existingVersionId) {
+      let current: RigProviderImage | null;
+      try {
+        current = await dependencies.currentImage(
+          input.db,
+          input.workspaceId,
+          input.existingVersionId,
+          backend,
+        );
+      } catch {
+        return;
+      }
+      if (current?.imageId === template) return;
+      if (
+        current?.buildRequestId === building.buildRequestId &&
+        current.startedAt !== building.startedAt
+      ) {
+        return;
+      }
+    }
+    await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+      input.observability.warn("unused compute environment template was not deleted", {
+        template,
+        error: errorMessage(error),
+      });
+    });
+  };
   try {
-    const built = await buildImmutableProviderImage({
+    const built = await dependencies.buildImage({
       backend,
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
       timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      signal: input.signal,
     });
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
@@ -1204,13 +1317,36 @@ export async function buildVerifiedRigProviderImage(input: {
       // A snapshot receipt is not proof that the artifact can cold-start. Boot
       // a second, independently owned sandbox from the exact image before it
       // can become runtime-selectable.
-      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
+      coldBootValidatedAt = await dependencies.verifyColdBoot({
         settings: input.settings,
         db: input.db,
         observability: input.observability,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        buildRequestId: building.buildRequestId,
+        rigVersionId: input.target.id,
+        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+        imageId: built.imageId,
+        contentHash,
+        checks: input.definition.checks,
+        lifecycle: input.lifecycle,
+      });
+    } else if (backend === "compute") {
+      if (!built.imageId || !built.providerBindingKey) {
+        throw new Error("compute template build returned incomplete ownership identity");
+      }
+      builtIdentity = {
+        imageId: built.imageId,
+        providerBindingKey: built.providerBindingKey,
+      };
+      builtCreated = built.created !== false;
+      // A captured template is not proof that it boots. Start a second,
+      // independently owned sandbox from it before runtime can select it.
+      coldBootValidatedAt = await dependencies.verifyColdBoot({
+        settings: input.settings,
+        db: input.db,
+        observability: input.observability,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
         rigVersionId: input.target.id,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: built.imageId,
@@ -1233,7 +1369,7 @@ export async function buildVerifiedRigProviderImage(input: {
       }
       throw abortReason(input.signal);
     }
-    return await finalize({
+    const published = await finalize({
       ...building,
       provider: built.provider,
       status: "ready",
@@ -1250,8 +1386,34 @@ export async function buildVerifiedRigProviderImage(input: {
       finishedAt: new Date().toISOString(),
       error: null,
     });
+    if (backend === "compute" && published.status !== "ready") {
+      // Fenced: another build owns the record now.
+      await releaseOwnComputeTemplate();
+    } else if (backend === "compute") {
+      if (
+        replaced?.backend === "compute" &&
+        replaced.imageId &&
+        replaced.imageId !== published.imageId
+      ) {
+        // Nothing references the template this rebuild replaced. Sandboxes
+        // already started from it keep running; a create racing the delete
+        // boots the plain image and runs setup.
+        await dependencies
+          .deleteComputeTemplate(input.settings, replaced.imageId)
+          .catch((error: unknown) => {
+            input.observability.warn("replaced compute environment template was not deleted", {
+              template: replaced!.imageId,
+              error: errorMessage(error),
+            });
+          });
+      }
+    }
+    return published;
   } catch (error) {
-    if (input.signal.aborted) throw abortReason(input.signal);
+    if (input.signal.aborted) {
+      await releaseOwnComputeTemplate();
+      throw abortReason(input.signal);
+    }
     if (artifactId) {
       await markSandboxCheckpointArtifactDeletePending(input.db, {
         accountId: input.accountId,
@@ -1269,6 +1431,8 @@ export async function buildVerifiedRigProviderImage(input: {
         builtIdentity.providerBindingKey,
         builtIdentity.imageId,
       ).catch(() => "not_found" as const);
+    } else if (backend === "compute") {
+      await releaseOwnComputeTemplate();
     }
     const message = errorMessage(error).slice(0, 2000);
     return await finalize({
@@ -1282,6 +1446,107 @@ export async function buildVerifiedRigProviderImage(input: {
         retryable: true,
       },
     });
+  }
+}
+
+/**
+ * Record that a compute Sandbox Environment version could not be built for
+ * its current content because its verification failed before any build. A
+ * turn then sees a failed build of this exact content, which it does not ask
+ * to rebuild, instead of an unbuilt version, which it would ask to verify
+ * again every day. The content changes with each release, so a release gets
+ * one more attempt. A ready template for older content that the record
+ * replaces is deleted. Best effort: a failure here leaves the version as it
+ * was.
+ */
+export async function recordComputeEnvironmentVerificationFailure(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    workspaceId: string;
+    version: RigProviderImageDefinition & { id: string };
+    message: string;
+  },
+  dependencies: Pick<
+    BuildVerifiedRigProviderImageDependencies,
+    "claim" | "finalize" | "deleteComputeTemplate"
+  > = defaultBuildVerifiedRigProviderImageDependencies,
+): Promise<boolean> {
+  const backend = input.settings.sandboxBackend as SandboxBackend;
+  if (
+    backend !== "compute" ||
+    !rigProviderImageBuildSupported(input.settings, backend) ||
+    !(input.version.setupScript ?? "").trim()
+  ) {
+    return false;
+  }
+  try {
+    const sourceImage = rigProviderImageContentSourceImage(input.settings, backend);
+    const contentHash = rigProviderImageContentHash({
+      backend,
+      sourceImage,
+      definition: input.version,
+    });
+    const claim = await dependencies.claim(input.db, {
+      workspaceId: input.workspaceId,
+      versionId: input.version.id,
+      image: {
+        backend,
+        provider: backend,
+        status: "building",
+        contentHash,
+        setupHash: rigProviderImageSetupHash(input.version),
+        sourceImage,
+        buildRequestId: rigProviderImageBuildRequestId({
+          targetId: input.version.id,
+          backend,
+          contentHash,
+        }),
+        imageId: null,
+        imageDigest: null,
+        artifactId: null,
+        providerBindingKeyHash: null,
+        provenance: { kind: "rig_verification", targetKind: "version", targetId: input.version.id },
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        error: null,
+      },
+      staleAfterMs: RIG_VERIFICATION_OWNER_TTL_MS,
+      retryUnsupported: true,
+    });
+    if (claim.status !== "claimed") return false;
+    const recorded = await dependencies.finalize(input.db, {
+      workspaceId: input.workspaceId,
+      versionId: input.version.id,
+      image: {
+        ...claim.image,
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        error: {
+          code: "provider_image_verification_failed",
+          message: input.message.slice(0, 2000) || "Sandbox Environment verification failed",
+          retryable: true,
+        },
+      },
+    });
+    const stale = claim.replaced;
+    if (recorded && stale?.backend === "compute" && stale.status === "ready" && stale.imageId) {
+      const template = stale.imageId;
+      await dependencies.deleteComputeTemplate(input.settings, template).catch((error: unknown) => {
+        input.observability.warn("replaced compute environment template was not deleted", {
+          template,
+          error: errorMessage(error),
+        });
+      });
+    }
+    return recorded;
+  } catch (error) {
+    input.observability.warn("compute environment verification failure was not recorded", {
+      versionId: input.version.id,
+      error: errorMessage(error),
+    });
+    return false;
   }
 }
 
@@ -1384,7 +1649,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, candidateVersion.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(
+              runSettings,
+              runSettings.sandboxBackend,
+            ),
             definition: providerImageDefinition,
           });
           return await runWithOwnedRigVerificationSandbox(
@@ -1394,7 +1662,6 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               observability,
               accountId: rig.accountId,
               workspaceId: input.workspaceId,
-              sandboxGroupId: change.id,
               rigVersionId: candidateVersion.id,
               sessionIdPrefix: `rig-verification-${change.id}`,
               lifecycle,
@@ -1578,7 +1845,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
-            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            sourceImage: rigProviderImageContentSourceImage(
+              runSettings,
+              runSettings.sandboxBackend,
+            ),
             definition: version,
           });
           return await runWithOwnedRigVerificationSandbox(
@@ -1588,7 +1858,6 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               observability,
               accountId: rig.accountId,
               workspaceId: input.workspaceId,
-              sandboxGroupId: version.id,
               rigVersionId: version.id,
               sessionIdPrefix: `rig-version-verification-${version.id}`,
               lifecycle,
@@ -1635,6 +1904,16 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               const passed =
                 platformCheckResults.every((result) => result.exitCode === 0) &&
                 checkResults.every((result) => result.exitCode === 0);
+              if (!passed) {
+                await recordComputeEnvironmentVerificationFailure({
+                  settings: runSettings,
+                  db,
+                  observability,
+                  workspaceId: input.workspaceId,
+                  version,
+                  message: "Sandbox Environment checks failed",
+                });
+              }
               const providerImage = passed
                 ? await buildVerifiedRigProviderImage({
                     settings: runSettings,
@@ -1680,6 +1959,19 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           // re-run instead of staying stale, symmetric to verifyRigChange. Then
           // rethrow so the Temporal activity still surfaces the failure.
           const detail = errorMessage(error);
+          if (!lifecycle.signal.aborted) {
+            // A cancelled run leaves the version for the next attempt; any
+            // other failure is recorded so turns stop asking for a rebuild of
+            // this exact content.
+            await recordComputeEnvironmentVerificationFailure({
+              settings: settingsForRigVerification(settings, version.image),
+              db,
+              observability,
+              workspaceId: input.workspaceId,
+              version,
+              message: detail,
+            });
+          }
           await recordRigAuditEvent(db, {
             grant,
             action: "rig.verification.failed",

@@ -15,6 +15,7 @@ import {
   ResetCreditInventory,
   codexAccountName,
   codexUsageReadings,
+  codexUsageWindows,
   hasResetInventory,
   planLabel,
   planReportsNoResets,
@@ -60,8 +61,10 @@ import {
 } from "@opengeni/react/ui/setting-row";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
-import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
+import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -72,7 +75,7 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /** The one fact column account rows line up in: the usage readout, against the chevron. */
 export const ACCOUNT_COLUMNS: RowListColumn[] = [
-  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end", leadsWhenFolded: true },
+  { id: "usage", label: "Usage", width: 240, hideLabel: true, align: "end", leadsWhenFolded: true },
 ];
 
 export interface CodexPlaces {
@@ -87,6 +90,15 @@ export interface CodexPlaces {
   openConnect: () => void;
   openAccess: (accountId: string) => void;
   sharePersonal?: ((accountId: string) => void) | undefined;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
+  /** A workspace's name in the organization, where the viewer can read it. */
+  workspaceNameOf?: ((workspaceId: string) => string | undefined) | undefined;
+  /**
+   * Workspace admins: stop using another workspace's own account that was
+   * shared with this one. Absent for everyone else.
+   */
+  removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
   backToList: () => void;
 }
 
@@ -182,14 +194,20 @@ export function CodexAccountRows({
   const entries = codex.accounts.map((account) => {
     const shared = account.source === "organization";
     const listed = organizationAccounts?.get(account.id);
+    // Another workspace's own account, shared with this one.
+    const sharedBy =
+      shared && account.ownerWorkspaceId && account.ownerWorkspaceId !== codex.workspaceId
+        ? account.ownerWorkspaceId
+        : null;
     // Until the organization's list says who else an account reaches, its
     // tag waits in place rather than changing under the reader.
-    const scopeLabel =
-      !shared || !organization ? undefined : listed?.reach ? (
-        accountReachLabel(places.scope, listed.reach, organization.workspaceName)
-      ) : organization.codex.loading ? (
-        <ModelSettingsPlaceholder />
-      ) : undefined;
+    const scopeLabel = sharedBy ? (
+      `Shared by ${places.workspaceNameOf?.(sharedBy) ?? "another workspace"}`
+    ) : !shared || !organization ? undefined : listed?.reach ? (
+      accountReachLabel(places.scope, listed.reach, organization.workspaceName)
+    ) : organization.codex.loading ? (
+      <ModelSettingsPlaceholder />
+    ) : undefined;
     return groupEntry(
       account.id,
       account,
@@ -233,28 +251,32 @@ export function codexSectionVisible(codex: CodexSubscriptions): boolean {
 }
 
 /**
- * The Codex section: how several accounts share work, keeping chats portable,
- * and Turn off Codex last. Which pool new work uses is not a setting here; the
+ * The Codex section: how several accounts share work, Codex Apps, and Turn
+ * off Codex last. Which pool new work uses is not a setting here; the
  * line above the Accounts list says it.
  */
 export function CodexSettingRows({
   codex,
   places,
-  providerSwitch,
   organizationSharing = null,
   onConnectForWorkspace,
   showRotation = true,
+  canChangeSettings = codex.canManage,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
-  /** The "Keep Codex chats portable" row. */
-  providerSwitch: ReactNode;
   /** How the organization's accounts share work, for the people who manage them. */
   organizationSharing?: ReactNode;
   /** Opens Connect Codex for an account owned by this workspace (Codex Apps needs one). */
   onConnectForWorkspace?: (() => void) | undefined;
   /** The shared account-rules section owns rotation after core settings load. */
   showRotation?: boolean;
+  /**
+   * Turn Codex on or off and pick how accounts share work here. Defaults to
+   * `codex.canManage`; a Personal workspace passes whether its owner may
+   * change its settings.
+   */
+  canChangeSettings?: boolean | undefined;
 }) {
   const [turningOff, setTurningOff] = useState(false);
   const { accounts } = codex;
@@ -265,7 +287,7 @@ export function CodexSettingRows({
           label="Codex is off in this workspace"
           description="New chats and automations here can't use Codex models. Accounts stay connected."
           control={
-            codex.canManage ? (
+            canChangeSettings ? (
               <RowButton
                 disabled={codex.busy}
                 onClick={() =>
@@ -282,7 +304,7 @@ export function CodexSettingRows({
   }
   // Only the pool in use matters, and only this workspace's own pool is set here.
   const showPick =
-    showRotation && codex.canManage && codex.workspaceManaged && accounts.length >= 2;
+    showRotation && canChangeSettings && codex.workspaceManaged && accounts.length >= 2;
   return (
     <>
       <SettingRowGroup>
@@ -310,8 +332,7 @@ export function CodexSettingRows({
           />
         ) : null}
         <CodexAppsRow codex={codex} places={places} onConnectForWorkspace={onConnectForWorkspace} />
-        {providerSwitch}
-        {codex.canManage ? (
+        {canChangeSettings ? (
           <SettingDangerRow
             label="Turn off Codex"
             description="New chats and automations here stop using Codex models. Accounts stay connected."
@@ -423,8 +444,7 @@ function CodexRow({
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
-  const readings = codexUsageReadings(live?.usage, codex.now);
-  const weekly = readings[0]!;
+  const windows = codexUsageWindows(live?.usage, codex.now);
   const status = attentionStatus(account, codex.now);
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
@@ -457,11 +477,10 @@ function CodexRow({
           ) : status === "out_of_usage" ? (
             <span className="text-xs font-medium text-danger">Out of usage</span>
           ) : (
-            <UsageReadout
-              percent={loadingUsage ? null : weekly.percent}
+            <SubscriptionUsageCell
+              windows={windows}
               loading={loadingUsage}
-              window="this week"
-              resets={usageResets(readings, weekly.label)}
+              now={codex.now}
               fallback={
                 live?.status === "error" || (!live && codex.usageError)
                   ? "Usage unavailable"
@@ -531,16 +550,28 @@ function CodexAccountDetail({
   const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const name = codexAccountName(account);
   const canEdit = editable(codex, account);
-  const organizationAccount = account.source === "organization";
+  // Another workspace's own account shared with this one: that workspace's
+  // admins manage it, and this workspace can only stop using it.
+  const sharedBy =
+    account.ownerWorkspaceId && account.ownerWorkspaceId !== codex.workspaceId
+      ? account.ownerWorkspaceId
+      : null;
+  const sharedByName = sharedBy
+    ? (places.workspaceNameOf?.(sharedBy) ?? "another workspace")
+    : null;
+  const removable = sharedBy !== null && places.removeFromWorkspace !== undefined;
+  const organizationAccount = account.source === "organization" && sharedBy === null;
+  const fromElsewhere = account.source === "organization";
   const status = attentionStatus(account, codex.now);
   const access = useConnectionAccess({
     client: codex.client,
     workspaceId: codex.workspaceId,
     kind: "codex",
     connectionId: account.id,
-    enabled: !organizationAccount && !places.personal,
+    enabled: !fromElsewhere && !places.personal,
   });
   const overview = codex.overviewMap[account.id];
   const attempts = codex.redemptionAttempts(account.id);
@@ -584,6 +615,12 @@ function CodexAccountDetail({
         Disconnect
       </DropdownMenuItem>
     ) : null,
+    removable ? (
+      <DropdownMenuItem key="remove" variant="destructive" onSelect={() => setRemoving(true)}>
+        <UnplugIcon />
+        Remove from this workspace
+      </DropdownMenuItem>
+    ) : null,
   ].filter(Boolean);
   const actions =
     menuItems.length > 0 ? (
@@ -603,14 +640,20 @@ function CodexAccountDetail({
           planLabel(account.plan, "ChatGPT"),
           // A custom name hides the sign-in, so the email stays findable.
           account.email && account.email !== name ? account.email : null,
-          organizationAccount ? places.scope.organization : places.scope.workspace,
+          sharedByName
+            ? `Shared by ${sharedByName}`
+            : organizationAccount
+              ? places.scope.organization
+              : places.scope.workspace,
         ]}
         actions={actions}
       />
       <DetailPageBody>
-        {organizationAccount ? (
+        {sharedByName ? (
+          <ManagedNote>{`Shared with ${places.workspaceName} by ${sharedByName}. That workspace's admins manage it.`}</ManagedNote>
+        ) : organizationAccount ? (
           <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
-        ) : !organizationAccount && !codex.canManage ? (
+        ) : !codex.canManage ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
         ) : null}
         {needsReconnect(account) ? (
@@ -757,7 +800,16 @@ function CodexAccountDetail({
             </SettingRowGroup>
           </DetailSection>
         ) : null}
-        {!organizationAccount && !planReportsNoResets(overview, attempts) ? (
+        {places.ownReach && places.personal && !fromElsewhere ? (
+          <OwnWhereItWorksSection
+            client={codex.client}
+            workspaceId={places.ownReach.workspaceId}
+            resourceKind="subscription_connection"
+            resourceId={account.id}
+            name={name}
+          />
+        ) : null}
+        {!fromElsewhere && !planReportsNoResets(overview, attempts) ? (
           <DetailSection
             title={resetCount > 0 ? `Usage limit resets (${resetCount})` : "Usage limit resets"}
           >
@@ -829,6 +881,24 @@ function CodexAccountDetail({
           places.backToList();
         }}
       />
+      {removable ? (
+        <DestructiveConfirm
+          open={removing}
+          onOpenChange={setRemoving}
+          title={`Stop using ${name} in ${places.workspaceName}?`}
+          consequences={[
+            `${name} stops paying for new work in ${places.workspaceName}.`,
+            "Running work here stops using it before its next model call.",
+            `Only the admins of ${sharedByName} or the organization can share it here again.`,
+          ]}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
+          onConfirm={async () => {
+            await places.removeFromWorkspace!(account.id);
+            places.backToList();
+          }}
+        />
+      ) : null}
     </DetailPage>
   );
 }
@@ -927,6 +997,7 @@ export function CodexConnectPage({
   footerStart,
   fields,
   blockedReason,
+  scope,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
@@ -936,6 +1007,8 @@ export function CodexConnectPage({
   fields?: ReactNode;
   /** Why the sign-in can't start yet (a choice above is incomplete). */
   blockedReason?: string | null;
+  /** "user": the person's own account, kept in their Personal workspace. */
+  scope?: "user" | undefined;
 }) {
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
@@ -949,6 +1022,7 @@ export function CodexConnectPage({
 
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay for new work."
       onClose={onClose}
@@ -966,6 +1040,7 @@ export function CodexConnectPage({
       onSubmit={async () => {
         if (signingIn) return false;
         await codex.connect({
+          scope,
           onConnected: (accountId) => {
             if (!active.current) return;
             setConnected(true);

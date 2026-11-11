@@ -51,8 +51,6 @@ function session(patch: Partial<Session> = {}): Session {
     rigId: null,
     rigVersionId: null,
     channelId: null,
-    variableSetId: null,
-    environmentId: null,
     firstPartyMcpPermissions: null,
     firstPartyMcpTools: [],
     mcpServers: [],

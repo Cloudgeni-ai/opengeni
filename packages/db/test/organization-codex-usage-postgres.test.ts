@@ -64,9 +64,6 @@ async function fixture(mode: "core", expired = false, workspaceManaged = false) 
   );
   const expires = new Date(expired ? 0 : Date.now() + 86_400_000).toISOString();
 
-  await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
   await shared!.admin`insert into subscription_connections (
       id, account_id, provider, kind, credential_encrypted, credential_format, provider_account_id,
       plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at,
@@ -583,61 +580,38 @@ for (const mode of ["core"] as const) {
         expect(rows[0]!.status).toBe("needs_relogin");
       },
     );
-    test.skipIf(!real)("refuses cutover maintenance without falling back", async () => {
-      const input = await fixture(mode);
-      await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${input.organizationId}, 'codex', false)
-        on conflict (account_id, provider) do update set enabled = false`;
+    test.skipIf(!real)("retains rotated tokens when quarantine starts during refresh", async () => {
+      const input = await fixture(mode, true);
       const fetch = provider();
-      expect(
-        (await fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch)).status,
-      ).toBe("error");
-      expect(fetch).not.toHaveBeenCalled();
-    });
-    for (const change of ["quarantine", "maintenance"] as const) {
-      test.skipIf(!real)(
-        `retains rotated tokens when ${change} starts during refresh`,
-        async () => {
-          const input = await fixture(mode, true);
-          const fetch = provider();
-          const refresh = mock(async () => {
-            if (change === "maintenance") {
-              await shared!
-                .admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-              values (${input.organizationId}, 'codex', false)
-              on conflict (account_id, provider) do update set enabled = false`;
-            } else
-              await shared!
-                .admin`update subscription_connections set status = 'error', last_error = 'Synthetic quarantine'
+      const refresh = mock(async () => {
+        await shared!
+          .admin`update subscription_connections set status = 'error', last_error = 'Synthetic quarantine'
               where id = ${input.credentialId}`;
 
-            return {
-              accessToken: "rotated-access",
-              refreshToken: "rotated-refresh",
-              idToken: "synthetic-id",
-            };
-          });
-          const result = await fetchOrganizationCodexUsageForAccount(
-            client!.db,
-            settings,
-            input,
-            fetch,
-            refresh,
-          );
-          expect(result.status).toBe("error");
-          expect(fetch).not.toHaveBeenCalled();
-          const rows = await shared!
-            .admin`select refresh_generation as generation, status, last_error, credential_encrypted
-              from subscription_connections where id = ${input.credentialId}`;
-          expect(Number(rows[0]!.generation)).toBe(2);
-          const { decryptEnvironmentValue } = await import("../src/environment-crypto");
-          expect(
-            JSON.parse(decryptEnvironmentValue(key, rows[0]!.credential_encrypted)).refresh_token,
-          ).toBe("rotated-refresh");
-          if (change === "quarantine")
-            expect(rows[0]).toMatchObject({ status: "error", last_error: "Synthetic quarantine" });
-        },
+        return {
+          accessToken: "rotated-access",
+          refreshToken: "rotated-refresh",
+          idToken: "synthetic-id",
+        };
+      });
+      const result = await fetchOrganizationCodexUsageForAccount(
+        client!.db,
+        settings,
+        input,
+        fetch,
+        refresh,
       );
-    }
+      expect(result.status).toBe("error");
+      expect(fetch).not.toHaveBeenCalled();
+      const rows = await shared!
+        .admin`select refresh_generation as generation, status, last_error, credential_encrypted
+              from subscription_connections where id = ${input.credentialId}`;
+      expect(Number(rows[0]!.generation)).toBe(2);
+      const { decryptEnvironmentValue } = await import("../src/environment-crypto");
+      expect(
+        JSON.parse(decryptEnvironmentValue(key, rows[0]!.credential_encrypted)).refresh_token,
+      ).toBe("rotated-refresh");
+      expect(rows[0]).toMatchObject({ status: "error", last_error: "Synthetic quarantine" });
+    });
   });
 }

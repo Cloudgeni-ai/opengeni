@@ -7,7 +7,7 @@ import type {
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
-  Session,
+  ChatSession as Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -65,6 +65,11 @@ export type UserMessageItem = {
    * for messages from agents, services and schedules, and for older messages.
    */
   sender?: MessageSender | undefined;
+  /**
+   * This message handed a sub-session's question to the agent ("Let the agent
+   * decide"). Hosts may show the decision instead of the plain text.
+   */
+  humanInputDelegation?: { sessionId: string; requestId: string } | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:
@@ -194,6 +199,17 @@ export type ToolCallItem = {
    */
   raw: unknown;
   status: "running" | "complete" | "failed" | "cancelled";
+  /**
+   * Set while the call waits for a person's approval (`session.requiresAction`
+   * names it): it has not run yet, so rows say so instead of "Done". Cleared
+   * when the person decides, its output arrives or the turn ends.
+   */
+  awaitingApproval?: true | undefined;
+  /**
+   * This call's approval was rejected, so it never ran: by the person when
+   * asked, or automatically (Opengeni refused it, or the approval expired).
+   */
+  approvalRejected?: "person" | "automatic" | undefined;
   occurredAt: string;
   /** Canonical textual projection of the settled tool output. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
@@ -287,6 +303,8 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  /** The Sandbox Environment a setup step sets up, by name, when its events say. */
+  subject?: string | undefined;
   blockedReason?:
     | "capture_in_progress"
     | "rotation_in_progress"
@@ -422,6 +440,11 @@ export type SessionStatusItem = {
    * is asked of the person, so it reads as stuck, not "waiting on you".
    */
   blocked?: true;
+  /**
+   * The `cancelled` status archiving a chat recorded when it stopped the
+   * chat's work: it reads as archived, never as "cancelled".
+   */
+  archived?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -450,6 +473,22 @@ export type NoticeItem = {
   text: string;
   /** An approval wait (`session.requiresAction`), independent of its display text. */
   approval?: true;
+  /**
+   * The actions an approval wait asks about, with the request's display title
+   * when it carried one, and the person's answer once `user.approvalDecision`
+   * recorded it. Presentation only.
+   */
+  approvalActions?: Array<{
+    id: string;
+    title: string | null;
+    /**
+     * Server-read facts about what it changes (the approval's `targetFacts`), in card
+     * order; history uses them only to tell two alike lines apart.
+     */
+    facts?: Array<{ label: string; value: string }>;
+    /** automatic_reject: Opengeni declined it, not the person. */
+    decision?: "approve" | "reject" | "automatic_reject";
+  }>;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**
@@ -461,6 +500,12 @@ export type NoticeItem = {
   capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
+  /**
+   * A failed attempt that a Retry reopened. The turn's final outcome carries
+   * the failure that still matters, so this attempt reads as one quiet step
+   * ("Attempt failed · retried") with its recorded text behind a disclosure.
+   */
+  retriedAttempt?: true;
   /**
    * Recorded agent wait only: delegated worker sessions that had not reported
    * back when the wait began. Best effort from the loaded history; absent when
@@ -516,15 +561,27 @@ export type ContextCompactionItem = {
   skipReason: string | null;
   /**
    * Present only for a `summarization_failed` skip where the provider
-   * definitively rejected the compaction request. Content-free identifiers.
+   * definitively rejected the compaction request, or a trimmed checkpoint
+   * (`implementation: "deterministic_trim"`) whose summary request was
+   * rejected that way. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The provider's own error message for a failed summary request, bounded,
+   * when it sent one: on a `summarization_failed` skip, or on a trimmed
+   * checkpoint. Diagnostics shown behind Details only.
+   */
+  providerMessage?: string;
   /**
    * The same turn's recorded failure text, when that turn failed because this
    * compaction did. Diagnostics shown behind Details only.
    */
   failureDetail?: string;
-  /** Provider implementation id for debug disclosure only. */
+  /**
+   * Provider implementation id. `deterministic_trim` marks a checkpoint that
+   * trimmed older messages because the chat's model could not summarize them;
+   * other values are for debug disclosure only.
+   */
   implementation: string | null;
   occurredAt: string;
 };
@@ -559,6 +616,21 @@ export type MachineInputMember = {
   sourceId: string;
   summary: string;
   result?: MediaGenerationResult | undefined;
+  /**
+   * An automation run's plain description: the automation's name and what
+   * the events that started it say happened. Never its instructions. Absent
+   * on runs delivered before Opengeni recorded it; the chat then says only
+   * that an automation ran.
+   */
+  automation?: AutomationRunPresentation | undefined;
+};
+
+export type AutomationRunPresentation = {
+  name: string;
+  /** What the first few events that started the run say, oldest first. */
+  eventSummaries: string[];
+  /** How many events started the run; 0 for a scheduled run. */
+  eventCount: number;
 };
 
 /**
@@ -644,6 +716,12 @@ export type TurnEndItem = {
   failureText: string | null;
   /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
   failureDetail?: string;
+  /**
+   * The failure has its own row: its notice, a compaction landmark or a
+   * usage-limit row. That row stands for the attempt once a Retry replaces it,
+   * so no "retried" step repeats it.
+   */
+  ownRow?: "notice" | "landmark" | "usage-limit";
   occurredAt: string;
 };
 
@@ -750,10 +828,16 @@ export type TimelineGroup =
         /**
          * Settled time inside this work span in which the agent was not
          * working: capacity waits, and the gap between a failed attempt and
-         * the Retry that reopened the turn. The worked duration and the live
-         * working clock exclude it.
+         * the Retry that reopened the turn, and settled pauses. The worked
+         * duration and the live working clock exclude it.
          */
         pausedMs?: number;
+        /**
+         * Set while a pause is in force over this still-open turn: when it
+         * began. Pause parks the turn for Resume, so it reads as paused with
+         * its clock stopped here, not as working.
+         */
+        pausedAt?: string;
         details: TimelineGroup[];
         /**
          * While the turn is live, its progress notes stay readable above the

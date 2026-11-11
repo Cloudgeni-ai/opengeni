@@ -33,6 +33,7 @@ import { Field, TextArea } from "../../../ui/field";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
 import { KeepActiveSetting, sessionReadOnlyArchive } from "./session-retention";
+import { UnattendedSetting } from "./session-unattended-setting";
 import { SessionUsageLimitSection } from "./session-usage-limit-section";
 import { useAppContext } from "../../app-context";
 import {
@@ -49,7 +50,6 @@ import {
   type AgentCapabilityDraft,
 } from "../../lib/agent-capabilities";
 import { chatLearningScope } from "../../lib/chat-learning-scope";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { sessionUsageLimitCapability } from "../../lib/session-usage-limit";
 import { cn } from "../../lib/utils";
@@ -87,6 +87,38 @@ export function AgentConfigurationPanel(props: {
     session.workspaceId,
     "sessions:control",
   );
+  const [configuration, setConfiguration] = useState<Session | null>(null);
+  const [configurationError, setConfigurationError] = useState<string | null>(null);
+  const [configurationRead, setConfigurationRead] = useState(0);
+  useEffect(() => {
+    setConfiguration(null);
+    setConfigurationError(null);
+    if (!canEdit) return;
+    const abort = new AbortController();
+    context.client
+      .getSessionConfiguration(session.workspaceId, session.id, {
+        fresh: true,
+        signal: abort.signal,
+      })
+      .then(
+        (value) => {
+          if (!abort.signal.aborted) setConfiguration(value);
+        },
+        () => {
+          if (!abort.signal.aborted) setConfigurationError("Could not load tool details.");
+        },
+      );
+    return () => abort.abort();
+  }, [
+    context.client,
+    canEdit,
+    session.workspaceId,
+    session.id,
+    session.toolPolicyVersion,
+    session.model,
+    session.activeSandboxId,
+    configurationRead,
+  ]);
   const sectionId = useId();
   const learningHeading = useRef<HTMLHeadingElement>(null);
   const config = session.agent ?? null;
@@ -117,10 +149,7 @@ export function AgentConfigurationPanel(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRegion = useRef<HTMLDivElement>(null);
-  const learningScope = chatLearningScope(
-    session,
-    isPersonalWorkspace(workspace, context.managedSelfContext),
-  );
+  const learningScope = chatLearningScope(session);
   // This chat's Agent learning: shown inside Skills and Knowledge, saved with them.
   const learning = useLearningSettings({
     workspaceId: session.workspaceId,
@@ -370,6 +399,12 @@ export function AgentConfigurationPanel(props: {
                   learningModes={learning.modes}
                 />
               </PanelSection>
+              {/* Absent on servers without unattended chats. */}
+              {session.unattended !== undefined && !sessionReadOnlyArchive(session) ? (
+                <PanelSection id={`${sectionId}-autonomy`} title="Autonomy">
+                  <UnattendedSetting session={session} onSaved={props.onReloadSession} />
+                </PanelSection>
+              ) : null}
               {context.clientConfig.sessionArchive && !sessionReadOnlyArchive(session) ? (
                 <PanelSection id={`${sectionId}-storage`} title="Storage">
                   <KeepActiveSetting
@@ -388,8 +423,29 @@ export function AgentConfigurationPanel(props: {
                   />
                 </PanelSection>
               ) : null}
-              <ConnectedApps session={session} />
-              <TechnicalDetails session={session} />
+              {canEdit ? (
+                configurationError ? (
+                  <Notice tone="failed">
+                    {configurationError}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setConfigurationRead((value) => value + 1)}
+                    >
+                      Try again
+                    </Button>
+                  </Notice>
+                ) : configuration?.id === session.id ? (
+                  <>
+                    <ConnectedApps session={configuration} />
+                    <TechnicalDetails session={configuration} />
+                  </>
+                ) : (
+                  <p role="status" className="text-sm text-fg-muted">
+                    Loading tool details…
+                  </p>
+                )
+              ) : null}
             </>
           )}
         </div>

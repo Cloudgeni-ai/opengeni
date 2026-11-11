@@ -42,7 +42,7 @@ export function coreCodexModelCallCompletedAt(
   return typeof at === "number" && Number.isFinite(at) ? new Date(at) : null;
 }
 
-/** Same banding as the legacy usage cache projection (legacy-subscription-world). */
+/** Same banding as the retired legacy usage cache projection. */
 const NEAR_EXHAUSTION_PERCENT = 90;
 
 function usageWindow(id: string, usedPercent: number, resetsAt: Date | null): QuotaWindow {

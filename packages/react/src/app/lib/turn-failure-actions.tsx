@@ -6,9 +6,11 @@ export type TurnFailureStep =
   | "retry"
   | "switch_model"
   | "buy_credits"
+  | "upgrade_plan"
   | "connect_model"
   | "new_session"
-  | "send_message";
+  | "send_message"
+  | "allow_machine";
 
 let sink: ((step: TurnFailureStep) => void) | null = null;
 

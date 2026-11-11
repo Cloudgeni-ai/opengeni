@@ -129,71 +129,126 @@ const credential: BrowserPasskeyCredentialMaterial = {
 describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
   "vault-backed interaction secrets (PostgreSQL)",
   () => {
-    test("passkeys: save, lease to one holder, monotonic sign count, release", async () => {
+    for (const backupEligibility of [undefined, false, true]) {
+      test(`passkeys: save, lease, count and release with backup eligibility ${backupEligibility}`, async () => {
+        if (!client) return;
+        const db = client.db;
+        const { principal } = await agentAttempt();
+        const port = createVaultInteractionSecretsPort({ db, encryptionKey: key });
+        const store = port.passkeys!;
+        const storedCredential = {
+          ...credential,
+          ...(backupEligibility === undefined
+            ? {}
+            : { backupEligibility, backupState: backupEligibility }),
+        };
+
+        const { itemId } = await store.saveRegistered(principal, {
+          credential: storedCredential,
+          origin: "http://localhost:47423",
+        });
+        const row = await getVaultItem(db, { kind: "principal", principal }, { itemId });
+        expect(row.type).toBe("passkey");
+        expect(row.name).toBe("localhost passkey for alice");
+        expect(row.websites).toEqual(["http://localhost:47423"]);
+        expect(row.fields.map((field) => [field.name, field.kind]).sort()).toEqual(
+          [
+            ["credentialId", "text"],
+            ["privateKey", "concealed"],
+            ["rpId", "text"],
+            ["userHandle", "text"],
+            ["userName", "text"],
+            ...(backupEligibility === undefined
+              ? []
+              : [
+                  ["backupEligibility", "text"],
+                  ["backupState", "text"],
+                ]),
+          ].sort(),
+        );
+        expect(Number(row.passkeySignCount)).toBe(1);
+
+        // A second registration for the same user gets a distinct name.
+        const second = await store.saveRegistered(principal, {
+          credential: { ...credential, credentialId: "c2Vjb25kLWNyZWRlbnRpYWw", signCount: 0 },
+          origin: null,
+        });
+        const secondRow = await getVaultItem(
+          db,
+          { kind: "principal", principal },
+          {
+            itemId: second.itemId,
+          },
+        );
+        expect(secondRow.name).toBe("localhost passkey for alice nRpYWw");
+        expect(secondRow.websites).toEqual(["https://localhost"]);
+
+        const leased = await store.lease(principal, "browser-a", 600);
+        expect(leased.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
+        const first = leased.find((entry) => entry.itemId === itemId)!;
+        expect(first).toEqual({ ...storedCredential, userDisplayName: null, itemId });
+
+        // The most recent holder takes over, so a passkey registered in one
+        // browser works at once in another.
+        const takenOver = await store.lease(principal, "browser-b", 600);
+        expect(takenOver.map((entry) => entry.itemId).sort()).toEqual(
+          [itemId, second.itemId].sort(),
+        );
+
+        await store.updateSignCount(principal, itemId, 7);
+        await store.updateSignCount(principal, itemId, 3);
+        const renewed = await store.lease(principal, "browser-a", 600);
+        expect(renewed.find((entry) => entry.itemId === itemId)?.signCount).toBe(7);
+
+        // Releasing a holder that no longer holds anything leaves the current lease.
+        await store.release("browser-b");
+        const kept = await getVaultItem(db, { kind: "principal", principal }, { itemId });
+        expect(kept.passkeyLeasedUntil).not.toBeNull();
+
+        await store.release("browser-a");
+        const taken = await store.lease(principal, "browser-b", 600);
+        expect(taken.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
+        await store.release("browser-b");
+      });
+    }
+
+    test("hosted passkeys: field approval rules gate only the passkey's own fields", async () => {
       if (!client) return;
       const db = client.db;
-      const { principal } = await agentAttempt();
-      const port = createVaultInteractionSecretsPort({ db, encryptionKey: key });
-      const store = port.passkeys!;
-
-      const { itemId } = await store.saveRegistered(principal, {
-        credential,
-        origin: "http://localhost:47423",
-      });
-      const row = await getVaultItem(db, { kind: "principal", principal }, { itemId });
-      expect(row.type).toBe("passkey");
-      expect(row.name).toBe("localhost passkey for alice");
-      expect(row.websites).toEqual(["http://localhost:47423"]);
-      expect(row.fields.map((field) => [field.name, field.kind]).sort()).toEqual(
-        [
-          ["credentialId", "text"],
-          ["privateKey", "concealed"],
-          ["rpId", "text"],
-          ["userHandle", "text"],
-          ["userName", "text"],
-        ].sort(),
-      );
-      expect(Number(row.passkeySignCount)).toBe(1);
-
-      // A second registration for the same user gets a distinct name.
-      const second = await store.saveRegistered(principal, {
-        credential: { ...credential, credentialId: "c2Vjb25kLWNyZWRlbnRpYWw", signCount: 0 },
-        origin: null,
-      });
-      const secondRow = await getVaultItem(
+      const { principal, subjectId } = await agentAttempt();
+      const scope = { accountId: principal.accountId, workspaceId: principal.workspaceId };
+      const logs: Array<[string, Record<string, unknown>]> = [];
+      const port = createVaultInteractionSecretsPort({
         db,
-        { kind: "principal", principal },
-        {
-          itemId: second.itemId,
-        },
-      );
-      expect(secondRow.name).toBe("localhost passkey for alice nRpYWw");
-      expect(secondRow.websites).toEqual(["https://localhost"]);
+        encryptionKey: key,
+        log: (event, fields) => logs.push([event, fields]),
+      });
+      const store = port.passkeys!;
+      const { itemId } = await store.saveRegistered(principal, { credential, origin: null });
+      const row = await getVaultItem(db, { kind: "principal", principal }, { itemId });
+      const rule = { itemId, vaultId: row.vaultId, item: false, subjectId };
+      const leaseLogs = () => logs.filter(([event]) => event === "browser.passkey.leased");
 
-      const leased = await store.lease(principal, "browser-a", 600);
-      expect(leased.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
-      const first = leased.find((entry) => entry.itemId === itemId)!;
-      expect(first).toEqual({ ...credential, userDisplayName: null, itemId });
+      expect(await store.lease(principal, "browser-a", 600)).toHaveLength(1);
+      expect(leaseLogs().at(-1)![1]).toEqual({
+        holder: "browser-a",
+        loaded: [{ itemId, rpId: "localhost" }],
+        skipped: [],
+      });
+      // An unchanged outcome is logged once per browser.
+      await store.lease(principal, "browser-a", 600);
+      expect(leaseLogs()).toHaveLength(1);
 
-      // The most recent holder takes over, so a passkey registered in one
-      // browser works at once in another.
-      const takenOver = await store.lease(principal, "browser-b", 600);
-      expect(takenOver.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
-
-      await store.updateSignCount(principal, itemId, 7);
-      await store.updateSignCount(principal, itemId, 3);
-      const renewed = await store.lease(principal, "browser-a", 600);
-      expect(renewed.find((entry) => entry.itemId === itemId)?.signCount).toBe(7);
-
-      // Releasing a holder that no longer holds anything leaves the current lease.
-      await store.release("browser-b");
-      const kept = await getVaultItem(db, { kind: "principal", principal }, { itemId });
-      expect(kept.passkeyLeasedUntil).not.toBeNull();
-
+      // Asking before the private key is used is asking before the passkey is.
+      await setSecretApprovalRules(db, scope, { ...rule, fieldKeys: ["privatekey"] });
+      expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
+      expect(leaseLogs().at(-1)![1]).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId, reason: "approval_required" }],
+      });
+      await setSecretApprovalRules(db, scope, { ...rule, fieldKeys: [] });
       await store.release("browser-a");
-      const taken = await store.lease(principal, "browser-b", 600);
-      expect(taken.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
-      await store.release("browser-b");
     });
 
     test("connected password manager passkeys: found, leased live, counted back", async () => {
@@ -211,6 +266,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         userDisplayName: "Alice",
         privateKey: credential.privateKey,
         signCount: 4,
+        backupEligibility: true,
+        backupState: true,
       };
       const host = createFakeVaultProvider({
         capabilities: { passkeys: true },
@@ -271,11 +328,15 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       ]);
 
       const logs: string[] = [];
+      const leases: Array<Record<string, unknown>> = [];
       const port = createVaultInteractionSecretsPort({
         db,
         encryptionKey: key,
         providersFor: () => providers,
-        log: (event) => logs.push(event),
+        log: (event, fields) => {
+          logs.push(event);
+          if (event === "browser.passkey.leased") leases.push(fields);
+        },
       });
       const store = port.passkeys!;
       const leased = await store.lease(principal, "browser-a", 600);
@@ -314,13 +375,34 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       };
       expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
       expect(logs).toContain("browser.passkey.provider_read_failed");
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId: item!.id, reason: "provider_read_failed" }],
+      });
       host.readPasskeys = readPasskeys;
 
       // An item that needs a person's approval for each use is not loaded.
-      const rule = { itemId: item!.id, vaultId: vault.id, fieldKeys: [], subjectId };
-      await setSecretApprovalRules(db, scope, { ...rule, item: true });
+      const rule = { itemId: item!.id, vaultId: vault.id, subjectId };
+      await setSecretApprovalRules(db, scope, { ...rule, item: true, fieldKeys: [] });
       expect(await store.lease(principal, "browser-a", 600)).toEqual([]);
-      await setSecretApprovalRules(db, scope, { ...rule, item: false });
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [],
+        skipped: [{ itemId: item!.id, reason: "approval_required" }],
+      });
+      // Asking before the login's password is used does not hold back its
+      // passkey, which the password manager holds apart from the password.
+      await setSecretApprovalRules(db, scope, { ...rule, item: false, fieldKeys: ["password"] });
+      expect(await store.lease(principal, "browser-a", 600)).toEqual([
+        { ...providerPasskey, signCount: 12, itemId: item!.id },
+      ]);
+      expect(leases.at(-1)).toEqual({
+        holder: "browser-a",
+        loaded: [{ itemId: item!.id, rpId: "example.com" }],
+        skipped: [],
+      });
+      await setSecretApprovalRules(db, scope, { ...rule, item: false, fieldKeys: [] });
       expect(await store.lease(principal, "browser-a", 600)).toHaveLength(1);
       await store.release("browser-a");
 

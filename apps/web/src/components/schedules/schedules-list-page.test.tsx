@@ -314,15 +314,6 @@ const manager = {
   canTargetSessions: true,
 };
 
-function sync(id: string, status: ScheduledTask["status"], control: Record<string, unknown>) {
-  return {
-    ...schedule(id, `Sync ${id}`, status),
-    action: { kind: "knowledge_source_sync" },
-    agentConfig: { prompt: "", resources: [], metadata: {}, knowledgeSource: { id } },
-    metadata: { knowledgeSourceSync: control },
-  } as unknown as ScheduledTask;
-}
-
 test("the switch shows only where it pauses a schedule the viewer can change", () => {
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), manager)).toBe(true);
   expect(canSwitchSchedule(schedule("a", "Mine", "paused"), manager)).toBe(true);
@@ -333,25 +324,9 @@ test("the switch shows only where it pauses a schedule the viewer can change", (
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), { ...manager, canManage: false })).toBe(
     false,
   );
-  // A sync that would run once on, and ones stopped by their source or connection.
-  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: true }), manager)).toBe(true);
-  expect(canSwitchSchedule(sync("s", "active", { sourceEnabled: false }), manager)).toBe(false);
-  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: false }), manager)).toBe(false);
-  expect(canSwitchSchedule(sync("s", "active", { connectionPaused: true }), manager)).toBe(false);
-  // A retired sync.
-  const retired = {
-    ...sync("r", "active", {}),
-    agentConfig: {
-      prompt: "",
-      resources: [],
-      metadata: {},
-      knowledgeSource: { connection: { providerDomain: "api.atlassian.com" } },
-    },
-  } as unknown as ScheduledTask;
-  expect(canSwitchSchedule(retired, manager)).toBe(false);
 });
 
-test("rows without a switch keep Pause in their menu; switched rows drop it", async () => {
+test("switched rows drop Pause from their menu", async () => {
   async function menuFor(task: ScheduledTask, pauseItem: boolean) {
     document.body.replaceChildren();
     const container = document.createElement("div");
@@ -391,8 +366,6 @@ test("rows without a switch keep Pause in their menu; switched rows drop it", as
     "Duplicate",
     "Delete",
   ]);
-  const stopped = sync("s", "active", { sourceEnabled: false });
-  expect(await menuFor(stopped, !canSwitchSchedule(stopped, manager))).toContain("Pause");
 });
 
 test("a list of others' schedules shows no switches", async () => {

@@ -1,4 +1,11 @@
 import { CuaNativeTools } from "./native-tools";
+import {
+  type AgentInput,
+  agentInput as processAgentInput,
+  type PersonInputReader,
+  reachesHidTimers,
+  recentPersonInput,
+} from "./macos-person-input";
 import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -30,6 +37,7 @@ import {
   type CuaDesktopRuntime,
   type ListedWindow,
   type RunStepsOutcome,
+  WINDOWS_SET_VALUE_REFUSED,
 } from "./wire";
 import {
   dateFieldFormat,
@@ -72,7 +80,15 @@ type Frame = {
   windowHeight: number;
 };
 type Operation = {
-  name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key" | "hotkey";
+  name:
+    | "click"
+    | "drag"
+    | "scroll"
+    | "set_value"
+    | "type_text"
+    | "press_key"
+    | "hotkey"
+    | "bring_to_front";
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
@@ -111,6 +127,9 @@ const UNTITLED_STRIP_MAX_SIDE = 100;
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+/** CUA's refusal of background typing when the window's focused element is
+ * not a text input (see typeAtClick). */
+const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
 
 /** How long the reading after an action waits for work the action started,
  * such as a save or a load the page shows as "Saving..." or a busy element,
@@ -174,6 +193,14 @@ export class CuaComputerBackend implements ComputerBackend {
   private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
+  /** Per window, the point of a click that was its latest action, in the
+   * screenshot pixels of the frame the click used (with that frame's size):
+   * where typing goes next when the window's content is not in its
+   * accessibility tree (see typeAtClick). Any other action forgets it. */
+  private readonly clickedPoints = new Map<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
   private closePromise: Promise<void> | null = null;
@@ -185,6 +212,11 @@ export class CuaComputerBackend implements ComputerBackend {
   /** macOS windows on the current Space that their app never shows. A window
    * stays this way until it comes on screen or goes away. */
   private readonly neverShown = new Set<string>();
+  /** macOS windows named by their id that the listing of every app leaves
+   * out, because they sit on a level above an app's working windows (a
+   * sign-in or other dialog an app raises there). CUA reads any window by its
+   * id, so they stay targets while their app lists them. */
+  private readonly namedWindows = new Set<string>();
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -195,6 +227,9 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
     private readonly frontWindow: WindowFronting | null,
+    private readonly personInput: PersonInputReader | null,
+    private readonly agentInput: AgentInput,
+    private readonly cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -214,6 +249,8 @@ export class CuaComputerBackend implements ComputerBackend {
       // stale token (see dispatchBatch); elsewhere each action is its own.
       actionBatches,
       parallelApps: false,
+      // Only macOS brings a window to the front (see dispatchFocus).
+      targetFocus: platform === "macos" && permissions.accessibility,
     };
   }
 
@@ -221,6 +258,7 @@ export class CuaComputerBackend implements ComputerBackend {
     runtime: CuaDesktopRuntime,
     platform: "macos" | "windows" | "linux" = "macos",
     options: {
+      cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
       /** A process's parent, to tie a Linux launcher's app to its window.
        * CUA runs in this process, so it sees the same processes. */
       parentPid?: (pid: number) => number | null;
@@ -232,6 +270,13 @@ export class CuaComputerBackend implements ComputerBackend {
       /** Windows: bring a window to the foreground before CUA sends it
        * pointer or keyboard input (see windows-foreground.ts). */
       frontWindow?: WindowFronting | null;
+      /** macOS: how long ago a person used the keyboard, mouse or trackpad
+       * (see macos-person-input.ts). Listings and observations say so when
+       * it was within the last minute. */
+      personInput?: PersonInputReader | null;
+      /** The input agents send through this process that the person-input
+       * reading would also see; shared by every session by default. */
+      agentInput?: AgentInput;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -246,6 +291,9 @@ export class CuaComputerBackend implements ComputerBackend {
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
         platform === "macos" ? (options.macWindows ?? null) : null,
         platform === "windows" ? (options.frontWindow ?? null) : null,
+        platform === "macos" ? (options.personInput ?? null) : null,
+        options.agentInput ?? processAgentInput,
+        options.cursorIdentity,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -290,7 +338,12 @@ export class CuaComputerBackend implements ComputerBackend {
           ? await this.front(window_id, [{ name: request.tool, args: { delivery_mode } }])
           : null;
       try {
-        return await this.nativeTools.call(request);
+        // Input the person-input reading would also see is noted, so it is
+        // not reported as a person's afterwards.
+        const nativeTools = this.nativeTools;
+        return reachesHidTimers(request.tool, request.arguments)
+          ? await this.agentInput.around(() => nativeTools.call(request))
+          : await nativeTools.call(request);
       } finally {
         await fronted?.giveBack();
       }
@@ -308,6 +361,7 @@ export class CuaComputerBackend implements ComputerBackend {
         keyboardInput: permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
+        targetFocus: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
         pointerInput: permissions.accessibility && permissions.screen_recording,
       };
@@ -317,15 +371,36 @@ export class CuaComputerBackend implements ComputerBackend {
   targets(): Promise<ComputerBackendTarget[]> {
     return this.run(async () => {
       await this.assertOnScreen(true);
-      return await this.discover();
+      const targets = await this.discover();
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? targets
+        : targets.map((target) => ({ ...target, personInputSecondsAgo }));
     });
   }
   observe(targetId: string): Promise<ComputerBackendObservation> {
-    return this.run(() =>
-      this.whileOnScreen(false, () =>
+    return this.run(async () => {
+      const observation = await this.whileOnScreen(false, () =>
         this.readOnScreen(targetId, () => this.observeTarget(targetId)),
-      ),
-    );
+      );
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? observation
+        : { ...observation, target: { ...observation.target, personInputSecondsAgo } };
+    });
+  }
+
+  /** Whole seconds since a person used the keyboard, mouse or trackpad, when
+   * that was within the last minute and clearly after any input agents sent
+   * through this process that the same reading sees. A reading that fails
+   * says nothing. */
+  private recentPersonInput(): number | undefined {
+    try {
+      if (!this.personInput) return undefined;
+      return recentPersonInput(this.agentInput.personOnly(this.personInput()));
+    } catch {
+      return undefined;
+    }
   }
   capture(
     targetId: string,
@@ -382,7 +457,12 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
+      // Only a click that is the window's latest action says where typing goes.
+      const clickedAt = this.clickedPoints.get(command.targetId);
+      this.clickedPoints.delete(command.targetId);
+      if (command.action.type === "batch")
+        return await this.dispatchBatch(command, false, standIn, unconfirmed);
+      if (command.action.type === "focus") return await this.dispatchFocus(command);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -403,6 +483,12 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
+      const clickFrame =
+        command.action.type === "pointer" &&
+        command.action.action === "click" &&
+        (command.action.button ?? "left") === "left"
+          ? this.latestFrame(command.targetId)
+          : undefined;
       // Filling a date field takes several steps, and a checkbox found by
       // name reads its state as its step runs: run them as one batch.
       if (
@@ -414,6 +500,7 @@ export class CuaComputerBackend implements ComputerBackend {
           { ...command, action: { type: "batch", actions: [command.action] } },
           true,
           standIn,
+          unconfirmed,
         );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
@@ -421,8 +508,10 @@ export class CuaComputerBackend implements ComputerBackend {
       const known = new Set(this.targetsById.keys());
       const fronted = await this.front(acted.windowId, operations);
       let report = "";
-      // A click or key press CUA could only send, with nothing confirming
-      // the app acted on it.
+      // A click, key press or press of an element CUA could only send, with
+      // nothing confirming the app acted on it. An app in the background can
+      // take a press through accessibility and do nothing (a toolbar button
+      // that opens its flyout only while its app is active).
       const rawInput =
         command.action.type === "keyboard" ||
         (command.action.type === "pointer" &&
@@ -434,7 +523,11 @@ export class CuaComputerBackend implements ComputerBackend {
           try {
             const call = await callDesktop(this.runtime, operation.name, operation.args, true);
             report += openedWindowsReport(call.result.text);
-            if (rawInput && deliveredUnconfirmed(call)) unconfirmedInput = true;
+            const press =
+              command.action.type === "semantic" &&
+              command.action.action === "invoke" &&
+              operation.name === "click";
+            if ((rawInput || press) && deliveredUnconfirmed(call)) unconfirmedInput = true;
           } catch (error) {
             if (index > 0)
               throw new ComputerBackendError(
@@ -443,6 +536,26 @@ export class CuaComputerBackend implements ComputerBackend {
                 false,
                 true,
               );
+            const atClick = this.typeAtClick(command, operation, error, clickedAt);
+            if (atClick) {
+              const call = await callDesktop(this.runtime, atClick.name, atClick.args, true);
+              report += openedWindowsReport(call.result.text);
+              if (deliveredUnconfirmed(call)) unconfirmedInput = true;
+              operations[index] = atClick;
+              continue;
+            }
+            if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
+              // CUA resolved the token and refused before writing. It does
+              // not expose that element's native control identity. Matching
+              // a descendant by its rectangle is not a safe fallback: an
+              // omitted child or sibling can occupy the same rectangle.
+              throw new ComputerBackendError(
+                "unsupported",
+                "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+                false,
+                false,
+              );
+            }
             // CUA's own wording names its raw tools; say what the caller does.
             if (
               error instanceof ComputerBackendError &&
@@ -468,10 +581,10 @@ export class CuaComputerBackend implements ComputerBackend {
                 )) ??
                 error
               );
-            // macOS answers an accessibility action with "cannot complete"
-            // (-25205) even when it pressed the button or opened the item, often
-            // because the window changed or closed meanwhile. The windows read
-            // afterwards say whether it did.
+            // macOS can answer an accessibility action with an error even
+            // when it pressed the button or opened the item, often because
+            // the window changed or closed meanwhile (see cannotComplete).
+            // The windows read afterwards say whether it did.
             if (
               operation.name === "click" &&
               operation.args.element_token !== undefined &&
@@ -486,6 +599,19 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
+      const click = operations[0];
+      if (
+        clickFrame &&
+        operations.length === 1 &&
+        click?.name === "click" &&
+        after?.target.id === command.targetId
+      )
+        this.clickedPoints.set(command.targetId, {
+          x: Number(click.args.x),
+          y: Number(click.args.y),
+          width: clickFrame.width,
+          height: clickFrame.height,
+        });
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
       if (confirmed.failures.length)
@@ -497,6 +623,51 @@ export class CuaComputerBackend implements ComputerBackend {
         );
       return confirmed.after;
     });
+  }
+
+  /** The window's most recent frame: the pixels pointer input uses now. */
+  private latestFrame(targetId: string): Frame | undefined {
+    return [...this.frames.values()].reverse().find((entry) => entry.targetId === targetId);
+  }
+
+  /**
+   * Typing in a background Mac window is refused when no text input has the
+   * keyboard focus as far as the window's accessibility tree shows. Where
+   * the content is not in that tree (a Simulator device, a sign-in sheet in
+   * one, a remote screen), the field the agent clicked just before has the
+   * focus all the same. The typing then goes to that click's point: CUA
+   * clicks the field again to focus it and makes this window its app's key
+   * window before sending any key, so the keys reach this window only. The
+   * refused attempt sent nothing. Only a click that was this window's latest
+   * action counts.
+   */
+  private typeAtClick(
+    command: ComputerBackendActionCommand,
+    operation: Operation,
+    error: unknown,
+    clickedAt: { x: number; y: number; width: number; height: number } | undefined,
+  ): Operation | null {
+    if (
+      !clickedAt ||
+      command.action.type !== "keyboard" ||
+      command.action.action !== "type" ||
+      operation.name !== "type_text" ||
+      !(error instanceof CuaFailure) ||
+      error.dispatched ||
+      error.cuaCode !== NO_FOCUSED_TEXT_INPUT
+    )
+      return null;
+    const latest = this.latestFrame(command.targetId);
+    if (!latest) return null;
+    const { element_token: _focused, ...args } = operation.args;
+    return {
+      ...operation,
+      args: {
+        ...args,
+        x: (clickedAt.x * latest.width) / clickedAt.width,
+        y: (clickedAt.y * latest.height) / clickedAt.height,
+      },
+    };
   }
 
   /** The checks of `steps` a reading after their input fails, read once more
@@ -630,6 +801,34 @@ export class CuaComputerBackend implements ComputerBackend {
     );
   }
 
+  /** macOS: brings a window to the front, activating its app, and leaves it
+   * there, for what works only in the front app (a toolbar button that opens
+   * its menu only while its app is active). CUA reports it done only once
+   * the window is the front app's focused window. */
+  private async dispatchFocus(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
+    if (command.action.type !== "focus") throw new Error("not a focus action");
+    const [operation] = await this.operations(command);
+    const targetId = command.action.targetId;
+    const acted = await this.target(targetId);
+    const known = new Set(this.targetsById.keys());
+    const observed = this.observations.get(targetId);
+    this.observations.delete(targetId);
+    try {
+      await callDesktop(this.runtime, operation!.name, operation!.args, "caller-settles");
+    } catch (error) {
+      if (error instanceof ComputerBackendError && !error.dispatched) throw error;
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
+        false,
+        true,
+      );
+    }
+    return await this.observeAfter(targetId, acted, known, "", observed);
+  }
+
   /** Each action of a batch as its CUA steps, and the action each step
    * belongs to. Every one is checked against the observation the batch names,
    * the only state its refs come from, before any of them runs. */
@@ -676,6 +875,7 @@ export class CuaComputerBackend implements ComputerBackend {
     command: ComputerBackendActionCommand,
     single = false,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null> {
     const { steps, actionOf } = await this.batchSteps(command);
     const standIns: ComputerBackendRoleStandIn[] = [];
@@ -688,6 +888,9 @@ export class CuaComputerBackend implements ComputerBackend {
     let report = "";
     let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
       null;
+    // Raw input (a key press, or a press CUA could only send) with nothing
+    // confirming the app took it, as for one action (see dispatch).
+    let unconfirmedInput = false;
     try {
       for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
         const chunk = steps.slice(start, start + MAX_RUN_STEPS);
@@ -728,8 +931,19 @@ export class CuaComputerBackend implements ComputerBackend {
             name: used.name,
           });
         }
-        if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
-        else stopped = { step: start + outcome.completed, outcome };
+        if (outcome.kind === "completed") {
+          report += openedWindowsReport(outcome.windowChanges);
+          for (const index of outcome.unconfirmed) {
+            const action = actions[actionOf[start + index]!];
+            if (
+              action?.type === "keyboard" ||
+              (action?.type === "semantic" &&
+                action.action === "invoke" &&
+                steps[start + index]?.name === "click")
+            )
+              unconfirmedInput = true;
+          }
+        } else stopped = { step: start + outcome.completed, outcome };
       }
     } finally {
       await fronted.giveBack();
@@ -744,6 +958,7 @@ export class CuaComputerBackend implements ComputerBackend {
           standIn(used);
         }
     if (!stopped) {
+      if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const { after: confirmed, failures } = await this.confirmInput(after, steps);
@@ -890,7 +1105,13 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Start or reassert a CUA session, setting its cursor motion once per
    * session and again whenever CUA revives it with defaults. */
   private async startSession(session: string): Promise<Record<string, unknown>> {
-    const { data } = await callDesktop(this.runtime, "start_session", { session });
+    const { data } = await callDesktop(this.runtime, "start_session", {
+      session,
+      cursor_identity: {
+        label: this.cursorIdentity?.label ?? "Agent",
+        ...(this.cursorIdentity?.avatarPng ? { avatar_png: this.cursorIdentity.avatarPng } : {}),
+      },
+    });
     if (data.revived === true || !this.cursorMotionSet.has(session)) {
       this.cursorMotionSet.add(session);
       // Cosmetic: a host without a cursor overlay must still act.
@@ -905,7 +1126,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private async discover(): Promise<ComputerBackendTarget[]> {
     const { data } = await callDesktop(this.runtime, "list_windows", {});
     const macos = this.identity.platform === "macos";
-    const windows = Windows.parse(data).windows.filter(
+    const listed = Windows.parse(data).windows;
+    const windows = [...listed, ...(await this.namedWindowsListed(listed))].filter(
       (window) =>
         // Another CUA worker's cursor overlay (another computer session, or
         // another agent on this desktop) spans the screen above every app. It
@@ -1028,7 +1250,7 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   private async target(targetId: string): Promise<Target> {
-    const target = this.targetsById.get(targetId);
+    const target = this.targetsById.get(targetId) ?? (await this.findTarget(targetId));
     if (!target)
       throw new ComputerBackendError(
         "target_not_found",
@@ -1039,13 +1261,55 @@ export class CuaComputerBackend implements ComputerBackend {
     return target;
   }
 
+  /** A target the last listing does not have: the listing may predate the
+   * window, or, on macOS, leave it out because it sits above the levels of an
+   * app's working windows while CUA still reads it by its id. */
+  private async findTarget(targetId: string): Promise<Target | undefined> {
+    const named =
+      this.identity.platform === "macos" && /^cua:window:\d{1,10}:\d{1,10}$/.test(targetId);
+    if (named) this.namedWindows.add(targetId);
+    await this.discover().catch(() => undefined);
+    const target = this.targetsById.get(targetId);
+    if (!target) this.namedWindows.delete(targetId);
+    return target;
+  }
+
+  /** The windows in {@link namedWindows} that their app still lists, on any
+   * level, beside the windows `listed` for every app. A window its app no
+   * longer lists leaves the set. */
+  private async namedWindowsListed(listed: readonly ListedWindow[]): Promise<ListedWindow[]> {
+    const seen = new Set(listed.map((window) => `cua:window:${window.pid}:${window.window_id}`));
+    const pids = new Set<number>();
+    for (const id of this.namedWindows)
+      if (seen.has(id)) this.namedWindows.delete(id);
+      else pids.add(Number(id.split(":")[2]));
+    const found: ListedWindow[] = [];
+    for (const pid of pids) {
+      const windows = await callDesktop(this.runtime, "list_windows", { pid })
+        .then(({ data }) => Windows.parse(data).windows)
+        .catch(() => null);
+      for (const id of this.namedWindows) {
+        if (Number(id.split(":")[2]) !== pid) continue;
+        const window = windows?.find((own) => `cua:window:${own.pid}:${own.window_id}` === id);
+        if (window) found.push(window);
+        else this.namedWindows.delete(id);
+      }
+    }
+    return found;
+  }
+
   /** A window that is not on screen (minimized, hidden, on another Space or
    * beyond every display) has neither pixels nor, often, controls CUA can
    * read, and CUA can take half a minute to find that out. A minimized window
    * or a hidden app's window is first brought back on screen, behind the
    * person's front window and without activating its app. Any other window
    * listed off screen is refused at once, and a failed read of a window that
-   * left the screen since says so instead of reporting a driver failure. */
+   * left the screen since says so instead of reporting a driver failure. A
+   * failed read of a window still listed on screen is tried once more a
+   * moment later (CUA can fail the first read of a window that is changing
+   * size, and read it at once afterwards); only a read was asked, so nothing
+   * is sent twice. A second failure is refused as unavailable, with what to
+   * do next. */
   private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
     const offScreen = () =>
       new ComputerBackendError(
@@ -1079,8 +1343,27 @@ export class CuaComputerBackend implements ComputerBackend {
           false,
           false,
         );
-      if (target.onScreen) throw error;
-      throw offScreen();
+      if (!target.onScreen) throw offScreen();
+      if (error.code !== "driver_failed") throw error;
+      await new Promise((resolve) => setTimeout(resolve, READ_RETRY_DELAY_MS));
+      try {
+        return await read();
+      } catch (again) {
+        if (
+          !(again instanceof ComputerBackendError) ||
+          again.dispatched ||
+          again.code !== "driver_failed"
+        )
+          throw again;
+        throw new ComputerBackendError(
+          "unavailable",
+          `${targetId} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          // Not retryable: it was tried again already, and a frame stream
+          // must not replace the helper for one window's failed read.
+          false,
+          false,
+        );
+      }
     }
   }
 
@@ -1204,12 +1487,31 @@ export class CuaComputerBackend implements ComputerBackend {
     observed: ComputerBackendObservation | undefined,
   ): ComputerBackendError | null {
     const target = this.targetsById.get(targetId);
+    // Typing right after a click on the field is retried at that click's
+    // point (see typeAtClick); this refusal is for typing without one.
+    if (target && cuaCode === NO_FOCUSED_TEXT_INPUT)
+      return new ComputerBackendError(
+        code,
+        "No text field in this window has the keyboard focus as far as its accessibility tree shows, so nothing was typed (keys sent anyway could act on the window instead). If the field is on screen but not in the tree, as in a Simulator device, click it with a pointer action and then type as the next action in this window; otherwise focus the field or set its value",
+        false,
+        false,
+      );
     if (
       !target ||
       this.identity.platform !== "macos" ||
-      (cuaCode !== "window_not_key" && cuaCode !== "key_focus_unknown")
+      (cuaCode !== "window_not_key" &&
+        cuaCode !== "key_focus_unknown" &&
+        cuaCode !== "window_not_main")
     )
       return null;
+    // A shortcut goes to the app's main window, whichever window has focus.
+    if (cuaCode === "window_not_main")
+      return new ComputerBackendError(
+        code,
+        "Keys to this window could reach another of its app's windows, since an app's shortcuts go to its main window and this window could not be made main (when its app is the one in front, that would move the window the person is using), so none were sent: use this window's controls instead (set_value on a field, invoke on a button)",
+        false,
+        false,
+      );
     // The app named no focused window, or did not answer in time: nothing
     // is known about where keys would go.
     if (cuaCode === "key_focus_unknown")
@@ -1262,7 +1564,10 @@ export class CuaComputerBackend implements ComputerBackend {
    *   the control that opened the menu takes set_value, but pointer and key
    *   input would not reach the menu;
    * - an element of another window of the app is that window's to act on,
-   *   pointed at only when it is a target the caller can observe. */
+   *   pointed at only when it is a target the caller can observe;
+   * - a window no longer on screen takes no input: an earlier action (often
+   *   the one before it in a batch) closed or hid it, and the app's other
+   *   windows are the ones to act on. */
   private async elementWindowRefusal(
     targetId: string,
     cuaCode: string | null | undefined,
@@ -1271,11 +1576,26 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendError | null> {
     const target = this.targetsById.get(targetId);
     if (!target) return null;
-    // CUA's wording names an input mode this tool does not offer.
+    // CUA's wording names an input mode this tool does not offer. The
+    // window's own focus action opens the way to the menu, so name it with
+    // the window's target: the dropdown lists a focus action too, which only
+    // moves the keyboard focus. Not where that focus would be refused (see
+    // dispatchFocus): then set_value is the way.
     if (cuaCode === "select_menu_would_raise_window")
       return new ComputerBackendError(
         code,
-        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+        `Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text${
+          this.identity.platform === "macos" && this.recentPersonInput() === undefined
+            ? `; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'${targetId}'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again`
+            : ""
+        }`,
+        false,
+        false,
+      );
+    if (cuaCode === "popup_option_without_text")
+      return new ComputerBackendError(
+        code,
+        "That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
         false,
         false,
       );
@@ -1290,6 +1610,13 @@ export class CuaComputerBackend implements ComputerBackend {
       return new ComputerBackendError(
         code,
         "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "off_space_or_ax_unresolved" || cuaCode === "window_not_on_screen")
+      return new ComputerBackendError(
+        code,
+        "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
         false,
         false,
       );
@@ -1931,10 +2258,26 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       throw unsupported("CUA's move_cursor controls its overlay, not native hover input");
     }
-    if (action.type === "focus")
-      throw unsupported(
-        "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
-      );
+    if (action.type === "focus") {
+      if (this.identity.platform !== "macos")
+        throw unsupported(
+          "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
+        );
+      // macOS brings the window to the front and leaves it there: a focus
+      // action asks for exactly that (see dispatchFocus).
+      const focused = await this.target(action.targetId);
+      // Not while someone else is using the computer: the front app is the
+      // one they are working in.
+      const personInputSecondsAgo = this.recentPersonInput();
+      if (personInputSecondsAgo !== undefined)
+        throw new ComputerBackendError(
+          "invalid_action",
+          `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${personInputSecondsAgo} s ago, so this window was not brought to the front: ask them first, or keep working in the background`,
+          false,
+          false,
+        );
+      return [{ name: "bring_to_front", args: { pid: focused.pid, window_id: focused.windowId } }];
+    }
     if (action.type !== "semantic" && action.type !== "keyboard")
       throw unsupported("This CUA operation is not admitted by the desktop adapter");
     const observed = this.observations.get(command.targetId);
@@ -2312,7 +2655,11 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Launch an app, then observe its window, so the caller can act on it
-   * directly, or the action's own target when no window of the app is found.
+   * directly; no observation when no window of the app is found.
+   * When the action's own target is one of the app's windows (the window the
+   * caller already works in), that window is observed: an app that is already
+   * running may show windows other callers work in, and the window launch_app
+   * reports first can be any of them.
    * Once the app runs, the launch succeeded whatever happens next. A cold app
    * can take seconds to show its first window, so its windows are searched
    * until one appears or the wait runs out. Each search is its own step in the
@@ -2340,7 +2687,7 @@ export class CuaComputerBackend implements ComputerBackend {
       for (let attempt = 0; ; attempt++) {
         const current = launched;
         const found = await this.run(async () => {
-          const windows = await this.launchedWindows(current);
+          const windows = await this.launchedWindows(current, command.targetId);
           for (const windowTarget of windows) {
             const reading = await this.observeTarget(windowTarget).catch(() => null);
             if (reading) return { windows: windows.length, reading };
@@ -2367,20 +2714,24 @@ export class CuaComputerBackend implements ComputerBackend {
           setTimeout(resolve, Math.min(pause, remaining, Math.max(0, reopenAt - now))),
         );
       }
-      return await this.run(() => this.observeTarget(command.targetId));
+      // No window of the app: the action's own target is not the app's (it
+      // would have been found), so observing it would pass another app's
+      // window off as the launched one.
+      return null;
     } catch {
       return null;
     }
   }
 
-  /** The targets of the launched app's windows, best first: the windows the
-   * launch reported, then the listed windows of its process. On Linux the app
+  /** The targets of the launched app's windows, best first: `preferred` when
+   * it is one of them, then the windows the launch reported, then the listed
+   * windows of its process. On Linux the app
    * may run as a child of the launcher process CUA reports, so a window of a
    * descendant counts too. A window that cannot be tied to the launch is never
    * guessed. A window lying within another of the app's windows (part of a
    * panel, such as an Open panel's accessory view) comes after the windows it
    * lies in. */
-  private async launchedWindows(launched: LaunchedApp): Promise<string[]> {
+  private async launchedWindows(launched: LaunchedApp, preferred: string): Promise<string[]> {
     const ownsWindow = (processId: number | null): boolean => {
       if (processId === null) return false;
       if (processId === launched.pid || processId === launched.launcherPid) return true;
@@ -2400,7 +2751,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const owned = targets
       .filter((target) => ownsWindow(target.processId))
       .map((target) => target.id);
-    const candidates = [...new Set([...reported, ...owned])];
+    const found = new Set([...reported, ...owned]);
+    const candidates = found.has(preferred)
+      ? [preferred, ...[...found].filter((id) => id !== preferred)]
+      : [...found];
     const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
     return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
   }
@@ -2501,6 +2855,10 @@ function inForeground(operation: { args: Record<string, unknown> }): boolean {
 }
 
 const RECENT_OBSERVATIONS = 4;
+
+/** How long a failed read of a window still on screen waits before it is
+ * tried once more. */
+const READ_RETRY_DELAY_MS = 500;
 
 /** The most steps CUA runs in one run_steps call. */
 const MAX_RUN_STEPS = 64;
@@ -2739,10 +3097,15 @@ const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
  * open, as `App ("Title", …); Other` (an untitled window by its app only).
  * A window the previous action opened late is reported separately and is
  * not this action's. */
-/** macOS's "cannot complete" (kAXErrorCannotComplete, -25205): an AX action
- * whose effect macOS did not confirm, which may still have happened. */
+/** An AX action error whose action may still have happened: "cannot
+ * complete" (kAXErrorCannotComplete, -25204), which an app returns when it
+ * did not answer in time, and -25205, which file dialogs return for an
+ * AXOpen that opened its item (and some windows for a press that closed
+ * them), although it stands for an unsupported attribute. */
 function cannotComplete(error: unknown): boolean {
-  return error instanceof ComputerBackendError && /-25205|cannot complete/i.test(error.message);
+  return (
+    error instanceof ComputerBackendError && /-2520[45]\b|cannot complete/i.test(error.message)
+  );
 }
 
 /** Whether a reading after an action shows the same window, elements and

@@ -1,4 +1,5 @@
 import { t } from "../lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   useCallback,
   useEffect,
@@ -44,7 +45,7 @@ import {
   type FeedbackImage,
 } from "../lib/feedback-capture";
 
-type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
+type FeedbackClient = Pick<ChatClient<OpenGeniClient>, "createFeedback" | "listOwnFeedback">;
 
 /** Screenshots in a report: taking, adding, pasting and removing them. */
 function useFeedbackImages() {
@@ -317,6 +318,12 @@ export function FeedbackDialog(props: {
               </p>
             ) : null}
           </div>
+        ) : null}
+        {props.reportContext ? (
+          <p className="text-xs text-fg-muted" data-feedback-included="">
+            To help fix what went wrong, your report also includes the page and chat you're on, the
+            app version, and the app's recent errors, requests and steps.
+          </p>
         ) : null}
         {submissionError ? (
           <p role="alert" className="text-sm text-destructive">

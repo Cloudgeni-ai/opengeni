@@ -46,6 +46,8 @@ function harness(
     "withAccessGrantSessionRlsContext",
     async (_d: unknown, _g: unknown, fn: () => unknown) => fn(),
   );
+  // The chat's frozen funding origin (read from its turn) is not under test.
+  spy(rls, "billingOriginForAccessGrant", async () => "app");
   spy(core, "resolveWorkspaceCatalogSettings", async () => ({ settings }));
   spy(core, "resolveCallerWorkspaceModelSelections", async () => [selection]);
   spy(core, "admissibleWorkspaceModel", () => selection);
@@ -152,6 +154,44 @@ describe("single-model calls and task usage limits", () => {
     });
     // Existing usage attribution is unchanged: no session on the usage event.
     expect(h.settle.mock.calls[0]![2]).not.toHaveProperty("sessionId");
+  });
+
+  test("settlement records where the served route ran: its claim, never evidence", async () => {
+    const h = harness({ allowed: true, state: null });
+    spy(runtimeModelCall.MultiProviderModelProvider.prototype, "resolveBinding", () => ({
+      client: {},
+      provider: { id: "offline" },
+      modelId: "scripted-model",
+      residency: {
+        geography: "eu",
+        deploymentType: "azure_data_zone",
+        regions: ["swedencentral"],
+        evidence: {
+          source: "operator_declaration",
+          reference: "internal deployment name",
+          verifiedAt: "2026-10-26",
+        },
+      },
+    }));
+    await call(h.service, "api_key", "req-eu");
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({
+      processingResidency: {
+        geography: "eu",
+        deploymentType: "azure_data_zone",
+        regions: ["swedencentral"],
+      },
+    });
+    expect(
+      (h.settle.mock.calls[0]![2] as { processingResidency: object }).processingResidency,
+    ).not.toHaveProperty("evidence");
+  });
+
+  test("a served route without a readable residency record is recorded as unknown", async () => {
+    const h = harness({ allowed: true, state: null });
+    await call(h.service, "api_key", "req-unknown");
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({
+      processingResidency: { geography: "unknown", regions: [] },
+    });
   });
 
   test.each(["human_session", "api_key"] as const)(

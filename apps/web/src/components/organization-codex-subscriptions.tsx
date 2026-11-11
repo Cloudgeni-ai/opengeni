@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import type {
   CodexAccount,
@@ -10,7 +11,8 @@ import { pollDeviceAuthorization } from "@opengeni/connect";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { codexAccountName, planLabel } from "@/components/codex-connection";
+import { codexAccountName } from "@/components/codex-connection";
+import { showCodexConnected } from "@/lib/codex-connect-result";
 import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
@@ -34,7 +36,7 @@ export function useOrganizationCodexSubscriptions({
   enabled = true,
 }: {
   organizationId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   /** False for people who can't read the organization's accounts: nothing is read. */
   enabled?: boolean;
 }) {
@@ -128,9 +130,7 @@ export function useOrganizationCodexSubscriptions({
             }
             if (result.status === "connected") {
               recordOutcome("connected");
-              toast.success(
-                `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
-              );
+              showCodexConnected("Codex connected for the organization", result);
               options?.onConnected?.(
                 "accountId" in result && typeof result.accountId === "string"
                   ? result.accountId

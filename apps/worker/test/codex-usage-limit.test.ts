@@ -188,6 +188,20 @@ describe("codexUsageLimitFailurePayload", () => {
     expect(payload.error).toContain("Your ChatGPT/Codex subscription usage limit has been reached");
     expect(payload.error).not.toContain("All connected");
   });
+
+  test("carries the reset instant so the chat can say when it resets", () => {
+    const now = new Date("2026-10-28T09:00:00.000Z");
+    expect(
+      codexUsageLimitFailurePayload({ resetsInSeconds: 3 * 24 * 3600 }, "x", { now }).resetsAt,
+    ).toBe("2026-10-31T09:00:00.000Z");
+    // Without a known reset the chat says so instead.
+    expect(
+      codexUsageLimitFailurePayload({ resetsInSeconds: null }, "x", { now }),
+    ).not.toHaveProperty("resetsAt");
+    expect(codexUsageLimitFailurePayload({ resetsInSeconds: 0 }, "x", { now })).not.toHaveProperty(
+      "resetsAt",
+    );
+  });
 });
 
 describe("agentRunFailurePayload — codex usage limit", () => {

@@ -12,6 +12,7 @@ import {
   NativeConnectSetup,
   type NativeConnectRequest,
 } from "@opengeni/react/app/components/capabilities/native-connect-setup";
+import type { ConnectAttempt } from "@opengeni/connect";
 import { toast } from "sonner";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -26,7 +27,11 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "@opengeni/react/app/components/capabilities/connection-ownership-selector";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  canChangeWorkspaceIntegrations,
+  canManageWorkspaceIntegrations,
+} from "@opengeni/react/app/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -43,9 +48,8 @@ import type {
  */
 
 // The per-account facets surface is a large, rarely-opened control plane
-// (Knowledge sources, Inbound triggers, Delivery destinations, Identity links)
-// plus its Google Drive knowledge-source dialog. Keep it out of the
-// Capabilities route's first chunk.
+// (Inbound triggers, Delivery destinations, Identity links). Keep it out of
+// the Capabilities route's first chunk.
 const IntegrationAccountFacets = lazy(async () => {
   const module = await import("@/components/capabilities/integration-account-facets");
   return { default: module.IntegrationAccountFacets };
@@ -230,6 +234,47 @@ export function useApiIntegrationOAuthCallback({
   }, [workspaceId]);
 }
 
+/**
+ * Finishes, in the background, any built-in integration setup the person
+ * left with a saved account but no tools (the app closed before the last
+ * step), then says so. Mount once in the Capabilities route.
+ */
+export function useFinishUnfinishedConnectSetups({
+  workspaceId,
+  refresh,
+  onRuntimeChanged,
+}: {
+  workspaceId: string;
+  refresh: () => Promise<void>;
+  onRuntimeChanged: () => void;
+}) {
+  const client = useAppContext().client;
+  const latest = useRef({ refresh, onRuntimeChanged });
+  latest.current = { refresh, onRuntimeChanged };
+  useEffect(() => {
+    const transport = client.connectTransport();
+    if (!transport.finishUnfinished) return;
+    // Not cancelled on leaving: the server finishes either way, and the
+    // person still hears that it did. Only this page's refresh stops.
+    let shown = true;
+    void transport
+      .finishUnfinished(workspaceId)
+      .then(async (completed) => {
+        if (completed.length === 0) return;
+        for (const attempt of completed)
+          toast.success(`${attempt.installationTarget?.displayName ?? "Account"} connected`);
+        if (!shown) return;
+        latest.current.onRuntimeChanged();
+        await latest.current.refresh();
+      })
+      // Nothing to tell: anything left stays saved for the next visit.
+      .catch(() => undefined);
+    return () => {
+      shown = false;
+    };
+  }, [client, workspaceId]);
+}
+
 export type ApiIntegrationAccountsController = {
   accounts: ApiIntegrationInstallationSummary[];
   accessItems: IntegrationAccessItem[];
@@ -258,6 +303,8 @@ export function useApiIntegrationAccounts({
   definitions,
   instances,
   canManage,
+  canAdd = canManage,
+  canChange = canManage,
   ownership = "workspace",
   personalOnly = false,
   refresh,
@@ -268,7 +315,12 @@ export function useApiIntegrationAccounts({
   definitionId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  /** Remove accounts and configure their sources (members). */
   canManage: boolean;
+  /** Add an account (members, unless their organization keeps it for admins). */
+  canAdd?: boolean;
+  /** Reconnect a shared account that is already set up (integration admins). */
+  canChange?: boolean;
   ownership?: ConnectionOwnership;
   /** This provider accepts only user-owned grants for new accounts. */
   personalOnly?: boolean;
@@ -283,13 +335,24 @@ export function useApiIntegrationAccounts({
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
-  const completeConnect = useCallback(() => {
-    setConnectRequest(null);
-    void refresh?.().catch(() =>
-      toast.error("Account connected, but refreshing the catalog failed"),
-    );
-    onRuntimeChanged?.();
-  }, [refresh, onRuntimeChanged]);
+  const connectName = definitions.find((candidate) => candidate.id === definitionId)?.name;
+  const completeConnect = useCallback(
+    (attempt: ConnectAttempt) => {
+      // Setup can finish after its dialog closed: leave a newer one open.
+      setConnectRequest((current) =>
+        current &&
+        current.installationTarget?.instanceKey !== attempt.installationTarget?.instanceKey
+          ? current
+          : null,
+      );
+      toast.success(
+        `${attempt.installationTarget?.displayName ?? connectName ?? "Account"} connected`,
+      );
+      void refresh?.().catch(() => toast.error("Couldn't refresh integrations"));
+      onRuntimeChanged?.();
+    },
+    [refresh, onRuntimeChanged, connectName],
+  );
   useEffect(() => {
     setConnectRequest(null);
     setNewConnection(null);
@@ -302,19 +365,15 @@ export function useApiIntegrationAccounts({
   const definition = definitions.find((candidate) => candidate.id === definitionId) ?? null;
   const accounts = instances.filter((instance) => instance.definitionId === definitionId);
 
-  const workspaceGrant = context.accessContext?.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManagePersonalDestination = Boolean(
-    workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
-  );
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  // A member reconnects only their own account; a shared one stays with admins.
+  const canReconnect = (account: ApiIntegrationInstallationSummary) =>
+    canChange || (canManage && account.ownership === "personal");
+  // The server says who may remove each account: admins remove any, a member
+  // only one they added. An older server omits it.
+  const canRemove = (account: ApiIntegrationInstallationSummary) => account.canRemove ?? canManage;
 
   async function startAdd(existing: ApiIntegrationInstallationSummary | null) {
-    if (!definition || !canManage || busy) return;
+    if (!definition || busy || !(existing ? canReconnect(existing) : canAdd)) return;
     setBusy(true);
     try {
       const instanceKey = existing?.instanceKey ?? `account-${crypto.randomUUID()}`;
@@ -351,7 +410,7 @@ export function useApiIntegrationAccounts({
   // shared definition goes with it, and the authenticated Connection is always
   // retained so another instance (or a reconnect) can still use it.
   async function previewRemove(instance: ApiIntegrationInstallationSummary) {
-    if (!canManage || busy) return;
+    if (!canRemove(instance) || busy) return;
     setBusy(true);
     try {
       const preview = await client.previewApiIntegrationUninstall(
@@ -405,24 +464,33 @@ export function useApiIntegrationAccounts({
   const accessItems: IntegrationAccessItem[] = accounts.map((account) => ({
     id: account.instanceKey,
     name: account.displayName,
-    meta: account.connected ? undefined : "Needs attention",
+    // An account carried in from another workspace is managed there.
+    meta: account.personalExtension
+      ? `From ${account.personalExtension.originWorkspaceName}`
+      : account.connected
+        ? undefined
+        : "Needs attention",
     status: account.connected ? "ok" : "warn",
-    ...(canManage
+    ...(canManage && !account.personalExtension
       ? {
           actions: [
-            ...(account.connected
+            ...(account.connected || !canReconnect(account)
               ? []
               : [{ label: "Reconnect", onClick: () => void startAdd(account), disabled: busy }]),
-            {
-              label: "Remove",
-              onClick: () => void previewRemove(account),
-              disabled: busy,
-              destructive: true,
-            },
+            ...(canRemove(account)
+              ? [
+                  {
+                    label: "Remove",
+                    onClick: () => void previewRemove(account),
+                    disabled: busy,
+                    destructive: true,
+                  },
+                ]
+              : []),
           ],
         }
       : {}),
-    ...(facetCount > 0
+    ...(facetCount > 0 && !account.personalExtension
       ? {
           detail: (
             <Suspense fallback={null}>
@@ -432,9 +500,6 @@ export function useApiIntegrationAccounts({
                 instance={account}
                 facetCount={facetCount}
                 canManage={canManage}
-                canManagePersonalDestination={canManagePersonalDestination}
-                canManageWorkspaceDestination={canManage}
-                canManageOrganizationDestination={canManageOrganizationDestination}
                 refreshRevision={refreshRevision}
               />
             </Suspense>
@@ -542,10 +607,11 @@ export function useIntegrationDefinitionRow({
   refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
-  const canManage = hasWorkspacePermission(
+  const canManage = canManageWorkspaceIntegrations(context.accessContext, workspaceId);
+  const canAdd = canAddWorkspaceIntegrations(
     context.accessContext,
     workspaceId,
-    "capabilities:manage",
+    context.workspaceMemberIntegrationSetup,
   );
   const controller = useApiIntegrationAccounts({
     workspaceId,
@@ -553,6 +619,8 @@ export function useIntegrationDefinitionRow({
     definitions,
     instances,
     canManage,
+    canAdd,
+    canChange: canChangeWorkspaceIntegrations(context.accessContext, workspaceId),
     ...(ownership ? { ownership } : {}),
     ...(personalOnly !== undefined ? { personalOnly } : {}),
     ...(refresh ? { refresh } : {}),
@@ -562,7 +630,7 @@ export function useIntegrationDefinitionRow({
 
   const chip: IntegrationChip =
     controller.accounts.length === 0
-      ? canManage
+      ? canAdd
         ? { label: "Not connected", tone: "idle" }
         : { label: "Set up by an admin", tone: "plain" }
       : controller.needsAttention
@@ -571,7 +639,7 @@ export function useIntegrationDefinitionRow({
 
   const footer: IntegrationFooter =
     controller.accounts.length === 0
-      ? canManage
+      ? canAdd
         ? { kind: "setup", onSetup: controller.addAccount, busy: controller.busy }
         : { kind: "locked" }
       : {
@@ -593,7 +661,7 @@ export function useIntegrationDefinitionRow({
           access: {
             title: "Connected accounts",
             items: controller.accessItems,
-            ...(canManage
+            ...(canAdd
               ? {
                   editLabel: "Add account",
                   onEdit: controller.addAccount,

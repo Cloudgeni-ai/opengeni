@@ -13,6 +13,7 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
+  type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import {
@@ -503,6 +504,8 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "api_keys",
+          "auth_sessions",
+          "agent_calls",
           "company_profile_activation_events",
           "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
@@ -564,6 +567,9 @@ describe("embedded worker lifecycle contract", () => {
           "preference_registry_revisions",
           "preference_registry_events",
           "self_service_organization_setup_receipts",
+          "session_attempt_model_context_snapshots",
+          "session_attempt_tool_catalogs",
+          "session_content_blobs",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
@@ -623,6 +629,23 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
         ...[
+          ...["native_push_devices", "native_push_deliveries", "session_content_collections"].map(
+            (name) => ({
+              name,
+              owner: "opengeni_migrator",
+              rls_enabled: false,
+              rls_forced: false,
+              rls_active: false,
+              policy_count: 0,
+              can_select: false,
+              can_insert: false,
+              can_update: false,
+              can_delete: false,
+              can_truncate: false,
+              can_references: false,
+              can_trigger: false,
+            }),
+          ),
           {
             name: "modal_native_origin_read_capabilities",
             owner: "opengeni_migrator",
@@ -768,17 +791,86 @@ describe("embedded worker lifecycle contract", () => {
             security_definer: true,
             configuration: ["search_path=pg_catalog"],
           },
-          // Migration 0988: the queued-turn hold summary. Its runtime grant
-          // stays deferred for previous-release compatibility.
+          // Migration 0988: the queued-turn hold summary, created without
+          // runtime EXECUTE; 1274 granted it.
           {
             name: "summarize_queued_turns_by_hold()",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          },
+          // Migration 1239 grants all six routines withheld by 1107.
+          ...[
+            "native_push_device_v2(text)",
+            "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+            "claim_native_push_deliveries_v2(uuid, integer, integer)",
+            "agent_call_device_count_v1(text, boolean)",
+            "agent_call_ringing_v1(text)",
+            "ring_agent_call_v1(uuid, boolean)",
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          })),
+          // Migration 1344: ends a settled call's ring on the other phones,
+          // created without runtime EXECUTE until a later migration grants it.
+          {
+            name: "end_agent_call_rings_v1(uuid)",
             owner: "opengeni_migrator",
             can_execute: false,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,
             has_dependents: false,
-            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1359: the session content collector and its inventory,
+          // created without runtime EXECUTE until a later migration grants them.
+          ...[
+            "session_content_garbage_candidates_v1(integer)",
+            "collect_session_content_garbage_v1(uuid, uuid, integer)",
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          })),
+          // Migration 1103: the subscription account-administrator grant,
+          // created without runtime EXECUTE; 1149 granted it.
+          {
+            name: "grant_subscription_account_administrator(jsonb)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1343 activates the external identity reader introduced
+          // by 1172 after the previous release recognizes either grant state.
+          {
+            name: "read_external_identity_v1(uuid, text, text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=public, pg_catalog, pg_temp"],
           },
           ...[
             "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
@@ -819,6 +911,7 @@ describe("embedded worker lifecycle contract", () => {
         ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -845,7 +938,7 @@ describe("embedded worker lifecycle contract", () => {
         }),
     } as unknown as Database;
 
-    await dbReadyCheck(db, {
+    const posture: RuntimeDatabasePostureOptions = {
       rlsStrategy: "force",
       expectedRole: "opengeni_app",
       targetSchema: "public",
@@ -882,7 +975,8 @@ describe("embedded worker lifecycle contract", () => {
         "organization_user_setup_delivery_attempts",
         "session_tenancy_additional_organization_activation_evidence",
       ],
-    })();
+    };
+    await dbReadyCheck(db, posture)();
     expect(
       (catalogResults[8] as Array<{ name: string; private_schema: boolean }>)
         .filter((row) => !row.private_schema)
@@ -896,6 +990,44 @@ describe("embedded worker lifecycle contract", () => {
 
     await dbReadyCheck(db)();
     expect(directExecutions).toBe(1);
+
+    // A revoked runtime EXECUTE grant on a declared private routine disables
+    // only that feature: readiness reports it as degraded and stays ready,
+    // while the strict release-gate evaluation still rejects it.
+    const routines = catalogResults[8] as Array<{ name: string; can_execute: boolean }>;
+    const revoked = routines.find((row) => row.name === "knowledge_index_due_v1(text, integer)")!;
+    const identity = (catalogResults[0] as Array<{ rolbypassrls: boolean }>)[0]!;
+    try {
+      revoked.can_execute = false;
+      const missing =
+        "runtime role lacks EXECUTE on private routine knowledge_index_due_v1(text, integer)";
+      // Its maintenance-work check also requires the grant; with the grant
+      // present that finding goes away, so it is degraded as well.
+      const maintenance =
+        "maintenance work check knowledge_index_due_v1(text, integer) is missing or has unsafe posture";
+      const degraded: (readonly string[])[] = [];
+      catalogQueries = 0;
+      await dbReadyCheck(db, posture, undefined, (findings) => degraded.push(findings))();
+      expect(degraded).toEqual([[maintenance, missing]]);
+      catalogQueries = 0;
+      await expect(opengeniDb.assertRuntimeDatabasePosture(db, posture)).rejects.toThrow(missing);
+
+      // Excess privilege stays fatal, even while the missing grant is degraded.
+      identity.rolbypassrls = true;
+      catalogQueries = 0;
+      const error = await dbReadyCheck(db, posture, undefined, (findings) =>
+        degraded.push(findings),
+      )().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(opengeniDb.RuntimeDatabasePostureError);
+      expect((error as opengeniDb.RuntimeDatabasePostureError).violations).toEqual([
+        "runtime role has BYPASSRLS",
+      ]);
+      expect(degraded.at(-1)).toEqual([maintenance, missing]);
+    } finally {
+      identity.rolbypassrls = false;
+      revoked.can_execute = true;
+    }
   });
 
   test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {

@@ -59,6 +59,21 @@ function typeIntoInput(input: HTMLInputElement, value: string): void {
   onChange({ target: input });
 }
 
+function typeIntoTextarea(textarea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(textarea, value);
+  const reactPropsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"));
+  if (!reactPropsKey) throw new Error("React textarea props were not attached");
+  const onChange = (
+    textarea as unknown as Record<
+      string,
+      { onChange?: (event: { target: HTMLTextAreaElement }) => void }
+    >
+  )[reactPropsKey]?.onChange;
+  if (!onChange) throw new Error("React textarea change handler was not attached");
+  onChange({ target: textarea });
+}
+
 const questions: HumanInputQuestion[] = [
   {
     id: "summary",
@@ -288,7 +303,7 @@ describe("HumanInputForm async host boundary", () => {
     expect(submissions).toEqual([{ outcome: "answered", answers: [] }]);
   });
 
-  test("multi-question header shows count; invalid Send answers focuses first error", async () => {
+  test("several questions are asked one at a time; Next checks the current one", async () => {
     const multi = {
       id: "request-multi",
       questions: [
@@ -319,33 +334,54 @@ describe("HumanInputForm async host boundary", () => {
         autoFocus: false,
       }),
     );
-    expect(mounted.container.textContent).toContain("2 questions");
-    expect(mounted.container.querySelector('button[type="submit"]')?.textContent).toBe(
-      "Send answers",
-    );
-    expect(mounted.container.querySelectorAll("[data-human-input-question]")).toHaveLength(2);
-    expect(
-      mounted.container.querySelector('[data-human-input-question="q1"] label')?.textContent,
-    ).toMatch(/1\.\s*First\?/);
-    const secondGroup = mounted.container.querySelector(
-      '[data-human-input-question="q2"] [role="radiogroup"]',
-    );
-    const secondLabelId = secondGroup?.getAttribute("aria-labelledby");
-    expect(secondLabelId).toBeTruthy();
-    expect(document.getElementById(secondLabelId!)?.textContent).toMatch(/2\.\s*Second\?/);
-
     const form = mounted.container.querySelector("form");
     expect(form).not.toBeNull();
+    const submitButton = () => mounted!.container.querySelector('button[type="submit"]');
+    const heading = () => form!.querySelector("h2")?.textContent;
+    const step = (id: string) =>
+      mounted!.container.querySelector<HTMLElement>(`[data-human-input-question="${id}"]`)!;
+    expect(mounted.container.textContent).toContain("Question 1 of 2");
+    expect(heading()).toBe("First?");
+    expect(submitButton()?.textContent).toBe("Next");
+    // Every step stays mounted so drafts and secrets survive; only the current one shows.
+    expect(mounted.container.querySelectorAll("[data-human-input-question]")).toHaveLength(2);
+    expect(step("q1").hidden).toBe(false);
+    expect(step("q2").hidden).toBe(true);
+
     await act(async () => {
       form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       await Promise.resolve();
       await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
     });
     expect(mounted.container.textContent).toContain("This question is required.");
+    expect(step("q2").hidden).toBe(true);
     const firstField = mounted.container.querySelector(
       '[data-human-input-question="q1"] textarea, [data-human-input-question="q1"] input',
     );
     expect(document.activeElement).toBe(firstField);
+
+    await act(async () => {
+      typeIntoTextarea(firstField as HTMLTextAreaElement, "An answer");
+    });
+    await act(async () => {
+      form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    });
+    expect(mounted.container.textContent).toContain("Question 2 of 2");
+    expect(heading()).toBe("Second?");
+    expect(step("q1").hidden).toBe(true);
+    expect(step("q2").hidden).toBe(false);
+    expect(submitButton()?.textContent).toBe("Send answers");
+    const secondGroup = step("q2").querySelector('[role="radiogroup"]');
+    expect(
+      document.getElementById(secondGroup!.getAttribute("aria-labelledby")!)?.textContent,
+    ).toBe("Second?");
+    expect(
+      Array.from(mounted.container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Back",
+      ),
+    ).toBe(true);
   });
 
   test("always renders an accessible inline Other field for a choice question", async () => {
@@ -873,5 +909,73 @@ describe("HumanInputForm yes/no decisions", () => {
     );
     expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
     expect(mounted.container.textContent).toContain("Other");
+  });
+
+  test("an agent-marked confirm answers with its own labels everywhere, action last", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    const request = decision(["Send the email", "Keep it as a draft"]);
+    const confirm = { ...request, questions: [{ ...request.questions[0]!, confirm: true }] };
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: confirm,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.textContent).not.toContain("Other");
+    const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "Keep it as a draft",
+      "Send the email",
+    ]);
+    await act(async () => {
+      (buttons[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      { outcome: "answered", answers: [{ questionId: "decision", values: ["a"] }] },
+    ]);
+  });
+});
+
+describe("HumanInputForm option hints", () => {
+  test("marks the recommended option without choosing it, and shows option previews", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-hints",
+          questions: [
+            {
+              id: "format",
+              kind: "single_select" as const,
+              prompt: "How should dates look in the export?",
+              options: [
+                { id: "iso", label: "ISO", recommended: true, preview: "2026-10-27" },
+                { id: "long", label: "Written out", preview: "27 October 2026" },
+              ],
+              required: true,
+              allowOther: true,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const badges = mounted.container.querySelectorAll("[data-human-input-recommended]");
+    expect(badges.length).toBe(1);
+    expect(badges[0]!.textContent).toBe("Recommended");
+    expect(badges[0]!.closest("label")?.textContent).toContain("ISO");
+    const previews = [...mounted.container.querySelectorAll("[data-human-input-preview]")];
+    expect(previews.map((preview) => preview.textContent)).toEqual([
+      "2026-10-27",
+      "27 October 2026",
+    ]);
+    const radios = [...mounted.container.querySelectorAll('input[type="radio"]')];
+    expect(radios.some((radio) => (radio as HTMLInputElement).checked)).toBe(false);
   });
 });

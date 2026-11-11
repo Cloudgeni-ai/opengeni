@@ -18,6 +18,22 @@
       "input_cached": 0.2
     },
     {
+      "id": "gpt-6.1-terra",
+      "vendor": "openai",
+      "name": "GPT-6.1 Terra ≤272k",
+      "input": 1,
+      "output": 5,
+      "input_cached": 0.05
+    },
+    {
+      "id": "gpt-6.1-terra-272k",
+      "vendor": "openai",
+      "name": "GPT-6.1 Terra >272k",
+      "input": 2,
+      "output": 7.5,
+      "input_cached": 0.1
+    },
+    {
       "id": "gpt-6-luna",
       "vendor": "openai",
       "name": "GPT-6 Luna",

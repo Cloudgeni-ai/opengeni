@@ -42,6 +42,19 @@ function connectorPresentationBucket(
   return opaqueCatalogName(item.name) ? 5 : 4;
 }
 
+/**
+ * Name of the workspace an "Only me" connector was carried from into its
+ * owner's Personal workspace, or null for connectors this workspace has itself.
+ */
+export function personalExtensionOrigin(
+  item: Pick<CapabilityCatalogItem, "metadata">,
+): string | null {
+  const extension = item.metadata.personalExtension;
+  if (!extension || typeof extension !== "object") return null;
+  const name = (extension as { originWorkspaceName?: unknown }).originWorkspaceName;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
 /** Raw hostnames, machine ids, and punctuation-led labels belong after names a human can scan. */
 export function opaqueCatalogName(name: string): boolean {
   const normalized = name.trim();

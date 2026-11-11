@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   getMyUsage,
   getWorkspaceAllowanceState,
@@ -20,7 +21,7 @@ export type WorkspaceBudgetRow = {
 export const WORKSPACE_BUDGET_READ_CONCURRENCY = 4;
 
 async function loadRow(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   readUsage: boolean,
 ): Promise<WorkspaceBudgetRow> {
@@ -50,7 +51,7 @@ export async function loadWorkspaceBudgetRows({
   isActive = () => true,
   concurrency = WORKSPACE_BUDGET_READ_CONCURRENCY,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceIds: readonly string[];
   canReadUsage: (workspaceId: string) => boolean;
   onRow: (workspaceId: string, row: WorkspaceBudgetRow) => void;

@@ -6,22 +6,10 @@
 
 use bytes::Bytes;
 use compute_fleet::{Fence, Found, Mutation, OwnerEpoch, Stamp, fence};
-use object_store::{PutMode, PutOptions, UpdateVersion, path::Path};
 
 use super::{ChunkStore, MAX_POINTER_BYTES};
+use crate::pointer_store::{Kept, Version, check_name};
 use crate::{Error, Result};
-
-/// Length of the write stamp every stored pointer begins with (see
-/// [`stamped`]).
-const STAMP_BYTES: usize = 16;
-
-/// Length of the whole header a stored pointer begins with: the write
-/// stamp, then its owner's stamp (epoch and save, each a little-endian
-/// `u64`).
-const HEADER_BYTES: usize = STAMP_BYTES + 16;
-
-/// Where pointers are stored: in this format, with an owner in the header.
-pub(super) const POINTERS: &str = "pointers/v3";
 
 /// The save number of a deleted sandbox's tombstone, which tells it from
 /// any other pointer.
@@ -40,9 +28,10 @@ const POINTER_TRIES: usize = 4;
 #[derive(Clone, Debug)]
 #[must_use = "a change lands through its publication"]
 pub struct Publication {
-    path: Path,
+    /// The pointer's name.
+    name: String,
     /// The pointer's version when the change started.
-    version: UpdateVersion,
+    version: Version,
     /// The owner stamp the pointer gets.
     stamp: Stamp,
 }
@@ -107,30 +96,17 @@ pub(crate) fn next_save() -> Stamp {
     }
 }
 
-/// A pointer as stored.
-struct Stored {
-    /// Its owner stamp.
-    owner: Stamp,
-    /// What it holds, without its header; empty for the pointer an archive
-    /// in flight stored and for a tombstone.
-    pointer: Bytes,
-    /// The version it is stored as.
-    version: UpdateVersion,
-}
-
-impl Stored {
-    /// Whether this is the tombstone a deleted sandbox left (see
-    /// [`ChunkStore::delete_pointer`]).
-    fn is_tombstone(&self) -> bool {
-        self.owner.save == TOMBSTONE_SAVE && self.pointer.is_empty()
-    }
+/// Whether `kept` is the tombstone a deleted sandbox left (see
+/// [`ChunkStore::delete_pointer`]).
+fn is_tombstone(kept: &Kept) -> bool {
+    kept.owner.save == TOMBSTONE_SAVE && kept.pointer.is_empty()
 }
 
 /// What the fence sees of pointer `stored`.
-fn found(stored: Option<&Stored>) -> Found {
+fn found(stored: Option<&Kept>) -> Found {
     match stored {
         None => Found::Nothing,
-        Some(stored) if stored.is_tombstone() => Found::Tombstone(stored.owner.epoch),
+        Some(stored) if is_tombstone(stored) => Found::Tombstone(stored.owner.epoch),
         Some(stored) => Found::Copy(stored.owner),
     }
 }
@@ -147,116 +123,47 @@ pub enum Stock {
     Holds(Vec<u8>),
 }
 
-/// `pointer` as stored: after a stamp no other write uses. Storing the
-/// same pointer again, or the empty one again, then still gives a new
-/// version where a store's entity tag follows the bytes (S3), so a write
-/// held up in flight, on condition of a version read long ago, can never
-/// land on a later write that happens to hold the same bytes.
-///
-/// After the write stamp comes the pointer's owner stamp: whose it is and
-/// which save it names, checked by every write that replaces it.
-fn stamped(owner: Stamp, pointer: &[u8]) -> Result<Bytes> {
-    let mut stored = vec![0; HEADER_BYTES + pointer.len()];
-    let (header, rest) = stored.split_at_mut(HEADER_BYTES);
-    let (stamp, header) = header.split_at_mut(STAMP_BYTES);
-    getrandom::fill(stamp).map_err(std::io::Error::from)?;
-    header[..8].copy_from_slice(&owner.epoch.0.to_le_bytes());
-    header[8..].copy_from_slice(&owner.save.to_le_bytes());
-    rest.copy_from_slice(pointer);
-    Ok(stored.into())
-}
-
-/// The owner stamp and the pointer `stored` holds, without its header
-/// (see [`stamped`]).
-pub(crate) fn unstamped(stored: &Bytes) -> Result<(Stamp, Bytes)> {
-    let Some(header) = stored.get(STAMP_BYTES..HEADER_BYTES) else {
-        return Err(Error::Invalid("pointer without a header"));
-    };
-    let (epoch, save) = header.split_at(8);
-    let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
-    let owner = Stamp {
-        epoch: OwnerEpoch(word(epoch)),
-        save: word(save),
-    };
-    Ok((owner, stored.slice(HEADER_BYTES..)))
-}
-
 impl ChunkStore {
-    fn pointer_path(&self, name: &str) -> Result<Path> {
-        if name.is_empty()
-            || name.len() > 128
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    /// Reads pointer `name`; `None` when there is none.
+    async fn read_pointer(&self, name: &str) -> Result<Option<Kept>> {
+        check_name(name)?;
+        let kept = self.pointers.read(name).await?;
+        if kept
+            .as_ref()
+            .is_some_and(|kept| kept.pointer.len() > MAX_POINTER_BYTES)
         {
-            return Err(Error::Invalid("pointer name"));
-        }
-        Ok(self.path(&format!("{POINTERS}/{name}")))
-    }
-
-    /// Reads the pointer at `path`; `None` when there is none.
-    async fn read_pointer(&self, path: &Path) -> Result<Option<Stored>> {
-        let read = match self.backend.get(path).await {
-            Ok(read) => read,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        if read.meta.size > (HEADER_BYTES + MAX_POINTER_BYTES) as u64 {
             return Err(Error::Invalid("pointer too large"));
         }
-        let version = UpdateVersion {
-            e_tag: read.meta.e_tag.clone(),
-            version: read.meta.version.clone(),
-        };
-        let stored = read.bytes().await?;
-        let (owner, pointer) = unstamped(&stored)?;
-        Ok(Some(Stored {
-            owner,
-            pointer,
-            version,
-        }))
+        Ok(kept)
     }
 
-    /// Stores `pointer` under `owner` at `path` on condition (`None` to
-    /// create it). The version stored, or `None` when the pointer changed
-    /// or appeared meanwhile.
+    /// Keeps `pointer` under `owner` as pointer `name` on condition of
+    /// `version` (`None` to create it). The version kept, or `None` when
+    /// the pointer changed or appeared meanwhile.
     async fn put_pointer(
         &self,
-        path: &Path,
+        name: &str,
         owner: Stamp,
         pointer: &[u8],
-        version: Option<UpdateVersion>,
-    ) -> Result<Option<UpdateVersion>> {
-        let mode = version.map_or(PutMode::Create, PutMode::Update);
-        let options = PutOptions {
-            mode,
-            ..Default::default()
-        };
-        match self
-            .backend
-            .put_opts(path, stamped(owner, pointer)?.into(), options)
+        version: Option<Version>,
+    ) -> Result<Option<Version>> {
+        check_name(name)?;
+        self.pointers
+            .write(
+                name,
+                owner,
+                Bytes::copy_from_slice(pointer),
+                version.as_ref(),
+            )
             .await
-        {
-            Ok(put) => Ok(Some(UpdateVersion {
-                e_tag: put.e_tag,
-                version: put.version,
-            })),
-            Err(
-                object_store::Error::Precondition { .. }
-                | object_store::Error::AlreadyExists { .. }
-                | object_store::Error::NotFound { .. },
-            ) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
     }
 
     /// The owner stamp of pointer `name` and what it holds; `None` when
     /// there is none, or only the empty one of an archive in flight or of
     /// a deleted sandbox.
     pub async fn get_owned_pointer(&self, name: &str) -> Result<Option<(Stamp, Vec<u8>)>> {
-        let path = self.pointer_path(name)?;
         Ok(self
-            .read_pointer(&path)
+            .read_pointer(name)
             .await?
             .filter(|stored| !stored.pointer.is_empty())
             .map(|stored| (stored.owner, stored.pointer.to_vec())))
@@ -272,9 +179,8 @@ impl ChunkStore {
     /// copy stored since, and a sweep's fence sends the caller to read
     /// again. Refused with [`Error::Fenced`] once a later owner holds it.
     pub async fn read_for_change(&self, name: &str, own: Stamp) -> Result<Rewrite> {
-        let path = self.pointer_path(name)?;
         for _ in 0..POINTER_TRIES {
-            let stored = self.read_pointer(&path).await?;
+            let stored = self.read_pointer(name).await?;
             match fence(Mutation::Rewrite(own), found(stored.as_ref())) {
                 Fence::Superseded { by } => return Err(Error::Fenced { by }),
                 Fence::Outdated => return Ok(Rewrite::Outdated),
@@ -294,7 +200,7 @@ impl ChunkStore {
                     return Ok(Rewrite::Change(
                         stored.pointer.to_vec(),
                         Publication {
-                            path,
+                            name: name.to_owned(),
                             version: stored.version,
                             stamp: own,
                         },
@@ -305,7 +211,7 @@ impl ChunkStore {
                 // one whose start is still in flight, cannot land after it.
                 stored => {
                     let version = stored.map(|stored| stored.version);
-                    if self.put_pointer(&path, own, &[], version).await?.is_some() {
+                    if self.put_pointer(name, own, &[], version).await?.is_some() {
                         return Ok(Rewrite::Nothing);
                     }
                 }
@@ -323,10 +229,16 @@ impl ChunkStore {
         owner: Stamp,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        self.backend
-            .put(&self.pointer_path(name)?, stamped(owner, &bytes)?.into())
-            .await?;
-        Ok(())
+        loop {
+            let version = self.read_pointer(name).await?.map(|kept| kept.version);
+            if self
+                .put_pointer(name, owner, &bytes, version)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
     }
 
     /// Starts an archive of save `own` that will replace pointer `name`:
@@ -342,9 +254,8 @@ impl ChunkStore {
     /// publication is refused as [`Error::Superseded`] begins again here,
     /// so every try is checked.
     pub async fn begin(&self, name: &str, own: Stamp) -> Result<Begun> {
-        let path = self.pointer_path(name)?;
         for _ in 0..POINTER_TRIES {
-            let stored = self.read_pointer(&path).await?;
+            let stored = self.read_pointer(name).await?;
             match fence(Mutation::Archive(own), found(stored.as_ref())) {
                 Fence::Superseded { by } => return Err(Error::Fenced { by }),
                 Fence::Outdated => return Ok(Begun::Outdated),
@@ -363,7 +274,7 @@ impl ChunkStore {
             }
             if let Some(stored) = stored {
                 return Ok(Begun::Publish(Publication {
-                    path,
+                    name: name.to_owned(),
                     version: stored.version,
                     stamp: own,
                 }));
@@ -372,9 +283,9 @@ impl ChunkStore {
                 epoch: own.epoch,
                 save: 0,
             };
-            if let Some(version) = self.put_pointer(&path, empty, &[], None).await? {
+            if let Some(version) = self.put_pointer(name, empty, &[], None).await? {
                 return Ok(Begun::Publish(Publication {
-                    path,
+                    name: name.to_owned(),
                     version,
                     stamp: own,
                 }));
@@ -414,9 +325,8 @@ impl ChunkStore {
     /// one this owner already holds changes nothing; refused with
     /// [`Error::Fenced`] once a later owner holds it.
     pub async fn claim(&self, name: &str, own: OwnerEpoch) -> Result<Option<(Stamp, Vec<u8>)>> {
-        let path = self.pointer_path(name)?;
         for _ in 0..POINTER_TRIES {
-            let stored = self.read_pointer(&path).await?;
+            let stored = self.read_pointer(name).await?;
             let (stamp, pointer, version) =
                 match fence(Mutation::Claim(own), found(stored.as_ref())) {
                     Fence::Superseded { by } => return Err(Error::Fenced { by }),
@@ -451,7 +361,7 @@ impl ChunkStore {
                     },
                 };
             if self
-                .put_pointer(&path, stamp, &pointer, version)
+                .put_pointer(name, stamp, &pointer, version)
                 .await?
                 .is_some()
             {
@@ -472,12 +382,12 @@ impl ChunkStore {
             return Err(Error::Invalid("pointer too large"));
         }
         let Publication {
-            path,
+            name,
             version,
             stamp,
         } = publication;
         if self
-            .put_pointer(&path, stamp, &bytes, Some(version))
+            .put_pointer(&name, stamp, &bytes, Some(version))
             .await?
             .is_some()
         {
@@ -487,26 +397,23 @@ impl ChunkStore {
         }
     }
 
-    /// Stores pointer `key` (as a listing gives it) again as it is, on
-    /// condition that it has not changed since it was read, and returns
-    /// what it holds. After this no archive that began earlier can publish
-    /// it, so what it names now is all it can name until an archive begun
-    /// later publishes: stored again under a new stamp, it has a new
-    /// version on every store. A tombstone is left as it is: nothing can
-    /// publish over it.
-    pub async fn fence(&self, key: &str) -> Result<Stock> {
-        let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
-        let path = self.pointer_path(name)?;
+    /// Keeps pointer `name` again as it is, on condition that it has not
+    /// changed since it was read, and returns what it holds. After this no
+    /// archive that began earlier can publish it, so what it names now is
+    /// all it can name until an archive begun later publishes: kept again,
+    /// it has a new version on every pointer store. A tombstone is left as
+    /// it is: nothing can publish over it.
+    pub async fn fence(&self, name: &str) -> Result<Stock> {
         for _ in 0..POINTER_TRIES {
-            let Some(stored) = self.read_pointer(&path).await? else {
+            let Some(stored) = self.read_pointer(name).await? else {
                 return Ok(Stock::Gone);
             };
-            if stored.is_tombstone() {
+            if is_tombstone(&stored) {
                 return Ok(Stock::Tombstone);
             }
             // Under the owner it had: a sweep owns nothing.
             if self
-                .put_pointer(&path, stored.owner, &stored.pointer, Some(stored.version))
+                .put_pointer(name, stored.owner, &stored.pointer, Some(stored.version))
                 .await?
                 .is_some()
             {
@@ -518,14 +425,12 @@ impl ChunkStore {
         Err(Error::Superseded)
     }
 
-    /// Reads pointer `key` (as a listing gives it) as [`Self::fence`]
-    /// would, without storing it again: a look that stops no archive.
-    pub async fn look(&self, key: &str) -> Result<Stock> {
-        let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
-        let path = self.pointer_path(name)?;
-        Ok(match self.read_pointer(&path).await? {
+    /// Reads pointer `name` as [`Self::fence`] would, without keeping it
+    /// again: a look that stops no archive.
+    pub async fn look(&self, name: &str) -> Result<Stock> {
+        Ok(match self.read_pointer(name).await? {
             None => Stock::Gone,
-            Some(stored) if stored.is_tombstone() => Stock::Tombstone,
+            Some(stored) if is_tombstone(&stored) => Stock::Tombstone,
             Some(stored) => Stock::Holds(stored.pointer.to_vec()),
         })
     }
@@ -554,13 +459,12 @@ impl ChunkStore {
     /// finds it rather than an empty place to start a copy in. What the
     /// pointer named stays until a sweep finds nothing names it.
     pub async fn delete_pointer(&self, name: &str, own: OwnerEpoch) -> Result<()> {
-        let path = self.pointer_path(name)?;
         let tombstone = Stamp {
             epoch: own,
             save: TOMBSTONE_SAVE,
         };
         for _ in 0..POINTER_TRIES {
-            let stored = self.read_pointer(&path).await?;
+            let stored = self.read_pointer(name).await?;
             match fence(Mutation::Delete(own), found(stored.as_ref())) {
                 Fence::Superseded { by } => return Err(Error::Fenced { by }),
                 Fence::Done => return Ok(()),
@@ -571,7 +475,7 @@ impl ChunkStore {
             }
             let version = stored.map(|stored| stored.version);
             if self
-                .put_pointer(&path, tombstone, &[], version)
+                .put_pointer(name, tombstone, &[], version)
                 .await?
                 .is_some()
             {
@@ -590,13 +494,12 @@ impl ChunkStore {
     /// may still forget it; a store of the same image since, or a sweep's
     /// fence, changes the version, so the empty one never lands on it.
     pub async fn read_to_forget(&self, name: &str) -> Result<Option<Publication>> {
-        let path = self.pointer_path(name)?;
         Ok(self
-            .read_pointer(&path)
+            .read_pointer(name)
             .await?
-            .filter(|stored| !stored.is_tombstone())
+            .filter(|stored| !is_tombstone(stored))
             .map(|stored| Publication {
-                path,
+                name: name.to_owned(),
                 version: stored.version,
                 stamp: Stamp {
                     epoch: stored.owner.epoch,
@@ -615,12 +518,5 @@ impl ChunkStore {
     /// was read: read it, and check, again.
     pub async fn forget(&self, publication: Publication) -> Result<()> {
         self.publish(publication, Vec::new()).await
-    }
-
-    /// The name of the pointer a listing of [`Area::Pointers`] shows as
-    /// `key`.
-    #[must_use]
-    pub fn pointer_name(key: &str) -> Option<&str> {
-        key.strip_prefix(POINTERS)?.strip_prefix('/')
     }
 }

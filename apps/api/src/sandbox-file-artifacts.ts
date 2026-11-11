@@ -19,8 +19,10 @@ import {
   recordWorkspaceUsage,
   requireLimit,
   resolveNewFileAudience,
+  resolveRunOnMachine,
   type ApiRouteDeps,
   type AccessGrantAuthorization,
+  type RunOnMachine,
 } from "@opengeni/core";
 import {
   completeFileUpload,
@@ -28,9 +30,12 @@ import {
   getGeneratedVideoArtifact,
   prepareGeneratedWorkspaceFile,
   getSessionAuthorityProjection,
+  getCodemodeCallExecutionSandboxId,
+  readActiveSandbox,
   requireWorkspace,
   recordSandboxFilePublication,
   withSessionRlsActorContext,
+  type LeaseSnapshot,
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { HTTPException } from "hono/http-exception";
@@ -41,7 +46,11 @@ import {
   type SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
 
-import { withChannelA, withChannelARead } from "./sandbox/channel-a";
+import { withChannelA, withChannelARead, withRunOnMachine } from "./sandbox/channel-a";
+import {
+  exactAgentAttemptClaims,
+  sessionFleetContextForCaller,
+} from "./sandbox/agent-fleet-context";
 import { sanitizeFilename } from "./routes/files";
 
 const FILE_READ_SENTINEL_BYTES = 1;
@@ -50,6 +59,39 @@ const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 const SANDBOX_EXPORT_URL_TTL_SECONDS = 4 * 60 * 60;
 const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
 const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
+
+/**
+ * The machine whose code made this call through Codemode, when it is not the
+ * session's active sandbox: a `run_on` exec on another enrolled machine, whose
+ * token names that machine. A path from that code means a file there. Null
+ * for model calls, for code on the active sandbox and for every other caller,
+ * whose paths resolve on the active sandbox as before. An unreachable machine
+ * refuses with run_on's own reason rather than read the active sandbox's
+ * file at the same path.
+ */
+export async function codemodeCallExecutionMachine(
+  deps: ApiRouteDeps,
+  input: { grant: AccessGrant; sessionId: string; codemodeOperationId: string | null },
+): Promise<RunOnMachine | null> {
+  if (!input.codemodeOperationId) return null;
+  if (exactAgentAttemptClaims(input.grant)?.sessionId !== input.sessionId) return null;
+  const sandboxId = await getCodemodeCallExecutionSandboxId(deps.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId,
+    operationId: input.codemodeOperationId,
+  });
+  if (!sandboxId) return null;
+  const active = await readActiveSandbox(deps.db, input.grant.workspaceId, input.sessionId);
+  if (active?.activeSandboxId === sandboxId) return null;
+  const resolved = await resolveRunOnMachine(
+    deps,
+    await sessionFleetContextForCaller(deps, input.grant, input.sessionId),
+    sandboxId,
+  );
+  if (!resolved.ok) throw new HTTPException(409, { message: resolved.reason });
+  return resolved.machine;
+}
 
 /**
  * Original bytes inherit the already-authorized source session's audience:
@@ -65,6 +107,8 @@ export async function publishSandboxFileArtifact(
     session: Session;
     path: string;
     visibility?: WorkspaceArtifactVisibility | undefined;
+    /** The machine the calling code runs on (see {@link codemodeCallExecutionMachine}). */
+    executionMachine?: RunOnMachine | null | undefined;
     signal?: AbortSignal | undefined;
   },
 ): Promise<SandboxFileArtifactReceipt> {
@@ -79,10 +123,7 @@ export async function publishSandboxFileArtifact(
       requireWorkspace(deps.db, input.grant.workspaceId),
     ]);
     if (!authority) throw new HTTPException(404, { message: "Source session is unavailable" });
-    const personal =
-      authority.visibility === "user_private" ||
-      authority.memoryScope === "user" ||
-      workspace.kind === "personal";
+    const personal = authority.visibility === "user_private" || authority.memoryScope === "user";
     const expectedOwner =
       authority.visibility === "user_private"
         ? authority.ownerSubjectId
@@ -135,6 +176,7 @@ export type FileAccessReceipt = {
  * generated image or video, download or upload), on the owner's behalf. An
  * agent acts for the person whose turn it runs and sees only what its chat's
  * own audience lets it see, so it can never reach another chat's private file.
+ * Null when no such file has this id, so the caller can try a Site.
  */
 export async function changeWorkspaceFileVisibility(
   deps: ApiRouteDeps,
@@ -143,7 +185,7 @@ export async function changeWorkspaceFileVisibility(
     artifactId: string;
     visibility: WorkspaceArtifactVisibility;
   },
-): Promise<FileAccessReceipt> {
+): Promise<FileAccessReceipt | null> {
   const actor =
     input.grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
@@ -154,7 +196,7 @@ export async function changeWorkspaceFileVisibility(
       (await getFile(deps.db, input.grant.workspaceId, input.artifactId))?.id ??
       (await getGeneratedVideoArtifact(deps.db, input.grant.workspaceId, input.artifactId))?.file
         .id;
-    if (!fileId) throw new HTTPException(404, { message: "file not found" });
+    if (!fileId) return null;
     const { file } = await changeFileVisibility({
       db: deps.db,
       settings: deps.settings,
@@ -181,6 +223,7 @@ async function publishSandboxFileArtifactInScope(
     session: Session;
     path: string;
     visibility?: WorkspaceArtifactVisibility | undefined;
+    executionMachine?: RunOnMachine | null | undefined;
     workspace: Workspace;
     person: string | null;
     privateOwnerSubjectId: string | null;
@@ -226,25 +269,31 @@ async function publishSandboxFileArtifactInScope(
     ...(input.signal ? { waitSignal: input.signal } : {}),
     operation: "artifact.publish" as const,
   };
+  // A file the calling code made on its own run_on machine is read and
+  // uploaded there; every other path resolves on the session's sandbox.
+  type FileHandle = { service: SandboxChannelAService; lease: LeaseSnapshot | null };
+  const executionMachine = input.executionMachine ?? null;
+  const onSandbox = <T>(readOnly: boolean, fn: (handle: FileHandle) => Promise<T>): Promise<T> =>
+    executionMachine
+      ? withRunOnMachine(channelServices, channelContext, executionMachine, fn)
+      : readOnly
+        ? withChannelARead(channelServices, channelContext, fn)
+        : withChannelA(channelServices, channelContext, fn);
   // Small files come through the API in one read. A larger file is hashed
   // where it lives and uploaded from there straight to object storage, so its
   // bytes never cross the control plane.
-  const { path, sandboxPath, content } = await withChannelARead(
-    channelServices,
-    channelContext,
-    async ({ service }) => {
-      const small = await readSandboxArtifactFile(service, input.path, readLimit);
-      if (!small.read.truncated && small.read.sizeBytes <= maxReadBytes) {
-        return { ...small, content: sandboxArtifactBytes(small.read) };
-      }
-      const digest = await service.digestWorkspaceFile(small.path);
-      return {
-        path: small.path,
-        sandboxPath: small.sandboxPath,
-        content: { kind: "box" as const, sizeBytes: digest.sizeBytes, sha256: digest.sha256 },
-      };
-    },
-  );
+  const { path, sandboxPath, content } = await onSandbox(true, async ({ service }) => {
+    const small = await readSandboxArtifactFile(service, input.path, readLimit);
+    if (!small.read.truncated && small.read.sizeBytes <= maxReadBytes) {
+      return { ...small, content: sandboxArtifactBytes(small.read) };
+    }
+    const digest = await service.digestWorkspaceFile(small.path);
+    return {
+      path: small.path,
+      sandboxPath: small.sandboxPath,
+      content: { kind: "box" as const, sizeBytes: digest.sizeBytes, sha256: digest.sha256 },
+    };
+  });
   if (content.sizeBytes > maxArtifactBytes) {
     throw new HTTPException(413, {
       message: `sandbox file exceeds the ${maxArtifactBytes}-byte artifact publication limit`,
@@ -315,7 +364,7 @@ async function publishSandboxFileArtifactInScope(
     // Always upload again: an object left by an earlier attempt whose file
     // changed mid-upload carries this digest's metadata but not its bytes.
     const target = file;
-    await withChannelA(channelServices, channelContext, async ({ service, lease }) => {
+    await onSandbox(false, async ({ service, lease }) => {
       // A Connected Machine reaches storage on its public endpoint; a leased
       // managed sandbox uses the sandbox-facing one.
       const put = await storage.createPutUrl({
@@ -383,7 +432,7 @@ async function publishSandboxFileArtifactInScope(
     fileId: file.id,
     sourceSessionId: input.session.id,
   });
-  if (!newlyPrepared && input.visibility && input.workspace.kind !== "personal") {
+  if (!newlyPrepared && input.visibility) {
     file = (
       await changeFileVisibility({
         db: deps.db,

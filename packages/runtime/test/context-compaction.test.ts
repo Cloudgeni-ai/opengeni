@@ -64,6 +64,7 @@ import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
@@ -229,9 +230,12 @@ describe("non-materializing plain JSON length", () => {
     cyclic.self = cyclic;
     expect(() => jsonSerializedLength(cyclic)).toThrow();
     expect(() => jsonSerializedUtf8ByteLength(cyclic)).toThrow();
-    expect(() => estimateSerializedValueTokens(undefined)).toThrow();
-    expect(() => estimateSerializedValueTokens(1n)).toThrow();
-    expect(() => estimateSerializedValueTokens(cyclic)).toThrow();
+    // A token estimate never fails a turn: it falls back to the converted value.
+    expect(estimateSerializedValueTokens(undefined)).toBe(1);
+    expect(estimateSerializedValueTokens(1n)).toBe(1);
+    expect(estimateSerializedValueTokens(cyclic)).toBe(
+      Math.ceil(Buffer.byteLength('{"self":null}', "utf8") / 4),
+    );
   });
 
   test("uses real JSON.stringify semantics for unusual non-persisted values", () => {
@@ -269,7 +273,7 @@ describe("non-materializing plain JSON length", () => {
         Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
       );
     }
-    expect(() => estimateSerializedValueTokens(boxedBigInt)).toThrow();
+    expect(estimateSerializedValueTokens(boxedBigInt)).toBe(1);
   });
 
   test("does not copy a wide persisted object while counting its exact JSON form", () => {
@@ -845,12 +849,14 @@ describe("codex-parity rebuild", () => {
         ...user("first photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: olderId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
       },
       assistant("looked at it"),
       {
         ...user("second photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: newerId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
       },
       user("what changed between them?"),
     ];
@@ -869,6 +875,7 @@ describe("codex-parity rebuild", () => {
         expect(first).toEqual(user("first photo"));
         expect(second[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: newerId }]);
         expect(second[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]).toBe(2000);
+        expect(second[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]).toEqual(["heif"]);
         const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
         expect(catalog[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: olderId }]);
         expect(rebuilt.indexOf(catalog)).toBeLessThan(rebuilt.indexOf(first));
@@ -890,9 +897,10 @@ describe("codex-parity rebuild", () => {
       expect(rebuilt.some((item) => item.content === "first photo")).toBe(true);
     });
 
-    test("the image bound never reaches the provider", () => {
+    test("the image bound and converted formats never reach the provider", () => {
       const wire = sanitizeHistoryItemsForModel(history()) as CompactionItem[];
       expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD);
+      expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD);
     });
   });
 

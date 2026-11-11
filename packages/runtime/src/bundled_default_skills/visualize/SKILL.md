@@ -7,8 +7,10 @@ description: "Create visualizations and interactive tools directly in conversati
 
 - A request for a new standalone file, website, app page, component, or other project change is not an in-conversation visualization request, even when the deliverable contains charts or interactive content.
 - A request to preview, explain, or explore a proposed interface in the conversation is an in-conversation visualization request.
+- A mockup on top of an existing product whose source or running build you can reach is built from that product, not redrawn in a fragment. See UI mockups below.
 - Create a visual only when the user needs to see or explore it in the conversation and it materially improves the explanation. Do not create an inline visual merely because the request involves data, charts, or an interactive page.
 - Use a normal Markdown table when the user asks for a table; return it directly and do not create a visualization file.
+- When the user is choosing among concrete options you found (products, plans, providers, places, candidates), write an `opengeni-ui` options answer instead of HTML or a long table. See Options answers below.
 - Custom image sizing or gallery layout is also an inline HTML use case, even without interactive controls.
 - Use normal Markdown for a static explanation that needs no interaction. Use HTML for dynamics, spatial motion, adjustable inputs, and other visuals.
 - In user-facing prose, describe only what the visual helps the user see or decide. Keep it concise and do not repeat information already clear from the visual. Avoid unsolicited implementation commentary; explain the implementation when the user asks.
@@ -16,6 +18,36 @@ description: "Create visualizations and interactive tools directly in conversati
 ## Context compaction
 
 Reload this Skill before creating or updating an inline visualization after compaction.
+
+## Options answers
+
+An `opengeni-ui` fenced block holding one JSON object draws the options as cards, a sortable table and an optional bar chart. The person can filter, compare and pick; their pick comes back to you as their next message, such as `Compare these in detail: A and B`.
+
+```opengeni-ui
+{
+  "title": "Laptops under $1,500",
+  "fields": [
+    { "key": "price", "label": "Price", "unit": "$", "better": "lower" },
+    { "key": "battery", "label": "Battery", "unit": "h", "better": "higher" },
+    { "key": "os", "label": "OS", "filter": true }
+  ],
+  "chart": "battery",
+  "select": { "max": 3, "action": "Compare these in detail" },
+  "items": [
+    { "id": "air", "title": "MacBook Air 13", "subtitle": "M4, 16 GB", "badge": "Recommended",
+      "description": "Light, silent, long battery life.", "url": "https://www.apple.com/macbook-air/",
+      "values": { "price": 1199, "battery": 18, "os": "macOS" } },
+    { "id": "x1", "title": "ThinkPad X1 Carbon", "subtitle": "Gen 13",
+      "values": { "price": 1449, "battery": 14, "os": "Windows" } }
+  ]
+}
+```
+
+- `items` (required, at most 60): `id`, `title`, and optional `subtitle`, `description` (one or two sentences), `badge` (a word or two), `url` (http or https) and `values`. Values are strings, numbers, booleans or null; write numbers as numbers, without units.
+- `fields` (at most 12) choose which values are shown and in what order; values without a field are not shown. `unit` is a currency sign before the number or a unit after it. `better` marks the best option for that field. `filter: true` offers the field's values as filter chips; use it for a few repeated categories.
+- `chart` names one numeric field from `fields` to draw as bars. `view: "table"` opens as a table when there are many fields to compare; cards are the default and phones always show cards.
+- `select: true` lets the person pick any number; `{ "max": 1 }` asks for one. `action` is the verb phrase that starts their message. Omit `select` when there is nothing to choose.
+- Write valid, literal JSON with no comments. Keep explanations outside the block, and do not repeat its data in a table. Write a new block to update the options.
 
 ## Inline HTML output contract
 
@@ -148,7 +180,9 @@ Choose the smallest composition that fits.
 
 - Include a few thoughtfully chosen design alternatives whenever they would help the user explore a mockup, without waiting for the user to ask. Use compact, labeled local controls for these alternatives. Do not assume a Tweak helper or host annotation API exists. Do not add design controls to charts, explainers, or simulations unless requested.
 - "In the widget" means the in-conversation visualization, not a widget inside the depicted product.
-- Use product and platform context already available in the conversation; don't search the project to render a mockup. Match the product's chrome, navigation, typography, colors, and content. If its design is unavailable, infer one from the platform and request.
+- Sketch a new idea from the product context already in the conversation; don't search a project just to sketch.
+- When the user wants the mockup on top of an existing product whose source or running build you can reach (an open repository, prototype code from earlier work, a running local app), build it from that product instead: make the change in the real source on a scratch branch or worktree, with sample data where the backend is missing, then build or run it and show the compiled result. Show it as screenshots in the reply, or, when the user should click through it, package the built page as a Site (read `sites`) and embed it with `opengeni-site`. Never retype the product's shell, components, or styles into a fragment, and never copy its compiled HTML or CSS into one by hand.
+- When you do draw the product in a fragment, match its chrome, navigation, typography, colors, and content. If its design is unavailable, infer one from the platform and request.
 - NEVER use visualization CSS variables or utility classes inside a mockup (for example, `--card`, `--font-size-base`, `.card`, or `.btn`). Define root-scoped, product-specific colors, typography, surfaces, and controls instead. This rule overrides all general visualization guidance.
 - Keep only the surrounding conversation surface transparent. Give product windows, cards, menus, and popovers opaque backgrounds, and stack overlays above the product content.
 - Follow the host's active appearance with product-specific `light-dark(<light>, <dark>)` colors unless a fixed theme is requested.

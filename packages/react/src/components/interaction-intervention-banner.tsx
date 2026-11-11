@@ -40,12 +40,12 @@ export function InteractionInterventionBanner({
         <span className="flex items-center gap-1.5 text-og-control font-medium text-og-fg">
           {interventionTitle(t, intervention.kind)}
           {interventions.length > 1 ? (
-            <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-[10px] font-normal text-og-muted">
+            <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-[10px] font-normal text-og-fg-muted">
               +{interventions.length - 1}
             </span>
           ) : null}
         </span>
-        <span className="block truncate text-og-xs text-og-muted">{intervention.reason}</span>
+        <span className="block truncate text-og-xs text-og-fg-muted">{intervention.reason}</span>
       </span>
       {!targetOpen && onOpen ? (
         <button
@@ -75,7 +75,7 @@ export function InteractionInterventionBanner({
         type="button"
         onClick={() => onResolve(intervention, "dismissed")}
         disabled={mutating}
-        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
         aria-label={t("interactionInterventionBanner.cancelRequest")}
         title={t("interactionInterventionBanner.cancelRequest")}
       >

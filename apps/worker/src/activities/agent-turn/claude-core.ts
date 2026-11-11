@@ -1,34 +1,32 @@
 /**
  * Claude on the shared subscription core (design 5.3, Claude track C1a): the
- * provider-neutral chat placement and request custody bound to Claude, and
- * the turn's route. The route is `core` only after the Claude drained cutover
- * commits its receipt (C3); the legacy Claude path is deleted (C4), so any
- * other route fails closed.
+ * provider-neutral chat placement and request custody bound to Claude.
  */
 import {
   buildSubscriptionCoreClaudeTokenResolver,
   CodexCredentialLeaseAttemptFencedError,
   decodeSubscriptionCoreClaudeQuota,
-  readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
-  SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   SubscriptionCoreError,
   subscriptionCoreRequests,
   subscriptionCoreTurns,
-  withRlsContext,
   type Database,
   type SubscriptionCoreClaudeTokenSnapshot,
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
-import { parseClaudeUsageHeaders, parseModelProvidersJson, type Settings } from "@opengeni/config";
+import {
+  parseClaudeUsageHeaders,
+  parseModelProvidersJson,
+  withClaudeConnectionCredential,
+  type Settings,
+} from "@opengeni/config";
 import type { PreparedUsageRequest } from "@opengeni/runtime";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
-import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import type { ClaudeTurnLease } from "./credential-leases";
 import { classifyClaudeProviderError } from "./errors";
 import {
-  assertCoreSourceConnected,
+  admitCoreRequest,
   coreLeaseRef,
   guardCoreTokenResolver,
   parkCoreSubscriptionTurn,
@@ -105,23 +103,12 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   isAttemptFenced: (error) => error instanceof CodexCredentialLeaseAttemptFencedError,
 };
 
-/**
- * The Claude capacity phase by the Claude route: `core` places on the shared
- * core; `maintenance` and `legacy` (no committed receipt) fail closed, since
- * the legacy Claude selection is deleted.
- */
-export async function selectClaudeTurnCapacityByRoute(
+/** The Claude capacity phase: Claude-billed turns are placed on the shared core. */
+export async function selectClaudeTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
   if (!deps.billingState.isClaudeTurn) return { ok: true };
   const { input } = deps;
-  const route = await withRlsContext(
-    deps.db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    (scoped) =>
-      readSubscriptionCoreProviderRoute(scoped, { accountId: input.accountId, provider: "claude" }),
-  );
-  if (route !== "core") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
   const turnId = deps.attempt.turnId;
   if (!turnId) throw new Error("Turn id was not initialized");
   deps.leases.claude.holderId ??= subscriptionTurnLeaseHolderId(
@@ -169,8 +156,11 @@ export type ClaudeCoreRequestAuthorization = {
   renewAfterUnauthorized: (
     generation: number,
   ) => Promise<SubscriptionCoreClaudeTokenSnapshot | null>;
-  /** The dispatch fence every physical request passes before its reservation. */
-  assertDispatch: () => Promise<void>;
+  /**
+   * Admit one physical request: its reservation is the dispatch fence (the
+   * accepted turn, the source and the live lease, in one transaction).
+   */
+  admit: (reserve: () => Promise<unknown>) => Promise<void>;
   /**
    * A main-lane request with a bearer of `generation` was admitted: the
    * refusal settlement fences its health write on that generation. Main-lane
@@ -206,13 +196,14 @@ export function buildClaudeCoreRequestAuthorization(input: {
   const ref = coreLeaseRef(lease, core, DISPLAY_NAME);
   core.requests = createCoreClaudeRequests(db, core, ref, input.execution, "main");
   core.titleRequests = createCoreClaudeRequests(db, core, ref, input.execution, "title");
+  const isLeaseLost = (error: unknown) => hasCoreCode(error, "subscription_core_lease_lost");
   const resolver = guardCoreTokenResolver(
     db,
     CLAUDE_CORE_TURN_PROVIDER,
     core,
     lease,
     buildSubscriptionCoreClaudeTokenResolver(db, input.settings, core.identity, ref),
-    (error) => hasCoreCode(error, "subscription_core_lease_lost"),
+    isLeaseLost,
   );
   let forced: Promise<SubscriptionCoreClaudeTokenSnapshot> | null = null;
   let observed: Promise<boolean> = Promise.resolve(false);
@@ -226,9 +217,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
       const token = await forced;
       return token.credentialVersion > generation ? token : null;
     },
-    assertDispatch: async () => {
-      await assertCoreSourceConnected(db, CLAUDE_CORE_TURN_PROVIDER, core);
-      await lease.assertCurrentForDispatch();
+    admit: async (reserve) => {
+      await admitCoreRequest(lease, reserve, isLeaseLost);
     },
     mainLaneAdmitted: (generation) => {
       core.credentialVersion = generation;
@@ -307,11 +297,28 @@ export function claudeCoreSettingsCredential(
   });
 }
 
-/** The scope a Claude product model id names (its prefix). */
-export function claudeCoreModelScope(productModelId: string): "organization" | "workspace" {
-  return productModelId.startsWith(`${SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[1]}/`)
-    ? "workspace"
-    : "organization";
+/**
+ * Settings whose Claude subscription providers carry a core-placed turn's
+ * credential. Every Claude subscription list (workspace and organization)
+ * gets it: whichever one defines the accepted model, in whichever id form,
+ * the turn runs on the connection the core placed it on.
+ */
+export function withClaudeCoreConnectionCredential(
+  settings: Settings,
+  credential: string,
+  credentialBinding: { connectionId: string; credentialVersion: number },
+): Settings {
+  return (["workspace", "organization"] as const).reduce(
+    (current, scope) =>
+      withClaudeConnectionCredential(
+        current,
+        "claude_subscription",
+        credential,
+        scope,
+        credentialBinding,
+      ),
+    settings,
+  );
 }
 
 /** The upstream model ids of the deployment's Claude subscription catalog. */
@@ -324,7 +331,8 @@ export function claudeSubscriptionUpstreamModelIds(
         .filter(
           (provider) =>
             provider.kind === "claude-subscription-workspace" ||
-            provider.kind === "claude-subscription-organization",
+            provider.kind === "claude-subscription-organization" ||
+            provider.kind === "claude-subscription",
         )
         .flatMap((provider) => provider.models.map((model) => model.upstreamModelId ?? model.id)),
     ),
@@ -340,7 +348,8 @@ export function claudeSubscriptionProviderIds(
       .filter(
         (provider) =>
           provider.kind === "claude-subscription-workspace" ||
-          provider.kind === "claude-subscription-organization",
+          provider.kind === "claude-subscription-organization" ||
+          provider.kind === "claude-subscription",
       )
       .map((provider) => provider.id),
   );
@@ -443,8 +452,7 @@ export function claudeCoreRequestPreparer(input: {
           input.observe?.(response, token.credentialVersion, upstreamModelId),
         custody: {
           admit: async () => {
-            await input.authorization.assertDispatch();
-            await input.lane.reserve(request);
+            await input.authorization.admit(() => input.lane.reserve(request));
             if (input.mainLane) input.authorization.mainLaneAdmitted(token.credentialVersion);
           },
           responded: (response) =>

@@ -1,10 +1,7 @@
-// Codex routes for organizations whose Codex cutover row exists (M3 PR 2b).
-//
-// `codexRouteDisposition` is read first by every Codex route. A missing or disabled row answers a
-// typed 503 and reads no legacy Codex table. An enabled row runs the
-// handlers below: the same paths, verbs, request fields and response shapes,
-// projected from the shared subscription core (SUB-COMPAT-02). Operations the
-// core does not serve yet answer a typed 409 instead of touching legacy state.
+// Codex routes on the shared subscription core (M3 PR 2b): the same paths,
+// verbs, request fields and response shapes, projected from the core
+// (SUB-COMPAT-02). Operations the core does not serve yet answer a typed 409
+// instead of touching legacy state.
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
@@ -22,7 +19,6 @@ import {
   getSubscriptionCoreCodexWorkspaceProjection,
   getSubscriptionCoreOrganizationCodexAccount,
   getSubscriptionCoreOrganizationCodexProjection,
-  readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexConnectionId,
   setSubscriptionCoreCodexAllocator,
@@ -34,8 +30,10 @@ import {
   SubscriptionCoreCodexSourceRefusedError,
   type SubscriptionCoreCodexCredentialInput,
   type SubscriptionCoreCodexDisconnectOutcome,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import type { CodexFetch, CodexUsagePayload } from "@opengeni/codex";
+import type { CodexConnectOfferedModel } from "./codex-connect-models";
 import {
   codexAccountJson,
   codexModelsForPicker,
@@ -46,27 +44,9 @@ import {
 } from "./codex";
 import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 import { parseRequestBody } from "../http/request-body";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
-
-/**
- * Only an enabled Codex cutover admits a request. Missing and disabled rows
- * are maintenance: fail closed, never fall back to legacy state.
- */
-export async function codexRouteDisposition(
-  deps: ApiRouteDeps,
-  accountId: string,
-): Promise<"core"> {
-  const disposition = await readCodexCutoverDisposition(deps.db, accountId);
-  if (disposition === "maintenance") {
-    throw typedHttpError(
-      503,
-      SUBSCRIPTION_CORE_CUTOVER_DISABLED,
-      "Codex subscriptions are paused for maintenance in this organization",
-    );
-  }
-  return disposition;
-}
 
 function projection(
   deps: ApiRouteDeps,
@@ -92,13 +72,20 @@ export async function coreCodexConnected(
     accountId: string;
     workspaceId: string | null;
     subjectId: string;
+    /** The person's own subscription: only a personal connection, else refused. */
+    personal?: boolean;
+    /** The shared workspace the person added their own subscription from (D-53). */
+    addedFrom?: string | undefined;
     credential: SubscriptionCoreCodexCredentialInput;
+    /** The account's offered Codex models, read once after it connects. */
+    offeredModels?: (() => Promise<CodexConnectOfferedModel[] | null>) | undefined;
   },
 ) {
   const result = await connectSubscriptionCoreCodexConnection(deps.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    ...(input.personal ? { personal: true } : {}),
     ...input.credential,
   });
   if (result.kind === "refused") {
@@ -137,6 +124,13 @@ export async function coreCodexConnected(
   } catch {
     // Every core waiter has its own bounded recheck; a lost wake only delays.
   }
+  if (input.personal && input.addedFrom)
+    await turnOnOwnSubscriptionWhereAdded(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.addedFrom,
+      subjectId: input.subjectId,
+      connectionId: result.id,
+    });
   const activeCredentialId =
     input.workspaceId === null
       ? (
@@ -147,11 +141,15 @@ export async function coreCodexConnected(
         ).rotation.activeCredentialId
       : (await projection(deps, input.accountId, input.workspaceId, input.subjectId)).rotation
           .activeCredentialId;
+  // Which Opengeni models it offers, so connecting an account whose plan
+  // offers none (or only some) says so now rather than at Send.
+  const models = input.offeredModels ? await input.offeredModels().catch(() => null) : null;
   return c.json({
     status: "connected",
     plan: input.credential.planType,
     accountId: result.id,
     isActive: activeCredentialId === result.id,
+    ...(models ? { models } : {}),
   });
 }
 
@@ -179,7 +177,14 @@ function disconnectRefused(outcome: SubscriptionCoreCodexDisconnectOutcome): voi
 export async function coreCodexDisconnect(
   c: Context,
   deps: ApiRouteDeps,
-  input: { accountId: string; workspaceId: string | null; subjectId: string; connectionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string | null;
+    subjectId: string;
+    connectionId: string;
+    /** Who disconnects: the removal is audited in its transaction. */
+    audit: DisconnectAuditActor;
+  },
 ) {
   let result: Awaited<ReturnType<typeof disconnectSubscriptionCoreCodexConnection>>;
   try {
@@ -214,7 +219,7 @@ export async function coreCodexDisconnect(
 export async function coreCodexDisconnectAll(
   c: Context,
   deps: ApiRouteDeps,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: { accountId: string; workspaceId: string; subjectId: string; audit: DisconnectAuditActor },
 ) {
   const result = await disconnectAllSubscriptionCoreCodexConnections(deps.db, input);
   if (result.refused) {
@@ -253,6 +258,7 @@ export async function coreCodexSetSource(
     workspaceId: string;
     subjectId: string;
     mode: "automatic" | "workspace" | "organization" | "disabled";
+    personalWorkspaceOwnerVerified?: boolean;
   },
 ) {
   let result: Awaited<ReturnType<typeof setSubscriptionCoreWorkspaceCodexSource>>;
@@ -453,7 +459,13 @@ export async function coreCodexClearApps(
   return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
 }
 
-type Admin = { accountId: string; workspaceId: string | null; subjectId: string };
+type Admin = {
+  accountId: string;
+  workspaceId: string | null;
+  subjectId: string;
+  /** The request verified a Personal workspace's owner acting as themselves (1233). */
+  personalWorkspaceOwnerVerified?: boolean;
+};
 
 export async function coreCodexActivate(
   c: Context,

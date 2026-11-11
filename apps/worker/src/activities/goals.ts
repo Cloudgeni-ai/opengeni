@@ -15,6 +15,7 @@ import {
   isSessionDefinitivelyDeleted,
   getSessionTurn,
   materializeGoalContinuation,
+  readSessionBillingOrigin,
   requireSession,
   requireWorkspace,
 } from "@opengeni/db";
@@ -164,6 +165,13 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
                 workspaceId: input.workspaceId,
                 model: continuationModel,
                 initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+                // The continuation inherits the chat's origin: fund it the same way.
+                billingOrigin: () =>
+                  readSessionBillingOrigin(tx, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                  }),
               },
             )));
         const pausedReason = modelPolicyBlocked
@@ -250,7 +258,7 @@ export function goalContinuationPrompt(
     "Child lifecycle notices:",
     "- A `child_requires_action` update means a worker you spawned is blocked on a question or a tool approval and will not progress until it is answered. " +
       (options.humanInputRespondAvailable
-        ? "If you know the answer to its question from your task context, answer it with opengeni__session_human_input_respond (pass the worker's sessionId, the requestId and question ids from the notice, and a response); the first answer wins, and an alreadyAnswered result means someone else answered first. Leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf; a question marked humanOnly can only be answered by the person. "
+        ? "If you know the answer to its question from your task context, answer it with opengeni__session_human_input_respond before the person has to (pass the worker's sessionId, the requestId and question ids from the notice, and a response); the first answer wins, and an alreadyAnswered result means someone else answered first. When the question asks for agent work you can do, such as starting a reviewer or worker, do that work and then answer. Leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf; a question marked humanOnly can only be answered by the person. "
         : "") +
       "Tool approvals can only be decided by a human. If you cannot resolve the blocker yourself, report the exact blocker (worker session id, the question); if it prevents further goal progress, pause under the blocked audit instead of retrying the worker or treating a human decision as an in-flight wait.",
     "- `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, and `child_progress` updates are informational: a resolved notice means the worker is moving again; a paused worker needs a human or you to resume it; a capacity wait resumes by itself; a progress note needs no action.",
@@ -295,7 +303,7 @@ export function goalContinuationPrompt(
     "- For document report deliverables (a document the user asked for, or a report too long for chat), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, requested Word, Excel, PDF or PowerPoint files, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
-    "Goal evidence is a short proof for the ledger, not the deliverable. After goal_complete succeeds, finish this same turn with the requested user-facing answer, or a concise summary and retained artifact link. Goal completion stops future automatic continuations; it does not send the answer or end this turn. Never compress a report into evidence or omit the final reply.",
+    "Goal evidence is a short proof for the ledger, not the deliverable. Put the requested user-facing answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends this turn, so call goal_complete on its own once you have seen your last results. Without a reply, finish this same turn with the requested user-facing answer after goal_complete succeeds. Goal completion stops future automatic continuations. Never compress a report into evidence or omit the final reply.",
     "Goal progress notes are short human-readable milestone statuses, not raw transcripts or continuation instructions. Keep normal spaces and summarize detail instead of squeezing words into a ledger field. The text and successCriteria fields each allow 8192 UTF-8 bytes, progressNote allows 8192 UTF-8 bytes, rationale allows 2048 UTF-8 bytes, and evidence allows 8192 characters.",
     "",
     ...waitingGuidance,
@@ -303,6 +311,7 @@ export function goalContinuationPrompt(
     "Blocked audit:",
     "- Base persistence on evidence, not a fixed number of turns or retries. Investigate recoverable failures and try plausible safe alternatives within current authority when they could materially advance the goal; do not exhaust every imaginable alternative or repeat an unchanged failure without a reason to expect progress.",
     "- A definitive missing permission, required human decision, or external prerequisite with no actionable authorized path can justify pausing immediately. State the concrete blocker, relevant evidence or attempted alternatives, and what must change to resume. Tool approvals remain human-only.",
+    "- A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.",
     "- If progress depends on work already in flight or a meaningful timed recheck, use the available waiting mechanism rather than pausing the goal; continue any independent authorized work first.",
     "- Do not pause merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
     "- When no meaningful authorized progress remains and the blocker requires human input or an external change that cannot be handled by an available wait or monitoring mechanism, call opengeni__goal_pause with the concrete blocker instead of repeatedly reporting it while leaving the goal active.",

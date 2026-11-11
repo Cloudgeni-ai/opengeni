@@ -15,6 +15,7 @@ import {
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
+import type { SessionStarter } from "../components/new-session-starters";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
@@ -47,6 +48,11 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
+  /**
+   * Suggestions under the new-chat composer in place of Opengeni's own, such
+   * as tasks that fit the app the chat sits in. An empty list shows none.
+   */
+  starters?: readonly SessionStarter[] | undefined;
   /**
    * Receives the open chat's state each time it changes, read from the
    * page's own event stream (no second connection).
@@ -85,8 +91,9 @@ export function useEmbedded(): boolean {
 }
 
 /** Tells the host the open chat's state each time it changes. */
-export function useReportSessionState(state: SessionViewState): void {
-  const report = useAppHost().onSessionState;
+export function useReportSessionState(state: SessionViewState, enabled = true): void {
+  const hostReport = useAppHost().onSessionState;
+  const report = enabled ? hostReport : undefined;
   const { sessionId, status, events, initialLoading } = state;
   useEffect(() => {
     report?.({ sessionId, status, events, initialLoading });
@@ -97,6 +104,13 @@ export function useReportSessionState(state: SessionViewState): void {
 export function useHostMessageContext(): (() => string | undefined) | undefined {
   const store = useAppHost().messageContext;
   const read = useCallback(() => store?.forSend(), [store]);
+  return store ? read : undefined;
+}
+
+/** Reads the tools the host's context is for at send time (see MessageContextItem.tools). */
+export function useHostMessageContextTools(): (() => string[] | undefined) | undefined {
+  const store = useAppHost().messageContext;
+  const read = useCallback(() => store?.toolsForSend(), [store]);
   return store ? read : undefined;
 }
 

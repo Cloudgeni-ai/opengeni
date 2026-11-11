@@ -7,6 +7,7 @@ import {
   configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   resolveModelProvider,
+  resolveModelProviderForTurn,
   OPENGENI_GATEWAY_PROVIDER_ID,
   OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
@@ -15,18 +16,33 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { createHash } from "node:crypto";
-import type { LatencyMode } from "@opengeni/contracts";
+import type {
+  BillingOrigin,
+  LatencyMode,
+  TurnInitiator,
+  TurnInitiatorContext,
+} from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
+import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
-  applyCreditDebitUpToBalance,
+  applyByokPlatformFeeDebit,
+  applyCreditDebitAfterUse,
   isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
   settleSessionUsageReceipt,
   toPostgresLosslessJson,
   type Database,
+  type UsageEventProcessingResidency,
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
+import { settleHostedWebSearchUsage } from "../domain/web-search-billing";
+import {
+  byokListEquivalent,
+  byokPlatformFeeActive,
+  byokPlatformFeeMicros,
+  ownModelFunding,
+} from "./byok-platform-fee";
 import {
   recordSessionUsageLimitEvent,
   type SessionUsageLimitMetricsSink,
@@ -37,7 +53,10 @@ import {
  * event, the `model.cost` event, and (for Opengeni-credit models) the
  * idempotent credit debit. Agent turns and stateless single model calls both
  * settle here; `sourceId` is the durable identity every idempotency key
- * derives from, so a retried settlement never charges twice.
+ * derives from, so a retried settlement never charges twice. The debit is the
+ * response's full price, charged after use like every other Opengeni-funded
+ * resource: it may take the balance below zero, and later grants and top-ups
+ * net against that.
  */
 
 export type ModelUsageBillingRecord = {
@@ -54,6 +73,8 @@ export type ModelUsageBillingRecord = {
   listByClassApprox?: boolean;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
+  /** Bring-your-own-key platform fee charged for this response (USD micros). */
+  byokPlatformFeeMicros?: number;
 };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
@@ -61,12 +82,25 @@ export type ModelUsageBillingRecord = {
 export type ModelUsageSettlementInput = {
   accountId: string;
   workspaceId: string;
+  /** Stateless caller provenance. Context labels never select a paying workspace. */
+  initiator?: TurnInitiator;
+  initiatorContext?: TurnInitiatorContext;
   /** Product model id used for pricing and ledger attribution. */
   model: string;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
   creditPolicyRevision?: number | undefined;
   gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  /** External inference pricing, never debit authority. Null explicitly means unknown,
+   * not permission to borrow a same-named conversational model's price. */
+  externalProviderCost?: ExternalModelProviderCost | null;
+  /**
+   * Searches the provider ran with its own hosted search tool for this
+   * response (`ModelResponseUsage.webSearchRequests`). On a credit-billed
+   * turn response while billing is active they are charged as a separate
+   * web-search debit, unless a Gateway reported the response cost.
+   */
+  hostedWebSearchRequests?: number | undefined;
   normalizedUsage: ModelCallUsageNormalization;
   /** Durable source identity (for a turn, `${turnId}:${sourceKey}`). */
   sourceId: string;
@@ -81,8 +115,25 @@ export type ModelUsageSettlementInput = {
   turnId?: string | null;
   turnAttemptId?: string | null;
   latencyMode?: LatencyMode;
+  /**
+   * Where the route that served the response processed it (its residency
+   * claim, never evidence), recorded on the usage events. Callers without a
+   * `model_call_facts` row (the standalone model-call API) pass it here.
+   */
+  processingResidency?: UsageEventProcessingResidency;
   /** Non-secret correlation fields added to the credit debit metadata. */
   debitMetadata?: Record<string, unknown>;
+  /**
+   * Funding origin of the call (`BillingOrigin`). Omitted resolves from the
+   * debit's turn or the request's origin (API work spends credits only).
+   */
+  billingOrigin?: BillingOrigin;
+  /**
+   * Served by the person's own API key (provider, gateway or custom
+   * endpoint). While credit billing is active it pays the platform fee from
+   * paid credit. The person's own subscription pays no fee.
+   */
+  byok?: boolean;
   /** Best-effort metrics hook after a committed debit. */
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
   /** Content-free per-task usage limit diagnostics (closed-set labels only). */
@@ -95,6 +146,11 @@ export type ModelUsageSettlementInput = {
    * custody the failure throws.
    */
   receiptCustody?: ((receipt: HeldSessionUsageReceipt, error: unknown) => void) | null;
+};
+
+export type ExternalModelProviderCost = {
+  costUsd: number;
+  source: "provider-reported" | "estimate";
 };
 
 /** A content-free task usage receipt whose write is still owed. */
@@ -156,6 +212,47 @@ export function sessionUsageReceiptSourceId(sourceId: string, turnId?: string | 
   return `sha256:${createHash("sha256").update(stored, "utf8").digest("hex")}`;
 }
 
+/**
+ * Charge the bring-your-own-key platform fee for one settled response: the
+ * configured share of its list-price equivalent (the fallback rate when no
+ * list price is known), debited once per source from paid credit.
+ */
+async function chargeByokPlatformFee(
+  settings: Settings,
+  db: Database,
+  input: ModelUsageSettlementInput,
+  priced: {
+    listPriceMicros: number | null;
+    reportedCostMicros: number | null;
+    pricingSource: ModelUsageBillingRecord["pricingSource"];
+    inputTokens: number | null;
+    outputTokens: number | null;
+  },
+): Promise<number> {
+  if (!byokPlatformFeeActive(settings, input.accountId)) return 0;
+  const list = byokListEquivalent(priced);
+  const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
+  if (feeMicros <= 0) return 0;
+  await applyByokPlatformFeeDebit(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    amountMicros: feeMicros,
+    sourceType: "model_response",
+    sourceId: input.sourceId,
+    idempotencyKey: `credit:${BYOK_PLATFORM_FEE_TYPE}:${input.sourceId}`,
+    ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
+    metadata: {
+      ...input.debitMetadata,
+      model: input.model,
+      listEquivalentMicros: list.listMicros,
+      listEquivalentSource: list.source,
+      ...(priced.pricingSource ? { pricingSource: priced.pricingSource } : {}),
+      feeBps: settings.byokPlatformFeeBps,
+    },
+  });
+  return feeMicros;
+}
+
 export async function settleModelUsage(
   settings: Settings,
   db: Database,
@@ -163,15 +260,23 @@ export async function settleModelUsage(
 ): Promise<ModelUsageBillingRecord> {
   const normalizedUsage = input.normalizedUsage;
   const usageContext = {
+    ...(input.initiator
+      ? { initiator: input.initiator, initiatorContext: input.initiatorContext ?? {} }
+      : {}),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.turnAttemptId ? { turnAttemptId: input.turnAttemptId } : {}),
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
   };
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
   const inputTokens = sanitizedUsage.inputTokens ?? 0;
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
   const { chargesOpenGeniCredits, countsTowardTokenCap } = input;
+  const externalPricing = input.externalProviderCost !== undefined;
+  if (externalPricing && (chargesOpenGeniCredits || input.gatewayBilling)) {
+    throw new Error("Invalid externally funded model cost");
+  }
   const resolvedGatewayModel = input.gatewayBilling
     ? resolveModelProvider(settings, input.model)
     : undefined;
@@ -211,11 +316,13 @@ export async function settleModelUsage(
     }
   }
   const pricingSchedules = configuredModelPricingSchedules(settings);
-  const configuredPricingModel = pricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
+  const configuredPricingModel = externalPricing
+    ? null
+    : pricingSchedules[input.model]
+      ? input.model
+      : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
+        ? input.model.slice("codex/".length)
+        : null;
   const pricingBreakdown = gatewayBilling
     ? unpinnedWorkspaceGatewayModel
       ? {
@@ -242,11 +349,13 @@ export async function settleModelUsage(
   // current usage frame does not establish geography/service-tier provenance,
   // so forward class splits stay unknown even when a total estimate is priced.
   const listPricingSchedules = configuredModelListPricingSchedules(settings);
-  const configuredListPricingModel = listPricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
+  const configuredListPricingModel = externalPricing
+    ? null
+    : listPricingSchedules[input.model]
+      ? input.model
+      : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
+        ? input.model.slice("codex/".length)
+        : null;
   const listSnapshot =
     !gatewayBilling && hasCompleteCoreTokenTelemetry && configuredListPricingModel
       ? calculateModelListUsageCostSnapshot(settings, configuredListPricingModel, sanitizedUsage, {
@@ -258,22 +367,42 @@ export async function settleModelUsage(
     listByClassMicros: listSnapshot?.listByClassMicros ?? null,
     listByClassApprox: listSnapshot?.listByClassApprox ?? false,
   };
-  const estimatedProviderCostMicros = gatewayBilling
-    ? (pricingBreakdown?.providerCostMicros ?? null)
-    : hasCompleteCoreTokenTelemetry
-      ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
-      : null;
+  const externalCost = input.externalProviderCost;
+  if (
+    externalCost &&
+    (chargesOpenGeniCredits ||
+      !Number.isFinite(externalCost.costUsd) ||
+      externalCost.costUsd < 0 ||
+      !Number.isSafeInteger(Math.round(externalCost.costUsd * 1_000_000)))
+  ) {
+    throw new Error("Invalid externally funded model cost");
+  }
+  const externalCostMicros = externalCost ? Math.round(externalCost.costUsd * 1_000_000) : null;
+  const estimatedProviderCostMicros =
+    externalCostMicros ??
+    (gatewayBilling
+      ? (pricingBreakdown?.providerCostMicros ?? null)
+      : hasCompleteCoreTokenTelemetry
+        ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
+        : null);
+  // The credit price a debit would use, else the reviewed list price's
+  // equivalent-credit comparison: a model priced only by a reviewed list rate
+  // (for example a newer Codex catalog model) still reports what it would
+  // have cost, without that rate ever becoming debit authority.
   const equivalentCreditCostMicros =
     pricingBreakdown && !unpinnedWorkspaceGatewayModel
       ? gatewayBilling || hasCompleteCoreTokenTelemetry
         ? pricingBreakdown.creditCostMicros
         : null
-      : null;
-  const pricingSource = gatewayBilling
-    ? ("gateway_reported" as const)
-    : estimatedProviderCostMicros !== null
-      ? ("configured_list_price" as const)
-      : null;
+      : !gatewayBilling && listSnapshot && estimatedProviderCostMicros !== null
+        ? listSnapshot.creditCostMicros
+        : null;
+  const pricingSource =
+    gatewayBilling || externalCost?.source === "provider-reported"
+      ? ("gateway_reported" as const)
+      : estimatedProviderCostMicros !== null
+        ? ("configured_list_price" as const)
+        : null;
   // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
@@ -284,7 +413,7 @@ export async function settleModelUsage(
   if (usageLimitSessionId) {
     const meterAmountMicros = sessionUsageMeterAmountMicros({
       estimatedProviderCostMicros,
-      gatewayReported: pricingSource === "gateway_reported",
+      gatewayReported: pricingSource === "gateway_reported" || externalCostMicros !== null,
       inputTokens: normalizedUsage.telemetry.inputTokens,
       outputTokens: normalizedUsage.telemetry.outputTokens,
     });
@@ -342,6 +471,23 @@ export async function settleModelUsage(
     });
   }
   if (!chargesOpenGeniCredits) {
+    if (externalCostMicros !== null) {
+      const eventType =
+        externalCost?.source === "estimate"
+          ? "model.estimated_provider_cost"
+          : "model.provider_cost";
+      await recordUsageEvent(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        eventType,
+        quantity: externalCostMicros,
+        unit: "usd_micros",
+        sourceResourceType: "model_response",
+        sourceResourceId: input.sourceId,
+        ...usageContext,
+        idempotencyKey: `usage:${eventType}:${input.sourceId}`,
+      });
+    }
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -353,9 +499,37 @@ export async function settleModelUsage(
       ...usageContext,
       idempotencyKey: `usage:model.cost:${input.sourceId}`,
     });
+    // Explicit from the caller, else the served route: the person's own API
+    // key, never their own subscription (no fee) or a deployment-funded free
+    // model.
+    const byok =
+      byokPlatformFeeActive(settings, input.accountId) &&
+      (input.byok ??
+        ownModelFunding(resolveModelProviderForTurn(settings, input.model)?.model) === "api_key");
+    const byokFee = byok
+      ? await chargeByokPlatformFee(settings, db, input, {
+          // The list price, even on a gateway route, then a reported cost.
+          listPriceMicros:
+            hasCompleteCoreTokenTelemetry && configuredListPricingModel
+              ? (calculateModelListUsageCostSnapshot(
+                  settings,
+                  configuredListPricingModel,
+                  sanitizedUsage,
+                  { latencyMode: input.latencyMode ?? "standard", priceContextKnown: false },
+                )?.providerCostMicros ?? null)
+              : !gatewayBilling && hasCompleteCoreTokenTelemetry
+                ? (pricingBreakdown?.providerCostMicros ?? null)
+                : null,
+          reportedCostMicros: gatewayBilling ? estimatedProviderCostMicros : null,
+          pricingSource,
+          inputTokens: sanitizedUsage.inputTokens ?? null,
+          outputTokens: sanitizedUsage.outputTokens ?? null,
+        })
+      : 0;
     return {
       billingPath: "external",
       pricedCostMicros: 0,
+      ...(byokFee > 0 ? { byokPlatformFeeMicros: byokFee } : {}),
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
@@ -365,7 +539,27 @@ export async function settleModelUsage(
     };
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  // Hosted provider searches are not in the token price. A Gateway-reported
+  // cost is the provider's whole bill for the response, search included, so
+  // it is never charged again. The searches run on the provider's search
+  // backend, so the model route's residency claim is not recorded on them.
+  const settleHostedWebSearch = async () => {
+    const requests = input.hostedWebSearchRequests ?? 0;
+    if (gatewayBilling || requests <= 0 || !input.turnId || !input.sessionId) return;
+    await settleHostedWebSearchUsage(db, settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId ?? null,
+      sourceId: input.sourceId,
+      model: input.model,
+      requests,
+      ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
+    });
+  };
   if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
+    if (shouldDebit) await settleHostedWebSearch();
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
@@ -393,16 +587,18 @@ export async function settleModelUsage(
     idempotencyKey: `usage:model.cost:${input.sourceId}`,
   });
   if (costMicros > 0) {
-    const result = await applyCreditDebitUpToBalance(db, {
+    const result = await applyCreditDebitAfterUse(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
-      requestedAmountMicros: costMicros,
-      modelId: canonicalizeConfiguredModelId(settings, input.model),
+      amountMicros: costMicros,
+      // Grants scoped to this model pay first where they cover it.
+      usage: canonicalizeConfiguredModelId(settings, input.model),
       creditPolicyRevision: input.creditPolicyRevision,
       sourceType: "model_response",
       sourceId: input.sourceId,
       idempotencyKey: `credit:model_usage_debit:${input.sourceId}`,
+      ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
       metadata: {
         model: input.model,
         ...input.debitMetadata,
@@ -415,6 +611,9 @@ export async function settleModelUsage(
         // counts. 0 when the provider did not report cached tokens.
         cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
         ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
+        ...(input.creditPolicyRevision !== undefined
+          ? { creditPolicyRevision: input.creditPolicyRevision }
+          : {}),
       },
     });
     try {
@@ -423,6 +622,7 @@ export async function settleModelUsage(
       // The debit is committed; metrics are best-effort only.
     }
   }
+  await settleHostedWebSearch();
   return {
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,

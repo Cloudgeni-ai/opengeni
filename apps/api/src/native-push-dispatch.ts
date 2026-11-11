@@ -1,6 +1,7 @@
 import { createSign, randomUUID } from "node:crypto";
 import { connect, type ClientHttp2Session } from "node:http2";
 import type { Settings } from "@opengeni/config";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import {
   claimNativePushDeliveries,
   listSessionHumanInputRequests,
@@ -93,10 +94,11 @@ export type NativePushDispatchDeps = {
 
 /**
  * A notification message as plain text for the lock screen: links keep their
- * text, emphasis and code marks go, and "- " bullets become "•".
+ * text, emphasis and code marks go, "- " bullets become "•", and bare source
+ * links lose the tracking a hosted web search tagged onto them.
  */
 export function plainNotificationText(markdown: string): string {
-  return markdown
+  return withoutProviderTrackingInText(markdown)
     .replace(/\[([^\]]+)\]\((?:[^)]+)\)/gu, "$1")
     .replace(/(\*\*|__)(.+?)\1/gu, "$2")
     .replace(/`([^`]+)`/gu, "$1")
@@ -114,6 +116,13 @@ export function nativePushAlert(payload: NativePushPayload): {
   if (payload.secretQuestion) {
     // A secret is answered only in the app's secure card (AC-5): no inline reply.
     return { title: payload.title ?? "The agent needs a secret", body: SECRET_QUESTION_PUSH_BODY };
+  }
+  if (payload.rule === "call" || payload.rule === "call_members") {
+    // Android shows a call as a notification; iOS rings through PushKit instead.
+    return {
+      title: `${payload.title ?? "Your agent"} is calling`,
+      body: payload.body ? plainNotificationText(payload.body) : "Tap to answer.",
+    };
   }
   const fallback =
     payload.rule === "needs_input"
@@ -150,8 +159,9 @@ export function nativePushInterruptionLevel(
   payload: ClaimedNativePushDelivery["payload"],
 ): "time-sensitive" | "active" {
   if (
-    (payload.rule === "agent" || payload.rule === "needs_input") &&
-    payload.urgency === "time_sensitive"
+    ((payload.rule === "agent" || payload.rule === "needs_input") &&
+      payload.urgency === "time_sensitive") ||
+    payload.rule === "call"
   ) {
     return "time-sensitive";
   }
@@ -167,17 +177,118 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
     rule: payload.rule,
     ...(payload.eventType ? { eventType: payload.eventType } : {}),
     ...(payload.sequence ? { sequence: payload.sequence } : {}),
+    ...(payload.callId ? { callId: payload.callId } : {}),
+    ...(payload.ringUntil ? { ringUntil: payload.ringUntil } : {}),
+  };
+}
+
+/** Whether a delivery rings a call (rather than showing a notification). */
+export function nativePushRingsCall(payload: ClaimedNativePushDelivery["payload"]): boolean {
+  return payload.rule === "call" && typeof payload.callId === "string" && !payload.callEnded;
+}
+
+/** Whether a delivery stops a ring that was settled elsewhere (Android only). */
+export function nativePushEndsCall(payload: ClaimedNativePushDelivery["payload"]): boolean {
+  return payload.rule === "call" && typeof payload.callId === "string" && !!payload.callEnded;
+}
+
+/**
+ * The PushKit payload of a call ring. iOS hands it to the app, which must
+ * report it to CallKit at once: the ring screen shows `title` (who calls) and
+ * the app keeps `reason` for the call.
+ */
+export function nativeCallPushBody(payload: ClaimedNativePushDelivery["payload"]) {
+  return {
+    aps: {},
+    call: nativeCallRing(payload),
+  };
+}
+
+function nativeCallRing(payload: ClaimedNativePushDelivery["payload"]) {
+  return {
+    callId: payload.callId,
+    sessionId: payload.sessionId,
+    workspaceId: payload.workspaceId,
+    subjectId: payload.subjectId,
+    title: payload.title ?? null,
+    reason: payload.body ?? null,
+    ringUntil: payload.ringUntil ?? null,
+  };
+}
+
+/**
+ * The FCM message of a push. Android notifications are data messages that
+ * expo-notifications shows. A call ring also carries `opengeniCall`, which an
+ * app with Android system calls turns into the incoming-call notification and
+ * ring screen; an app without them shows the ordinary "is calling"
+ * notification from the same message. A ring that can no longer arrive while
+ * the call rings is dropped by FCM. The end of a ring settled elsewhere is a
+ * data-only message with nothing to show: it replaces the ring when that has
+ * not arrived yet (same collapse key), and expo-notifications presents no
+ * notification for it.
+ */
+export type NativeFcmMessage = {
+  token: string;
+  android: { priority: "HIGH"; collapse_key?: string | undefined; ttl?: string };
+  data: { title?: string; message?: string; body?: string; opengeniCall?: string };
+};
+
+export function nativeFcmMessage(
+  delivery: Pick<ClaimedNativePushDelivery, "token" | "payload">,
+  now = Date.now(),
+): NativeFcmMessage {
+  const ringSeconds =
+    delivery.payload.rule === "call"
+      ? Math.max(0, Math.floor((Date.parse(delivery.payload.ringUntil ?? "") - now) / 1000))
+      : NaN;
+  if (nativePushEndsCall(delivery.payload)) {
+    return {
+      token: delivery.token,
+      android: {
+        priority: "HIGH",
+        collapse_key: delivery.payload.callId,
+        ...(Number.isFinite(ringSeconds) ? { ttl: `${ringSeconds}s` } : {}),
+      },
+      data: {
+        opengeniCall: JSON.stringify({
+          type: "ended",
+          callId: delivery.payload.callId,
+          reason: delivery.payload.callEnded,
+        }),
+      },
+    };
+  }
+  const alert = nativePushAlert(delivery.payload);
+  const ring = nativePushRingsCall(delivery.payload);
+  return {
+    token: delivery.token,
+    android: {
+      priority: "HIGH",
+      collapse_key: ring ? delivery.payload.callId : delivery.payload.sessionId,
+      ...(Number.isFinite(ringSeconds) ? { ttl: `${ringSeconds}s` } : {}),
+    },
+    data: {
+      title: alert.title,
+      message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
+      body: JSON.stringify(nativePushData(delivery.payload)),
+      ...(ring
+        ? { opengeniCall: JSON.stringify({ type: "ring", ...nativeCallRing(delivery.payload) }) }
+        : {}),
+    },
   };
 }
 
 /**
  * The notification category the app registers actions for: an approval can be
- * approved (behind device unlock) or denied, a question answered inline.
+ * approved (behind device unlock) or denied, a question answered inline. An
+ * MCP server's question opens the app: an approval must name the question it
+ * answers, which a lock-screen action cannot do.
  */
 export function nativePushCategory(
   payload: NativePushPayload,
 ): "og.approval" | "og.question" | undefined {
   if (payload.secretQuestion || payload.secretUseApproval) return undefined;
+  if (payload.serverQuestionKind) return undefined;
   if (payload.eventType === "session.requiresAction") return "og.approval";
   if (payload.eventType === "session.humanInput.requested") return "og.question";
   return undefined;
@@ -245,29 +356,55 @@ export function createApnsSender(input: {
   return async (delivery) => {
     const host =
       delivery.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
+    if (nativePushEndsCall(delivery.payload)) {
+      // CallKit hears a call's outcome from the app; only Android gets these.
+      return { outcome: "failed", error: "Ended-call pushes are Android only" };
+    }
+    const ring = nativePushRingsCall(delivery.payload);
+    if (ring && !delivery.voipToken) {
+      return { outcome: "failed", error: "No PushKit token for this phone" };
+    }
     const alert = nativePushAlert(delivery.payload);
     const category = nativePushCategory(delivery.payload);
-    const body = JSON.stringify({
-      aps: {
-        alert,
-        sound: "default",
-        "thread-id": delivery.payload.sessionId,
-        "interruption-level": nativePushInterruptionLevel(delivery.payload),
-        ...(category ? { category } : {}),
-      },
-      body: nativePushData(delivery.payload),
-    });
+    const body = JSON.stringify(
+      ring
+        ? nativeCallPushBody(delivery.payload)
+        : {
+            aps: {
+              alert,
+              sound: "default",
+              "thread-id": delivery.payload.sessionId,
+              "interruption-level": nativePushInterruptionLevel(delivery.payload),
+              ...(category ? { category } : {}),
+            },
+            body: nativePushData(delivery.payload),
+          },
+    );
+    const ringUntil = Date.parse(delivery.payload.ringUntil ?? "");
+    const requestHeaders = ring
+      ? {
+          ":method": "POST",
+          ":path": `/3/device/${delivery.voipToken}`,
+          authorization: `bearer ${bearer()}`,
+          "apns-topic": `${delivery.appId}.voip`,
+          "apns-push-type": "voip",
+          "apns-priority": "10",
+          // A ring that cannot arrive before the call stops ringing is dropped.
+          "apns-expiration": String(Number.isFinite(ringUntil) ? Math.floor(ringUntil / 1000) : 0),
+          "content-type": "application/json",
+        }
+      : {
+          ":method": "POST",
+          ":path": `/3/device/${delivery.token}`,
+          authorization: `bearer ${bearer()}`,
+          "apns-topic": delivery.appId,
+          "apns-push-type": "alert",
+          "apns-priority": "10",
+          "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(0, 64),
+          "content-type": "application/json",
+        };
     return await new Promise<NativePushSendResult>((resolve) => {
-      const request = session(host).request({
-        ":method": "POST",
-        ":path": `/3/device/${delivery.token}`,
-        authorization: `bearer ${bearer()}`,
-        "apns-topic": delivery.appId,
-        "apns-push-type": "alert",
-        "apns-priority": "10",
-        "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(0, 64),
-        "content-type": "application/json",
-      });
+      const request = session(host).request(requestHeaders);
       let status = 0;
       let text = "";
       request.setTimeout(10_000, () => request.close());
@@ -288,7 +425,12 @@ export function createApnsSender(input: {
           }
         })();
         if (status === 410 || reason === "BadDeviceToken" || reason === "Unregistered") {
-          return resolve({ outcome: "unregistered", error: `${status} ${reason}` });
+          // A stale PushKit token must not drop the phone's notifications; the
+          // app registers a fresh one on its next launch.
+          return resolve({
+            outcome: ring ? "failed" : "unregistered",
+            error: `${status} ${reason}`,
+          });
         }
         resolve({
           outcome: status === 429 || status >= 500 || status === 0 ? "retry" : "failed",
@@ -344,7 +486,6 @@ export function createFcmSender(input: {
   };
   return async (delivery) => {
     try {
-      const alert = nativePushAlert(delivery.payload);
       const response = await http(
         `https://fcm.googleapis.com/v1/projects/${account.project_id}/messages:send`,
         {
@@ -353,17 +494,7 @@ export function createFcmSender(input: {
             authorization: `Bearer ${await accessToken()}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            message: {
-              token: delivery.token,
-              android: { priority: "HIGH", collapse_key: delivery.payload.sessionId },
-              data: {
-                title: alert.title,
-                message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
-                body: JSON.stringify(nativePushData(delivery.payload)),
-              },
-            },
-          }),
+          body: JSON.stringify({ message: nativeFcmMessage(delivery) }),
           signal: AbortSignal.timeout(10_000),
         },
       );
@@ -417,12 +548,17 @@ export async function drainNativePushDeliveries(
   await Promise.all(
     claimed.map(async (delivery) => {
       const sender = senders[delivery.platform];
-      const result: NativePushSendResult = sender
-        ? await sender(delivery).catch((error: unknown) => ({
-            outcome: "retry" as const,
-            error: String(error),
-          }))
-        : { outcome: "failed", error: `No ${delivery.platform} push credentials configured` };
+      const rangOut =
+        delivery.payload.rule === "call" &&
+        Date.parse(delivery.payload.ringUntil ?? "") <= Date.now();
+      const result: NativePushSendResult = rangOut
+        ? { outcome: "failed", error: "The call stopped ringing before it could be sent" }
+        : sender
+          ? await sender(delivery).catch((error: unknown) => ({
+              outcome: "retry" as const,
+              error: String(error),
+            }))
+          : { outcome: "failed", error: `No ${delivery.platform} push credentials configured` };
       const outcome =
         result.outcome === "retry" && delivery.attempts >= MAX_ATTEMPTS ? "failed" : result.outcome;
       if (outcome === "delivered") delivered += 1;

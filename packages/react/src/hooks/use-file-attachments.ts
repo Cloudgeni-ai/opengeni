@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { AppShotCapture, FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -5,8 +6,9 @@ import {
   type EmbeddedFileAttachmentClientOverride,
 } from "../session-context";
 import { useErrorMessage } from "../lib/error-message";
+import { readStoredFilePreviewUrl } from "../stored-file-preview";
 
-export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
+export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride<ChatClient> & {
   /**
    * Only files matching this predicate are accepted by {@link
    * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to
@@ -15,7 +17,7 @@ export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
    * bypasses it.
    */
   /** Retain original uploads in the chat owner’s personal scope when private. */
-  scope?: "workspace" | "personal";
+  scope?: "workspace" | "personal" | undefined;
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 
@@ -39,6 +41,11 @@ export type FileAttachment = {
    * shows and the text it exposed, sent to the agent with the image.
    */
   appShot?: AppShotCapture | undefined;
+  /**
+   * Brought back with a saved draft (`restoreReadyFiles`) rather than added
+   * by the person just now.
+   */
+  restored?: true | undefined;
 };
 
 export type UseFileAttachmentsResult = {
@@ -69,11 +76,20 @@ export type UseFileAttachmentsResult = {
   /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /**
-   * Resolve a ready image's short-lived server preview URL on demand. Optional
-   * for upload-only embedded clients; local object-URL previews remain usable
-   * without it.
+   * Resolve a ready image's short-lived server preview URL on demand: how a
+   * restored draft, another device or a broken local preview still shows the
+   * picture. Optional for upload-only embedded clients; local object-URL
+   * previews remain usable without it.
    */
   loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
+  /**
+   * Look up a workspace file's content type by its file id, for files a
+   * restored draft names without their metadata. Optional: present when the
+   * client can read file metadata.
+   */
+  loadFileContentType?:
+    | ((fileId: string, signal?: AbortSignal) => Promise<string | undefined>)
+    | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -99,6 +115,27 @@ export type UseFileAttachmentsResult = {
 };
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
+
+/**
+ * Where an attachment for this chat is stored: Only me (`personal`) in a private
+ * chat or one with personal memory, otherwise the workspace. `undefined` while
+ * the chat is unknown, so the server (or a session proxy's `chats` setting)
+ * decides instead of the browser guessing.
+ */
+export function uploadScopeForSession(
+  session:
+    | {
+        tenancy?: { visibility?: string | undefined } | null | undefined;
+        memoryScope?: string | null | undefined;
+      }
+    | null
+    | undefined,
+): "workspace" | "personal" | undefined {
+  if (!session) return undefined;
+  return session.tenancy?.visibility === "private" || session.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
 
 let fallbackAttachmentId = 0;
 
@@ -404,6 +441,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                restored: true,
                 ...(file.appShot ? { appShot: file.appShot } : {}),
                 // No source File and no object URL: server metadata is the
                 // only authority restored across page/device boundaries.
@@ -422,23 +460,34 @@ export function useFileAttachments(
     async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
       const generation = scopeGeneration.current;
       const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
-      const createDownloadUrl = client.createFileDownloadUrl;
       if (
         !attachment ||
         attachment.status !== "ready" ||
         !attachment.file ||
         !attachment.contentType.startsWith("image/") ||
-        typeof createDownloadUrl !== "function" ||
+        typeof client.createFileDownloadUrl !== "function" ||
         signal?.aborted
       ) {
         return undefined;
       }
       const fileId = attachment.file.id;
-      const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
+      // One shared, cached read for every surface showing this file; an abort
+      // only discards this caller's result.
+      const url = await readStoredFilePreviewUrl({ client, workspaceId }, fileId);
       if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
       const current = attachmentsRef.current.find((candidate) => candidate.id === id);
       if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
-      return signed.url;
+      return url;
+    },
+    [client, workspaceId],
+  );
+
+  const loadFileContentType = useCallback(
+    async (fileId: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const getFile = client.getFile;
+      if (typeof getFile !== "function") return undefined;
+      const file = await getFile.call(client, workspaceId, fileId, { signal });
+      return file.contentType;
     },
     [client, workspaceId],
   );
@@ -488,6 +537,7 @@ export function useFileAttachments(
     addFromPaste,
     restoreReadyFiles,
     ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),
+    ...(typeof client.getFile === "function" ? { loadFileContentType } : {}),
     retry,
     retainPreview,
     remove,

@@ -39,7 +39,6 @@ const baseSession = {
   workspaceId,
   status: "idle",
   sandboxBackend: "none",
-  variableSetId: null,
   rigId: null,
   metadata: {},
 } as Session;
@@ -58,8 +57,6 @@ function task(): ScheduledTask {
     agentConfig: baseConfig,
     targetSessionId,
     reusableSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: "2026-08-05T00:00:00.000Z",
@@ -87,7 +84,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageOnly,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
       }),
@@ -113,7 +109,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
       }),
@@ -126,7 +121,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
       }),
@@ -139,7 +133,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
       }),
@@ -147,7 +140,6 @@ describe("scheduled existing-session authorization", () => {
 
     const attachedSession = {
       ...baseSession,
-      variableSetId: crypto.randomUUID(),
       sandboxBackend: "selfhosted" as const,
       rigId: crypto.randomUUID(),
     };
@@ -158,7 +150,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
       }),
@@ -172,7 +163,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: { ...baseConfig, goal: { text: "Replace the target goal" } },
       }),
@@ -183,7 +173,6 @@ describe("scheduled existing-session authorization", () => {
         grant: manageAndControl,
         targetSessionId: null,
         runMode: "existing_session",
-        variableSetId: null,
         rigId: null,
         agentConfig: baseConfig,
         missingTargetStatus: 404,
@@ -230,7 +219,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: baseConfig,
       }),
     ).rejects.toMatchObject({ status: 422 });
@@ -246,7 +234,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId, workingDir: "repos/app" },
@@ -260,25 +247,9 @@ describe("scheduled Connected Machine targeting", () => {
     });
   });
 
-  test("a personal machine runs only Only me schedules; offline machines never run", async () => {
+  test("a picked personal machine runs its owner's schedule whoever can see it; offline machines never run", async () => {
     const sandboxLookup = spyOn(db, "getSandbox");
     sandboxLookup.mockResolvedValue({ ...sandbox, scope: "user" });
-    await expect(
-      validateScheduledTaskMachineTarget({
-        settings,
-        db: {} as never,
-        grant: manageOnly,
-        runMode: "new_session_per_run",
-        audience: "workspace_shared",
-        agentConfig: {
-          ...baseConfig,
-          machineTarget: { targetSandboxId: machineSandboxId },
-        },
-      }),
-    ).rejects.toMatchObject({
-      status: 422,
-      message: expect.stringContaining("Only me"),
-    });
     spyOn(db, "getEnrollment").mockResolvedValue(enrollment);
     await expect(
       validateScheduledTaskMachineTarget({
@@ -286,13 +257,25 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "user_private",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },
         },
       }),
     ).resolves.toEqual({ sandboxId: machineSandboxId, enrollmentId, sandboxOs: "linux" });
+    // Following a workspace default that is a personal machine never counts.
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      settings: { defaultExecutionTarget: { kind: "machine", targetSandboxId: machineSandboxId } },
+    } as never);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: { ...baseConfig, executionTarget: "workspace_default" },
+      }),
+    ).rejects.toMatchObject({ status: 422 });
 
     sandboxLookup.mockResolvedValue(sandbox);
     spyOn(db, "getLiveEnrollmentConnection").mockResolvedValue(null);
@@ -302,7 +285,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },
@@ -310,5 +292,67 @@ describe("scheduled Connected Machine targeting", () => {
         requireOnline: true,
       }),
     ).rejects.toMatchObject({ status: 422 });
+  });
+});
+
+describe("scheduled sandbox backend", () => {
+  const cloud = testSettings({
+    sandboxBackend: "modal",
+    modalTokenId: "test-modal-token-id",
+    modalTokenSecret: "test-modal-token-secret",
+  });
+
+  test("refuses a backend the deployment does not serve before any lookup", async () => {
+    const lookup = spyOn(db, "getSandbox");
+    for (const runMode of ["new_session_per_run", "reusable_session"] as const) {
+      for (const sandboxBackend of ["local", "docker", "compute"] as const) {
+        await expect(
+          validateScheduledTaskMachineTarget({
+            settings: cloud,
+            db: {} as never,
+            grant: manageOnly,
+            runMode,
+            agentConfig: { ...baseConfig, sandboxBackend },
+          }),
+        ).rejects.toMatchObject({
+          status: 422,
+          message: expect.stringContaining(
+            `sandboxBackend "${sandboxBackend}" is not available in this deployment`,
+          ),
+        });
+      }
+    }
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("a reusable schedule whose chat exists keeps that chat's placement", async () => {
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings: cloud,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "reusable_session",
+        reusableSessionId: targetSessionId,
+        agentConfig: { ...baseConfig, sandboxBackend: "local" },
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("keeps served backends and the omitted default", async () => {
+    for (const agentConfig of [
+      baseConfig,
+      { ...baseConfig, sandboxBackend: "modal" as const },
+      { ...baseConfig, sandboxBackend: "none" as const },
+    ]) {
+      await expect(
+        validateScheduledTaskMachineTarget({
+          settings: cloud,
+          db: {} as never,
+          grant: manageOnly,
+          runMode: "new_session_per_run",
+          agentConfig,
+        }),
+      ).resolves.toBeNull();
+    }
   });
 });

@@ -22,6 +22,8 @@
 
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
+import { backgroundCommandWakeSender } from "@opengeni/core";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 import {
   effectiveSandboxLifecycle,
   sandboxProviderMaxRemainingLifetimeMs,
@@ -35,6 +37,7 @@ import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
+  signalBackgroundCommandWakes,
   beginSandboxRematerialization,
   sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
@@ -183,6 +186,9 @@ export type SandboxResumeServices = {
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Live fanout for background commands a provider loss settled. */
   bus?: EventBus | null;
+  /** Wakes a session waiting on a background command this resume settles as
+   * lost. Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
   /** One turn's journal, background-command ledger and metering, bound onto a
    * compute box's agent session before the turn receives it. Other backends
    * ignore it. */
@@ -2273,6 +2279,10 @@ async function resumeBoxForTurnOnce(
           instanceId: live.instanceId,
           leaseEpoch: marked.lease.leaseEpoch,
         });
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
         throw new SandboxLeaseInstanceLostError(
           ids.sandboxGroupId,
           marked.lease.leaseEpoch,
@@ -2358,9 +2368,17 @@ async function waitForWarm(
     // cold->warming and run the full spawner branch.
     throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
   }
-  // Still warming once the warming budget is spent.
-  throw new SandboxSiblingWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs, {
-    sandboxGroupId: ids.sandboxGroupId,
-    instanceId: lease.instanceId,
-  });
+  // The wait budget bounds this activity, not the elected creator's work.
+  // Large verified restores can exceed it while the creator keeps its warming
+  // lease alive. Yield to same-turn lifecycle recovery without replacing that
+  // box. Only the creator renews warming expiry; an abandoned owner still goes
+  // through the normal reaper and epoch fence on the next admission.
+  throw new SandboxLeaseTransitionError(
+    ids.sandboxGroupId,
+    lease.leaseEpoch,
+    "provider_recovery_in_progress",
+    lease.backend,
+    lease.instanceId,
+    lease.liveness,
+  );
 }

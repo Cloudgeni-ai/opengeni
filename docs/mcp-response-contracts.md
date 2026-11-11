@@ -207,14 +207,17 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
+| First-party: `github_repository_attach` | Mutation | Bounded attach result (status, repository, ref, mount path, message); attaches only a call a person approved |
 | First-party: `x_accounts_list`, `reddit_accounts_list`, `social_connections_list`, `social_posts_recent` | List | Existing bounded provider/account or aggregate list result |
 | First-party: `x_search_live`, `x_mentions_live`, `x_thread_fetch`, `reddit_search_live`, `reddit_mentions_live`, `reddit_thread_fetch` | Read/list | Existing bounded provider result; the exact connection must match the tool namespace |
 | First-party: `x_posts_sync`, `reddit_posts_sync` | Mutation | Existing bounded sync result; writes the durable social-post store and requires an exact provider-matching connection |
 | First-party: `social_daily_analysis_context` | Read | Existing bounded analysis input projection |
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
-| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types |
+| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types, plus a webhook's format (for its managers) and its last five deliveries |
 | First-party: `events_get` | Read | One stored event by id (data bounded at intake), or a run's event summaries, 50 per page with `nextOffset` |
+| First-party: `event_sources_create_webhook`, `event_sources_update` | Mutation | The source's id, name, preset, status and status reason, plus the address to give the sending app (`registerUrl`); never the signing secret |
+| First-party: `event_sources_delete` | Mutation | The deleted source's id |
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
 | First-party: `knowledge_search`, `knowledge_prepare_save`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status. A model call to `knowledge_search` or `knowledge_prepare_save` receives a compact copy without bookkeeping or repeated preview text; other callers receive the exact result ([details](knowledge.md#model-visible-discovery-results)) |
 | First-party: `sandboxes_list` | List | Existing fleet projection |

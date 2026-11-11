@@ -11,6 +11,7 @@ import {
   buildConnectionTokenResolver,
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
+  ConnectionNotRefreshableError,
   ConnectionRefreshHttpError,
   normalizeBearerScheme,
   createConnection,
@@ -1031,6 +1032,182 @@ describe("connections table and helpers", () => {
   });
 });
 
+describe("personal GitHub refresh on stored connections", () => {
+  // GitHub answers form-encoded unless JSON is requested and reports a
+  // rejected grant as HTTP 200 with an error field.
+  function githubTokenTransport(outcome: "token" | "bad_refresh_token") {
+    return {
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const fields: Record<string, string> =
+          outcome === "token"
+            ? {
+                access_token: "ghu_refreshed",
+                expires_in: "28800",
+                refresh_token: "ghr_rotated",
+                refresh_token_expires_in: "15811200",
+                scope: "repo",
+                token_type: "bearer",
+              }
+            : { error: "bad_refresh_token", error_description: "incorrect" };
+        if (new Headers(init?.headers).get("accept")?.includes("application/json")) {
+          return Response.json(
+            Object.fromEntries(
+              Object.entries(fields).map(([k, v]) => [k, /^\d+$/.test(v) ? Number(v) : v]),
+            ),
+          );
+        }
+        return new Response(new URLSearchParams(fields).toString(), {
+          headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+        });
+      }) as unknown as typeof fetch,
+      dnsLookup: async () => [{ address: "140.82.121.3", family: 4 as const }],
+    };
+  }
+
+  const clientId = "Ov23personal-client";
+  const personalSettings = {
+    ...settings,
+    githubPersonalOauthEnabled: true,
+    githubPersonalOauthClientId: clientId,
+    githubPersonalOauthClientSecret: "personal-client-secret",
+  } as Settings;
+
+  async function expiredPersonalGitHubConnection() {
+    const userId = `github-owner-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "GitHub owner",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    )!;
+    await grantWorkspaceAccess(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId,
+      permissions: ["workspace:admin"],
+    });
+    const metadata = {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      githubUserId: "59779138",
+      githubLogin: "octocat",
+      oauthEnvironment: personalSettings.environment,
+      oauthClientMarker: createHash("sha256").update(clientId).digest("hex").slice(0, 32),
+      credentialBindingId: crypto.randomUUID(),
+      connectedAt: "2026-11-02T09:19:18.000Z",
+      lastVerifiedAt: "2026-11-02T09:19:18.000Z",
+      disconnectedAt: null,
+      refreshTokenExpiresAt: "2027-05-02T09:19:18.000Z",
+    };
+    const created = await persistProviderOAuthConnection(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId,
+      visibleToSubjectId: subjectId,
+      providerDomain: "github.com",
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: enc({
+        access_token: "ghu_expired",
+        refresh_token: "ghr_current",
+        token_type: "Bearer",
+        token_endpoint: "https://github.com/login/oauth/access_token",
+        client_id: clientId,
+        token_endpoint_auth_method: "client_secret_post",
+        scope_parameter_supported: false,
+      }),
+      grantedScopes: ["repo"],
+      expiresAt: new Date(Date.now() - 60_000),
+      metadata,
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "59779138",
+      createdBySubjectId: subjectId,
+      requireLiveUserAuthority: true,
+      requiredLiveUserPermission: "connections:write",
+      allowCanonicalPersonalWorkspaceOwner: false,
+    });
+    return { connectionId: created!.id, workspaceId: grant.workspaceId, subjectId };
+  }
+
+  async function storedRow(connectionId: string) {
+    const [row] = await admin<
+      {
+        status: string;
+        authority_generation: string;
+        last_refresh_at: Date | null;
+        expires_at: Date | null;
+        last_error: string | null;
+      }[]
+    >`select status, authority_generation, last_refresh_at, expires_at, last_error
+      from connections where id = ${connectionId}`;
+    return row!;
+  }
+
+  function resolveOnce(
+    stored: Awaited<ReturnType<typeof expiredPersonalGitHubConnection>>,
+    outcome: "token" | "bad_refresh_token",
+  ) {
+    return buildConnectionTokenResolver(db, personalSettings, undefined, {
+      refreshTransport: githubTokenTransport(outcome),
+    })({
+      workspaceId: stored.workspaceId,
+      subjectId: stored.subjectId,
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/user",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: stored.connectionId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: ["repo"],
+      },
+    });
+  }
+
+  test("an expired token refreshes and keeps its authority generation", async () => {
+    if (!available) return;
+    const stored = await expiredPersonalGitHubConnection();
+    const before = await storedRow(stored.connectionId);
+
+    const result = await resolveOnce(stored, "token");
+
+    expect(result).toMatchObject({
+      status: "ok",
+      headers: { authorization: "Bearer ghu_refreshed" },
+    });
+    const after = await storedRow(stored.connectionId);
+    expect(after.status).toBe("active");
+    expect(after.last_refresh_at).not.toBeNull();
+    expect(after.expires_at!.getTime()).toBeGreaterThan(Date.now());
+    expect(after.authority_generation).toBe(before.authority_generation);
+  });
+
+  test("a refresh GitHub rejects moves the stored connection to needs_reauth", async () => {
+    if (!available) return;
+    const stored = await expiredPersonalGitHubConnection();
+
+    const result = await resolveOnce(stored, "bad_refresh_token");
+
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    const after = await storedRow(stored.connectionId);
+    expect(after.status).toBe("needs_reauth");
+    expect(after.last_error).toBe("connection refresh refused by the provider (bad_refresh_token)");
+    const metadata = await getConnectionMetadata(
+      db,
+      stored.workspaceId,
+      stored.connectionId,
+      stored.subjectId,
+    );
+    expect(metadata?.status).toBe("needs_reauth");
+  });
+});
+
 describe("buildConnectionTokenResolver", () => {
   test("fails closed before credential lookup for repository-scoped provider bindings", async () => {
     const { deps, counts } = resolverDeps();
@@ -1805,6 +1982,8 @@ describe("buildConnectionTokenResolver", () => {
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
         connectionVersion: 8,
+        // The provider's actual OAuth grants, for per-tool gating.
+        grantedScopes: ["read"],
         expiresAt: refreshed.expiresAt,
       },
       {
@@ -1812,6 +1991,7 @@ describe("buildConnectionTokenResolver", () => {
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
         connectionVersion: 8,
+        grantedScopes: ["read"],
         expiresAt: refreshed.expiresAt,
       },
     ]);
@@ -1918,6 +2098,46 @@ describe("buildConnectionTokenResolver", () => {
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
     expect(counts.status).toBe(0);
   });
+
+  test.each([
+    ["the token endpoint is down", true, new ConnectionRefreshHttpError(503)],
+    ["the token endpoint is unreachable", true, new TypeError("fetch failed")],
+    ["the grant is rejected", false, new ConnectionRefreshHttpError(400, "invalid_grant")],
+    [
+      "there is nothing to refresh with",
+      false,
+      new ConnectionNotRefreshableError("connection has no refresh token endpoint"),
+    ],
+  ] as const)(
+    "a forced refresh failing because %s is transient: %p",
+    async (_, transient, error) => {
+      const stale = brokerCredential({
+        id: "conn_oauth",
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+        version: 3,
+      });
+      const { deps } = resolverDeps({
+        loadCredential: async () => stale,
+        refresh: async () => {
+          throw error;
+        },
+      });
+      const reported: string[] = [];
+      const result = await buildConnectionTokenResolver({} as Database, settings, deps, {
+        onTransientRefreshFailure: ({ connectionId }) => reported.push(connectionId),
+      })({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+        forceRefresh: true,
+      });
+      expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+      expect(reported).toEqual(transient ? ["conn_oauth"] : []);
+    },
+  );
 
   test("refresh token POST rejects redirects without marking needs_reauth", async () => {
     let redirectTargetHits = 0;
@@ -2443,6 +2663,166 @@ describe("buildConnectionTokenResolver", () => {
       subjectId: authority.ownerSubjectId,
     });
     expect(counts.recordUsed).toBe(0);
+  });
+
+  test("tells the owner hook once, only when this resolve moved the connection to needs_reauth", async () => {
+    const stale = () =>
+      brokerCredential({
+        id: authorityIds.connectionId,
+        accountId: authorityIds.organizationId,
+        workspaceId: authorityIds.originWorkspaceId,
+        subjectId: "user:owner",
+        providerDomain: "api.example.com",
+        kind: "oauth2",
+        credential: { access_token: "expired", refresh_token: "rejected" },
+        expiresAt: new Date(Date.now() - 1_000),
+        authorityGeneration: 7,
+        version: 13,
+      });
+    const authorizeAcceptedUse: ConnectionBrokerDeps["authorizeAcceptedUse"] = async () => ({
+      status: "authorized",
+      originWorkspaceId: authorityIds.originWorkspaceId,
+      connectionKind: "oauth2",
+      attribution: {
+        organizationId: authorityIds.organizationId,
+        workspaceId: authorityIds.workspaceId,
+        sessionId: authorityIds.sessionId,
+        connectionId: authorityIds.connectionId,
+        connectionGeneration: 7,
+        scope: "user",
+        ownerSubjectId: "user:owner",
+        authorityId: "00000000-0000-4000-8000-000000000108",
+        grantId: null,
+      },
+    });
+    const resolve = async (
+      overrides: Partial<ConnectionBrokerDeps>,
+      broken: Array<Record<string, unknown>>,
+      withUse = true,
+    ) =>
+      await buildConnectionTokenResolver(
+        {} as Database,
+        settings,
+        resolverDeps({ authorizeAcceptedUse, loadCredential: async () => stale(), ...overrides })
+          .deps,
+        {
+          onConnectionNeedsReauth: async (event) => {
+            broken.push(event);
+          },
+        },
+      )({
+        workspaceId: authorityIds.workspaceId,
+        serverId: "personal-mail",
+        destinationUrl: "https://api.example.com/mcp",
+        // Outside a chat turn only a shared (workspace) reference resolves.
+        connectionRef: withUse
+          ? {
+              connectionId: authorityIds.connectionId,
+              providerDomain: "api.example.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            }
+          : { providerDomain: "api.example.com", kind: "oauth2" },
+        ...(withUse ? { connectionUseContext: acceptedConnectionUseContext() } : {}),
+      });
+    const rejected = async () => {
+      throw new ConnectionRefreshHttpError(400, "invalid_grant");
+    };
+
+    // The provider rejected the grant and this resolve made the transition.
+    const transitioned: Array<Record<string, unknown>> = [];
+    expect(await resolve({ refresh: rejected }, transitioned)).toMatchObject({
+      status: "auth_needed",
+      reason: "refresh_failed",
+    });
+    const use = acceptedConnectionUseContext();
+    expect(transitioned).toEqual([
+      {
+        workspaceId: authorityIds.originWorkspaceId,
+        connectionId: authorityIds.connectionId,
+        subjectId: "user:owner",
+        providerDomain: "api.example.com",
+        httpStatus: 400,
+        use: {
+          workspaceId: use.workspaceId,
+          sessionId: use.sessionId,
+          turnId: use.turnId,
+          attemptId: use.attemptId,
+          executionGeneration: use.executionGeneration,
+        },
+      },
+    ]);
+
+    // Without an accepted chat turn the hook still hears it, with no chat.
+    const outsideTurn: Array<Record<string, unknown>> = [];
+    expect(
+      await resolve(
+        {
+          refresh: rejected,
+          loadCredential: async () => ({
+            ...stale(),
+            workspaceId: authorityIds.workspaceId,
+            subjectId: null,
+          }),
+        },
+        outsideTurn,
+        false,
+      ),
+    ).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    expect(outsideTurn).toHaveLength(1);
+    expect(outsideTurn[0]).not.toHaveProperty("use");
+
+    // Another resolve already moved it (the guarded status write lost): silent.
+    const lostRace: Array<Record<string, unknown>> = [];
+    await resolve({ refresh: rejected, setStatus: async () => false }, lostRace);
+    expect(lostRace).toEqual([]);
+
+    // A transient token-endpoint failure leaves it active: silent.
+    const transient: Array<Record<string, unknown>> = [];
+    await resolve(
+      {
+        refresh: async () => {
+          throw new ConnectionRefreshHttpError(503);
+        },
+      },
+      transient,
+    );
+    expect(transient).toEqual([]);
+
+    // An already broken connection is reported to the caller, never again to the owner.
+    const alreadyBroken: Array<Record<string, unknown>> = [];
+    expect(
+      await resolve(
+        { loadCredential: async () => ({ ...stale(), status: "needs_reauth" }) },
+        alreadyBroken,
+      ),
+    ).toMatchObject({ status: "auth_needed" });
+    expect(alreadyBroken).toEqual([]);
+
+    // A failing hook never changes the credential result.
+    const failingHook = await buildConnectionTokenResolver(
+      {} as Database,
+      settings,
+      resolverDeps({ authorizeAcceptedUse, loadCredential: async () => stale(), refresh: rejected })
+        .deps,
+      {
+        onConnectionNeedsReauth: async () => {
+          throw new Error("notice store down");
+        },
+      },
+    )({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "personal-mail",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      connectionUseContext: acceptedConnectionUseContext(),
+    });
+    expect(failingHook).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
   });
 
   test("a provider adapter owns a bounded permanent-refresh lifecycle transition", async () => {

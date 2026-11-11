@@ -6,7 +6,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { MeetingRecorder, MeetingRecorderStore } from "./recorder-context";
+import type {
+  MeetingRecorder,
+  MeetingRecorderStore,
+  MeetingStartRequest,
+} from "./recorder-context";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -82,7 +86,19 @@ async function until(check: () => boolean) {
 }
 
 type Desktop = {
-  listener: ((request: { kind: "record"; title?: string } | { kind: "stop" }) => void) | null;
+  listener:
+    | ((
+        request:
+          | {
+              kind: "record";
+              title?: string;
+              calendarEvent?: { provider: "google" | "microsoft"; id: string };
+              replace?: boolean;
+            }
+          | { kind: "stop" }
+          | { kind: "open" },
+      ) => void)
+    | null;
 };
 
 function installDesktop(): Desktop {
@@ -116,7 +132,7 @@ function mountProvider() {
   };
   const opened: string[] = [];
   const meetingsOpened: string[] = [];
-  let pendingStart: () => boolean = () => false;
+  let pendingStart: () => MeetingStartRequest | null = () => null;
   let open: ((recordingId: string, workspaceId: string) => boolean) | null = null;
   function Probe() {
     const current = useMeetingRecorder();
@@ -127,17 +143,25 @@ function mountProvider() {
   }
   function PendingStart() {
     const { take } = usePendingMeetingStart();
-    pendingStart = () => take() !== null;
+    pendingStart = take;
     return null;
   }
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  return {
+  const view = {
     seen,
     opened,
     meetingsOpened,
-    takePendingStart: () => pendingStart(),
+    // Taking the pending start clears provider state, so it runs inside act.
+    takePendingStart: () => view.takePendingRequest() !== null,
+    takePendingRequest: () => {
+      let taken: MeetingStartRequest | null = null;
+      act(() => {
+        taken = pendingStart();
+      });
+      return taken as MeetingStartRequest | null;
+    },
     open: (recordingId: string, workspaceId: string) => open!(recordingId, workspaceId),
     render: (workspaceId: string | null, options: { scope?: string | null } = {}) =>
       act(async () => {
@@ -161,6 +185,7 @@ function mountProvider() {
       container.remove();
     },
   };
+  return view;
 }
 
 describe("A recording and the workspace it was made in", () => {
@@ -271,6 +296,29 @@ describe("A recording and the workspace it was made in", () => {
       removeDesktop();
     }
   });
+  test("the desktop app's menu opens the meeting being recorded, without stopping it", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      // Nothing records yet: Meetings opens instead.
+      await act(async () => desktop.listener!({ kind: "open" }));
+      expect(view.opened).toEqual([]);
+      expect(view.meetingsOpened.length).toBe(1);
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      await view.render("workspace-b");
+      await settle();
+      await act(async () => desktop.listener!({ kind: "open" }));
+      expect(view.opened).toEqual(["workspace-a/recording-in-workspace-a"]);
+      expect(view.seen.recorder?.state).toBe("recording");
+      expect(events.some((event) => event.includes("capture ended"))).toBe(false);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
 });
 
 describe("A recording and the person who made it", () => {
@@ -316,17 +364,22 @@ describe("A recording and the person who made it", () => {
     }
   });
 
-  test("a desktop Record while signed out is not kept for whoever signs in next", async () => {
+  test("the page takes the desktop app's choices only while it can record", async () => {
     events.length = 0;
     const desktop = installDesktop();
     const view = mountProvider();
     try {
+      // Signed out, the page takes no choices, so the app doesn't ask about calls.
       await view.render(null, { scope: null });
       await settle();
-      await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
-      expect(view.meetingsOpened).toEqual([]);
+      expect(desktop.listener).toBeNull();
+      // Signed in but with no workspace to record to: still none.
+      await view.render(null, { scope: "person-1" });
+      await settle();
+      expect(desktop.listener).toBeNull();
       await view.render("workspace-a", { scope: "person-1" });
       await settle();
+      expect(desktop.listener).not.toBeNull();
       expect(view.takePendingStart()).toBe(false);
 
       // Signed in, it opens Meetings and asks for a start...
@@ -336,6 +389,84 @@ describe("A recording and the person who made it", () => {
       await view.render("workspace-a", { scope: "person-2" });
       await settle();
       expect(view.takePendingStart()).toBe(false);
+      // Signing out stops it taking choices.
+      await view.render(null, { scope: null });
+      await settle();
+      expect(desktop.listener).toBeNull();
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
+
+  test("a recording keeps taking the desktop app's Stop when the workspace goes", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      await view.render(null);
+      await settle();
+      expect(desktop.listener).not.toBeNull();
+      await act(async () => desktop.listener!({ kind: "stop" }));
+      await settle();
+      expect(view.opened).toEqual(["workspace-a/recording-in-workspace-a"]);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
+
+  test("the desktop app's Record starts the next recording after one stopped, never during one", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      await settle();
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
+      expect(view.takePendingStart()).toBe(false);
+      await act(async () => setStates.get("workspace-a")!("stopped"));
+      await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
+      expect(view.takePendingStart()).toBe(true);
+      expect(view.meetingsOpened).toEqual(["workspace-a", "workspace-a"]);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
+  test("a reminder's Join and record this one stops the recording, then starts the next meeting's", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      await settle();
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      const calendarEvent = { provider: "google" as const, id: "event-2" };
+      // Without replace, a reminder's Join shows the recording going on.
+      await act(async () =>
+        desktop.listener!({ kind: "record", title: "Planning", calendarEvent }),
+      );
+      expect(view.takePendingRequest()).toBeNull();
+      expect(view.seen.recorder?.state).toBe("recording");
+      // With it, the recording stops and is kept, then the next one starts for its event.
+      await act(async () =>
+        desktop.listener!({ kind: "record", title: "Planning", calendarEvent, replace: true }),
+      );
+      await settle();
+      expect(view.seen.recorder?.state).toBe("stopped");
+      expect(view.takePendingRequest()).toEqual({
+        title: "Planning",
+        titleSource: "app",
+        calendarEvent,
+      });
+      expect(view.meetingsOpened).toEqual(["workspace-a", "workspace-a"]);
     } finally {
       await view.unmount();
       removeDesktop();

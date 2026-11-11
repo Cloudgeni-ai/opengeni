@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isWorkspacePermissionDenied } from "@opengeni/react/app/lib/permissions";
@@ -6,7 +7,7 @@ import { isWorkspacePermissionDenied } from "@opengeni/react/app/lib/permissions
 /** Settings inventory uses the same owning-human authority as the session picker,
  * with inactive accounts included for repair. It never feeds credential selection. */
 export function useCatalogConnectionAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   authorityKey: string,
   canRead: boolean | null,
@@ -89,5 +90,7 @@ export function useCatalogConnectionAccounts(
     onRetry: () => {
       void refresh();
     },
+    /** Your own logins: where each works for your own messages, asked from this workspace. */
+    ownReach: { client, workspaceId },
   };
 }

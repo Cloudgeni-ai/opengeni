@@ -58,6 +58,21 @@ async function read(
   return OrganizationIntegrationPolicy.parse(row?.policy ?? {});
 }
 
+/**
+ * The organization's current integration policy for a serving-time filter
+ * (what an acquisition in this organization would be allowed to add). A plain
+ * read under the organization's own RLS scope: it takes no policy fence and is
+ * NOT an acquisition guard. Acquisitions keep using
+ * `withOrganizationIntegrationPolicyFence`.
+ */
+export async function readOrganizationIntegrationPolicyForServing(
+  db: Database,
+  inputScope: OrganizationIntegrationPolicyScope,
+): Promise<OrganizationIntegrationPolicy> {
+  const scope = policyScope.parse(inputScope);
+  return withRlsContext(db, { ...scope, workspaceId: null }, (tx) => read(tx, scope));
+}
+
 /** Own only the subject setting this policy operation changes. The enclosing
  * withRlsContext transaction/savepoint restores all settings on failure; on
  * success it restores account/workspace only, so restore our subject explicitly.

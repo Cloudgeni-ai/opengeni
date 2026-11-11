@@ -51,9 +51,9 @@ async function resolveIncidentTelemetryVaults(input: {
   if (declaration.action !== "required") return [];
   const preflight = declaration.preflight;
   if (
-    preflight.requiredVariableSetNames.length === 0 &&
-    preflight.requiredVariableNames.length === 0 &&
-    preflight.dataSource.route.kind !== "variable_set"
+    preflight.requiredVaultNames.length === 0 &&
+    preflight.requiredSecretNames.length === 0 &&
+    preflight.dataSource.route.kind !== "vault"
   ) {
     return [];
   }

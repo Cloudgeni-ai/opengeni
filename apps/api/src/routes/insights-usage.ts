@@ -16,7 +16,7 @@ import {
   hasPermission,
   listInsightsCalls,
   requireAccessContext,
-  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   siteViewerForGrant,
   type ApiRouteDeps,
   type InsightsQueryScope,
@@ -55,6 +55,8 @@ export function insightsRawQuerySupported(
 ): boolean {
   const keys = new Set([
     "range",
+    "from",
+    "to",
     "provider",
     "model",
     "payer",
@@ -69,7 +71,9 @@ export function insightsRawQuerySupported(
   if (Object.keys(query).some((key) => !keys.has(key))) return false;
   if (
     query.range !== undefined &&
-    !new Set(["today", "week", "month", "30d", "90d", "ytd"]).has(String(query.range))
+    !new Set(["today", "week", "month", "30d", "90d", "ytd", "custom", "1h", "3h", "24h"]).has(
+      String(query.range),
+    )
   )
     return false;
   return (
@@ -228,7 +232,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/sites", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = parseRequestQuery(
       InsightsSiteUsageQuery,
       insightsQueryParameters(c.req.queries()),
@@ -252,7 +256,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = insightsQueryParameters(c.req.queries());
     if (!insightsRawQuerySupported(query, false, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
@@ -287,7 +291,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/calls", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = insightsQueryParameters(c.req.queries());
     if (!insightsRawQuerySupported(query, false, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });

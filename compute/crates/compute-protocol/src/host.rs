@@ -694,6 +694,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         awake: bool,
     },
+    /// Boot a sandbox afresh from its disk where it is, keeping its files:
+    /// any step under way that would keep its running programs is
+    /// cancelled, its VM ends without being saved, and its saved memory
+    /// image is deleted here and from the store's copy, so its next wake,
+    /// on this host, boots it from its files. Nothing is stored first, so
+    /// it takes as long as ending a VM, however slow the store is; the
+    /// files here, its newest copy, stay. Answered once the VM has ended
+    /// and the image is gone; a wake asked meanwhile waits for that, then
+    /// boots it. Refused with [`ErrorCode::Busy`] while the sandbox is
+    /// being created, removed or handed off, with [`ErrorCode::Broken`]
+    /// for a broken sandbox, and by a host from before this request with
+    /// [`ErrorCode::Invalid`].
+    Restart {
+        /// Its id.
+        id: Id,
+    },
     /// Report every sandbox and host counters.
     Status,
     /// Build a sandbox image (ADR 19) from the OCI image `image` with this
@@ -779,6 +795,11 @@ pub enum Reply {
         /// The digest of the image manifest built, for an index the one
         /// for this host's platform.
         digest: String,
+        /// The digest of the guest programs it was built with
+        /// ([`crate::fleet::Capacity::guest`]); `None` from a host of an
+        /// earlier release.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest: Option<String>,
     },
     /// The copy [`Request::Capture`] made is being stored: ask again.
     Capturing,
@@ -888,11 +909,12 @@ pub struct SandboxStatus {
     /// paused for host memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_room: Option<u64>,
-    /// Bytes of host memory its VM held when the host paused it, or began
-    /// pausing and saving it, to free memory while it was in use above its
-    /// memory request; set until it wakes again. It loses nothing and
-    /// wakes by itself once there is room; a control plane may rather move
-    /// it to another host.
+    /// Bytes of host memory its VM held when an earlier release paused it,
+    /// or began pausing and saving it, to free memory while it was in use
+    /// above its memory request; set until it wakes again. It loses
+    /// nothing and wakes by itself once there is room; a control plane may
+    /// rather move it to another host. This release never pauses a
+    /// sandbox in use for memory (ADR 24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_for_memory: Option<u64>,
     /// Bytes the host asked its guest to give back through its balloon
@@ -918,8 +940,10 @@ pub struct FailedStep {
     pub error: String,
 }
 
-/// A VM's zswap traffic and memory pressure. A running VM is never
-/// compressed: its `zswpout` grows only while it is paused.
+/// A VM's zswap traffic and memory pressure. A running VM is compressed
+/// only on a host that bounds running sandboxes (ADR 24), and then only
+/// what it holds above its request; elsewhere its `zswpout` grows only
+/// while it is paused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStatus {
     /// Pages compressed into zswap since the VM process started.
@@ -1059,6 +1083,14 @@ pub struct DiskStatus {
     pub reserve: u64,
     /// Bytes more wakes may book.
     pub free: u64,
+    /// Bytes beyond [`DiskStatus::free`] that a new sandbox could book now
+    /// by disk relief (ADR 30): what the host frees without losing
+    /// anything, idle sandboxes' local copies that object storage holds
+    /// and templates and cached images nothing uses, as its admission
+    /// counts it. Missing from what a host of an earlier release wrote,
+    /// which then counts none.
+    #[serde(default)]
+    pub reclaimable: u64,
     /// Inodes available at the last reading.
     pub inodes_available: u64,
     /// Inodes booked for saves.
@@ -1113,8 +1145,8 @@ pub enum TemplateState {
     Ready,
     /// Being built; new sandboxes boot cold meanwhile.
     Building,
-    /// The last build failed; new sandboxes boot cold, and a later one
-    /// tries again.
+    /// The last build failed, or was put off for want of room; new
+    /// sandboxes boot cold, and a later one tries again.
     Failed,
     /// Unused for long enough that the host gave it and its ready
     /// sandboxes up; the next create of the shape boots cold and builds it
@@ -1129,6 +1161,13 @@ pub struct BlockedSandbox {
     pub id: Id,
     /// What went wrong.
     pub problem: String,
+    /// For one whose VM was found held frozen, as the guard leaves VMs
+    /// once the lease has run out, so that the agent could not take it
+    /// back: the owner epoch its record names. A registration lists it
+    /// with that epoch, and the service's ruling decides whether its VM
+    /// is ended or taken back once the lease lets it run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_owner_epoch: Option<u64>,
 }
 
 /// A step's name on the wire.

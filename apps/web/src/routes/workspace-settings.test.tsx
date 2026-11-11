@@ -44,7 +44,7 @@ const collaboratorMember = {
     "stream:view",
     "files:read",
     "documents:search",
-    "variable-sets:list",
+    "secrets:list",
     "connections:read",
     "rigs:use",
     "artifacts:read",

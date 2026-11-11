@@ -2,6 +2,7 @@ import { CircleAlertIcon, CircleCheckIcon, InfoIcon, TriangleAlertIcon } from "l
 import type { ReactNode } from "react";
 
 import { cn } from "../lib/cn";
+import { ErrorText } from "./error-text";
 
 /* ----------------------------------------------------------------------------
    Notice — the one inline panel for states that need a quiet word (doctrine D7).
@@ -110,10 +111,14 @@ export function Notice({
       <div className={cn("min-w-0 flex-1", layout === "banner" && "py-1.5")}>
         {/* A title is always full-strength text, whatever the tone; the body
             under it is the muted description. */}
-        {title ? <div className="font-medium text-fg">{title}</div> : null}
+        {title ? (
+          <div className="font-medium text-fg">
+            <ErrorText>{title}</ErrorText>
+          </div>
+        ) : null}
         {children ? (
           <div className={cn("break-words text-sm leading-5", title ? "mt-0.5 text-fg-muted" : "")}>
-            {children}
+            <ErrorText>{children}</ErrorText>
           </div>
         ) : null}
       </div>

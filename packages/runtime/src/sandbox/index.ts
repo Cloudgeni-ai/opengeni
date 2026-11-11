@@ -29,7 +29,12 @@ export {
 // unchanged.
 
 import type { Settings } from "@opengeni/config";
-import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+import {
+  collectSandboxEnvironment,
+  deploymentSandboxBackend,
+  hostSandboxBackendRefused,
+  parseExposedPorts,
+} from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
 export {
   sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
@@ -55,6 +60,14 @@ import {
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  findRebuildableWorkspacePaths,
+  workspaceCaptureStillRunning,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,
+  workspaceSizeFromArchiveDescriptor,
+  type RebuildableWorkspacePaths,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 
@@ -85,6 +98,7 @@ import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
@@ -118,10 +132,9 @@ export {
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
-import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
 import type { ComputeCreateIdentity } from "./compute/session";
-import { errorMessage } from "@opengeni/contracts/values";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -141,14 +154,6 @@ export {
   connectedCommandExitProof,
 } from "./selfhosted/terminal-replay";
 
-export {
-  repairSerializedRunStateExposedPorts,
-  runStateCompatibilityProvider,
-  runStateExposedPortsRecord,
-  type RunStateExposedPortsCompatibilityRepair,
-  type RunStateExposedPortsCompatibilityResult,
-} from "./run-state-compat";
-
 // The provider registry surface — the descriptor table self-test, the per-
 // provider registrations, selection + capability negotiation, and the typed
 // construction errors. All agent-loop-free, so the API-direct control plane
@@ -160,6 +165,8 @@ export {
   type CapabilityDescriptor,
 } from "./capabilities";
 export {
+  SANDBOX_BACKEND_NOT_SERVED_CODE,
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
   SandboxExactResumeReplacedError,
@@ -198,6 +205,11 @@ export {
   type ProviderSandboxFailure,
   type ProviderSandboxFailureKind,
 } from "./provider-errors";
+export {
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+  loadE2BServiceBusyError,
+} from "./provider-capacity";
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,
@@ -441,6 +453,20 @@ export {
   type SecretStdinCarry,
 } from "./secret-delivery";
 
+// Credential profiles: per-command environment variables resolved from secret
+// references at the same exec boundary (docs/secrets.md).
+export {
+  CREDENTIAL_PROFILE_GIT_HELPER,
+  CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE,
+  createCredentialEnvironment,
+  credentialProfileGitHelperEnvironment,
+  credentialProfileNoteText,
+  withCredentialProfileNotes,
+  type CreateCredentialEnvironmentInput,
+  type CredentialEnvironment,
+  type CredentialEnvironmentResult,
+} from "./credential-profile-delivery";
+
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.
@@ -514,6 +540,7 @@ export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
@@ -569,6 +596,10 @@ export {
   NEVER_SENT_DETAIL_KEY,
   CONNECTION_REPLACED_DETAIL_KEY,
   AGENT_UNANSWERED_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
+  type UnresponsiveAgentRecovery,
   agentNotAnsweredReason,
   isAgentNotAnswered,
   requestWithoutWaking,
@@ -578,6 +609,18 @@ export {
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
+} from "./selfhosted/process-start-failure";
+export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
 export {
   AGENT_LINK_LOST_HEADER,
   AGENT_UNANSWERED_HEADER,
@@ -591,6 +634,9 @@ export {
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
+  CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE,
+  CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE,
+  type SelfhostedFaultContext,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
   FAULT_FIELD_WHAT_PRESERVED,
@@ -654,10 +700,20 @@ export {
   ComputeControlClient,
   ComputeControlError,
   isComputeSandboxNotFound,
+  isComputeTemplateGone,
   type ComputeCreateRequest,
   type ComputeSandboxView,
+  type ComputeTemplateView,
   type ComputeWokenView,
 } from "./compute/control";
+export {
+  buildComputeEnvironmentTemplate,
+  computeEnvironmentTemplateName,
+  computeSourceImage,
+  deleteComputeTemplate,
+  resolveComputeProviderBinding,
+  type ComputeProviderBinding,
+} from "./providers/compute";
 export {
   getComputeAgentPlane,
   setComputeAgentPlane,
@@ -676,6 +732,8 @@ export {
   type ComputeCreateIdentity,
   type ComputeSessionState,
   type ComputeTurnDeps,
+  type UnresponsiveComputeMachine,
+  UNRESPONSIVE_RECOVERY_MS,
 } from "./compute/session";
 export {
   COMPUTE_METADATA,
@@ -710,6 +768,7 @@ export {
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
   OP_START_RESEND_HORIZON_MS,
+  OP_START_UNANSWERED_MS,
   querySelfhostedOp,
   releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
@@ -810,6 +869,23 @@ export function createSandboxClient(
 }
 
 /**
+ * Refuse a host-backed box (`local`, `docker`) unless the deployment serves it,
+ * which for a host backend means it is the deployment's configured default
+ * (`sandboxBackendServed`, the same rule session creation applies). The
+ * deployment default is read from `settings.deploymentSandboxBackend`, which
+ * survives the per-session `{...settings, sandboxBackend}` rebinds, so a
+ * session's stored backend can never serve itself. A host box runs as
+ * processes on this worker or API host, so whether it is allowed is a
+ * deployment choice, never a consequence of what happens to be installed on
+ * the host image. Remote providers keep their own credential validation.
+ */
+export function assertHostSandboxBackendServed(settings: Settings, backend: SandboxBackend): void {
+  if (hostSandboxBackendRefused(settings, backend)) {
+    throw new SandboxBackendNotServedError(backend, deploymentSandboxBackend(settings));
+  }
+}
+
+/**
  * Construct the raw provider SandboxClient for an EXPLICIT backend, independent
  * of settings.sandboxBackend. This is the resume-by-id builder the per-turn
  * resume path (and the API-direct control plane) call: a lease's box was created
@@ -817,7 +893,9 @@ export function createSandboxClient(
  * resume_backend_id), and the client that reattaches to it must be built for
  * THAT backend, not the process's currently-configured default. When the backend
  * equals settings.sandboxBackend this is identical to createSandboxClient
- * (behavior-preserved). Returns undefined for "none".
+ * (behavior-preserved). Returns undefined for "none". A host backend (`local`,
+ * `docker`) that is not the default of `settings` is refused before anything is
+ * built (assertHostSandboxBackendServed).
  */
 export function createSandboxClientForBackend(
   backend: SandboxBackend,
@@ -832,6 +910,7 @@ export function createSandboxClientForBackend(
   if (registration.backend === "none") {
     return undefined;
   }
+  assertHostSandboxBackendServed(settings, registration.backend);
   registration.validateCredentials(settings); // fail-fast, typed
 
   const exposedPorts = parseExposedPorts(settings.dockerExposedPorts);
@@ -1252,6 +1331,12 @@ export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
     : undefined;
 }
 
+/** RunState owns `exposedPorts` as a port-keyed endpoint record; provider
+ * clients keep their configured port arrays in provider state. */
+function runStateExposedPortsRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? structuredClone(value) : undefined;
+}
+
 export async function deserializeSandboxSessionStateEnvelope(
   client: SandboxClient,
   envelope: unknown,
@@ -1293,13 +1378,6 @@ export async function deserializeSandboxSessionStateEnvelope(
     }
   }
   const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
-  if (state.exposedPorts !== undefined && exposedPorts === undefined) {
-    console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
-      provider: runStateCompatibilityProvider(client.backendId),
-      sessionClass: "root",
-      path: "sessionState.exposedPorts",
-    });
-  }
   return await client.deserializeSessionState({
     ...providerState,
     manifest: state.manifest,

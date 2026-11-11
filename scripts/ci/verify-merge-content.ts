@@ -10,11 +10,27 @@ function git(args: string[], cwd: string): string {
   }).trim();
 }
 
+/** The head a squash-landed PR had, fetched from GitHub's refs/pull/<n>/head. */
+export function fetchPullHead(number: number, cwd: string): string | null {
+  try {
+    git(["fetch", "--quiet", "--no-tags", "origin", `refs/pull/${number}/head`], cwd);
+    return git(["rev-parse", "FETCH_HEAD"], cwd);
+  } catch {
+    return null;
+  }
+}
+
 /** Recompute each landed merge independently of the provider's merge implementation.
- * Single-parent squash commits from before queue rollout are reported, not attested.
- * This is detection after landing, not a substitute for merge_group checks.
+ * A squash commit titled "... (#N)" is recomputed from its parent and PR #N's
+ * head, as GitHub squashes. Other single-parent commits are reported, not attested.
+ * This is detection after landing, not a substitute for testing before it.
  */
-export function verifyMergeContent(base: string, head: string, cwd = process.cwd()) {
+export function verifyMergeContent(
+  base: string,
+  head: string,
+  cwd = process.cwd(),
+  pullHead: (number: number) => string | null = (number) => fetchPullHead(number, cwd),
+) {
   for (const sha of [base, head]) {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("expected exact base/head commit SHAs");
   }
@@ -27,8 +43,13 @@ export function verifyMergeContent(base: string, head: string, cwd = process.cwd
   for (const sha of commits) {
     const parents = git(["show", "-s", "--format=%P", sha], cwd).split(" ");
     if (parents.length === 1) {
-      singleParent.push(sha);
-      continue;
+      const number = /\(#(\d+)\)$/.exec(git(["show", "-s", "--format=%s", sha], cwd))?.[1];
+      const side = number ? pullHead(Number(number)) : null;
+      if (!side) {
+        singleParent.push(sha);
+        continue;
+      }
+      parents.push(side);
     }
     if (parents.length !== 2) throw new Error(`unsupported merge topology: ${sha}`);
     // merge-tree exits nonzero on conflicts. Never bless a hand-resolved tree
@@ -44,13 +65,27 @@ export function verifyMergeContent(base: string, head: string, cwd = process.cwd
   return { schemaVersion: 1, base, head, verified, singleParent };
 }
 
+function isStrictAncestor(sha: string, head: string, cwd: string): boolean {
+  if (sha === head) return false;
+  try {
+    git(["merge-base", "--is-ancestor", sha, head], cwd);
+    return true;
+  } catch {
+    // Not an ancestor, or a commit this checkout does not have (so not in head's history).
+    return false;
+  }
+}
+
 /** Cover every coalesced push since prior full-green evidence, not just the last
- * webhook's before SHA. Bootstrap at this check's introduction on first-parent
- * main history, never at a guessed current push boundary. */
+ * webhook's before SHA. The evidence is the newest full-green main run on a
+ * strict ancestor of head, so re-verifying an older release after a newer main
+ * went green still starts at that release's own prior evidence. Bootstrap at
+ * this check's introduction on first-parent main history only when no such run
+ * exists, never at a guessed current push boundary. */
 export function fullGreenAuditBase(
   head: string,
   cwd = process.cwd(),
-  discover?: () => ReturnType<typeof latestGreenMain>,
+  discover?: (accept: (sha: string) => boolean) => ReturnType<typeof latestGreenMain>,
 ) {
   const introduced = git(
     [
@@ -68,9 +103,12 @@ export function fullGreenAuditBase(
     .at(-1);
   if (!introduced) throw new Error("Cannot find the merge-content audit bootstrap commit");
   const notBefore = git(["show", "-s", "--format=%cI", introduced], cwd);
+  const accept = (sha: string) => isStrictAncestor(sha, head, cwd);
   let previous: string | undefined;
   try {
-    previous = (discover ?? (() => latestGreenMain(undefined, undefined, notBefore)))().sha;
+    previous = (discover ?? ((only) => latestGreenMain(undefined, undefined, notBefore, only)))(
+      accept,
+    ).sha;
   } catch (error) {
     if (
       !(error instanceof Error) ||
@@ -78,15 +116,8 @@ export function fullGreenAuditBase(
     )
       throw error;
   }
-  if (previous && previous !== head) {
-    try {
-      git(["merge-base", "--is-ancestor", previous, head], cwd);
-      return previous;
-    } catch {
-      // A newer parallel Version run may already have published green. Audit
-      // this older exact run from bootstrap instead of trusting a descendant.
-    }
-  }
+  // Never trust a descendant (a newer run that went green first) or head itself.
+  if (previous && accept(previous)) return previous;
   return git(["rev-parse", `${introduced}^1`], cwd);
 }
 

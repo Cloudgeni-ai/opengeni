@@ -7,6 +7,8 @@ import {
   withOrganizationOpenRouterCatalogProvider,
   withOrganizationOpperCatalogProvider,
   withOrganizationDirectCatalogProvider,
+  withOrganizationCompatibleProviders,
+  organizationCompatibleProviderId,
   organizationDirectModelIdPrefix,
 } from "@opengeni/config";
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
@@ -18,31 +20,39 @@ import {
 import {
   deliverSubscriptionCoreWake,
   getModelConnectionAccess,
+  listModelConnectionAdministeredWorkspaceIds,
   listOrganizationAdministrationMembers,
   nestedPostgresSqlState,
   readSubscriptionCoreProviderModelConnectionAccess,
+  removeSubscriptionCoreProviderModelConnectionFromWorkspace,
   subscriptionCoreAccessChangeWake,
   ModelConnectionAccessForbiddenError,
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
+  listSharedWorkspacesForAccount,
   listOrganizationModelProviderCustomModels,
   getOrganizationModelProviderConnection,
   getWorkspaceProviderApiKeyConnectionMetadata,
+  listOrganizationCompatibleEndpoints,
   type ModelConnectionTarget,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman } from "./codex";
+import {
+  requireOrganizationCodexHuman,
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parsePathParam } from "../http/path-identifier";
-import { codexRouteDisposition } from "./codex-core";
-import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 import { parseRequestBody } from "../http/request-body";
 
 const Kind = z.enum([
@@ -55,8 +65,11 @@ const Kind = z.enum([
   "opper",
   "openai",
   "azure_openai",
+  "openai_compatible",
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "openai_compatible")
+    return `${organizationCompatibleProviderId(target.connectionId)}/`;
   if (target.kind === "openai" || target.kind === "azure_openai")
     return organizationDirectModelIdPrefix(target.kind);
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
@@ -69,25 +82,11 @@ function modelPrefix(target: ModelConnectionTarget) {
 }
 
 /**
- * Codex access policies follow the organization's Codex cutover row (M3 PR
- * 3): the legacy credential row without one; the shared core connection with
- * an enabled one (the legacy rows are frozen after 0680); a disabled row is
- * maintenance (typed 503 from `codexRouteDisposition`). SuperGrok's follow
- * its provider route (design 5.3, X2b): legacy without the `xai` cutover
- * receipt, the shared core connection with it, maintenance fails closed.
+ * Codex, SuperGrok and Claude subscription access policies live on the shared
+ * core connection; every other connection kind keeps its own access row.
  */
-async function coreAccessDisposition(
-  deps: ApiRouteDeps,
-  kind: ModelConnectionTarget["kind"],
-  accountId: string,
-): Promise<"legacy" | "core"> {
-  if (kind === "codex") return await codexRouteDisposition(deps, accountId);
-  // SuperGrok runs only on the core: any other route fails closed.
-  if (kind === "supergrok")
-    return await requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
-  if (kind === "claude_subscription")
-    return await requireSubscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
-  return "legacy";
+function onSubscriptionCore(kind: ModelConnectionTarget["kind"]): boolean {
+  return kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
 }
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
@@ -96,7 +95,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     async function target(
       c: Context,
       mutate: boolean,
-    ): Promise<{ connection: ModelConnectionTarget; core: boolean }> {
+    ): Promise<{ connection: ModelConnectionTarget; core: boolean; person: boolean }> {
       const kind = parsePathParam(c, "kind", Kind);
       if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
@@ -104,13 +103,26 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       let connectionId = parsePathParam(
         c,
         "connectionId",
-        kind === "codex" || kind === "supergrok" || kind === "claude_subscription"
+        kind === "codex" ||
+          kind === "supergrok" ||
+          kind === "claude_subscription" ||
+          kind === "openai_compatible"
           ? z.string().uuid()
           : z.union([z.literal("current"), z.string().uuid()]),
       );
       if (scope === "organizations") {
-        if (mutate) requireSameOriginBrowserMutation(c, deps);
-        const human = await requireOrganizationCodexHuman(c, deps, scopeId);
+        // A subscription account's access is the subscription writers'; they
+        // accept every account administrator. Gateway and direct provider
+        // connections stay with the organization's people.
+        const subscription =
+          kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
+        if (mutate) {
+          if (subscription) requireOrganizationSubscriptionMutationOrigin(c, deps);
+          else requireSameOriginBrowserMutation(c, deps);
+        }
+        const human = subscription
+          ? await requireOrganizationSubscriptionAdministrator(c, deps, scopeId)
+          : await requireOrganizationCodexHuman(c, deps, scopeId);
         return {
           connection: {
             kind,
@@ -119,19 +131,18 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             workspaceId: null,
             subjectId: human.subjectId,
           },
-          core: (await coreAccessDisposition(deps, kind, scopeId)) === "core",
+          core: onSubscriptionCore(kind),
+          person: human.accountAdministrator !== true,
         };
       }
       // Workspace OpenAI and Azure OpenAI connections are exact direct
       // connections with no shared access policy; only the organization's has one.
-      if (kind === "openai" || kind === "azure_openai")
+      if (kind === "openai" || kind === "azure_openai" || kind === "openai_compatible")
         throw new HTTPException(404, { message: "Connection not found" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       // On the core a SuperGrok or Claude access policy is a shared connection's, which
       // the core editor authorizes; only the legacy pools have private rows.
-      const sharedCore =
-        (kind === "supergrok" || kind === "claude_subscription") &&
-        (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
+      const sharedCore = kind === "supergrok" || kind === "claude_subscription";
       if (mutate) {
         // A core Claude change keeps the legacy same-origin browser check.
         if (kind === "claude_subscription" && !c.req.header("authorization"))
@@ -160,12 +171,13 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         core:
           kind === "supergrok" || kind === "claude_subscription"
             ? sharedCore
-            : (await coreAccessDisposition(deps, kind, grant.accountId)) === "core",
+            : onSubscriptionCore(kind),
+        person: true,
       };
     }
     app.get(path, async (c) => {
       c.header("cache-control", "private, no-store");
-      const { connection, core } = await target(c, false);
+      const { connection, core, person } = await target(c, false);
       const coreAccess = core
         ? await readSubscriptionCoreProviderModelConnectionAccess(deps.db, connection)
         : null;
@@ -179,6 +191,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       // Shared core connections at organization scope can be limited to people
       // and report the workspaces that use them as their own (design 5.4).
       const organizationCore = coreAccess !== null && connection.workspaceId === null;
+      // A workspace's own subscription account can also serve other shared
+      // workspaces (D-52): its route offers the ones the person administers,
+      // plus the ones it already serves.
+      const workspaceCore = coreAccess !== null && connection.workspaceId !== null;
       let settings =
         connection.workspaceId === null
           ? (await deps.resolveCatalogSettings()).settings
@@ -190,15 +206,40 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             ).settings;
       settings = withCodexCatalogProvider(withXaiSubscriptionCatalogProvider(settings));
       let workspaces: Array<{ id: string; name: string }> = [];
+      if (workspaceCore && connection.workspaceId !== null) {
+        const [administered, shared] = await Promise.all([
+          listModelConnectionAdministeredWorkspaceIds(deps.db, {
+            accountId: connection.accountId,
+            workspaceId: connection.workspaceId,
+            subjectId: connection.subjectId,
+          }),
+          listSharedWorkspacesForAccount(deps.db, connection.accountId),
+        ]);
+        const offered = new Set([...administered, ...(coreAccess.policy.allowedWorkspaces ?? [])]);
+        workspaces = shared
+          .filter((workspace) => offered.has(workspace.id))
+          .map(({ id, name }) => ({ id, name }));
+      }
       if (connection.workspaceId === null) {
         const actor = {
           organizationId: connection.accountId,
           actorSubjectId: connection.subjectId,
         };
-        workspaces = (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
-          ({ id, name }) => ({ id, name }),
-        );
-        if (connection.kind === "anthropic" || connection.kind === "claude_subscription") {
+        // The administration overview and organization custom models are
+        // read for a person; an account administrator without one (for
+        // example the deployment's access key) gets the organization's shared
+        // workspaces and the provider's default catalog.
+        workspaces = person
+          ? (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
+              ({ id, name }) => ({ id, name }),
+            )
+          : (await listSharedWorkspacesForAccount(deps.db, connection.accountId)).map(
+              ({ id, name }) => ({ id, name }),
+            );
+        if (
+          person &&
+          (connection.kind === "anthropic" || connection.kind === "claude_subscription")
+        ) {
           const customModels = await listOrganizationModelProviderCustomModels(deps.db, {
             organizationId: connection.accountId,
             actorSubjectId: connection.subjectId,
@@ -240,12 +281,21 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             models,
           });
         }
+        if (connection.kind === "openai_compatible") {
+          const endpoint = (await listOrganizationCompatibleEndpoints(deps.db, actor)).find(
+            (candidate) => candidate.endpoint.id === connection.connectionId,
+          );
+          if (endpoint)
+            settings = withOrganizationCompatibleProviders(settings, [
+              { ...endpoint.endpoint, models: endpoint.models },
+            ]);
+        }
       }
       // The people an administrator can choose, or null when the account
       // can't be limited to people or the organization has more members than
       // its member list shows (people are then not offered).
       const people =
-        organizationCore && coreAccess?.peopleSupported
+        organizationCore && coreAccess?.peopleSupported && person
           ? await listOrganizationAdministrationMembers(deps.db, {
               organizationId: connection.accountId,
               actorSubjectId: connection.subjectId,
@@ -274,11 +324,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           models: configuredModels(settings)
             .filter((model) => model.id.startsWith(modelPrefix(connection)))
             .map(({ id, label }) => ({ id, label })),
-          personalWorkspacesSupported:
-            connection.workspaceId === null &&
-            (connection.kind === "codex" ||
-              connection.kind === "supergrok" ||
-              connection.kind === "claude_subscription"),
+          // Every organization account, subscription or API key, can serve
+          // Personal workspaces; a workspace's own account serves only it.
+          personalWorkspacesSupported: connection.workspaceId === null,
           ...(organizationCore
             ? {
                 ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
@@ -286,7 +334,13 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
                 ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
               }
-            : {}),
+            : workspaceCore
+              ? {
+                  peopleSupported: false,
+                  localWorkspaceIds: coreAccess.localWorkspaceIds,
+                  managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                }
+              : {}),
         }),
       );
     });
@@ -303,13 +357,21 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(422, {
           message: "Personal sharing requires the organization subscription route",
         });
+      if (policy.moveToOrganization && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Only the organization can take over a workspace's account",
+        });
       if (policy.allowedModels?.some((id) => !id.startsWith(modelPrefix(connection))))
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",
         });
+      // A workspace's own subscription account can serve chosen shared
+      // workspaces (D-52); other workspace connections serve only their own.
       if (
         connection.workspaceId !== null &&
-        (policy.allowedWorkspaces !== null || policy.allowedPeople != null)
+        (policy.allowedPeople != null ||
+          policy.allowPersonalWorkspaces ||
+          (!core && policy.allowedWorkspaces !== null))
       )
         throw new HTTPException(422, {
           message: "Workspace connections cannot be assigned to other workspaces",
@@ -327,10 +389,14 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         if (
           error instanceof SubscriptionCoreAccessPersonNotInOrganizationError ||
           error instanceof SubscriptionCoreAccessPeopleUnlistableError ||
-          error instanceof SubscriptionCoreAccessInvalidError
+          error instanceof SubscriptionCoreAccessInvalidError ||
+          error instanceof SubscriptionCoreAccessMoveRequiredError
         )
           throw new HTTPException(422, { message: error.message });
-        if (error instanceof ModelConnectionAccessForbiddenError)
+        if (
+          error instanceof ModelConnectionAccessForbiddenError ||
+          error instanceof SubscriptionCoreAccessWorkspaceNotAdministeredError
+        )
           throw new HTTPException(403, { message: error.message });
         throw error;
       }
@@ -355,5 +421,29 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       }
       return c.json(updated);
     });
+    if (scope === "workspaces")
+      // A workspace another workspace's own subscription account serves can
+      // stop using it here; only its owner changes it otherwise (D-52).
+      app.delete(path, async (c) => {
+        const { connection, core } = await target(c, true);
+        if (!core || connection.workspaceId === null)
+          throw new HTTPException(404, { message: "Connection not found" });
+        let removed;
+        try {
+          removed = await removeSubscriptionCoreProviderModelConnectionFromWorkspace(deps.db, {
+            ...connection,
+            workspaceId: connection.workspaceId,
+          });
+        } catch (error) {
+          if (error instanceof ModelConnectionAccessForbiddenError)
+            throw new HTTPException(403, { message: error.message });
+          throw error;
+        }
+        if (!removed)
+          throw new HTTPException(404, {
+            message: "No other workspace's account is shared with this workspace under that id",
+          });
+        return c.body(null, 204);
+      });
   }
 }

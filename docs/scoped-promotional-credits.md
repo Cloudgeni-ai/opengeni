@@ -12,6 +12,8 @@ signup credit stays spendable under its original scoped/general terms.
 Coverage
 can change for existing and new promotional balances; issued amounts and spent
 credits stay unchanged. Legacy unrestricted grants remain unrestricted.
+Promotional and plan credit pay for app use only; API use (keys, products on
+the SDK, outside agents) pays from credits. See [billing-origin.md](billing-origin.md).
 
 ## Change models without redeploying
 
@@ -105,6 +107,8 @@ unrestricted purchased credits. The current policy determines its coverage,
 including when an old checkout is completed after an operator update.
 
 Promotions do not fund embeddings, video generation or warm sandbox time.
-Post-use platform debt stays in general credits. There are no credit reservations
-or automatic card charges. Debits and grant allocations commit together under
-an account lock, with idempotent receipts including zero-cost settlements.
+Post-use platform debt stays in general credits: a model response is charged its
+full price after use, its covering grants pay what they can, and the rest may take
+general credit below zero. There are no credit reservations or automatic card
+charges. Debits and grant allocations commit together under an account lock,
+with idempotent receipts; zero-cost receipts from earlier releases stay settled.

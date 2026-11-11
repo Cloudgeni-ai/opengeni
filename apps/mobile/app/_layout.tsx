@@ -70,6 +70,14 @@ export default function RootLayout() {
                   <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
                   <Stack.Screen name="meetings" options={{ title: "Meetings" }} />
                   <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
+                  <Stack.Screen name="automations" options={{ title: "Automations" }} />
+                  <Stack.Screen name="automation/[id]" options={{ title: "" }} />
+                  <Stack.Screen
+                    name="automation-new"
+                    // A page sheet like Feedback: it opens with the keyboard up, and
+                    // a detented form sheet fights the keyboard over the layout.
+                    options={{ headerShown: false, presentation: "modal" }}
+                  />
                   <Stack.Screen name="session/[id]" options={{ title: "" }} />
                   <Stack.Screen name="settings" options={{ title: "Settings" }} />
                   <Stack.Screen name="wake-phrase" options={{ title: "" }} />
@@ -85,6 +93,8 @@ export default function RootLayout() {
                   />
                   <Stack.Screen
                     name="add-account"
+                    // One sign-in sheet at a time: pushing it again goes to the open one.
+                    dangerouslySingular
                     options={{ headerShown: false, presentation: "modal" }}
                   />
                   <Stack.Screen name="call" options={{ headerShown: false }} />

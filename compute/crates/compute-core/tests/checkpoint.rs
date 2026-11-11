@@ -31,9 +31,9 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(policy: HostPolicy) -> Self {
+    fn new(policy: &HostPolicy) -> Self {
         Self {
-            host: Host::new(policy).unwrap(),
+            host: Host::new(*policy).unwrap(),
             now: At::ZERO,
         }
     }
@@ -120,7 +120,7 @@ fn cancelled(actions: &[Action]) -> Vec<OpId> {
 
 #[test]
 fn a_running_sandbox_is_checkpointed_within_a_minute_then_every_interval() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     assert_eq!(
         started(&rig.add(1, State::RUNNING, checkpointed(), Size::whole(GIB))),
         Vec::new()
@@ -164,7 +164,7 @@ fn a_running_sandbox_is_checkpointed_within_a_minute_then_every_interval() {
 
 #[test]
 fn a_checkpoint_counts_from_the_wake_after_a_sleep() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     let paused = State::new(Level::Paused, Durability::Remote, true);
     rig.add(1, paused, checkpointed(), Size::whole(GIB));
     rig.at(secs(3600));
@@ -182,12 +182,13 @@ fn a_checkpoint_counts_from_the_wake_after_a_sleep() {
 
 #[test]
 fn use_does_not_cancel_a_checkpoint_but_memory_pressure_does() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         memory: Some(MemoryPolicy {
             low_watermark: 8 * GIB,
             high_watermark: 9 * GIB,
             compressed_percent: 30,
             balloon_grace: Duration::from_secs(2),
+            outgrowth: None,
         }),
         ..HostPolicy::default()
     });
@@ -231,7 +232,7 @@ fn use_does_not_cancel_a_checkpoint_but_memory_pressure_does() {
 
 #[test]
 fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, checkpointed(), Size::whole(GIB));
     rig.hold(1);
     let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
@@ -255,7 +256,7 @@ fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
     assert_eq!(step, Step::Pause, "it sleeps instead");
 
     // Asked with nothing holding it, the sleep cancels a checkpoint at once.
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(2, State::RUNNING, checkpointed(), Size::whole(GIB));
     let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
     assert_eq!(step, Step::Checkpoint);
@@ -270,7 +271,7 @@ fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
 
 #[test]
 fn a_sandbox_that_never_ran_is_archived_at_once_and_a_wake_comes_first() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     let created = State::new(Level::Saved, Durability::Local, false);
     let (step, op) = only_start(&rig.add(1, created, checkpointed(), Size::whole(GIB)));
     assert_eq!(step, Step::Archive, "its only copy is on this host");
@@ -297,7 +298,7 @@ fn a_sandbox_that_never_ran_is_archived_at_once_and_a_wake_comes_first() {
 
 #[test]
 fn work_during_a_checkpoint_keeps_its_sandbox_awake_after_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     let policy = SleepPolicy::new(SleepRules {
         checkpoint_every: Some(EVERY),
         ..SleepRules::RECOMMENDED
@@ -338,7 +339,7 @@ fn work_during_a_checkpoint_keeps_its_sandbox_awake_after_it() {
 
 #[test]
 fn a_checkpoint_books_its_disks_whole_growth_while_it_runs() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,
@@ -390,13 +391,74 @@ fn a_checkpoint_books_its_disks_whole_growth_while_it_runs() {
     assert_eq!(rig.host.disk().unwrap().booked.bytes, before);
 }
 
+#[test]
+fn a_checkpoint_during_hydration_books_the_whole_disk_once() {
+    let mut rig = Rig::new(&HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    let reading = Input::Disk {
+        available: DiskSpace {
+            bytes: 128 * GIB,
+            inodes: 10_000,
+        },
+    };
+    rig.send(reading);
+    let size = Size {
+        disk: 32 * GIB + 32 * GIB / 256,
+        save: 16 * GIB + (64 << 20),
+        fetch: 16 * GIB + (64 << 20),
+        ..Size::whole(16 * GIB)
+    };
+    rig.add(1, State::RUNNING, checkpointed(), size);
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: true,
+    });
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: 4 * GIB,
+    });
+    rig.send(reading);
+    assert_eq!(
+        rig.host.disk().unwrap().booked.bytes,
+        4 * GIB + size.save + size.fetch
+    );
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    let whole = size.disk + size.save + size.fetch;
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, whole);
+    // Even a small headroom measurement cannot weaken the clone/trim
+    // bound while the step owns the VM. Memory may still all arrive.
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.send(reading);
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, whole);
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: false,
+    });
+    rig.send(reading);
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, size.disk + size.save);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(
+        rig.host.disk().unwrap().booked.bytes,
+        size.disk + 2 * size.save
+    );
+}
+
 /// A checkpoint leaves its sandbox running and booking its next save, so
 /// the memory image it wrote is booked on its own until a reading shows
 /// it, whether the checkpoint was done or cancelled while it uploaded:
 /// nothing else is admitted to the space it took meanwhile.
 #[test]
 fn the_image_a_checkpoint_wrote_stays_booked_until_a_reading() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,
@@ -460,7 +522,7 @@ fn the_image_a_checkpoint_wrote_stays_booked_until_a_reading() {
 /// nothing took.
 #[test]
 fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,
@@ -524,7 +586,7 @@ fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
 
     // One that did write, here cancelled while it uploaded, keeps both
     // booked until a reading shows them: its retry waits for that reading.
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,
@@ -553,7 +615,7 @@ fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
 
 #[test]
 fn a_checkpoint_waits_for_disk_its_growth_can_book_and_room_is_made_for_it() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,

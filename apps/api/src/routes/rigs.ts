@@ -1,23 +1,28 @@
-import { legacyVariableSetFields, VariableSetsRemovedError } from "../http/variable-sets-removed";
 import {
   CreateRigRequest,
+  type ListOrganizationRigsResponse,
   ProposeRigChangeRequest,
   RigDefinitionEditPayload,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
 import {
   beginRigChangeVerificationAttempt,
+  listOrganizationCompute,
   listRigs,
   RigChangeTransitionError,
+  updateOrganizationRigReach,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ZodType } from "zod";
 import {
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requirePermission,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -35,6 +40,13 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
+import { parseRequestJson } from "../http/request-body";
+import {
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+  requireOrganizationComputeLister,
+} from "../http/organization-compute-reach";
 import { errorMessage } from "@opengeni/contracts/values";
 
 async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
@@ -44,21 +56,6 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
     bodyRecord?.payload && typeof bodyRecord.payload === "object"
       ? (bodyRecord.payload as Record<string, unknown>)
       : null;
-  // RM-1: rig default Variable Sets were removed with Variable Sets.
-  const legacyFields = [
-    ...legacyVariableSetFields(bodyRecord),
-    ...legacyVariableSetFields(payloadRecord).map((field) => `payload.${field}`),
-  ];
-  if (legacyFields.length > 0) {
-    throw new VariableSetsRemovedError(legacyFields);
-  }
-  // An explicit [] still clears an old version's defaults; null means "unchanged".
-  if (bodyRecord && !Array.isArray(bodyRecord.defaultVariableSetIds)) {
-    delete bodyRecord.defaultVariableSetIds;
-  }
-  if (payloadRecord && !Array.isArray(payloadRecord.defaultVariableSetIds)) {
-    delete payloadRecord.defaultVariableSetIds;
-  }
   const imageOverrideUnsupported = Boolean(
     (bodyRecord && Object.hasOwn(bodyRecord, "image")) ||
     (payloadRecord && Object.hasOwn(payloadRecord, "image")),
@@ -99,11 +96,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await requireRigForApi(db, authorization.grant, rigId);
     if (
       rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
+      !authorizationHoldsOrganizationAdministration(authorization)
     ) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     return { authorization, grant: authorization.grant, rig };
   }
@@ -198,6 +193,20 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(await listRigs(db, grant));
   });
 
+  // Every organization sandbox environment, wherever it works: names and
+  // where each works, for the organization owners and admins who decide that
+  // (Organization settings > Shared). The list above holds only the ones that
+  // work here.
+  app.get("/v1/workspaces/:workspaceId/organization-rigs", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "rigs:use");
+    requireOrganizationComputeLister(authorization, "sandbox environment");
+    return c.json({
+      rigs: await listOrganizationCompute(db, authorization.grant, "rig"),
+      complete: true,
+    } satisfies ListOrganizationRigsResponse);
+  });
+
   app.post("/v1/workspaces/:workspaceId/rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
@@ -210,11 +219,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const allowOrganization =
       payload.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      authorizationHoldsOrganizationAdministration(authorization);
     if (payload.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const rig = await createRigForApi({ db }, grant, payload, {
       allowOrganization,
@@ -239,12 +246,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "rigs:manage");
     const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     const allowOrganization =
-      rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      rig.scope === "organization" && authorizationHoldsOrganizationAdministration(authorization);
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const payload = await parseRigRequest(
       c,
@@ -261,15 +265,33 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "rigs:manage");
     const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     const allowOrganization =
-      rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      rig.scope === "organization" && authorizationHoldsOrganizationAdministration(authorization);
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });
+  });
+
+  // Where an organization rig works: every shared workspace or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // made in always has it. The organization's owner or an admin decides this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attempt.
+  app.put("/v1/workspaces/:workspaceId/rigs/:rigId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    requireOrganizationCompute(rig.scope, "sandbox environment");
+    requireComputeReachCaller(c, grant, "sandbox environment");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const result = await updateOrganizationRigReach(db, rig.id, {
+      accountId: grant.accountId,
+      homeWorkspaceId: rig.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "sandbox environment"));
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {

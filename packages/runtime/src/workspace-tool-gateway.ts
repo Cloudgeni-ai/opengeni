@@ -4,6 +4,8 @@
  * RunState, sandbox, or inference API.
  */
 export {
+  // A connection that cannot serve an approved call; nothing reached the provider.
+  ConnectionApprovalPreflightError,
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,
@@ -13,10 +15,15 @@ export {
   // gateway must derive it exactly as model execution does.
   sessionMcpApprovalConnectionId,
 } from "./index";
+// A call that needs one of the account's values chosen; nothing was sent.
+export { isMcpAccountParameterChoiceError } from "./mcp-account-parameters";
 // Execution-time `{{secret:…}}` argument resolution for gateway tool calls;
 // the same resolver model execution applies after approval.
 export {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
+  type LiteralSecretScope,
   type SecretArgumentMode,
 } from "./secret-argument-resolution";

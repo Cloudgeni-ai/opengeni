@@ -2,7 +2,19 @@ import { expect, test } from "bun:test";
 import { connectionAccountIdentityLabel } from "../src/connection-account-label";
 
 test("uses the authenticated email across provider metadata shapes", () => {
-  for (const key of ["email", "providerEmail", "googleEmail", "gmailEmail"]) {
+  for (const key of [
+    "email",
+    "providerEmail",
+    "googleEmail",
+    "gmailEmail",
+    "googleDriveEmail",
+    "atlassianEmail",
+    "linearEmail",
+    "notionEmail",
+    "asanaEmail",
+    "stripeEmail",
+    "oidcEmail",
+  ]) {
     expect(
       connectionAccountIdentityLabel(
         { [key]: "user@example.test", displayName: "User" },
@@ -19,6 +31,15 @@ test("uses real workspace names without displaying provider IDs", () => {
       "Slack account",
     ),
   ).toBe("member · Community");
+  expect(
+    connectionAccountIdentityLabel(
+      { linearEmail: "user@example.test", linearUserId: "u-1", linearWorkspaceName: "Acme" },
+      "Linear account",
+    ),
+  ).toBe("user@example.test · Acme");
+  expect(
+    connectionAccountIdentityLabel({ oidcName: "User", oidcSubject: "sub-1" }, "Account"),
+  ).toBe("User");
   expect(
     connectionAccountIdentityLabel({ slackUserId: "U_ONE", slackTeamId: "T_ONE" }, "Slack account"),
   ).toBe("Slack account");

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
 import {
   organizationAccessPresetPermissions,
   type OrganizationWorkspaceScope,
@@ -55,6 +56,35 @@ function browser(cookie: string): Record<string, string> {
   return { cookie, origin, "sec-fetch-site": "same-origin", "content-type": "application/json" };
 }
 
+/** The phone app's own credential, from the native sign-in its person approved in a browser. */
+async function phoneCredential(app: ReturnType<typeof createApp>, cookie: string): Promise<string> {
+  const verifier = randomBytes(48).toString("base64url");
+  const authorize = await app.request("/v1/native-app/authorize", {
+    method: "POST",
+    headers: browser(cookie),
+    body: JSON.stringify({
+      redirectUri: "opengeni://auth/callback",
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      platform: "ios",
+      deviceName: "Maja's iPhone",
+    }),
+  });
+  expect(authorize.status).toBe(200);
+  const { redirectUrl } = (await authorize.json()) as { redirectUrl: string };
+  const token = await app.request("/v1/native-app/token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code: new URL(redirectUrl).searchParams.get("code"),
+      codeVerifier: verifier,
+      redirectUri: "opengeni://auth/callback",
+    }),
+  });
+  expect(token.status).toBe(200);
+  return ((await token.json()) as { accessToken: string }).accessToken;
+}
+
 describe("session admin access end to end", () => {
   test("allow, give, act fully as the person, refuse limited agents and other sessions, turn off", async () => {
     const app = createApp({
@@ -102,14 +132,18 @@ describe("session admin access end to end", () => {
     const organizationId = access.accountGrants[0]!.accountId;
     const workspaceId = access.workspaceGrants[0]!.workspaceId;
 
-    const session = async (createdBySubjectId: string, metadata: Record<string, unknown> = {}) => {
+    const session = async (
+      createdBySubjectId: string,
+      metadata: Record<string, unknown> = {},
+      inWorkspace = workspaceId,
+    ) => {
       const id = crypto.randomUUID();
-      await withWorkspaceSessionActivityRls(client.db, workspaceId, async (scoped) => {
+      await withWorkspaceSessionActivityRls(client.db, inWorkspace, async (scoped) => {
         await scoped.execute(sql`
           insert into sessions (id, account_id, workspace_id, initial_message, model,
             reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
             root_session_id, status, created_by_kind, created_by_subject_id, metadata)
-          values (${id}, ${organizationId}, ${workspaceId}, 'fixture', 'test-model', 'medium',
+          values (${id}, ${organizationId}, ${inWorkspace}, 'fixture', 'test-model', 'medium',
             'standard', 'none', ${id},
             jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), ${id}, 'idle',
             'subject', ${createdBySubjectId}, ${JSON.stringify(metadata)}::jsonb)`);
@@ -119,8 +153,8 @@ describe("session admin access end to end", () => {
     const own = await session(subjectId);
     const someoneElses = await session(`user:${crypto.randomUUID()}`);
     const setting = `/v1/organizations/${organizationId}/agent-admin-access`;
-    const sessionAccess = (id: string) =>
-      `/v1/workspaces/${workspaceId}/sessions/${id}/admin-access`;
+    const sessionAccess = (id: string, inWorkspace = workspaceId) =>
+      `/v1/workspaces/${inWorkspace}/sessions/${id}/admin-access`;
 
     // Off by default: nothing can be given.
     expect(await (await app.request(setting, { headers: { cookie } })).json()).toMatchObject({
@@ -158,6 +192,22 @@ describe("session admin access end to end", () => {
     expect(
       await (await app.request(sessionAccess(own), { headers: { cookie } })).json(),
     ).toMatchObject({ active: false, allowed: true, canGrant: true });
+
+    // The phone app gives it with its own credential: no browser origin to show.
+    const phone = { authorization: `Bearer ${await phoneCredential(app, cookie)}` };
+    const byPhone = await app.request(sessionAccess(own), {
+      method: "PUT",
+      headers: { ...phone, "content-type": "application/json" },
+      body: JSON.stringify({ durationHours: 1 }),
+    });
+    expect(byPhone.status).toBe(200);
+    expect(await byPhone.json()).toMatchObject({ active: true, grantedBy: { subjectId } });
+    expect(
+      (await app.request(sessionAccess(own), { method: "DELETE", headers: phone })).status,
+    ).toBe(200);
+    expect(
+      await (await app.request(sessionAccess(own), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: false });
 
     // An agent acting as the person with their full access gives it as them;
     // one with less can't, so it can never widen its own access.
@@ -400,8 +450,18 @@ describe("session admin access end to end", () => {
       }),
     ).toMatchObject({ status: 200, body: { audience: "only_me" } });
 
-    // A plain member of the workspace gives their own session their access;
-    // its agent then does what they can and is refused what they can't.
+    // A plain member of a shared workspace gives their own session their
+    // access; its agent then does what they can and is refused what they
+    // can't. (The owner's Personal workspace above can have no other member.)
+    const teamResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: browser(cookie),
+      body: JSON.stringify({ accountId: organizationId, name: "Team" }),
+    });
+    expect(teamResponse.status, await teamResponse.clone().text()).toBe(201);
+    const teamWorkspaceId = ((await teamResponse.json()) as { id: string }).id;
+    const ownInTeam = await session(subjectId, {}, teamWorkspaceId);
+    const teamAccess = (id: string) => sessionAccess(id, teamWorkspaceId);
     const memberEmail = `member-${crypto.randomUUID()}@example.test`;
     await app.request("/v1/auth/sign-up/email", {
       method: "POST",
@@ -432,25 +492,25 @@ describe("session admin access end to end", () => {
       values (${organizationId}, ${memberSubjectId}, 'member', 'active', ${memberPersonal})`;
     await shared.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
-      values (${organizationId}, ${workspaceId}, ${memberSubjectId}, ${memberEmail}, 'member',
+      values (${organizationId}, ${teamWorkspaceId}, ${memberSubjectId}, ${memberEmail}, 'member',
         ${shared.admin.json(["workspace:read", "sessions:create", "sessions:read", "sessions:control"])})`;
-    const membersOwn = await session(memberSubjectId);
+    const membersOwn = await session(memberSubjectId, {}, teamWorkspaceId);
     expect(
       await (
-        await app.request(sessionAccess(membersOwn), { headers: { cookie: memberCookie } })
+        await app.request(teamAccess(membersOwn), { headers: { cookie: memberCookie } })
       ).json(),
     ).toMatchObject({ active: false, allowed: true, canGrant: true });
     // Not on someone else's session.
     expect(
       (
-        await app.request(sessionAccess(own), {
+        await app.request(teamAccess(ownInTeam), {
           method: "PUT",
           headers: browser(memberCookie),
           body: "{}",
         })
       ).status,
     ).toBe(403);
-    const memberGranted = await app.request(sessionAccess(membersOwn), {
+    const memberGranted = await app.request(teamAccess(membersOwn), {
       method: "PUT",
       headers: browser(memberCookie),
       body: "{}",
@@ -463,7 +523,7 @@ describe("session admin access end to end", () => {
     });
     // The owner sees it, can end it, but can't give it on the member's behalf.
     expect(
-      await (await app.request(sessionAccess(membersOwn), { headers: { cookie } })).json(),
+      await (await app.request(teamAccess(membersOwn), { headers: { cookie } })).json(),
     ).toMatchObject({ active: true, canGrant: false, canRevoke: true });
     const asMember = async (
       id: string,
@@ -490,7 +550,10 @@ describe("session admin access end to end", () => {
       return JSON.parse((result.content[0] as { text: string }).text) as { status: number };
     };
     expect(
-      await asMember("getSessionAdminAccess", { workspaceId, sessionId: membersOwn }),
+      await asMember("getSessionAdminAccess", {
+        workspaceId: teamWorkspaceId,
+        sessionId: membersOwn,
+      }),
     ).toMatchObject({ status: 200 });
     expect(
       (
@@ -513,9 +576,9 @@ describe("session admin access end to end", () => {
     // Leaving the workspace ends it.
     await shared.admin`
       delete from workspace_memberships
-      where workspace_id = ${workspaceId} and subject_id = ${memberSubjectId}`;
+      where workspace_id = ${teamWorkspaceId} and subject_id = ${memberSubjectId}`;
     expect(
-      await (await app.request(sessionAccess(membersOwn), { headers: { cookie } })).json(),
+      await (await app.request(teamAccess(membersOwn), { headers: { cookie } })).json(),
     ).toMatchObject({ active: false });
 
     // Turning the organization setting off ends it.

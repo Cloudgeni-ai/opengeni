@@ -25,6 +25,7 @@ export const TURN_FAILURE_CLASSES = [
   "provider_quota",
   "rate_limited",
   "provider_error",
+  "model_history",
   "model_unavailable",
   "codex_account",
   "safety_refusal",
@@ -33,6 +34,7 @@ export const TURN_FAILURE_CLASSES = [
   "context_limit",
   "connectivity",
   "pre_start",
+  "machine_access",
   "other",
 ] as const;
 export type TurnFailureClass = (typeof TURN_FAILURE_CLASSES)[number];
@@ -41,9 +43,11 @@ export const TURN_FAILURE_ACTIONS = [
   "retry",
   "switch_model",
   "buy_credits",
+  "upgrade_plan",
   "connect_model",
   "new_session",
   "send_message",
+  "allow_machine",
   "left",
 ] as const;
 export type TurnFailureAction = (typeof TURN_FAILURE_ACTIONS)[number];
@@ -73,6 +77,7 @@ export function turnFailureClass(
   if (code.startsWith("context_") || code.includes("compaction")) return "context_limit";
   if (code === "upstream_connectivity_unavailable") return "connectivity";
   if (code === "pre_claim_failure") return "pre_start";
+  if (code === "machine_access_required") return "machine_access";
   return "other";
 }
 

@@ -41,6 +41,18 @@ delivery can be late or missed.
   so it is offered again; a session token that expired is refreshed once
   for the acquisition. After five failures in a row the session is given
   up and opened again.
+- **A job GitHub takes back still wants a runner.** When no runner takes
+  a job assigned to the set in time (its start failed for want of room,
+  say), GitHub takes the assignment back: the job is reported completed,
+  `canceled`, with no runner, and no longer counts as assigned. It stays
+  queued, but GitHub offers it again only once something changes, such
+  as a runner registering; an idle runner that was there already changes
+  nothing, and neither does a new session. So the pool owes each job
+  taken back a fresh runner, up to its maximum, on top of what it scales
+  to, and starts it as soon as there is room. Once GitHub offers the job
+  again it is assigned and scaled for as any, and the surplus idle runner
+  is removed. What is owed is held in memory only, so a restart in
+  between forgets it.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
   in its environment and its runner's name and id in its metadata, with
@@ -54,7 +66,20 @@ delivery can be late or missed.
   `docker/github-runner.Dockerfile`, released as
   `opengeni-compute-github-runner`. Its start command counts the runner as
   a running command (ADR 3), so a job that waits quietly is never put to
-  sleep, and runs Docker for the job. A runner takes one job and ends.
+  sleep, and runs Docker for the job. It starts the runner only once
+  Docker answers, and the image's own check (`COMPUTE_RUNNER_READY`, a
+  shell command) succeeds if it sets one: GitHub gives a job only to a
+  runner that has connected, so no job lands where Docker is not up yet.
+  It waits as long as that takes, within the sandbox's timeout, and
+  starts a dockerd that exits again. A runner takes one job and ends.
+  A runner's sandbox is never archived or checkpointed, so it is its own
+  only copy for as long as it runs: its host's guard never freezes it
+  when the host loses touch with the control service
+  ([18](0018-the-control-service-leases-and-fences.md)), and a job
+  outlasts such a blip, as long as the host's agent stays up through it
+  (one that restarts meanwhile leaves the mark orphaned until its
+  recovery marks the VM again, and an orphaned VM found running past the
+  deadline is frozen).
 - **A sandbox ends with its job**: at once when GitHub reports the job
   completed, and at the latest when a reconciliation finds its runner gone
   from GitHub (ephemeral runners are removed when their job ends). An
@@ -87,6 +112,25 @@ delivery can be late or missed.
   failed refresh leaves the last good template in use. The clone's token
   is given to that one command, never written to the disk the template
   keeps.
+  A refresh outlives restarts of the control service, which come with
+  every release and cut every stream through it while sandboxes run on.
+  Each command runs under a tag and records in the guest's `/dev/shm`
+  (memory, never on the template's disk) that it started and then its
+  exit code. A cut stream is followed again by the tag, a command that
+  ended meanwhile ends as its record says, and only one that never
+  started is started again. A save cut short is found by its name or
+  asked again (a name is made once), and a create cut short is asked
+  again, any builder it made after all ended. So a restart costs the
+  refresh nothing; only what its commands did, or compute staying away
+  past the time they were given, fails it.
+  The builder takes one of the pool's places, so the pool and its builder
+  never hold more sandboxes than `--max` and a host sized for the pool is
+  never asked for one more. It takes a place only while GitHub has
+  assigned the pool fewer jobs than `--max`, and idle runners make way for
+  it. While it holds the place the pool keeps at most one runner fewer and
+  tells GitHub it takes one job fewer, and when the builder gives the
+  place back the pool scales at once. A job beyond the rest waits for the
+  refresh to end.
   `actions/checkout` cleans untracked files by default, which would delete
   the prepared dependencies: warm workflows check out with `clean: false`.
 - **A build cache in object storage.** The service serves Turborepo's
@@ -114,5 +158,8 @@ delivery can be late or missed.
   their own, with its own cache or none.
 - Warm templates keep the guest version of the sandbox they were prepared
   in (ADR 22); refreshing from a base of a newer release moves them on.
+- A refresh costs the pool one place while it runs: on a pool kept full of
+  jobs it waits for a quieter moment, and on a busy one a job may wait for
+  it, at most once per `--warm-every`.
 - Only GitHub Actions is served. Other CI systems with just-in-time
   runners (GitLab, Buildkite) would be further services of the same shape.

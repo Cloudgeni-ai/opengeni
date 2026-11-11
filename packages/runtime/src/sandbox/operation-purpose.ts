@@ -1,4 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
+import { isDefinitePathNotFoundError } from "./channel-a";
 
 /**
  * Platform-internal reasons for sandbox provider operations. Setup work runs
@@ -13,16 +16,19 @@ export const SANDBOX_OPERATION_PURPOSES = [
   "hook.artifact-runtime-doctor",
   "hook.azure-cli-login",
   "hook.codemode-client",
+  "hook.shell-tools",
   "hook.codemode-token",
   "hook.codemode-token-renewal-registration",
   "hook.git-credential-renewal-registration",
   "hook.repository-clone",
+  "hook.repository-removal",
   "hook.rig-setup",
   "hook.other",
   "run_credentials",
   "file_resources",
   "lazy_manifest",
   "repository_skills",
+  "box_repair",
 ] as const;
 
 export type SandboxOperationPurpose = (typeof SANDBOX_OPERATION_PURPOSES)[number];
@@ -57,7 +63,10 @@ export type SandboxSetupOperationObservation = {
   backend: string;
   op: string;
   purpose: SandboxOperationPurpose;
-  outcome: "completed" | "failed";
+  /** `not_found` is a read-only probe's definite "no such path" answer, such as
+   * repository skill discovery listing an absent `.agents/skills`. The
+   * provider answered; the caller expects and handles the miss. */
+  outcome: "completed" | "not_found" | "failed";
   durationSeconds: number;
 };
 
@@ -70,6 +79,52 @@ const INSTRUMENTED_OPERATIONS = [
   "pathExists",
   "materializeEntry",
 ] as const;
+
+const READ_ONLY_PATH_PROBES = new Set<string>(["readFile", "listDir", "pathExists", "viewImage"]);
+
+/** A definite path miss is the provider's authoritative answer to a read-only
+ * probe (repository skill discovery lists absent `.agents/skills` on almost
+ * every turn), not a failed provider operation. Writes never qualify. Only
+ * typed or errno-coded misses count, the same set skill discovery treats as
+ * absent: generic 404 statuses or "not found" prose (for example a vanished
+ * sandbox) never do. Shared by this setup metric and the routed per-operation
+ * metric. The setup metric's `purpose` label tells callers apart: a miss is
+ * expected for skill discovery, but may matter for another purpose. */
+export function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
+  return (
+    READ_ONLY_PATH_PROBES.has(op) &&
+    (isDefinitePathNotFoundError(error) ||
+      error instanceof SandboxWorkspaceReadNotFoundError ||
+      error instanceof SandboxFilesystemNotFoundError)
+  );
+}
+
+const CALLER_PATH_OPERATIONS = new Set<string>([
+  ...READ_ONLY_PATH_PROBES,
+  "writeFile",
+  "editor.createFile",
+  "editor.updateFile",
+  "editor.deleteFile",
+]);
+
+/** The SDK's typed refusals of a path the caller supplied: it escapes the
+ * workspace root or the configured path grants (`invalid_manifest_path`), or
+ * the box's resolver refused it (`path_resolution_error`). Matched by code so
+ * a second copy of the SDK error classes still classifies. */
+const CALLER_PATH_REJECTION_CODES = new Set<string>([
+  "invalid_manifest_path",
+  "path_resolution_error",
+]);
+
+/** A path the caller (normally the model) asked for was refused before any
+ * provider work: the request was invalid, the provider did not fail. Only
+ * caller-addressed file operations qualify; a platform operation such as
+ * manifest materialization with a bad path is a real failure. */
+export function isCallerPathRejection(op: string, error: unknown): boolean {
+  if (!CALLER_PATH_OPERATIONS.has(op) || !error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && CALLER_PATH_REJECTION_CODES.has(code);
+}
 
 const instrumented = new WeakSet<object>();
 
@@ -102,6 +157,13 @@ export function instrumentSandboxSessionOperations<T>(
           const result = await bound(...args);
           outcome = "completed";
           return result;
+        } catch (error) {
+          try {
+            if (isReadOnlyPathProbeMiss(op, error)) outcome = "not_found";
+          } catch {
+            // Classification is telemetry only.
+          }
+          throw error;
         } finally {
           try {
             observe({

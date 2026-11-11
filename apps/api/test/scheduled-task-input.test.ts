@@ -35,7 +35,6 @@ describe("conversational scheduling input", () => {
     expect(result.runMode).toBe("existing_session");
     expect(result.agentConfig.model).toBeUndefined();
     expect(result.agentConfig.machineTarget).toBeUndefined();
-    expect(result.variableSetId).toBeUndefined();
   });
 
   test("an explicit destination overrides only the destination, never the calling authority", () => {

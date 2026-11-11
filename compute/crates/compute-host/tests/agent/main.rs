@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
-    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, LastWords, MemoryProfile,
+    MemorySource, MemoryStats, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -32,10 +32,13 @@ mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
+mod disk_relief;
 mod fleet;
 mod images;
 mod link;
+mod memory;
 mod observe;
+mod only_copy;
 mod pool;
 mod ready;
 mod rejoin;
@@ -43,6 +46,7 @@ mod requests;
 #[path = "../support/required.rs"]
 mod required;
 mod restart;
+mod restart_in_place;
 mod roots;
 mod sleep;
 mod stopped;
@@ -151,6 +155,10 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// VMs held frozen, by name, as the guard leaves them once the lease
+    /// has run out: adopting one fails as when its VMM does not answer,
+    /// and the engine says it is held frozen while its process lives.
+    held_frozen: Mutex<HashSet<String>>,
     /// How long taking back each VM a previous agent left running takes,
     /// as on a host whose VMMs answer slowly.
     adopt_delay: Mutex<Duration>,
@@ -175,12 +183,22 @@ struct World {
     guarantees: Mutex<Vec<(String, u32, u16)>>,
     /// While set, no VM can be given new guarantees.
     refuse_guarantees: AtomicBool,
+    /// What the VMs may still take together, as an engine that limits
+    /// what they hold together reports it; `None` for no such limit.
+    memory_room: Mutex<Option<u64>>,
     /// Each VM started: its name and the memory limit it started under.
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
     /// Each VM started: its name and the processor weight it started at.
     started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each VM's mark as its sandbox's only copy, by name, as last set
+    /// (see `Engine::set_only_copy`). A VM starts unmarked, and one that
+    /// ends loses its mark unless `groups_left` is set.
+    only_copies: Mutex<HashMap<String, bool>>,
+    /// While set, a VM that ends leaves its group behind with its mark, as
+    /// a group whose removal gives up while the kernel still holds it.
+    groups_left: AtomicBool,
     /// Each time a VM was told its drives grew: which VM, how long its
     /// writable drives' files were then, and whether it was paused.
     drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
@@ -207,6 +225,24 @@ struct World {
     /// While set, no guest takes a connection, as when the guard froze
     /// every VM on the host.
     frozen: AtomicBool,
+    /// What each VM holds of host memory as the fake reports it; 100 MiB
+    /// unless set.
+    resident: Mutex<Option<u64>>,
+    /// How each running VM pages as the fake reports it; nothing read
+    /// unless set.
+    paging: Mutex<Option<MemoryStats>>,
+    /// Whether the kernel may compress running VMs.
+    compresses_running: AtomicBool,
+    /// Memory bounds asked of VMs: which VM, its low and its high.
+    bounds: Mutex<Vec<(String, u64, Option<u64>)>>,
+    /// VM processes the kernel's out-of-memory killer ended, as the engine
+    /// reports it; `None` for an engine that cannot tell.
+    oom_kills: Mutex<Option<u64>>,
+    /// What a guest answers a shrink with; `None` for a guest of a release
+    /// before shrinking, which answers it as any line it does not know.
+    shrink_answer: Mutex<Option<String>>,
+    /// Every shrink a guest was asked, as the line it read.
+    shrinks: Mutex<Vec<String>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -237,6 +273,14 @@ struct Process {
 impl World {
     fn violation(&self, text: String) {
         self.violations.lock().unwrap().push(text);
+    }
+
+    /// VM `name` ended: its group goes with its mark, unless groups are
+    /// left behind.
+    fn vm_ended(&self, name: &str) {
+        if !self.groups_left.load(Ordering::SeqCst) {
+            self.only_copies.lock().unwrap().remove(name);
+        }
     }
 
     /// Simulates a VMM crash: its guest stops answering at once, as a real
@@ -324,7 +368,9 @@ impl Fake {
     /// Takes back the VM a previous agent left running for `spec`, if
     /// any.
     fn adopt_now(&self, spec: &VmSpec) -> Result<Option<(FakeVm, Found)>, EngineError> {
-        if self.world.unadoptable.lock().unwrap().contains(&spec.name) {
+        if self.world.unadoptable.lock().unwrap().contains(&spec.name)
+            || self.world.held_frozen.lock().unwrap().contains(&spec.name)
+        {
             return Err(EngineError::new(
                 ErrorKind::Transient,
                 "adopt",
@@ -370,6 +416,13 @@ impl Fake {
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
         }
+        // Into the group an earlier VM left, if any: the engine clears its
+        // mark first.
+        self.world
+            .only_copies
+            .lock()
+            .unwrap()
+            .insert(name.clone(), false);
         if self.world.tearing_down.lock().unwrap().contains(&name) {
             self.world.violation(format!(
                 "a VM for {name} started during an old one's teardown"
@@ -406,6 +459,7 @@ impl Fake {
             abort.abort();
             let _ = std::fs::remove_file(&socket);
             world.live.lock().unwrap().remove(&dead);
+            world.vm_ended(&dead);
         });
         let process = Process {
             serial: self.world.next_vm.fetch_add(1, Ordering::Relaxed),
@@ -664,6 +718,15 @@ impl GuestState {
                 "ok".into()
             }
             ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
+            // As a guest asked to free memory for the host answers, or one
+            // older than that, which does not know the line.
+            ("shrink", _) => {
+                world.shrinks.lock().unwrap().push(line.to_owned());
+                match world.shrink_answer.lock().unwrap().clone() {
+                    Some(answer) => answer,
+                    None => "unknown shrink".into(),
+                }
+            }
             // Counted, and held while the world says, as it is asked.
             ("sync", _) => "synced".into(),
             (other, _) => format!("unknown {other}"),
@@ -939,6 +1002,7 @@ impl Engine for Fake {
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
+        self.world.vm_ended(&vm.name);
         self.world.tearing_down.lock().unwrap().remove(&vm.name);
         Ok(())
     }
@@ -949,8 +1013,25 @@ impl Engine for Fake {
     ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
         let delay = *self.world.adopt_delay.lock().unwrap();
         let found = self.adopt_now(spec);
+        // A VMM held frozen answers if it is thawed within the time it is
+        // given to, as the guard thaws it a step after the lease runs.
+        let thawing = self
+            .world
+            .held_frozen
+            .lock()
+            .unwrap()
+            .contains(&spec.name)
+            .then(|| (self.clone(), spec.clone()));
         async move {
             sleep(delay).await;
+            if let Some((fake, spec)) = thawing {
+                for _ in 0..100 {
+                    if !fake.world.held_frozen.lock().unwrap().contains(&spec.name) {
+                        return fake.adopt_now(&spec);
+                    }
+                    sleep(Duration::from_millis(2)).await;
+                }
+            }
             found
         }
     }
@@ -999,7 +1080,38 @@ impl Engine for Fake {
     }
 
     fn resident_bytes(&self, _: &FakeVm) -> Result<u64, EngineError> {
-        Ok(100 << 20)
+        Ok(self.world.resident.lock().unwrap().unwrap_or(100 << 20))
+    }
+
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.memory_room.lock().unwrap())
+    }
+
+    fn memory_stats(&self, _: &FakeVm) -> Result<MemoryStats, EngineError> {
+        self.world.paging.lock().unwrap().ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::Transient,
+                "memory_stats",
+                "no paging set for the fake",
+            )
+        })
+    }
+
+    fn compresses_running(&self) -> bool {
+        self.world.compresses_running.load(Ordering::SeqCst)
+    }
+
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.oom_kills.lock().unwrap())
+    }
+
+    fn bound_memory(&self, vm: &FakeVm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        self.world
+            .bounds
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), low, high));
+        Ok(())
     }
 
     fn set_guarantees(
@@ -1029,6 +1141,26 @@ impl Engine for Fake {
             .lock()
             .unwrap()
             .push((vm.name.clone(), bytes));
+        Ok(())
+    }
+
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        let alive = self
+            .world
+            .vms
+            .lock()
+            .unwrap()
+            .get(&spec.name)
+            .is_some_and(|process| !*process.exit.borrow());
+        Ok(alive && self.world.held_frozen.lock().unwrap().contains(&spec.name))
+    }
+
+    fn set_only_copy(&self, vm: &FakeVm, only: bool) -> Result<(), EngineError> {
+        self.world
+            .only_copies
+            .lock()
+            .unwrap()
+            .insert(vm.name.clone(), only);
         Ok(())
     }
 
@@ -1069,6 +1201,16 @@ impl Engine for Fake {
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         let work = Arc::clone(&vm.work);
         async move { Ok(work.lock().unwrap().said_halted) }
+    }
+
+    /// What a real VM's logs would say, naming the VM, read once it is
+    /// lost.
+    fn last_words(&self, vm: &FakeVm) -> impl Future<Output = LastWords> + Send + 'static {
+        std::future::ready(LastWords {
+            guest: format!("{}: Kernel panic - not syncing", vm.name),
+            vmm: "Vmm is stopping.".into(),
+            pager: String::new(),
+        })
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
@@ -1125,6 +1267,9 @@ struct Lab {
     handle: Handle,
 }
 
+// A lab takes its host policy by value as tests build it, once per test:
+// copying it costs nothing worth the references at every call.
+#[allow(clippy::large_types_passed_by_value)]
 impl Lab {
     /// Unix socket paths are short, so labs live directly under /tmp. The
     /// root is removed when the test process exits.
@@ -1154,8 +1299,10 @@ impl Lab {
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
             disk_reading: None,
             stream_idle: HostConfig::STREAM_IDLE,
+            hand_off_unwakeable: HostConfig::HAND_OFF_UNWAKEABLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
             guest_checks: compute_host::GuestChecks::DEFAULT,
@@ -1176,6 +1323,7 @@ impl Lab {
             guard_freezes: None,
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
+            recovery_retry: Duration::from_millis(100),
             agent_link: None,
             processor_share: None,
             prepare: None,

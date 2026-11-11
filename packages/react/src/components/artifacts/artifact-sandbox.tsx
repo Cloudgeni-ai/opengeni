@@ -6,10 +6,18 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
+import { useWindowLayerOpen } from "../../lib/window-layer";
 import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
@@ -36,9 +44,19 @@ export type ArtifactSandboxProps = {
   maxAutoHeight?: number | undefined;
   theme?: "light" | "dark" | undefined;
   headerControls?: ReactNode | undefined;
+  /**
+   * The toolbar's first control, for example the host's Back to the page the
+   * Site was opened from. Full screen shows its own Back there instead.
+   */
+  toolbarStart?: ReactNode | undefined;
   title: string;
   /** Hide the visible title/icon while retaining the accessible iframe title. */
   showTitle?: boolean | undefined;
+  /**
+   * Wraps the visible title, so a host can attach its own menu to it (the
+   * Site view's Copy title). Returns the title itself when absent.
+   */
+  renderTitle?: ((title: ReactElement) => ReactNode) | undefined;
   showLiveStatus?: boolean | undefined;
   /**
    * Replaces the "Live" indicator, for example with the host's link to the
@@ -58,6 +76,15 @@ export type ArtifactSandboxProps = {
   toolBridge?: PublishedHtmlArtifactToolBridge | undefined;
   /** Who is viewing, answered to the Site's `site.viewer` over the bridge. */
   viewer?: SiteViewer | undefined;
+  /**
+   * The Site's own address (`/admin?tab=2`), answered to `site.location`.
+   * Omit it to let the frame keep the address itself (starting at `/`, kept
+   * across reloads); pass it with `onSiteLocationChange` to keep it in the
+   * host, for example in its URL.
+   */
+  siteLocation?: string | undefined;
+  /** The Site moved itself with `site.navigate`. */
+  onSiteLocationChange?: ((href: string, options: { replace: boolean }) => void) | undefined;
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
@@ -91,7 +118,21 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
   const [ownFocused, setOwnFocused] = useState(false);
+  const [ownSiteLocation, setOwnSiteLocation] = useState("/");
+  const siteLocation = props.siteLocation ?? ownSiteLocation;
+  const onSiteLocationChangeRef = useRef(props.onSiteLocationChange);
+  onSiteLocationChangeRef.current = props.onSiteLocationChange;
+  const ownsSiteLocation = props.siteLocation === undefined;
+  const onSiteLocationChange = useCallback(
+    (href: string, options: { replace: boolean }) => {
+      if (ownsSiteLocation) setOwnSiteLocation(href);
+      onSiteLocationChangeRef.current?.(href, options);
+    },
+    [ownsSiteLocation],
+  );
   const focused = props.fullScreen ?? ownFocused;
+  // Full screen, the Site fills the window's content.
+  useWindowLayerOpen(focused);
   const setFocused = (next: boolean) => {
     if (props.fullScreen === undefined) setOwnFocused(next);
     props.onFullScreenChange?.(next);
@@ -131,6 +172,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       open
       aria-label={props.title}
       data-artifact-fullscreen={focused || undefined}
+      data-window-layer={focused || undefined}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
@@ -153,6 +195,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         )}
       >
         <div className="flex min-w-0 items-center gap-2.5">
+          {!focused && props.toolbarStart ? props.toolbarStart : null}
           {focused ? (
             <ArtifactButton
               variant="ghost"
@@ -169,7 +212,20 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          {props.showTitle !== false && (
+          {props.showTitle === false ? null : props.renderTitle ? (
+            // Its menu opens in front of full screen, as the controls' do; its
+            // words leave a full-screen toolbar's drag region so they can be
+            // right-clicked.
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.renderTitle(
+                <span className="truncate text-xs font-semibold text-fg [-webkit-app-region:no-drag] [app-region:no-drag]">
+                  {props.title}
+                </span>,
+              )}
+            </PortalContainerProvider>
+          ) : (
             <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
           )}
           {props.headerControls ? (
@@ -260,6 +316,8 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
         {...(props.viewer ? { viewer: props.viewer } : {})}
+        location={siteLocation}
+        onLocationChange={onSiteLocationChange}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",

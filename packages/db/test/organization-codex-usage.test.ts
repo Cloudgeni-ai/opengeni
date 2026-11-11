@@ -5,12 +5,11 @@ import { traceFetch } from "@opengeni/observability";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import type { Database } from "../src/database";
-import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
+import { encryptEnvironmentValue } from "../src/environment-crypto";
 import {
   readOrganizationCodexUsage,
   type OrganizationCodexUsageJoinedFetch,
 } from "../src/organization-codex-usage";
-import * as compatibility from "../src/subscription-core-codex-compat";
 import * as repository from "../src/subscription-core-repository";
 
 function joined<T extends CodexFetch>(
@@ -36,7 +35,6 @@ function coreFixture(reader: typeof readOrganizationCodexUsage = readOrganizatio
   const organizationId = crypto.randomUUID();
   const credentialId = crypto.randomUUID();
   let disconnected = false;
-  let maintenance = false;
   let locked = false;
   let depth = 0;
   const queries: string[] = [];
@@ -82,16 +80,10 @@ function coreFixture(reader: typeof readOrganizationCodexUsage = readOrganizatio
       throw new Error("Unexpected fixture query");
     },
   } as unknown as Database;
-  const disposition = spyOn(compatibility, "readCodexCutoverDisposition").mockImplementation(
-    async () => (maintenance ? "maintenance" : "core"),
-  );
   const canonical = spyOn(repository, "resolveSubscriptionConnectionId").mockResolvedValue(
     credentialId,
   );
-  restores.push(
-    () => disposition.mockRestore(),
-    () => canonical.mockRestore(),
-  );
+  restores.push(() => canonical.mockRestore());
   const withAdministrator = async <T>(target: Database, use: (tx: Database) => Promise<T>) => {
     depth += 1;
     try {
@@ -116,7 +108,7 @@ function coreFixture(reader: typeof readOrganizationCodexUsage = readOrganizatio
     canonical,
     withAdministrator,
     settings: { environmentsEncryptionKey: key.toString("base64") } as Settings,
-    input: { organizationId, credentialId, mode: "core" as const },
+    input: { organizationId, credentialId },
     isLocked: () => locked,
     disconnect: () => {
       disconnected = true;
@@ -132,14 +124,11 @@ function coreFixture(reader: typeof readOrganizationCodexUsage = readOrganizatio
         }),
       );
     },
-    maintenance: () => {
-      maintenance = true;
-    },
     read: (fetch: CodexFetch, options: { requestTimeoutMs?: number; signal?: AbortSignal } = {}) =>
       reader(
         db,
         { environmentsEncryptionKey: key.toString("base64") } as Settings,
-        { organizationId, credentialId, mode: "core", ...options },
+        { organizationId, credentialId, ...options },
         withAdministrator,
         fetch,
         refresh,
@@ -401,14 +390,6 @@ describe("organization core usage bounded request lock", () => {
     }
   });
 
-  test("maintenance after lock acquisition is rechecked before provider dispatch", async () => {
-    const f = coreFixture();
-    f.hooks.onLock = f.maintenance;
-    const fetch = joined(mock(async () => new Response("{}")));
-    expect((await f.read(fetch)).status).toBe("error");
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
   test("a 401 followed by disconnect cannot refresh or send another usage request", async () => {
     const f = coreFixture();
     f.hooks.onUnlock = f.disconnect;
@@ -457,89 +438,4 @@ describe("organization core usage bounded request lock", () => {
     expect(logs).not.toHaveBeenCalled();
     expect(f.queries).toEqual([]);
   });
-});
-
-test("a concurrently replaced bearer cannot dispatch after its refresh enters maintenance", async () => {
-  const key = Buffer.alloc(32, 47);
-  const organizationId = crypto.randomUUID();
-  const credentialId = crypto.randomUUID();
-  let maintenance = false;
-  let reads = 0;
-  const row = {
-    id: credentialId,
-    version: 1,
-    status: "active",
-    last_error: null,
-    plan_type: "pro",
-    provider_account_id: "synthetic-provider",
-    is_fedramp: false,
-    expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    last_refresh_at: null,
-    credential_encrypted: encryptEnvironmentValue(
-      key,
-      JSON.stringify({
-        access_token: "synthetic-access",
-        refresh_token: "synthetic-refresh",
-        id_token: "synthetic-id",
-      }),
-    ),
-  };
-  const dialect = new PgDialect();
-  const db = {
-    execute: async (statement: SQL) => {
-      const query = dialect.sqlToQuery(statement);
-      if (/select id,/.test(query.sql)) {
-        reads += 1;
-        if (reads === 2) {
-          row.version = 2;
-          row.expires_at = new Date(0).toISOString();
-        }
-        // The other supported database-driver result shape is deliberate.
-        return { rows: [{ ...row }] };
-      }
-      if (/update .* set credential_encrypted/.test(query.sql.trim())) {
-        row.credential_encrypted = query.params.find(
-          (value) => typeof value === "string" && value.startsWith("v2:"),
-        ) as string;
-        row.version += 1;
-        return { rows: [{ id: credentialId }] };
-      }
-      if (/set local|select pg_advisory_xact_lock/.test(query.sql)) return { rows: [] };
-      throw new Error("Unexpected database operation");
-    },
-  } as unknown as Database;
-  const disposition = spyOn(compatibility, "readCodexCutoverDisposition").mockImplementation(
-    async () => (maintenance ? "maintenance" : "core"),
-  );
-  const alias = spyOn(repository, "resolveSubscriptionConnectionId").mockResolvedValue(
-    credentialId,
-  );
-  const provider = joined(mock(async () => new Response("{}")));
-  const refresh = mock(async () => {
-    maintenance = true;
-    return {
-      accessToken: "rotated-access",
-      refreshToken: "rotated-refresh",
-      idToken: "synthetic-id",
-    };
-  });
-  try {
-    const result = await readOrganizationCodexUsage(
-      db,
-      { environmentsEncryptionKey: key.toString("base64") } as Settings,
-      { organizationId, credentialId, mode: "core" },
-      async (target, use) => use(target),
-      provider,
-      refresh,
-    );
-    expect(refresh).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("error");
-    expect(provider).not.toHaveBeenCalled();
-    expect(JSON.parse(decryptEnvironmentValue(key, row.credential_encrypted)).refresh_token).toBe(
-      "rotated-refresh",
-    );
-  } finally {
-    disposition.mockRestore();
-    alias.mockRestore();
-  }
 });

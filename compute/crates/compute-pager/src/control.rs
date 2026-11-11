@@ -64,6 +64,31 @@ pub enum ToPager {
     Filled { ranges: Vec<(u64, u64)> },
 }
 
+/// What a pager that finished leaves in its done file, beside its control
+/// socket: the launch it served and where the VMM said the guest's memory
+/// is. Written only once every page is in place and the memory has no
+/// fault handler any more, so from then on a page of these regions that
+/// the kernel holds neither in memory nor in swap reads as zeros. A pager
+/// older than this type leaves the file empty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finished {
+    /// The launch, as the host named it.
+    pub tag: String,
+    /// The regions of guest memory, as the VMM's handshake gave them.
+    pub regions: Vec<Region>,
+}
+
+/// One region of guest memory in the VMM's address space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Region {
+    /// Its first address in the VMM.
+    pub address: u64,
+    /// Its length in bytes.
+    pub size: u64,
+    /// Where its bytes start in the memory image.
+    pub offset: u64,
+}
+
 /// Parses one line, ignoring surrounding whitespace.
 ///
 /// # Errors

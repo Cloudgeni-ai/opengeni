@@ -185,8 +185,13 @@ const {
 } = await import("../src/workspace-tool-gateway");
 const { createWorkspaceToolGatewayCatalogAttestations } =
   await import("../src/workspace-tool-gateway-attestations");
-const { invokeWorkspaceToolTarget, resolveWorkspaceToolTarget, resolveWorkspaceToolManifest } =
-  await import("../src/workspace-tool-target");
+const {
+  approveWorkspaceToolTarget,
+  describeWorkspaceSiteToolConsent,
+  invokeWorkspaceToolTarget,
+  resolveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
+} = await import("../src/workspace-tool-target");
 import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
@@ -212,8 +217,38 @@ function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
     prepare: async (deps, authorization, options = {}) =>
       await prepareWorkspaceToolGateway(deps, authorization, options),
     begin: async () => true,
+    // The pinned active Site version (the fixture DB is inert): it declares
+    // the exact account routes, as Sites authored before per-viewer routing do.
+    readSiteVersion: siteVersion(fixtureConnectionIds.map((id) => grafanaRoute(id))),
+    // "Always allow for this Site" allowances: none unless a test adds them.
+    hasAllowance: async () => false,
+    listAllowances: async () => [],
+    recordAllowance: async () => undefined,
     ...extra,
   };
+}
+
+const fixtureConnectionIds = [
+  "55555555-5555-4555-8555-555555555555",
+  "66666666-6666-4666-8666-666666666666",
+  "77777777-7777-4777-8777-777777777777",
+] as const;
+function grafanaRoute(connectionId: string) {
+  return {
+    serverId: core.mcpAccountRouteId("grafana", connectionId),
+    toolName: "query_prometheus",
+  };
+}
+type SiteVersionReader = NonNullable<TargetGatewayOptions["readSiteVersion"]>;
+/** An active Site version declaring exactly `requestedTools`. */
+function siteVersion(
+  requestedTools: readonly { serverId: string; toolName: string }[],
+): SiteVersionReader {
+  return async (_db, _grant, _artifactId, id) =>
+    ({
+      status: "active",
+      version: { id, requestedTools: [...requestedTools] },
+    }) as Awaited<ReturnType<SiteVersionReader>>;
 }
 
 const accountId = "11111111-1111-4111-8111-111111111111";
@@ -1536,3 +1571,570 @@ describe("delayed-connector setup benchmark", () => {
     }
   }, 120_000);
 });
+
+// Host-native consent for Site tool calls: a Site call that needs approval is
+// confirmed by its viewer in the Opengeni frame, runs on the viewer's own
+// account only, and "Always allow for this Site" is this person's consent for
+// this Site, tool and connection.
+describe("Site tool consent", () => {
+  const site = { siteArtifactId: artifactId, siteVersionId: versionId };
+  const canonical = { serverId: "grafana", toolName: "query_prometheus" };
+  type Allowance = Parameters<NonNullable<TargetGatewayOptions["recordAllowance"]>>[1];
+  function allowances(initial: Allowance[] = []) {
+    const rows = [...initial];
+    const matches = (row: Allowance, key: Omit<Allowance, "accountId">) =>
+      row.workspaceId === key.workspaceId &&
+      row.subjectId === key.subjectId &&
+      row.siteId === key.siteId &&
+      row.serverId === key.serverId &&
+      row.toolName === key.toolName &&
+      (row.connectionId ?? null) === (key.connectionId ?? null);
+    return {
+      rows,
+      options: {
+        hasAllowance: async (_db, key) => rows.some((row) => matches(row, key)),
+        listAllowances: async (_db, key) =>
+          rows
+            .filter(
+              (row) =>
+                row.workspaceId === key.workspaceId &&
+                row.subjectId === key.subjectId &&
+                row.siteId === key.siteId,
+            )
+            .map(({ siteId, serverId, toolName, connectionId }) => ({
+              siteId,
+              serverId,
+              toolName,
+              connectionId,
+              createdAt: "2026-10-26T00:00:00Z",
+            })),
+        recordAllowance: async (_db, key) => {
+          rows.push(key);
+        },
+      } satisfies TargetGatewayOptions,
+    };
+  }
+  const allowanceFor = (connectionId: string, subject = subjectId): Allowance => ({
+    accountId,
+    workspaceId,
+    subjectId: subject,
+    siteId: artifactId,
+    serverId: "grafana",
+    toolName: "query_prometheus",
+    connectionId,
+  });
+  const invoke = (
+    f: ReturnType<typeof createFixture>,
+    identity: { serverId: string; toolName: string },
+    options: TargetGatewayOptions = {},
+    extra: { approvalToken?: string; authorization?: AccessGrantAuthorization } = {},
+  ) =>
+    invokeWorkspaceToolTarget(
+      f.deps,
+      extra.authorization ?? targetAuthorization(),
+      {
+        ...site,
+        target: { identity },
+        operationId: crypto.randomUUID(),
+        arguments: {},
+        ...(extra.approvalToken ? { approvalToken: extra.approvalToken } : {}),
+      },
+      targetOptions(options),
+    );
+  const usedConnections = (f: ReturnType<typeof createFixture>) => [
+    ...new Set(f.state.resolved.map((input) => input.connectionRef.connectionId)),
+  ];
+  const ownOnly = (f: ReturnType<typeof createFixture>) => {
+    // The viewer's only account is their personal one.
+    f.state.connections = [f.personal, f.foreign];
+  };
+
+  test("a declared canonical tool runs on the viewer's own account, never another member's", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      const outcome = await invoke(f, canonical, {
+        readSiteVersion: siteVersion([canonical]),
+      });
+      expect(outcome.result.isError).not.toBe(true);
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.personal));
+      expect(usedConnections(f)).toEqual([f.personal.id]);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("another member's declared account route maps to the viewer's own account through the canonical declaration", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      const contexts: unknown[] = [];
+      const outcome = await invoke(f, f.identity(f.foreign), {
+        readSiteVersion: siteVersion([f.identity(f.foreign), canonical]),
+        authorizeSite: async (_db, _grant, context) => {
+          contexts.push(context);
+        },
+      });
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.personal));
+      expect(usedConnections(f)).toEqual([f.personal.id]);
+      // Authorized by the declaration it was routed from.
+      expect(contexts).toContainEqual({
+        ...site,
+        identity: f.identity(f.personal),
+        declaredIdentity: canonical,
+      });
+      // Without a canonical declaration another member's route stays theirs:
+      // the same non-enumerating answer as an unavailable tool.
+      f.state.resolved.length = 0;
+      await expectHttpStatus(
+        invoke(f, f.identity(f.foreign), {
+          readSiteVersion: siteVersion([f.identity(f.foreign)]),
+        }),
+        404,
+      );
+      expect(f.state.resolved).toHaveLength(0);
+      expect(f.grafana.calls).toHaveLength(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a viewer without an account is sent to connect; one with several chooses", async () => {
+    const f = createFixture();
+    try {
+      // No account at all (only other members' personal ones): the existing connect card.
+      ownOnly(f);
+      await expectHttpStatus(
+        invoke(
+          f,
+          canonical,
+          { readSiteVersion: siteVersion([canonical]) },
+          { authorization: targetAuthorization("human:target-call-none") },
+        ),
+        409,
+        "site_tool_connection_required",
+      );
+      f.state.connections = [f.shared, f.personal, f.foreign];
+      // Shared and personal: the viewer picks, unless "Always allow" chose one.
+      await expectHttpStatus(
+        invoke(f, canonical, { readSiteVersion: siteVersion([canonical]) }),
+        409,
+        "site_tool_account_required",
+      );
+      expect(f.grafana.calls).toHaveLength(0);
+      const remembered = allowances([allowanceFor(f.personal.id)]);
+      const outcome = await invoke(f, canonical, {
+        readSiteVersion: siteVersion([canonical]),
+        ...remembered.options,
+      });
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.personal));
+      // Another person's allowance never chooses for this viewer.
+      const theirs = allowances([allowanceFor(f.personal.id, otherSubjectId)]);
+      await expectHttpStatus(
+        invoke(f, canonical, { readSiteVersion: siteVersion([canonical]), ...theirs.options }),
+        409,
+        "site_tool_account_required",
+      );
+      // Resolving a definition needs no choice.
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { ...site, target: { identity: canonical } },
+        targetOptions({ readSiteVersion: siteVersion([canonical]) }),
+      );
+      expect(resolved.entry.identity.toolName).toBe("query_prometheus");
+    } finally {
+      f.close();
+    }
+  });
+
+  test("an approval-required Site call asks in the Opengeni frame until confirmed or always allowed", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      f.settings.mcpServers[0]!.requireApproval = true;
+      const declared = { readSiteVersion: siteVersion([canonical]) };
+      await expectHttpStatus(invoke(f, canonical, declared), 409, "tool_gateway_approval_required");
+      expect(f.grafana.calls).toHaveLength(0);
+      // Outside a Site nothing changes.
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.personal) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions(),
+        ),
+        409,
+        "tool_gateway_approval_required",
+      );
+
+      // Confirm with "Always allow for this Site": a single-use token for this
+      // call, and an allowance keyed by person, Site, connector, tool and connection.
+      const remembered = allowances();
+      const issued: unknown[] = [];
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { ...site, target: { identity: canonical } },
+        targetOptions(declared),
+      );
+      const approval = await approveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          ...site,
+          identity: canonical,
+          operationId: crypto.randomUUID(),
+          arguments: {},
+          expectedDefinitionDigest: resolved.definitionDigest,
+          rememberForSite: true,
+        },
+        targetOptions({
+          ...declared,
+          ...remembered.options,
+          issue: async (_db, input) => {
+            issued.push(input);
+          },
+        }),
+      );
+      expect(approval.approvalToken).toMatch(/^ogta_/);
+      expect(issued).toHaveLength(1);
+      expect(remembered.rows).toEqual([allowanceFor(f.personal.id)]);
+
+      // The allowance runs later calls without asking, on this account only.
+      const outcome = await invoke(f, canonical, { ...declared, ...remembered.options });
+      expect(outcome.result.isError).not.toBe(true);
+      expect(f.grafana.calls).toHaveLength(1);
+      expect(usedConnections(f)).toEqual([f.personal.id]);
+      // It is this person's: another viewer is still asked.
+      await expectHttpStatus(
+        invoke(
+          f,
+          canonical,
+          { ...declared, ...remembered.options },
+          { authorization: targetAuthorization(otherSubjectId) },
+        ),
+        409,
+        "tool_gateway_approval_required",
+      );
+      // And this Site's: the same tool in another Site is still asked.
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            siteArtifactId: crypto.randomUUID(),
+            siteVersionId: versionId,
+            target: { identity: canonical },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions({ ...declared, ...remembered.options }),
+        ),
+        409,
+        "tool_gateway_approval_required",
+      );
+      expect(f.grafana.calls).toHaveLength(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("the frame's approval binds exactly the retried call on the chosen account", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      f.settings.mcpServers[0]!.requireApproval = true;
+      const declared = { readSiteVersion: siteVersion([canonical]) };
+      const route = f.identity(f.personal);
+      const operationId = crypto.randomUUID();
+      const args = { query: "up" };
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { ...site, target: { identity: route } },
+        targetOptions(declared),
+      );
+      // A token store with the database's matching rule: every bound field.
+      const issued: Array<Record<string, unknown>> = [];
+      const begun: Array<Record<string, unknown>> = [];
+      const binding = (input: Record<string, unknown>) =>
+        JSON.stringify([
+          input.operationId,
+          input.identity,
+          input.targetBindingDigest,
+          input.argumentsDigest,
+          input.approvalAuthorityDigest,
+          input.tokenHash,
+        ]);
+      const tokens = targetOptions({
+        ...declared,
+        issue: async (_db, input) => {
+          issued.push(input as unknown as Record<string, unknown>);
+        },
+        begin: async (_db, input) => {
+          const started = input as unknown as Record<string, unknown>;
+          begun.push(started);
+          if (!input.approvalRequired) return true;
+          const index = issued.findIndex((row) => binding(row) === binding(started));
+          if (index < 0) return false;
+          issued.splice(index, 1);
+          return true;
+        },
+      });
+      const { approvalToken } = await approveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          ...site,
+          identity: route,
+          operationId,
+          arguments: args,
+          expectedDefinitionDigest: resolved.definitionDigest,
+        },
+        tokens,
+      );
+      const retry = (overrides: { arguments?: Record<string, unknown> } = {}) =>
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            ...site,
+            target: { identity: route },
+            operationId,
+            arguments: overrides.arguments ?? args,
+            expectedDefinitionDigest: resolved.definitionDigest,
+            approvalToken,
+          },
+          tokens,
+        );
+      // Different arguments are not what the person confirmed.
+      await expectHttpStatus(retry({ arguments: { query: "down" } }), 409);
+      const outcome = await retry();
+      expect(outcome.result.isError).not.toBe(true);
+      expect(f.grafana.calls).toHaveLength(1);
+      // Single use.
+      await expectHttpStatus(retry(), 409);
+      expect(f.grafana.calls).toHaveLength(1);
+      expect(begun.map((started) => started.approvalRequired)).toEqual([true, true, true]);
+      expect(usedConnections(f)).toEqual([f.personal.id]);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("Always allow never overrides a Block", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      f.state.policies = [
+        {
+          id: crypto.randomUUID(),
+          connectionId: f.personal.id,
+          serverId: "grafana",
+          toolName: "query_prometheus",
+          actionName: "*",
+          policy: "block",
+          version: 1,
+        },
+      ];
+      const remembered = allowances([allowanceFor(f.personal.id)]);
+      const outcome = await invoke(f, canonical, {
+        readSiteVersion: siteVersion([canonical]),
+        ...remembered.options,
+      }).then(
+        (value) => value,
+        (error: unknown) => error,
+      );
+      expect(outcome).not.toMatchObject({ result: { isError: false } });
+      expect(f.grafana.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("the consent review is the provider's reading of the exact arguments on the viewer's own account", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      const reviewed: unknown[] = [];
+      const email = {
+        from: "ada@example.test",
+        to: "anyone@example.test",
+        cc: "",
+        bcc: "hidden@example.test",
+        subject: "Read by the provider",
+        textBody: "body is never returned to the frame",
+        htmlBody: "",
+        contentSha256: "a".repeat(64),
+        attachments: [{ name: "a.pdf", mediaType: "application/pdf", bytes: 3 }],
+      };
+      let fail = false;
+      const reviewing = targetOptions({
+        readSiteVersion: siteVersion([canonical]),
+        prepare: async (deps, authorization, options = {}) => ({
+          ...(await prepareWorkspaceToolGateway(deps, authorization, options)),
+          review: async (identity, args) => {
+            reviewed.push({ identity, args });
+            if (fail) throw new Error("the draft is gone");
+            return { protectedFields: ["raw"], email };
+          },
+        }),
+      });
+      const args = { raw: "VG86IGFueW9uZUBleGFtcGxlLnRlc3Q" };
+      const described = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization(),
+        { ...site, identity: canonical, arguments: args },
+        reviewing,
+      );
+      // Read on the viewer's own route, from the exact arguments; only the
+      // header rows the frame shows, never the body.
+      expect(reviewed).toEqual([{ identity: f.identity(f.personal), args }]);
+      expect(described.review).toEqual({
+        kind: "gmail",
+        email: {
+          from: "ada@example.test",
+          to: "anyone@example.test",
+          cc: "",
+          bcc: "hidden@example.test",
+          subject: "Read by the provider",
+          attachments: 1,
+        },
+      });
+      // Through the real preparation the route's own server is found; this
+      // provider has no review of its own, so the frame shows its arguments.
+      const unreviewed = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization(),
+        { ...site, identity: canonical, arguments: { query: "up" } },
+        targetOptions({ readSiteVersion: siteVersion([canonical]) }),
+      );
+      expect(unreviewed.review).toBeNull();
+      expect(f.grafana.calls).toHaveLength(0);
+      // Without arguments nothing is read.
+      const bare = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization(),
+        { ...site, identity: canonical },
+        reviewing,
+      );
+      expect(bare.review).toBeNull();
+      expect(reviewed).toHaveLength(1);
+      // A provider that cannot read what the call would do refuses.
+      fail = true;
+      await expectHttpStatus(
+        describeWorkspaceSiteToolConsent(
+          f.deps,
+          targetAuthorization(),
+          { ...site, identity: canonical, arguments: args },
+          reviewing,
+        ),
+        422,
+        "site_tool_review_unavailable",
+      );
+      expect(f.grafana.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a connection that needs attention is a typed refusal, not a server error", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      f.settings.mcpServers[0]!.requireApproval = true;
+      const declared = targetOptions({ readSiteVersion: siteVersion([canonical]) });
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { ...site, target: { identity: canonical } },
+        declared,
+      );
+      // The approval preflight then finds the credential unusable.
+      let preflights = 0;
+      f.state.onCredential = async (input: ResolveConnectionCredentialInput) => {
+        // Only the approval preflight (catalog preparation has its own).
+        if (input.preflightAcceptsRefreshableExpiry !== true) return;
+        preflights++;
+        f.personal.status = "revoked";
+      };
+      await expectHttpStatus(
+        approveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            ...site,
+            identity: canonical,
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            expectedDefinitionDigest: resolved.definitionDigest,
+          },
+          declared,
+        ),
+        409,
+        "tool_connection_needs_attention",
+      );
+      expect(preflights).toBe(1);
+      expect(f.grafana.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("the consent description lists only the viewer's own accounts", async () => {
+    const f = createFixture();
+    try {
+      const declared = targetOptions({ readSiteVersion: siteVersion([canonical]) });
+      const choices = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization(),
+        { ...site, identity: canonical },
+        declared,
+      );
+      expect(choices.connect).toBeNull();
+      expect(choices.selected).toBeNull();
+      expect(choices.accounts.map((account) => account.identity).sort(byServer)).toEqual(
+        [f.identity(f.shared), f.identity(f.personal)].sort(byServer),
+      );
+      const none = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization("human:target-call-none"),
+        { ...site, identity: canonical },
+        targetOptions({
+          readSiteVersion: siteVersion([canonical]),
+        }),
+      );
+      // The shared account is everyone's; with it removed there is none.
+      expect(none.accounts.map((account) => account.identity)).toEqual([f.identity(f.shared)]);
+      f.state.connections = [f.personal, f.foreign];
+      const unconnected = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization("human:target-call-none"),
+        { ...site, identity: canonical },
+        targetOptions({ readSiteVersion: siteVersion([canonical]) }),
+      );
+      expect(unconnected.accounts).toEqual([]);
+      expect(unconnected.connect).toMatchObject({ providerDomain: "127.0.0.1" });
+      // Undeclared tools are refused.
+      await expectHttpStatus(
+        describeWorkspaceSiteToolConsent(
+          f.deps,
+          targetAuthorization(),
+          { ...site, identity: canonical },
+          targetOptions({ readSiteVersion: siteVersion([]) }),
+        ),
+        403,
+      );
+    } finally {
+      f.close();
+    }
+  });
+});
+
+const byServer = (a: { serverId: string }, b: { serverId: string }) =>
+  a.serverId.localeCompare(b.serverId);

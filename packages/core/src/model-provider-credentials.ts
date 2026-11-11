@@ -25,12 +25,14 @@ import {
   withOrganizationDirectCatalogProvider,
   withOrganizationDirectCredential,
   withOrganizationAzureOpenAIEntraCredential,
+  withOrganizationCompatibleProviders,
   withOrganizationOpperCatalogProvider,
   withOrganizationOpperCredential,
   withWorkspaceOpperCatalogProvider,
   withWorkspaceOpperCredential,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
+import { retainedClaudeUpstreamModelId } from "./model-catalog";
 import {
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
@@ -50,7 +52,10 @@ import {
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
   type Database,
+  isWorkspaceEuOnly,
   loadModelProviderExecutionInputs,
+  decryptOrganizationCompatibleEndpointKeys,
+  listOrganizationCompatibleEndpointsForWorkspace,
   type ModelProviderExecutionInputs,
 } from "@opengeni/db";
 
@@ -273,9 +278,12 @@ export async function settingsWithOrganizationProviderCredentials(
         workspaceId,
         providerKind,
       }));
-    const upstreamModelId = retainedProductModelId?.startsWith(prefix)
-      ? retainedProductModelId.slice(prefix.length)
-      : null;
+    const upstreamModelId =
+      providerKind === "claude_subscription"
+        ? retainedClaudeUpstreamModelId(retainedProductModelId, providerKind, "organization")
+        : retainedProductModelId?.startsWith(prefix)
+          ? retainedProductModelId.slice(prefix.length)
+          : null;
     const retained = upstreamModelId
       ? await getOrganizationModelProviderCustomModelForExecution(db, {
           accountId,
@@ -374,6 +382,20 @@ export async function settingsWithOrganizationProviderCredentials(
       models,
     });
   }
+  // The organization's own OpenAI-compatible endpoints this workspace can
+  // use, each with its own decrypted key (none without an encryption key).
+  result = withOrganizationCompatibleProviders(
+    result,
+    decryptOrganizationCompatibleEndpointKeys(
+      settings,
+      prepared?.organizationCompatibleEndpoints ??
+        (await listOrganizationCompatibleEndpointsForWorkspace(db, {
+          accountId,
+          workspaceId,
+          includeCredentials: environmentsEncryptionKeyBytes(settings) !== null,
+        })),
+    ),
+  );
   for (const kind of CLAUDE_CONNECTION_KINDS) {
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");
@@ -400,16 +422,18 @@ export async function settingsWithOrganizationProviderCredentials(
           workspaceId,
           providerKind: kind,
         });
-    const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
-    const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
-      ? retainedProductModelId
-      : null;
-    if (workspaceModelId) {
+    const workspaceUpstreamModelId = retainedClaudeUpstreamModelId(
+      retainedProductModelId,
+      kind,
+      "workspace",
+    );
+    const workspaceModelId = workspaceUpstreamModelId === null ? null : retainedProductModelId!;
+    if (workspaceUpstreamModelId !== null) {
       const retained = await getWorkspaceProviderCustomModelForExecution(db, {
         accountId,
         workspaceId,
         providerKind: kind,
-        upstreamModelId: workspaceModelId.slice(workspacePrefix.length),
+        upstreamModelId: workspaceUpstreamModelId,
       });
       if (retained && !workspaceModels.some((model) => model.id === retained.id))
         workspaceModels.push(retained);
@@ -440,6 +464,30 @@ export async function settingsWithOrganizationProviderCredentials(
       );
   }
   return result;
+}
+
+/**
+ * EU-only inference: when the workspace is EU-only, every model route the run
+ * resolves must be EU (`requiredModelGeography`). A failed read throws, so a
+ * run never proceeds without knowing. Narrowing only: an EU requirement
+ * already on the settings is kept.
+ */
+export async function settingsWithInferenceResidency(
+  db: Database,
+  input: { accountId: string; workspaceId: string; settings: Settings },
+): Promise<Settings> {
+  if (input.settings.requiredModelGeography === "eu") return input.settings;
+  const euOnly = await isWorkspaceEuOnly(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+  });
+  return withInferenceResidencyRequirement(input.settings, euOnly);
+}
+
+function withInferenceResidencyRequirement(settings: Settings, euOnly: boolean): Settings {
+  return euOnly && settings.requiredModelGeography !== "eu"
+    ? { ...settings, requiredModelGeography: "eu" }
+    : settings;
 }
 
 /**
@@ -474,11 +522,14 @@ export async function settingsWithModelProviderCredentials(
     claudeSubscriptionEnabled: xaiSettings.claudeSubscriptionEnabled,
     loadOrganizationCredentials: environmentsEncryptionKeyBytes(xaiSettings) !== null,
   });
+  // EU-only inference (`settingsWithInferenceResidency`, read in the same
+  // transaction as the rest): set before any overlay that resolves a route.
+  const residencySettings = withInferenceResidencyRequirement(xaiSettings, prepared.euOnly);
   const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
     accountId,
     workspaceId,
-    xaiSettings,
+    residencySettings,
     productModelId,
     prepared,
   );

@@ -146,6 +146,7 @@ export function ClaudeSignInPage({
     (legacy ? !token.trim() : Boolean(attempt && !code.trim()));
   return (
     <ModelsFormPage
+      connectStep
       backLabel={state.connected ? "Claude subscription" : undefined}
       headerAside={<ProviderTile provider="claude_subscription" />}
       title={state.connected ? "Reconnect Claude subscription" : "Connect Claude subscription"}

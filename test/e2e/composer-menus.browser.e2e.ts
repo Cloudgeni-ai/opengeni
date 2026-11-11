@@ -92,9 +92,10 @@ describe("consistent production composer menus", () => {
               await page.keyboard.press("Space");
               expect((await state()).selected).toEqual([1]);
             }
+            // The list refreshes itself on open; there is no Refresh row.
             expect(
               await menu.getByRole("button", { name: "Refresh list", exact: true }).count(),
-            ).toBe(1);
+            ).toBe(0);
             expect(
               await menu.getByRole("button", { name: "Refresh repositories", exact: true }).count(),
             ).toBe(0);

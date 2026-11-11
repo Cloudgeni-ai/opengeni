@@ -19,6 +19,7 @@ export const SESSION_HEADER_PARTS = [
   "find",
   "machine",
   "site",
+  "agent",
   "model",
   "accessKey",
 ] as const;

@@ -192,6 +192,55 @@ test("managers browse collections and records, read stored data as text and dele
   host.remove();
 });
 
+test("a record someone else added names them, never their raw owner id", async () => {
+  // Owners keep the Site viewer id's form: `user:` followed by the subject.
+  const owner = "user:user:b06b9cee-1111-4111-8111-111111111111";
+  const client = {
+    getSiteData: async () => described,
+    querySiteData: async () => ({
+      records: [{ ...record("r1", { name: "Grace" }, "grace"), owner, createdBy: owner }],
+      nextCursor: null,
+      count: 1,
+    }),
+    writeSiteData: async () => ({ results: [] }),
+    exportSiteData: async () => ({ content: "", contentType: "", truncated: false }),
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const flush = async () => {
+    for (let index = 0; index < 5; index += 1) await act(async () => await Promise.resolve());
+  };
+  await act(async () =>
+    root.render(
+      <module.SiteDataPanel
+        client={client as never}
+        workspaceId="ws"
+        siteId="site"
+        title="Team CRM"
+        currentPrincipal="user:user:me"
+        personName={(subjectId) =>
+          subjectId === "user:b06b9cee-1111-4111-8111-111111111111" ? "Ada Lovelace" : null
+        }
+      />,
+    ),
+  );
+  await flush();
+  const button = (text: string) =>
+    [...host.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.includes(text),
+    )!;
+  await act(async () => button("contacts").click());
+  await flush();
+  await act(async () => button("grace").click());
+  await flush();
+  expect(host.textContent).toContain("Added by Ada Lovelace");
+  expect(host.textContent).not.toContain("Added by you");
+  expect(host.textContent).not.toContain("b06b9cee");
+  await act(async () => root.unmount());
+  host.remove();
+});
+
 const sqlDescribed = (enabled: boolean, available = true): SiteSqlDescribeResponse => ({
   siteId: "site",
   available,

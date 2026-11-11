@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComputerAction,
   ComputerActionReceipt,
@@ -62,7 +63,7 @@ import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
-export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
+export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride<ChatClient> & {
   /** Selected Opengeni agent/session. Peer ComputerSessions remain visible. */
   sessionId: string;
   enabled?: boolean | undefined;
@@ -1028,7 +1029,7 @@ function ComputerSessionGroup(props: {
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
             <span className="min-w-0 flex-1">
@@ -2219,7 +2220,7 @@ function ComputerStatusBar(props: {
       <span
         className={cn(
           "size-1.5 rounded-full",
-          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-muted",
+          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-fg-subtle",
         )}
       />
       <span>

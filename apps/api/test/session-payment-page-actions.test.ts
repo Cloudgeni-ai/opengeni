@@ -30,7 +30,22 @@ function tools(authority: SessionAppActionAuthority, options: { canPay?: boolean
       dispatch: async (request) => {
         requests.push(request);
         if (options.canPay === false) {
-          return Response.json({ error: "missing permission: billing:manage" }, { status: 403 });
+          // The billing routes' envelope for a missing billing:manage.
+          return Response.json(
+            {
+              error: {
+                status: 403,
+                code: "forbidden",
+                message: "You don't have permission to manage billing.",
+                retryable: false,
+                details: {
+                  code: "missing_permission",
+                  permission: "billing:manage",
+                },
+              },
+            },
+            { status: 403 },
+          );
         }
         if (request.url.endsWith("/v1/billing/checkout")) {
           return Response.json({
@@ -183,7 +198,7 @@ test("someone who uses Opengeni through another product gets that refusal first,
     expect(refused.isError).toBe(true);
     const text = (refused.content[0] as { text: string }).text;
     expect(text).toStartWith(
-      "Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace",
+      "Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace",
     );
     expect(text).toContain("billing");
     expect(text).not.toBe(PLAIN_REFUSAL);

@@ -4,11 +4,14 @@ import {
   appActionCallChangesState,
   appActionCallHandlesSecrets,
   appActionCallNeedsConfirmation,
+  appActionCallSecretInputs,
+  appActionCallStoresVaultItem,
   appActionConfirmationTitle,
   appActionHandlesSecrets,
   appActionNeedsConfirmation,
   appActionPaymentPage,
   findAppAction,
+  mapAppActionCallSecretInputs,
   PAYMENT_PAGE_ACTIONS,
 } from "../src/app-actions";
 import {
@@ -41,10 +44,6 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   expect(search).toBeDefined();
   expect(appActionCallChangesState({ id: search!.id })).toBe(false);
-  // A retired action runs nothing (it only names its replacement), so it never asks.
-  const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
-  expect(retired?.retired).toBeDefined();
-  expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
 });
 
 test("opening a checkout needs no confirmation in the chat; a billing portal link still does", () => {
@@ -188,6 +187,18 @@ test("the confirmation is a plain question built only from checked values", () =
   expect(share({ workspaceId: "ws-1", sessionId: "chat-1" }, "private")).toBe(
     "Make this chat visible only to you?",
   );
+  // A share link's one confirmation says plainly who can read what.
+  const link = (id: string, sessionId: string) =>
+    appActionConfirmationTitle({ id, pathParameters: { workspaceId: "ws-1", sessionId } }, here);
+  expect(link("createSessionShareLink", "chat-1")).toBe(
+    "Create a link to this chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("createSessionShareLink", "chat-2")).toBe(
+    "Create a link to another chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("revokeSessionShareLink", "chat-1")).toBe(
+    "Stop sharing this chat? Its link will stop working.",
+  );
   expect(
     appActionConfirmationTitle(
       { id: "updateWorkspaceSettings", pathParameters: { workspaceId: "ws-2" } },
@@ -291,6 +302,49 @@ test("a tool approval change asks about the tools it names and the approval it s
       here,
     ),
   ).toBe("Set this MCP server's default tool approval to Ask in this workspace?");
+});
+
+test("turning video on or off asks in plain words, and says how it's paid", () => {
+  const turnOn = {
+    id: "updateVideoGenerationPolicy",
+    pathParameters: { workspaceId: "ws-1" },
+    body: {
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: ["bytedance/seedance-2.5"],
+      defaultModelId: "bytedance/seedance-2.5",
+    },
+  };
+  expect(appActionConfirmationTitle(turnOn, here)).toBe(
+    "Let every chat in this workspace make videos?",
+  );
+  expect(
+    appActionConfirmationTitle({ ...turnOn, pathParameters: { workspaceId: "ws-2" } }, here),
+  ).toBe("Let every chat in another workspace make videos?");
+  expect(
+    appActionConfirmationTitle(
+      { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } },
+      here,
+    ),
+  ).toBe("Turn off video for every chat in this workspace?");
+  // The second line names the payer in words, never the stored code.
+  expect(appActionReviewSummary(turnOn)).toBe("Paid with: Opengeni credits");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "workspace_gateway" },
+    }),
+  ).toBe("Paid with: The workspace's Vercel AI Gateway");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "supergrok_subscription" },
+    }),
+  ).toBe("Paid with: A connected SuperGrok account");
+  // An unknown code is still shown as it is.
+  expect(appActionReviewSummary({ id: "x", body: { fundingSource: "something_new" } })).toBe(
+    "Funding source: something_new",
+  );
 });
 
 test("an app action's card answers its question with Allow", () => {
@@ -421,7 +475,16 @@ test("the card's second line shows the key values; raw arguments stay in Details
     kind: "generic",
     title: "Invite anna@example.com to your organization as an admin?",
   });
-  expect(review.consequence).toBe("Email: anna@example.com · Role: admin");
+  // The agent's values are labelled as sent, never read as the server's facts.
+  expect(review.consequence).toBe("Sent by the agent: Email: anna@example.com · Role: admin");
+  // Beside the server's facts about its target they're left to Details.
+  expect(
+    toolReviewAction("admin_action_call", invite, {
+      kind: "generic",
+      title: "Remove the Gmail connection?",
+      targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+    }).consequence,
+  ).toBeUndefined();
   expect(toolReviewFields(invite, undefined, "admin_action_call")).toEqual({
     fields: [],
     moreFields: 0,
@@ -536,4 +599,83 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
   }
   // Bounded: most of the app stays reachable.
   expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
+});
+
+test("secret inputs are only the filled request fields an action marks as secret", () => {
+  const createSession = {
+    id: "createSession",
+    pathParameters: { workspaceId: "w" },
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { Authorization: "Bearer a" } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { "x-key": "c" } },
+      ],
+    },
+  };
+  expect(appActionCallSecretInputs(createSession)).toEqual([
+    { Authorization: "Bearer a" },
+    { "x-key": "c" },
+  ]);
+  const mapped = mapAppActionCallSecretInputs(createSession, () => ({ replaced: true }));
+  expect(mapped).toEqual({
+    ...createSession,
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { replaced: true } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { replaced: true } },
+      ],
+    },
+  });
+  // The input is never changed in place.
+  expect(createSession.body.mcpServers[0]!.headers).toEqual({ Authorization: "Bearer a" });
+  // Response-side secrets, unknown actions and JSON text have no inputs.
+  for (const args of [
+    { id: "createOrganizationWebhook", body: { url: "https://x.test" } },
+    { id: "POST /v1/workspaces/:workspaceId/tools/invoke", body: { name: "session_create" } },
+    { id: "noSuchAction", body: { token: "x" } },
+    JSON.stringify({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ]) {
+    expect(appActionCallSecretInputs(args)).toEqual([]);
+    expect(mapAppActionCallSecretInputs(args, () => "changed")).toBe(args);
+  }
+  expect(
+    appActionCallSecretInputs({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ).toEqual(["x"]);
+  // Only creating or updating a vault item keeps its body in the vault.
+  expect(
+    appActionCallStoresVaultItem({ id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items" }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
+    }),
+  ).toBe(false);
+  expect(appActionCallStoresVaultItem({ id: "createSession" })).toBe(false);
+});
+
+test("no action's secret request fields nest inside each other", () => {
+  // mapAppActionCallSecretInputs puts resolved values back by visit order;
+  // nested secret fields (".credentials" and ".credentials.token") would
+  // visit one value twice.
+  for (const entry of ACTION_CATALOG) {
+    const fields = (entry.secretFields ?? []).filter(
+      (field) => field.startsWith("request.") || field.startsWith("request[]"),
+    );
+    for (const outer of fields) {
+      for (const inner of fields) {
+        if (outer === inner) continue;
+        const nested = inner.startsWith(`${outer}.`) || inner.startsWith(`${outer}[`);
+        expect([entry.id, outer, inner, nested]).toEqual([entry.id, outer, inner, false]);
+      }
+    }
+  }
 });

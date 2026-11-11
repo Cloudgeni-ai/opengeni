@@ -23,6 +23,8 @@ export interface NativeTimelineMessages {
     agentAnswered?: string;
     /** An agent skipped the question; defaults to `skipped`. */
     agentSkipped?: string;
+    /** The person let the agent decide; defaults to `skipped`. */
+    agentDecides?: string;
     skipped: string;
     expired: string;
     cancelled: string;
@@ -30,6 +32,7 @@ export interface NativeTimelineMessages {
   /** An answered secret question: where the value was saved, never the value. */
   humanInputSecretSaved: (vaultName: string, itemName: string) => string;
   working: string;
+  paused: string;
   waiting: string;
   thinking: string;
   thought: string;
@@ -124,6 +127,7 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
     answered: t("native.timeline.messages.youAnswered"),
     agentAnswered: t("native.timeline.messages.agentAnswered"),
     agentSkipped: t("native.timeline.messages.agentSkipped"),
+    agentDecides: t("native.timeline.messages.youLetTheAgentDecide"),
     skipped: t("native.timeline.messages.skipped"),
     expired: t("native.timeline.messages.expired"),
     cancelled: t("native.timeline.messages.cancelled"),
@@ -131,6 +135,7 @@ export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMe
   humanInputSecretSaved: (vaultName, itemName) =>
     t("native.timeline.messages.savedToVaultnameItemname", { vaultName, itemName }),
   working: t("native.timeline.messages.working"),
+  paused: t("native.timeline.messages.paused"),
   waiting: t("native.timeline.messages.waiting"),
   thinking: t("native.timeline.messages.thinking"),
   thought: t("native.timeline.messages.thought"),

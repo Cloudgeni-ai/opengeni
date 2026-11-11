@@ -22,45 +22,86 @@ test("only an archived or archiving chat is read-only", () => {
       session({ keepLive: false, archive: { state: "archiving", archivedAt: null } }),
     )?.state,
   ).toBe("archiving");
+  // Archived by a person and waiting to be stored: already read-only.
+  expect(
+    sessionReadOnlyArchive({
+      ...session({ keepLive: false, archive: null }),
+      archived: true,
+    })?.state,
+  ).toBe("archiving");
 });
 
-test("the notice says why the chat is read-only and offers a new chat", () => {
+test("the notice says the chat is archived and offers to continue in a new chat", () => {
   const archived = renderToStaticMarkup(
     <ReadOnlySessionNotice
       session={session({
         keepLive: false,
         archive: { state: "archived", archivedAt: "2026-01-01T00:00:00.000Z" },
       })}
-      idleDays={30}
-      onNewSession={() => undefined}
+      onContinue={() => undefined}
     />,
   );
-  expect(archived).toContain("This chat is read-only");
-  expect(archived).toContain("after 30 days without activity");
-  expect(archived).toContain("You can read the whole conversation, but not continue it.");
-  expect(archived).toContain("New chat");
+  expect(archived).toContain("This chat is archived");
+  expect(archived).toContain("It moved to long-term storage");
+  expect(archived).toContain("You can read the whole conversation, but not continue it here.");
+  expect(archived).toContain("Continue in a new chat");
 
   const moving = renderToStaticMarkup(
     <ReadOnlySessionNotice
       session={session({ keepLive: false, archive: { state: "archiving", archivedAt: null } })}
-      onNewSession={() => undefined}
+      onContinue={() => undefined}
     />,
   );
   expect(moving).toContain("is moving to long-term storage");
-  expect(moving).toContain("a long time");
 
   expect(
     renderToStaticMarkup(
       <ReadOnlySessionNotice
         session={session({ keepLive: false, archive: null })}
-        onNewSession={() => undefined}
+        onContinue={() => undefined}
       />,
     ),
   ).toBe("");
 });
 
-test("the read-only chats page names the deployment's idle period", () => {
-  expect(readOnlyChatsDescription(1)).toContain("no activity for 1 day move");
-  expect(readOnlyChatsDescription(30)).toContain("no activity for 30 days move");
-  expect(readOnlyChatsDescription(undefined)).toContain("a long time");
+test("a chat this person can restore offers Restore, and a restore in progress says so", () => {
+  const archived = { state: "archived" as const, archivedAt: "2026-01-01T00:00:00.000Z" };
+  const restorable = renderToStaticMarkup(
+    <ReadOnlySessionNotice
+      session={session({ keepLive: false, archive: archived })}
+      onContinue={() => undefined}
+      onRestore={async () => true}
+    />,
+  );
+  expect(restorable).toContain("Restore chat");
+  expect(restorable).toContain("Restore it to continue here.");
+  expect(restorable).not.toContain("but not continue it here");
+
+  const restoring = renderToStaticMarkup(
+    <ReadOnlySessionNotice
+      session={session({ keepLive: false, archive: { ...archived, restoring: true } })}
+      onContinue={() => undefined}
+      onRestore={async () => true}
+    />,
+  );
+  expect(restoring).toContain("Restoring this chat");
+  expect(restoring).toContain("Restoring…");
+  expect(restoring).toContain('data-read-only-session="restoring"');
+  expect(restoring).toContain("coming back from long-term storage");
+
+  // Without the option (no permission, or a sub-chat) there is no Restore.
+  expect(
+    renderToStaticMarkup(
+      <ReadOnlySessionNotice
+        session={session({ keepLive: false, archive: archived })}
+        onContinue={() => undefined}
+      />,
+    ),
+  ).not.toContain("Restore chat");
+});
+
+test("the Archived page names the deployment's idle period", () => {
+  expect(readOnlyChatsDescription(1)).toContain("no activity for 1 day are archived too");
+  expect(readOnlyChatsDescription(30)).toContain("no activity for 30 days are archived too");
+  expect(readOnlyChatsDescription(undefined)).not.toContain("no activity");
 });

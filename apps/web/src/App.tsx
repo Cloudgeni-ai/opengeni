@@ -3,7 +3,7 @@
 //   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
-//   /workspaces/:id/priority, /agents        → sessions redirect (retired "For you" and Agents pages)
+//   /workspaces/:id/priority                 → sessions redirect (retired "For you" page)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
@@ -11,9 +11,8 @@
 //                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
-//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
-//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/archived                 → archived chats (long-term storage, read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
@@ -25,6 +24,12 @@
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
+//   /workspaces/:id/agents                   → agents (all or yours; new, import)
+//   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
+//   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
+//   /workspaces/:id/agents/:agentId/edit     → edit agent
+//   /workspaces/:id/agents/:agentId/introduce/:connectionId → introduce it in Slack channels
+//   /workspaces/:id/bot-templates            → old links, redirect to agents
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -73,6 +78,7 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
+  siteViewArtifactsReturn,
   siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
@@ -100,6 +106,7 @@ import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
   parseAgentParam,
+  parseAutoConnectIssuerParam,
   parseServiceAccountParam,
   parseDeveloperView,
   parseWebhookParam,
@@ -117,8 +124,12 @@ import {
   type OrganizationAdminSection as OrganizationSettingsSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import {
+  connectorLocation,
+  parseConnectorParam,
+  parseConnectorView,
   parseOrganizationRecordId,
   parseOrganizationView,
+  type ConnectorView,
   type OrganizationView,
 } from "@/lib/organization-route";
 import {
@@ -130,6 +141,7 @@ import {
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
+import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -174,6 +186,10 @@ const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
 );
+const LazySharedSessionRoute = lazyRouteComponent(
+  () => import("@/routes/shared-session"),
+  "SharedSessionRoute",
+);
 const LazyExcelAddinRoute = lazyRouteComponent(
   () => import("@/routes/excel-addin"),
   "ExcelAddinRoute",
@@ -209,6 +225,10 @@ const LazyOnboardingPreviewRoute = lazyRouteComponent(
 const LazySubscriptionPlansPreview = lazyRouteComponent(
   () => import("@/dev/subscription-plans-preview"),
   "SubscriptionPlansPreview",
+);
+const LazyOwnSubscriptionPlanPreview = lazyRouteComponent(
+  () => import("@/dev/own-subscription-plan-preview"),
+  "OwnSubscriptionPlanPreview",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
@@ -252,6 +272,14 @@ const LazyEventSourceDetailRoute = lazyRouteComponent(
 const LazyAutomationTemplatesRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "AutomationTemplatesRoute",
+);
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
+const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
+const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
+const LazyAgentSlackIntroRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentSlackIntroRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -394,6 +422,13 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// A chat someone shared with a link. PUBLIC, like `/reset-password`: the
+// person opening it usually isn't signed in and may have no account.
+const sharedSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "share/$shareId",
+  component: SharedSession,
+});
 // How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
 // colleagues send this link to people who may not be signed in.
 const excelAddinRoute = createRoute({
@@ -473,6 +508,11 @@ const subscriptionPlansPreviewRoute = createRoute({
   path: "dev/subscription-plans",
   component: LazySubscriptionPlansPreview,
 });
+const ownSubscriptionPlanPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/own-subscription-plan",
+  component: LazyOwnSubscriptionPlanPreview,
+});
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -517,16 +557,11 @@ const workspaceAgentRoute = createRoute({
   path: "agent",
   component: WorkspaceIndexRedirect,
 });
-// The "For you" feed and the Agents page were retired. Attention now lives in
-// the sessions rail ("Needs you" view), so their old links land on sessions.
+// The "For you" feed was retired. Attention now lives in the sessions rail
+// ("Needs you" view), so its old links land on sessions.
 const workspaceRetiredPriorityRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "priority",
-  component: WorkspaceIndexRedirect,
-});
-const workspaceRetiredAgentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "agents",
   component: WorkspaceIndexRedirect,
 });
 const workspaceSessionsRoute = createRoute({
@@ -574,22 +609,6 @@ const workspaceSecretsItemRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
     search.view === "edit" ? { view: "edit" } : {},
 });
-// Variable sets became Secrets (Q-48): old links land on the same place.
-const workspaceVariableSetsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets",
-  component: SecretsRedirect,
-});
-const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets/$variableSetId",
-  component: SecretsRedirect,
-});
-const workspaceEnvironmentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "environments",
-  component: SecretsRedirect,
-});
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs",
@@ -599,8 +618,14 @@ const workspaceRigsRoute = createRoute({
 });
 const workspaceReadOnlyChatsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "read-only-chats",
+  path: "archived",
   component: ReadOnlyChats,
+});
+// The Archived page was called Read-only chats; old links still land on it.
+const workspaceLegacyReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: LegacyReadOnlyChatsRedirect,
 });
 const workspaceInboxRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -772,6 +797,41 @@ const workspaceAutomationTemplatesRoute = createRoute({
   path: "automations/templates",
   component: AutomationTemplates,
 });
+const workspaceAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
+  component: Agents,
+});
+const workspaceAgentNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/new",
+  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } =>
+    typeof search.sourceSessionId === "string" && search.sourceSessionId.length > 0
+      ? { sourceSessionId: search.sourceSessionId }
+      : {},
+  component: AgentNew,
+});
+const workspaceAgentDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId",
+  component: AgentDetail,
+});
+const workspaceAgentEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/edit",
+  component: AgentEdit,
+});
+const workspaceAgentIntroRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/introduce/$connectionId",
+  component: AgentIntro,
+});
+// Bot templates became agents; old links land on Agents.
+const workspaceBotTemplatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "bot-templates",
+  component: BotTemplatesRedirect,
+});
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
 const workspaceLegacySchedulesRoute = createRoute({
@@ -935,13 +995,15 @@ const workspaceOrganizationRoute = createRoute({
     checkoutSession?: string;
     section?: OrganizationAdminSection;
     account?: string;
-    view?: ModelsView | OrganizationView | DeveloperView;
+    view?: ModelsView | OrganizationView | DeveloperView | ConnectorView;
     person?: string;
     invitation?: string;
     workspace?: string;
     webhook?: string;
     agent?: string;
+    issuer?: string;
     serviceAccount?: string;
+    connector?: string;
   } & InsightsRawSearch &
     ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
@@ -963,9 +1025,15 @@ const workspaceOrganizationRoute = createRoute({
           ? parseOrganizationView(search.view)
           : section === "developer"
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
-            : undefined;
+            : section === "integrations"
+              ? parseConnectorView(search.view)
+              : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
+    const issuer =
+      section === "agents" && !agent ? parseAutoConnectIssuerParam(search.issuer) : undefined;
+    const connector =
+      section === "integrations" ? parseConnectorParam(search.connector) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -989,7 +1057,9 @@ const workspaceOrganizationRoute = createRoute({
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
       ...(agent ? { agent } : {}),
+      ...(issuer ? { issuer } : {}),
       ...(serviceAccount ? { serviceAccount } : {}),
+      ...(connector ? { connector } : {}),
       ...(section === "insights"
         ? Object.fromEntries(
             INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -1022,6 +1092,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
@@ -1035,6 +1106,7 @@ const routeTree = rootRoute.addChildren([
         composerChromeGalleryRoute,
         onboardingPreviewRoute,
         subscriptionPlansPreviewRoute,
+        ownSubscriptionPlanPreviewRoute,
         devSessionTimelineRoute,
       ]
     : []),
@@ -1044,7 +1116,6 @@ const routeTree = rootRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
     workspaceRetiredPriorityRoute,
-    workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceSecretsRoute.addChildren([
@@ -1052,12 +1123,10 @@ const routeTree = rootRoute.addChildren([
       workspaceSecretsVaultRoute,
       workspaceSecretsItemRoute,
     ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
+    workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceComputerUseRoute,
@@ -1072,6 +1141,12 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceAgentsRoute,
+    workspaceAgentNewRoute,
+    workspaceAgentDetailRoute,
+    workspaceAgentEditRoute,
+    workspaceAgentIntroRoute,
+    workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
     workspaceLegacyScheduleDetailRoute,
@@ -1105,6 +1180,8 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
+// The screens the person moved through go with their next feedback report.
+router.history.subscribe(({ location }) => recordFeedbackNavigation(location.pathname));
 warmDesktopPages([
   LazySessionRoute,
   LazySessionsIndexRoute,
@@ -1217,21 +1294,6 @@ function Secrets() {
   );
 }
 
-function SecretsRedirect() {
-  const { workspaceId, variableSetId } = useParams({ strict: false });
-  if (!workspaceId) return null;
-  // A variable set's id is kept by its vault, so its page maps one to one.
-  return variableSetId ? (
-    <Navigate
-      to="/workspaces/$workspaceId/secrets/$vaultId"
-      params={{ workspaceId, vaultId: variableSetId }}
-      replace
-    />
-  ) : (
-    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
-  );
-}
-
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
@@ -1340,6 +1402,48 @@ function EventSourceDetail() {
 function AutomationTemplates() {
   const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
   return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
+}
+
+function Agents() {
+  const { workspaceId } = workspaceAgentsRoute.useParams();
+  return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
+function AgentNew() {
+  const { workspaceId } = workspaceAgentNewRoute.useParams();
+  const { sourceSessionId } = workspaceAgentNewRoute.useSearch();
+  return <LazyNewAgentRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
+}
+
+function AgentDetail() {
+  const { workspaceId, agentId } = workspaceAgentDetailRoute.useParams();
+  return <LazyAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentEdit() {
+  const { workspaceId, agentId } = workspaceAgentEditRoute.useParams();
+  return <LazyEditAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentIntro() {
+  const { workspaceId, agentId, connectionId } = workspaceAgentIntroRoute.useParams();
+  return (
+    <LazyAgentSlackIntroRoute
+      workspaceId={workspaceId}
+      agentId={agentId}
+      connectionId={connectionId}
+    />
+  );
+}
+
+function BotTemplatesRedirect() {
+  const { workspaceId } = workspaceBotTemplatesRoute.useParams();
+  return <Navigate to="/workspaces/$workspaceId/agents" params={{ workspaceId }} replace />;
+}
+
+function LegacyReadOnlyChatsRedirect() {
+  const { workspaceId } = workspaceLegacyReadOnlyChatsRoute.useParams();
+  return <Navigate to="/workspaces/$workspaceId/archived" params={{ workspaceId }} replace />;
 }
 
 function LegacySchedulesRedirect() {
@@ -1514,14 +1618,16 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
+  const search = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
-      conversation={conversation}
-      startNew={startNew === true}
+      conversation={search.conversation}
+      startNew={search.new === true}
+      page={search.page}
+      artifactsReturn={siteViewArtifactsReturn(search)}
     />
   );
 }
@@ -1553,7 +1659,9 @@ function Organization() {
     workspace,
     webhook,
     agent,
+    issuer,
     serviceAccount,
+    connector,
     from,
     fromLabel,
   } = workspaceOrganizationRoute.useSearch();
@@ -1578,6 +1686,12 @@ function Organization() {
           : undefined
       }
       connectedAgent={page === "agents" ? agent : undefined}
+      autoConnectIssuer={page === "agents" ? issuer : undefined}
+      connectors={
+        page === "integrations"
+          ? connectorLocation({ connector, view: parseConnectorView(view) })
+          : undefined
+      }
       person={person}
       invitation={invitation}
       workspace={workspace}
@@ -1634,6 +1748,11 @@ function SiteAuthorize() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SharedSession() {
+  const { shareId } = sharedSessionRoute.useParams();
+  return <LazySharedSessionRoute shareId={shareId} />;
 }
 
 function SetupAccount() {

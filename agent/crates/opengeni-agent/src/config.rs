@@ -98,9 +98,6 @@ fn home_dir() -> Option<PathBuf> {
         })
 }
 
-/// The credentials file name inside the config dir.
-const CREDENTIALS_FILE: &str = "credentials.json";
-
 /// Directory containing one independently replaceable credential document per
 /// Opengeni deployment/workspace connection. Separate files avoid a global
 /// read-modify-write race when two `connect` commands run concurrently and let
@@ -128,12 +125,6 @@ pub struct StoredConnection {
     pub connection_id: String,
     /// Normalized API origin used to create/manage this connection.
     pub api_url: String,
-    /// This record came from the old single-connection file, which did not
-    /// persist its deployment origin. It remains fully usable for runtime
-    /// transport, but its displayed `api_url` is only a migration hint until an
-    /// explicit reconnect to that deployment replaces it.
-    #[serde(default)]
-    pub legacy_origin: bool,
     /// A refused transport is suspended until renewal or explicit reconnect.
     /// This belongs to this credential document, never the shared host engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,20 +153,6 @@ impl StoredConnection {
             schema_version: CONNECTION_SCHEMA_VERSION,
             connection_id,
             api_url,
-            legacy_origin: false,
-            authentication_state: None,
-            credentials,
-        }
-    }
-
-    fn from_legacy(api_url_hint: &str, credentials: StoredCredentials) -> Self {
-        let api_url = normalize_api_url(api_url_hint);
-        let connection_id = legacy_connection_id(&credentials);
-        Self {
-            schema_version: CONNECTION_SCHEMA_VERSION,
-            connection_id,
-            api_url,
-            legacy_origin: true,
             authentication_state: None,
             credentials,
         }
@@ -206,14 +183,6 @@ pub fn connection_id(api_url: &str, workspace_id: &str) -> String {
     blake3::hash(material.as_bytes()).to_hex()[..20].to_string()
 }
 
-fn legacy_connection_id(credentials: &StoredCredentials) -> String {
-    let material = format!(
-        "legacy\0{}\0{}",
-        credentials.workspace_id, credentials.agent_id
-    );
-    blake3::hash(material.as_bytes()).to_hex()[..20].to_string()
-}
-
 /// The agent's persisted, scoped enrollment state.
 ///
 /// This is the source of truth the supervisor dials NATS with. It mirrors the
@@ -230,11 +199,6 @@ pub struct StoredCredentials {
     /// presents this as the connect token; the server's auth-callout responder
     /// validates it and mints a workspace-scoped user JWT (M-AUTH).
     /// There is NO operator creds-file — the bearer IS the credential. NEVER logged.
-    ///
-    /// (Deserialized from the legacy `nats_credentials` key too, so a credentials
-    /// file written by an older agent build still loads — the value is the same
-    /// token, only the field's meaning was clarified.)
-    #[serde(alias = "nats_credentials")]
     pub nats_bearer: String,
     /// NATS server URL(s) to dial — `wss://` for the relay-symmetric TLS ingress.
     pub nats_urls: Vec<String>,
@@ -299,63 +263,13 @@ impl StoredCredentials {
     }
 }
 
-/// Loads the persisted credentials from the config dir, or `Ok(None)` if the
-/// agent has not enrolled yet.
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] if the config dir cannot be resolved, the file exists
-/// but cannot be read, or it is present but malformed.
-pub fn load_credentials() -> Result<Option<StoredCredentials>, ConfigError> {
-    let path = config_dir()?.join(CREDENTIALS_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let creds = serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse {
-                path: path.clone(),
-                source,
-            })?;
-            Ok(Some(creds))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(ConfigError::io(path, e)),
-    }
-}
-
-/// Persists the credentials to the config dir with `0600` permissions (the file
-/// holds the workspace-scoped NATS Account creds — never world-readable).
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] if the directory cannot be created or the file cannot
-/// be written.
-#[cfg(test)]
-pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigError> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::io(&dir, e))?;
-    let path = dir.join(CREDENTIALS_FILE);
-    let body = serde_json::to_vec_pretty(creds).expect("StoredCredentials serializes");
-
-    // Write then tighten the mode to 0600. We write first (creating the file),
-    // then set permissions, so the secret never momentarily exists world-readable
-    // on platforms where create honors the umask loosely.
-    std::fs::write(&path, &body).map_err(|e| ConfigError::io(&path, e))?;
-    restrict_permissions(&path)?;
-    Ok(path)
-}
-
 /// Loads every configured Opengeni connection, ordered by local connection id.
-///
-/// A pre-multi-connection `credentials.json` is migrated exactly once into the
-/// new per-connection directory using `legacy_api_url` as its deployment origin.
-/// The legacy file is removed only after the new owner-only document is safely
-/// persisted.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigError`] when the directory cannot be read or any connection
 /// document is malformed. A malformed credential is never silently skipped.
-pub fn load_connections(legacy_api_url: &str) -> Result<Vec<StoredConnection>, ConfigError> {
-    migrate_legacy_credentials(legacy_api_url)?;
+pub fn load_connections() -> Result<Vec<StoredConnection>, ConfigError> {
     let dir = connections_dir()?;
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -406,11 +320,7 @@ fn validate_connection(path: &Path, connection: &StoredConnection) -> Result<(),
             detail: "api_url and workspace_id must be non-empty".to_string(),
         });
     }
-    let expected = if connection.legacy_origin {
-        legacy_connection_id(&connection.credentials)
-    } else {
-        connection_id(&connection.api_url, &connection.credentials.workspace_id)
-    };
+    let expected = connection_id(&connection.api_url, &connection.credentials.workspace_id);
     let file_id = path.file_stem().and_then(std::ffi::OsStr::to_str);
     if connection.connection_id != expected || file_id != Some(expected.as_str()) {
         return Err(ConfigError::Invalid {
@@ -421,7 +331,7 @@ fn validate_connection(path: &Path, connection: &StoredConnection) -> Result<(),
     Ok(())
 }
 
-/// Reads one connection file by its id, without legacy migration. `None` when
+/// Reads one connection file by its id. `None` when
 /// that connection no longer exists (disconnected or replaced).
 pub fn load_connection(connection_id: &str) -> Result<Option<StoredConnection>, ConfigError> {
     if connection_id.is_empty()
@@ -452,7 +362,7 @@ pub fn find_connection(
     workspace_id: &str,
 ) -> Result<Option<StoredConnection>, ConfigError> {
     let wanted = connection_id(api_url, workspace_id);
-    Ok(load_connections(api_url)?
+    Ok(load_connections()?
         .into_iter()
         .find(|connection| connection.connection_id == wanted))
 }
@@ -522,9 +432,6 @@ fn save_connection_unlocked(connection: &StoredConnection) -> Result<PathBuf, Co
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    if !connection.legacy_origin {
-        remove_replaced_legacy_connection(connection)?;
-    }
     Ok(path)
 }
 
@@ -549,50 +456,10 @@ fn write_private_staging_file(path: &Path, body: &[u8]) -> Result<(), ConfigErro
     Ok(())
 }
 
-fn remove_replaced_legacy_connection(connection: &StoredConnection) -> Result<(), ConfigError> {
-    let dir = connections_dir()?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(ConfigError::io(&dir, error)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| ConfigError::io(&dir, error))?;
-        let candidate_path = entry.path();
-        if candidate_path == dir.join(format!("{}.json", connection.connection_id))
-            || candidate_path.extension().and_then(std::ffi::OsStr::to_str) != Some("json")
-        {
-            continue;
-        }
-        let bytes = std::fs::read(&candidate_path)
-            .map_err(|error| ConfigError::io(&candidate_path, error))?;
-        let candidate: StoredConnection =
-            serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse {
-                path: candidate_path.clone(),
-                source,
-            })?;
-        validate_connection(&candidate_path, &candidate)?;
-        if candidate.legacy_origin
-            && candidate.credentials.workspace_id == connection.credentials.workspace_id
-            && candidate.credentials.agent_id == connection.credentials.agent_id
-        {
-            match std::fs::remove_file(&candidate_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(ConfigError::io(candidate_path, error)),
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Removes one local connection by its exact id or an unambiguous id prefix.
 /// Returns the removed record, or `Ok(None)` when no connection matched.
-pub fn remove_connection(
-    query: &str,
-    legacy_api_url: &str,
-) -> Result<Option<StoredConnection>, ConfigError> {
-    let matches: Vec<_> = load_connections(legacy_api_url)?
+pub fn remove_connection(query: &str) -> Result<Option<StoredConnection>, ConfigError> {
+    let matches: Vec<_> = load_connections()?
         .into_iter()
         .filter(|connection| connection.connection_id.starts_with(query))
         .collect();
@@ -608,43 +475,6 @@ pub fn remove_connection(
         Ok(()) => Ok(Some(connection)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ConfigError::io(path, error)),
-    }
-}
-
-fn migrate_legacy_credentials(api_url: &str) -> Result<(), ConfigError> {
-    let legacy_path = config_dir()?.join(CREDENTIALS_FILE);
-    let Some(credentials) = load_credentials()? else {
-        return Ok(());
-    };
-    // The legacy document never stored its deployment origin. Keep it under a
-    // dedicated identity rather than pretending the caller's/default URL is
-    // authoritative: otherwise adding a real connection whose workspace UUID
-    // happens to match could overwrite the still-live legacy link.
-    let connection = StoredConnection::from_legacy(api_url, credentials);
-    let path = connections_dir()?.join(format!("{}.json", connection.connection_id));
-    if path.exists() {
-        let bytes = std::fs::read(&path).map_err(|error| ConfigError::io(&path, error))?;
-        let persisted: StoredConnection =
-            serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse {
-                path: path.clone(),
-                source,
-            })?;
-        validate_connection(&path, &persisted)?;
-        if persisted != connection {
-            return Err(ConfigError::Invalid {
-                path,
-                detail: "existing legacy migration does not match credentials.json".to_string(),
-            });
-        }
-    } else {
-        save_connection(&connection)?;
-    }
-    match std::fs::remove_file(&legacy_path) {
-        Ok(()) => Ok(()),
-        // Another updated agent process may have completed the same idempotent
-        // migration between our read and remove.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ConfigError::io(legacy_path, error)),
     }
 }
 
@@ -679,15 +509,8 @@ fn replace_file(temporary: &Path, destination: &Path) -> Result<(), ConfigError>
     }
 }
 
-/// Tightens a file to owner-only read/write (`0600`) on unix; a no-op elsewhere
-/// (Windows ACL tightening is handled by the install path).
-#[cfg(all(unix, test))]
-fn restrict_permissions(path: &Path) -> Result<(), ConfigError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| ConfigError::io(path, e))
-}
-
+/// Non-unix files are created without a mode; Windows ACL tightening is handled
+/// by the install path.
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
@@ -735,32 +558,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn save_then_load_roundtrips() {
-        let _guard = with_temp_config(); // (lock, tempdir) held for the test body
-        let creds = sample();
-        let path = save_credentials(&creds).expect("save");
-        assert!(path.exists());
-        let loaded = load_credentials().expect("load").expect("present");
-        assert_eq!(loaded, creds);
-    }
-
-    #[test]
-    fn load_absent_is_none() {
-        let _guard = with_temp_config(); // (lock, tempdir) held for the test body
-        assert!(load_credentials().expect("load").is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn saved_file_is_0600() {
-        use std::os::unix::fs::PermissionsExt;
-        let _guard = with_temp_config(); // (lock, tempdir) held for the test body
-        let path = save_credentials(&sample()).expect("save");
-        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "credentials must be owner-only");
-    }
-
-    #[test]
     fn resume_token_round_trips_through_persistence() {
         // The resume-token round-trip the supervisor relies on (§10.6): persist a
         // rotated token + epoch, reload, and confirm they survive.
@@ -768,8 +565,8 @@ pub(crate) mod tests {
         let mut creds = sample();
         creds.resume_token = "resume-deadbeef".to_string();
         creds.last_known_epoch = 7;
-        save_credentials(&creds).expect("save");
-        let loaded = load_credentials().expect("load").expect("present");
+        save_connection(&StoredConnection::new("https://one.example", creds)).expect("save");
+        let loaded = load_connections().expect("load").remove(0).credentials;
         assert_eq!(loaded.resume_token, "resume-deadbeef");
         assert_eq!(loaded.last_known_epoch, 7);
     }
@@ -785,7 +582,7 @@ pub(crate) mod tests {
 
         save_connection(&first).expect("save first");
         save_connection(&second).expect("save second");
-        let loaded = load_connections("https://unused.example").expect("load");
+        let loaded = load_connections().expect("load");
         assert_eq!(loaded.len(), 2);
         assert!(loaded.contains(&first));
         assert!(loaded.contains(&second));
@@ -799,7 +596,7 @@ pub(crate) mod tests {
         let mut rotated = first.clone();
         rotated.credentials.nats_bearer = "oge_rotated".to_string();
         save_connection(&rotated).expect("rotate");
-        let loaded = load_connections("https://unused.example").expect("load");
+        let loaded = load_connections().expect("load");
         assert_eq!(loaded, vec![rotated]);
     }
 
@@ -816,70 +613,10 @@ pub(crate) mod tests {
         reconnected.credentials.nats_bearer = "oge_reconnected".into();
         save_connection(&reconnected).expect("explicit reconnect");
         assert!(!save_renewed_connection(&renewed, &original).expect("reconnect wins"));
-        assert_eq!(
-            load_connections("https://one.example").unwrap(),
-            vec![reconnected.clone()]
-        );
-        remove_connection(&reconnected.connection_id, "https://one.example").expect("disconnect");
+        assert_eq!(load_connections().unwrap(), vec![reconnected.clone()]);
+        remove_connection(&reconnected.connection_id).expect("disconnect");
         assert!(!save_renewed_connection(&reconnected, &renewed).expect("disconnect wins"));
-        assert_eq!(
-            load_connections("https://one.example").unwrap(),
-            Vec::<StoredConnection>::new()
-        );
-    }
-
-    #[test]
-    fn legacy_single_credentials_migrate_without_losing_the_secret() {
-        let _guard = with_temp_config();
-        save_credentials(&sample()).expect("legacy save");
-        let loaded = load_connections("https://legacy.example/").expect("migrate");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].api_url, "https://legacy.example");
-        assert!(loaded[0].legacy_origin);
-        assert_eq!(loaded[0].credentials, sample());
-        assert!(!config_dir().expect("dir").join(CREDENTIALS_FILE).exists());
-    }
-
-    #[test]
-    fn invalid_existing_migration_never_deletes_legacy_credentials() {
-        let _guard = with_temp_config();
-        save_credentials(&sample()).expect("legacy save");
-        let connection = StoredConnection::from_legacy("https://legacy.example", sample());
-        let destination = connections_dir()
-            .expect("connections dir")
-            .join(format!("{}.json", connection.connection_id));
-        std::fs::write(&destination, b"{}").expect("write invalid destination");
-
-        assert!(load_connections("https://legacy.example").is_err());
-        assert!(config_dir().expect("dir").join(CREDENTIALS_FILE).exists());
-    }
-
-    #[test]
-    fn explicit_connection_replaces_only_its_matching_legacy_record() {
-        let _guard = with_temp_config();
-        save_credentials(&sample()).expect("legacy save");
-        let legacy = load_connections("https://possibly-wrong.example")
-            .expect("migrate")
-            .into_iter()
-            .next()
-            .expect("legacy record");
-
-        let explicit = StoredConnection::new("https://actual.example", sample());
-        assert_ne!(legacy.connection_id, explicit.connection_id);
-        save_connection(&explicit).expect("save explicit");
-
-        assert_eq!(
-            load_connections("https://unused.example").expect("load"),
-            vec![explicit]
-        );
-    }
-
-    #[test]
-    fn legacy_identity_cannot_collide_with_an_explicit_deployment_workspace() {
-        let _guard = with_temp_config();
-        let legacy = StoredConnection::from_legacy("https://api.opengeni.ai", sample());
-        let explicit = StoredConnection::new("https://api.opengeni.ai", sample());
-        assert_ne!(legacy.connection_id, explicit.connection_id);
+        assert_eq!(load_connections().unwrap(), Vec::<StoredConnection>::new());
     }
 
     #[test]
@@ -887,12 +624,12 @@ pub(crate) mod tests {
         let _guard = with_temp_config();
         let connection = StoredConnection::new("https://one.example", sample());
         save_connection(&connection).expect("save");
-        let removed = remove_connection(&connection.connection_id[..8], "https://unused.example")
+        let removed = remove_connection(&connection.connection_id[..8])
             .expect("remove")
             .expect("present");
         assert_eq!(removed, connection);
         assert_eq!(
-            load_connections("https://unused.example").expect("load"),
+            load_connections().expect("load"),
             Vec::<StoredConnection>::new()
         );
     }
@@ -911,22 +648,6 @@ pub(crate) mod tests {
             .permissions()
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700);
-    }
-
-    #[test]
-    fn legacy_nats_credentials_key_still_deserializes_as_the_bearer() {
-        // A credentials file written by an older agent build used the field name
-        // `nats_credentials`; the `#[serde(alias)]` keeps it loadable as the bearer
-        // (the value is the same connect token, only the meaning was clarified).
-        let legacy = r#"{
-            "agent_id": "a", "workspace_id": "w",
-            "nats_credentials": "oge_legacy.bearer",
-            "nats_urls": ["wss://nats.example:443"],
-            "relay_url": "", "update_pubkey": "",
-            "consented_whole_machine": true, "consented_screen_control": false
-        }"#;
-        let creds: StoredCredentials = serde_json::from_str(legacy).expect("parse legacy");
-        assert_eq!(creds.nats_bearer, "oge_legacy.bearer");
     }
 
     #[test]

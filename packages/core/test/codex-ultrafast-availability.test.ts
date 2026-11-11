@@ -44,7 +44,6 @@ async function selection(connections: dbApi.SubscriptionCoreCodexServingConnecti
   };
   const read = await loadWorkspaceCodexCatalogReadiness(db, settings, context, {}, {
     recordModels: async () => true,
-    disposition: async () => "core",
     listServing: async () => connections,
     fetchModels: fetchCodexModels,
     // An account without a cached list is unreadable here.

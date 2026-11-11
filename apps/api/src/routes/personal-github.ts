@@ -7,6 +7,7 @@ import {
   PersonalGitHubRepositorySelectionState,
   ReplacePersonalGitHubRepositorySelectionsRequest,
   VerifyPersonalGitHubRepositorySelectionsRequest,
+  personalGitHubAllRepositoriesEffectiveAccess,
 } from "@opengeni/contracts/personal-github";
 import {
   ListGitHubRepositoryBranchesQuery,
@@ -33,6 +34,7 @@ import {
   requireLegacyOAuthActor,
 } from "../connection-ownership";
 import {
+  canonicalPersonalGitHubConnection,
   completePersonalGitHubOAuthCallback,
   listPersonalGitHubConnections,
   personalGitHubReviewUrl,
@@ -44,6 +46,7 @@ import {
   personalGitHubRepositoryProviderHttpError,
   PersonalGitHubRepositoryProviderError,
   requirePersonalGitHubRepositoryConnection,
+  searchLivePersonalGitHubRepositories,
   verifyLivePersonalGitHubRepositories,
 } from "../integrations/personal-github-repositories";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
@@ -60,6 +63,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     return c.json(
       PersonalGitHubConnectionStatusResponse.parse({
         enabled: deps.settings.githubPersonalOauthEnabled,
+        allRepositoriesAvailable:
+          deps.settings.githubPersonalOauthEnabled &&
+          deps.settings.githubPersonalAllRepositoriesEnabled,
         connection: canonicalPersonalGitHubConnection(connections),
         reviewUrl: personalGitHubReviewUrl(deps.settings),
       }),
@@ -125,29 +131,51 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       const query = parseRequestQuery(ListPersonalGitHubRepositoriesQuery, c.req.query());
       try {
         const selection = await loadRepositorySelectionState(deps, access.grant, connection);
-        const page = await listLivePersonalGitHubRepositories(deps, {
+        const listInput = {
           accountId: access.grant.accountId,
           workspaceId,
           subjectId: access.grant.subjectId,
           connectionId,
           expectedConnectionAuthorityGeneration: selection.connectionAuthorityGeneration,
-          page: query.cursor,
           limit: query.limit,
-        });
+        };
+        const page = query.query
+          ? {
+              ...(await searchLivePersonalGitHubRepositories(deps, {
+                ...listInput,
+                query: query.query,
+              })),
+              nextPage: null,
+            }
+          : await listLivePersonalGitHubRepositories(deps, { ...listInput, page: query.cursor });
         const selectedAccessById = new Map(
           selection.repositories.map((repository) => [
             repository.repositoryId,
             repository.selectedAccess,
           ]),
         );
+        // A mode saved while the deployment allowed it is not used once it no longer does.
+        const allRepositoriesAccess =
+          deps.settings.githubPersonalOauthEnabled &&
+          deps.settings.githubPersonalAllRepositoriesEnabled
+            ? selection.allRepositoriesAccess
+            : null;
         return c.json(
           ListPersonalGitHubRepositoriesResponse.parse({
-            repositories: page.repositories.map((repository) => ({
-              ...repository,
-              selectedAccess: selectedAccessById.get(repository.repositoryId) ?? null,
-            })),
+            // `selectedAccess` stays the saved choice; in All my repositories
+            // every listed repository is usable at `effectiveAccess`.
+            repositories: page.repositories.map((repository) => {
+              const selectedAccess = selectedAccessById.get(repository.repositoryId) ?? null;
+              return {
+                ...repository,
+                selectedAccess,
+                effectiveAccess: allRepositoriesAccess
+                  ? personalGitHubAllRepositoriesEffectiveAccess(allRepositoriesAccess, repository)
+                  : selectedAccess,
+              };
+            }),
             nextCursor: page.nextPage,
-            selection,
+            selection: publicSelectionState(selection),
           }),
         );
       } catch (error) {
@@ -177,6 +205,21 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       const request = await parseRequestJson(c, ReplacePersonalGitHubRepositorySelectionsRequest);
       try {
         const current = await loadRepositorySelectionState(deps, access.grant, connection);
+        // Turning the mode on, or changing its access, waits for the
+        // deployment to allow it; keeping or turning off a stored one does not.
+        if (
+          request.allRepositoriesAccess &&
+          request.allRepositoriesAccess !== current.allRepositoriesAccess &&
+          !(
+            deps.settings.githubPersonalOauthEnabled &&
+            deps.settings.githubPersonalAllRepositoriesEnabled
+          )
+        ) {
+          throw new HTTPException(409, {
+            message:
+              "All my repositories is not available on this deployment yet. Choose repositories instead.",
+          });
+        }
         assertRepositoryConnectionAuthorityFence(current, request);
         const verified = await verifyLivePersonalGitHubRepositories(deps, {
           accountId: access.grant.accountId,
@@ -185,6 +228,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           connectionId,
           expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
           repositories: request.repositories,
+          skipUnavailable: Boolean(request.allRepositoriesAccess),
         });
         const lastVerifiedAt = new Date().toISOString();
         const selection = await replacePersonalGitHubRepositorySelections(deps.db, {
@@ -196,8 +240,13 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           expectedSelectionGeneration: request.expectedSelectionGeneration,
           idempotencyKey: request.idempotencyKey,
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
+          ...(request.allRepositoriesAccess !== undefined
+            ? { allRepositoriesAccess: request.allRepositoriesAccess }
+            : {}),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+        return c.json(
+          PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)),
+        );
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }
@@ -282,7 +331,9 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           idempotencyKey: request.idempotencyKey,
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
         });
-        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+        return c.json(
+          PersonalGitHubRepositorySelectionState.parse(publicSelectionState(selection)),
+        );
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }
@@ -303,6 +354,14 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
+}
+
+/** The selection as clients see it; the mode's generation is server-only. */
+function publicSelectionState(
+  state: DbPersonalGitHubRepositorySelectionState,
+): Omit<DbPersonalGitHubRepositorySelectionState, "allRepositoriesGeneration"> {
+  const { allRepositoriesGeneration: _generation, ...rest } = state;
+  return rest;
 }
 
 async function loadRepositorySelectionState(
@@ -349,23 +408,4 @@ function personalGitHubRepositoryRouteError(error: unknown): Error {
     return new HTTPException(404, { message: "personal GitHub connection not found" });
   }
   return error instanceof Error ? error : new Error("personal GitHub repository request failed");
-}
-
-function canonicalPersonalGitHubConnection<
-  T extends { status: string; updatedAt: string; id: string },
->(connections: T[]): T | null {
-  const statusRank: Record<string, number> = {
-    active: 0,
-    needs_reauth: 1,
-    error: 2,
-    revoked: 3,
-  };
-  return (
-    [...connections].sort((left, right) => {
-      const rank = (statusRank[left.status] ?? 4) - (statusRank[right.status] ?? 4);
-      if (rank !== 0) return rank;
-      const updated = right.updatedAt.localeCompare(left.updatedAt);
-      return updated !== 0 ? updated : right.id.localeCompare(left.id);
-    })[0] ?? null
-  );
 }

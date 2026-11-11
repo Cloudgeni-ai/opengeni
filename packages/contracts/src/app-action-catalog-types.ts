@@ -17,13 +17,6 @@ export type ActionCatalogEntry = {
    */
   browserOnly?: string;
   /**
-   * The route that replaced this removed one ("METHOD /path"), which now only
-   * answers 410 `gone`. Set only on such actions; the server hides them from
-   * search, points describe and call at the replacement, and treats them as
-   * running nothing (no confirmation is asked for them).
-   */
-  retired?: string;
-  /**
    * Where the action carries a key, password, token or other secret: field
    * paths ("request.apiKey", "response.token") or a route reason, derived by
    * the catalog generator. Without full access a chat leaves it to the app.

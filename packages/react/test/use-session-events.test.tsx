@@ -37,6 +37,9 @@ const englishText = createOpenGeniText();
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+// First paint stays inside the server's single-query page; scroll and
+// catch-up pages are larger.
+const SESSION_FIRST_WINDOW_PAGE_SIZE = 255;
 const SESSION_HISTORY_PAGE_SIZE = 1000;
 // Windowed history reads the conversation; a turn's steps load when opened.
 // These fakes have no listEventPage, so they cannot see the server announce
@@ -1175,7 +1178,7 @@ describe("useSessionEvents", () => {
 
     const sequences = hook.result.current.events.map((item) => item.sequence);
     expect(sequences.at(-1)).toBe(4_004);
-    expect(sequences[0]).toBeLessThan(3_001);
+    expect(sequences[0]).toBeLessThan(4_000 - SESSION_FIRST_WINDOW_PAGE_SIZE + 1);
     for (let index = 1; index < sequences.length; index += 1) {
       expect(sequences[index]).toBe(sequences[index - 1]! + 1);
     }
@@ -1556,16 +1559,16 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
     ]);
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(201);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(946);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
+    expect(lengths.filter((length) => length === SESSION_FIRST_WINDOW_PAGE_SIZE)).toHaveLength(1);
 
     await hook.unmount();
   });
@@ -1593,7 +1596,7 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
-        if (delayedOlder && options.before === 2_501) {
+        if (delayedOlder && options.before === 3_246) {
           const page = listPage(store, options);
           await delayedOlder;
           return page;
@@ -1667,7 +1670,7 @@ describe("useSessionEvents", () => {
         {
           ...CONVERSATION_READ,
           before: Number.MAX_SAFE_INTEGER,
-          limit: SESSION_HISTORY_PAGE_SIZE,
+          limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
@@ -1754,14 +1757,14 @@ describe("useSessionEvents", () => {
         {
           ...CONVERSATION_READ,
           before: Number.MAX_SAFE_INTEGER,
-          limit: SESSION_HISTORY_PAGE_SIZE,
+          limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
       ]);
       expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(2_501);
+      expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(3_246);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
 
       let releaseOlder!: () => void;
@@ -1784,7 +1787,7 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       // A foreground replacement is atomic: the prior complete tip remains
       // visible while the bounded latest page is still in flight.
-      expect(hook.result.current.events[0]?.sequence).toBe(2_501);
+      expect(hook.result.current.events[0]?.sequence).toBe(3_246);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
       await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
       delayedTail = null;
@@ -1796,23 +1799,23 @@ describe("useSessionEvents", () => {
       expect(listCalls.at(-1)).toEqual({
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
       expect(listCalls.some((call) => call.after === 2_500)).toBe(false);
       expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // Replacement retires navigation against the discarded window. The old
-      // page must not splice 1501–2500 onto 5001–6000, leaving an inaccessible gap.
+      // page must not splice 2246–3245 onto 5746–6000, leaving an inaccessible gap.
       expect(hook.result.current.loadingOlder).toBe(false);
       releaseOlder();
       await actRun(() => pendingOlder);
       expect(pendingOlder.committed).toBe(false);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
       expect(hook.result.current.hasOlder).toBe(true);
 
@@ -1840,7 +1843,7 @@ describe("useSessionEvents", () => {
       expect(listCalls.at(-1)).toEqual({
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
@@ -2030,7 +2033,7 @@ describe("useSessionEvents", () => {
         event(index + 301, "agent.message.delta", { text: "middle" }),
       ),
       event(500),
-      ...Array.from({ length: 900 }, (_, index) =>
+      ...Array.from({ length: 200 }, (_, index) =>
         event(index + 501, "agent.message.delta", { text: "tail" }),
       ),
     ];
@@ -2049,7 +2052,7 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -2085,7 +2088,7 @@ describe("useSessionEvents", () => {
       event(1, "session.created", {}),
       ...Array.from({ length: 5999 }, (_, index) => event(index + 2)),
     ];
-    const initialOldest = store.length - SESSION_HISTORY_PAGE_SIZE + 1;
+    const initialOldest = store.length - SESSION_FIRST_WINDOW_PAGE_SIZE + 1;
     let releaseOlder: () => void = () => {
       throw new Error("older page was not requested");
     };
@@ -2129,7 +2132,7 @@ describe("useSessionEvents", () => {
       store.slice(initialOldest - 33).map((item) => item.sequence),
     );
     expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(
-      SESSION_HISTORY_PAGE_SIZE + 32,
+      SESSION_FIRST_WINDOW_PAGE_SIZE + 32,
     );
     expect(hook.result.current.events[0]?.sequence).toBe(initialOldest - 32);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -2210,21 +2213,21 @@ describe("useSessionEvents", () => {
 
     // This synthetic log has no turn boundary in either page, so the initial
     // read stops after one bounded boundary probe and remains explicitly older.
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
-    expect(hook.result.current.events[0]?.sequence).toBe(38_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE * 2);
+    expect(hook.result.current.events[0]?.sequence).toBe(39_491);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
         ...CONVERSATION_READ,
-        before: 39_001,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        before: 39_746,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -2255,7 +2258,7 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -2308,14 +2311,14 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
         ...CONVERSATION_READ,
         before: 8,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -2373,13 +2376,13 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
     ]);
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_746);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
@@ -2767,7 +2770,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
+    expect(hook.result.current.events[0]?.sequence).toBe(4_746);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([5_000]);
@@ -2780,7 +2783,7 @@ describe("useSessionEvents", () => {
       {
         ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },

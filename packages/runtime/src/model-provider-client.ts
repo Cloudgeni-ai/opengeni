@@ -1,7 +1,15 @@
 import {
+  assertInferenceResidencyForOtherRequest,
+  assertInferenceResidencyForRequest,
+  inferenceResidencyCacheKey,
+  inferenceResidencyRequirement,
+  type InferenceResidencyRequirement,
+} from "./inference-residency";
+import {
   configuredModels,
   azureOpenAIDeploymentIdentityAvailable,
   deploymentAzureEntraCredential,
+  isDirectOpenAiApiBaseUrl,
   opperMaxOutputTokens,
   type ResolvedModelProvider,
   type Settings,
@@ -27,6 +35,7 @@ import {
   sharedAzureEntraAccessTokenSource,
   type AzureEntraAccessTokenSource,
 } from "@opengeni/network/azure-entra";
+import { pinnedFetch } from "@opengeni/network";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
@@ -53,17 +62,22 @@ import {
   azureModelRequestPolicy,
   chatModelRequestPolicy,
   modelRequestPolicyForProvider,
+  withStorelessResponses,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
+  refuseModelTransport,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import { invalidRequestSignatureOfResponse } from "./provider-invalid-request";
+import { classifyProviderAccountRefusalResponse } from "./provider-quota";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
@@ -122,6 +136,7 @@ export function buildOpenAIClientFromSettings(
   settings: Settings,
   providerId: string = settings.openaiProvider,
 ): OpenAI {
+  const residency = inferenceResidencyRequirement(settings);
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const identityTokenSource =
@@ -157,6 +172,7 @@ export function buildOpenAIClientFromSettings(
                 ? azureEntraBearerFetch(openAIResponsesFetch(settings), identityTokenSource, false)
                 : openAIResponsesFetch(settings),
               settings.openaiResponsesWebSocketEnabled,
+              residency,
             ),
           ),
         ),
@@ -181,11 +197,17 @@ export function buildOpenAIClientFromSettings(
             providerId,
             openAIResponsesFetch(settings),
             settings.openaiResponsesWebSocketEnabled,
+            residency,
           ),
         ),
       ),
     },
-    { modelRequestPolicy: chatModelRequestPolicy },
+    {
+      // Only the OpenAI platform; a compatible server keeps its own contract.
+      modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
+        ? withStorelessResponses(chatModelRequestPolicy)
+        : chatModelRequestPolicy,
+    },
   );
 }
 
@@ -247,6 +269,21 @@ function openAIResponsesFetch(settings: Settings): typeof globalThis.fetch {
     endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   });
   return openaiWebSocketTransport as unknown as typeof globalThis.fetch;
+}
+
+/**
+ * The transport for a workspace's own OpenAI-compatible endpoint. Its URL is
+ * customer-chosen, so each request resolves the host once, refuses private
+ * and special-use addresses (unless the operator allows private integration
+ * targets), pins the connection to the vetted addresses and never follows a
+ * redirect.
+ */
+export function compatibleModelEndpointFetch(settings: Settings): typeof globalThis.fetch {
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+    pinnedFetch(input as string | URL | Request, init, settings, {
+      label: "Model endpoint",
+      requireHttpsOutsideLocalTest: true,
+    })) as typeof globalThis.fetch;
 }
 
 /**
@@ -319,6 +356,7 @@ function providerClientCacheKey(
             }
           : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
+        residency: inferenceResidencyCacheKey(inferenceResidencyRequirement(settings)),
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         ...(provider.kind === "codex-subscription"
           ? { codexResponsesWebSocket: settings.codexResponsesWebSocketEnabled }
@@ -514,11 +552,18 @@ function azureEntraRefusedResponse(): Response {
 }
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  const residency = inferenceResidencyRequirement(settings);
   if (
-    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
+    (provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-compatible-workspace") &&
     !provider.apiKey?.trim()
   ) {
-    throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+    throw new Error("This workspace's model connection key is unavailable");
+  }
+  // A disconnected organization endpoint fails closed like its other accounts.
+  if (provider.kind === "direct-compatible-organization" && !provider.apiKey?.trim()) {
+    throw new Error("This organization's model endpoint key is unavailable");
   }
   // A missing or revoked organization connection fails closed; it never
   // falls back to the deployment's own Azure or OpenAI credentials.
@@ -549,6 +594,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "opper-managed" ||
     provider.kind === "opper-workspace" ||
     provider.kind === "opper-organization";
+  // A workspace's or organization's own OpenAI-compatible server is an
+  // arbitrary URL: every request is DNS-pinned to public addresses and
+  // refuses redirects.
+  const compatibleEndpoint =
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization";
   // Opper reuses the exact-upstream lookup so an unknown slug fails before
   // network I/O; its entries carry no Gateway route policy.
   const gatewayPolicies =
@@ -602,7 +653,9 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   // transports has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
   const registryMaxRetries =
-    gatewayProvider || openRouterProvider || opperProvider ? 0 : settings.openaiMaxRetries;
+    gatewayProvider || openRouterProvider || opperProvider || compatibleEndpoint
+      ? 0
+      : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -630,6 +683,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
                   : globalThis.fetch,
                 settings.codexResponsesWebSocketEnabled,
+                residency,
               ),
             ),
           },
@@ -655,7 +709,9 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               // pre-acceptance authentication failure (401).
               maxRetries: 0,
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-              fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+              fetch: xaiSubscriptionFetch(
+                instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
+              ),
             },
             {
               modelRequestPolicy: modelRequestPolicyForProvider(
@@ -704,12 +760,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   modelStreamIdlePolicy(settings, provider),
                   anonymousProvider
                     ? withoutAuthenticationHeaders(
-                        instrumentedModelFetch(provider.id, globalThis.fetch),
+                        instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
                       )
                     : gatewayProvider
                       ? vercelGatewayRoutingFetch(
                           provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                          instrumentedModelFetch(provider.id, globalThis.fetch),
+                          instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
                           gatewayPolicies,
                         )
                       : provider.kind === "direct-azure-organization"
@@ -722,12 +778,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                                 )
                               : azureApiKeyHeaderFetch(openAIResponsesFetch(settings)),
                             settings.openaiResponsesWebSocketEnabled,
+                            residency,
                           )
-                        : instrumentedModelFetch(
-                            provider.id,
-                            openAIResponsesFetch(settings),
-                            settings.openaiResponsesWebSocketEnabled,
-                          ),
+                        : compatibleEndpoint
+                          ? instrumentedModelFetch(
+                              provider.id,
+                              compatibleModelEndpointFetch(settings),
+                              false,
+                              residency,
+                            )
+                          : instrumentedModelFetch(
+                              provider.id,
+                              openAIResponsesFetch(settings),
+                              settings.openaiResponsesWebSocketEnabled,
+                              residency,
+                            ),
                 ),
               ),
             },
@@ -749,10 +814,26 @@ export function instrumentedModelFetch(
   provider: string,
   inner: typeof fetch,
   transportReportsDispatch = false,
+  /** The EU requirement of the settings this client was built from. */
+  residency: InferenceResidencyRequirement | null = null,
 ): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
+      // Under EU-only inference, other provider endpoints that carry content
+      // (images, audio, files) are refused here; reads such as model lists pass.
+      try {
+        assertInferenceResidencyForOtherRequest(provider, input, init, residency);
+      } catch (error) {
+        refuseModelTransport(error);
+      }
       return await inner(input, init);
+    }
+    // EU-only inference: refuse a non-EU route before anything is sent. The
+    // refusal is final: the SDK must neither retry it nor wrap it.
+    try {
+      init = await assertInferenceResidencyForRequest(provider, input, init, residency);
+    } catch (error) {
+      refuseModelTransport(error);
     }
     const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
     init = prepared.init;
@@ -828,7 +909,20 @@ export function instrumentedModelFetch(
           });
         }
       }
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      if (response.status === 404) {
+        // Only the provider's body tells an account restriction (for example
+        // an OpenRouter account limited to its own keys) from any other 404.
+        // Read a bounded clone off-path; the call never waits for it.
+        recordModelCallMetricAfterAccountRefusalCheck(provider, response, started);
+      } else {
+        recordModelCallMetric(
+          provider,
+          response.ok ? "completed" : "failed",
+          started,
+          response.status,
+        );
+      }
+      if (response.status === 400) recordModelInvalidRequestMetric(provider, response);
       return response;
     } catch (error) {
       capture.cancel();
@@ -856,13 +950,84 @@ function recordModelCallMetric(
   provider: string,
   outcome: "completed" | "failed",
   started: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
 ): void {
-  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  recordModelCallMetricWithDuration(
+    provider,
+    outcome,
+    Math.max(0, (performance.now() - started) / 1000),
+    httpStatus,
+    providerAccountRefusal,
+  );
+}
+
+function recordModelCallMetricWithDuration(
+  provider: string,
+  outcome: "completed" | "failed",
+  durationSeconds: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
+): void {
   try {
-    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+    runtimeMetricsHooks?.onModelCall?.({
+      provider,
+      outcome,
+      durationSeconds,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+    });
   } catch {
     // Metrics emission must never affect a model call.
   }
+}
+
+/**
+ * Record a failed 404 call once its bounded body clone has been classified.
+ * The duration is the response time, not the classification time, and a
+ * failed classification still records the call (as an unclassified 404).
+ */
+function recordModelCallMetricAfterAccountRefusalCheck(
+  provider: string,
+  response: Response,
+  started: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  let classification: Promise<ProviderAccountRefusal | null>;
+  try {
+    classification = classifyProviderAccountRefusalResponse(response);
+  } catch {
+    classification = Promise.resolve(null);
+  }
+  void classification
+    .catch(() => null)
+    .then((refusal) =>
+      recordModelCallMetricWithDuration(
+        provider,
+        "failed",
+        durationSeconds,
+        response.status,
+        refusal ?? undefined,
+      ),
+    );
+}
+
+/**
+ * Count a provider's 400 by the request path it names. The body is read from
+ * a clone taken before the response is returned, and the call never waits
+ * for it.
+ */
+function recordModelInvalidRequestMetric(provider: string, response: Response): void {
+  const hook = runtimeMetricsHooks?.onModelInvalidRequest;
+  if (!hook) return;
+  void invalidRequestSignatureOfResponse(response).then((signature) => {
+    if (!signature) return;
+    try {
+      hook({ provider, ...signature });
+    } catch {
+      // Metrics emission must never affect a model call.
+    }
+  });
 }
 
 function azureDeploymentBaseUrl(settings: Settings): string {

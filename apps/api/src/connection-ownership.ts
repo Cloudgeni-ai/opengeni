@@ -183,6 +183,31 @@ export function personalOwnerVerifiedInState(payload: Record<string, unknown>): 
 }
 
 /**
+ * The owner fields every owner-bound OAuth/install state signs. Its callback
+ * re-checks this owner through `requireConnectOwnerAuthority`, and the claim is
+ * also what finds a managed human's authority in their own Personal workspace
+ * (no membership row). The claim is a required argument so a start path cannot
+ * leave it out; `connect-owner-state-surface.test.ts` keeps every owner-bound
+ * state on this helper.
+ */
+export function connectOwnerStateFields(
+  owner: { accountId: string; workspaceId: string; subjectId: string },
+  personalOwnerVerified: boolean,
+): {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: boolean;
+} {
+  return {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    subjectId: owner.subjectId,
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: personalOwnerVerified,
+  };
+}
+
+/**
  * Callback-side fence for every path that persists a personal owner. Requires
  * both the signed start-time verification and a non-machine subject.
  */

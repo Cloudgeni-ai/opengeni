@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
+  CircleAlertIcon,
   GitPullRequestIcon,
   MessageSquareCodeIcon,
   NotebookPenIcon,
@@ -19,6 +20,7 @@ import type { WorkspaceAutomationTemplate } from "@opengeni/sdk";
 
 const TEMPLATE_ICONS: Record<string, ReactNode> = {
   "meeting-notes": <NotebookPenIcon />,
+  "automation-failed": <CircleAlertIcon />,
   "pr-review": <MessageSquareCodeIcon />,
   "issue-triage": <TagsIcon />,
   "morning-brief": <SunriseIcon />,

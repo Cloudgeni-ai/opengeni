@@ -1,5 +1,6 @@
 import {
   configuredModelPricingSchedules,
+  organizationCompatibleConnectionIdOf,
   type Settings,
   type ResolvedModelProvider,
 } from "@opengeni/config";
@@ -9,6 +10,7 @@ import {
   getWorkspaceProviderApiKeyConnectionMetadata,
   loadConnectionCredentialForBroker,
   loadDirectModelProviderConnection,
+  loadOrganizationCompatibleEndpointApiKey,
   loadOrganizationModelProviderApiKey,
   loadOrganizationModelProviderCredential,
   workspaceProviderApiKeyConnectionSpec,
@@ -35,8 +37,16 @@ export const SessionTitleRequest = z.object({
   externallyBilled: z.boolean(),
   chargesOpenGeniCredits: z.boolean(),
   countsTowardTokenCap: z.boolean(),
+  /** Served by the person's own API key (pays the platform fee); older requests omit it. */
+  byok: z.boolean().optional(),
   pricingJson: z.string(),
   serviceTier: z.enum(["fast", "priority", "ultrafast"]).optional(),
+  /**
+   * Processing residency of the accepted title route, recorded on the title's
+   * usage event and fact. Read with `parseModelCallProcessingResidency`;
+   * requests admitted before it existed omit it and record unknown.
+   */
+  processingResidency: z.unknown().optional(),
 });
 export type SessionTitleRequest = z.infer<typeof SessionTitleRequest>;
 
@@ -110,7 +120,11 @@ export async function sessionTitleApiConnectionId(input: {
     provider.credentialSource.mechanism !== "api_key"
   )
     return null;
-  if (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") {
+  if (
+    provider.kind === "direct-openai-workspace" ||
+    provider.kind === "direct-azure-workspace" ||
+    provider.kind === "direct-compatible-workspace"
+  ) {
     const connection = await loadDirectModelProviderConnection(
       db,
       settings,
@@ -120,6 +134,20 @@ export async function sessionTitleApiConnectionId(input: {
     if (!connection || connection.apiKey !== provider.apiKey)
       throw new SessionTitleRouteUnavailableError("Title model connection changed");
     return connection.id;
+  }
+  if (provider.kind === "direct-compatible-organization") {
+    // One of the organization's own endpoints: pin that exact connection.
+    const connectionId = organizationCompatibleConnectionIdOf(provider.id);
+    const apiKey =
+      connectionId &&
+      (await loadOrganizationCompatibleEndpointApiKey(db, settings, {
+        accountId,
+        workspaceId,
+        connectionId,
+      }));
+    if (!connectionId || !apiKey || apiKey !== provider.apiKey)
+      throw new SessionTitleRouteUnavailableError("Title model connection changed");
+    return connectionId;
   }
   const kind = providerKinds[provider.kind as keyof typeof providerKinds];
   if (provider.credentialSource.kind === "workspace_connection") {

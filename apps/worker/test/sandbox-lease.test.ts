@@ -24,12 +24,13 @@
 // a real box, drains its lease, and asserts the reaper's real terminate path
 // stops it — terminating the box in `finally` regardless.
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// pgvector/pgvector:pg16 (the migration baseline does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser → FORCE RLS applies; the global
 // sweep rides the SECURITY-DEFINER fn). Container torn down in afterAll.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { dropScratchBypassRole, reapStaleBypassRoles } from "./scratch-bypass-role";
 import {
   captureRetainedRouterOutput,
   createProviderCommandRetainer,
@@ -60,6 +61,8 @@ import {
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
   confirmDrainCold,
+  createEnrollment,
+  createSandbox,
   createSession,
   createDb,
   deferRetainedProcessReconciliation,
@@ -77,6 +80,7 @@ import {
   releaseLeaseHolder,
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
+  readActiveSandbox,
   readLease,
   readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
@@ -85,6 +89,7 @@ import {
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   SandboxWorkspaceMutationOutputRejectedError,
+  setActiveSandbox,
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
@@ -95,7 +100,11 @@ import {
 import { createObservability } from "@opengeni/observability";
 import { RoutingSandboxSession } from "@opengeni/runtime";
 import { workspaceArchiveObjectKey } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  recordTestRoleOwner,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
@@ -539,6 +548,8 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
+  // Earlier runs killed before their cleanup can leave a bypass role behind.
+  await reapStaleBypassRoles(admin, shared.adminUrl);
 }, 180_000);
 
 afterAll(async () => {
@@ -725,6 +736,90 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
     expect(result.terminated).toBeGreaterThanOrEqual(1);
     expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+  }, 60_000);
+
+  test("reaping a chat's idle box during a turn on its Connected Machine leaves the machine selected", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      initialMessage: "work on my desktop",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: ids.groupId,
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "windows",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      kind: "selfhosted",
+      name: "desktop",
+      enrollmentId: enrollment.id,
+    });
+    const moved = await setActiveSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: session.activeEpoch,
+    });
+    expect(moved.swapped).toBe(true);
+    await initializeSessionStartAtomically(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const claim = await claimSessionWorkForAttempt(db, ids.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `machine-turn-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    // The chat's own managed box, opened by a viewer, sits idle past its grace
+    // while the turn works on the machine.
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 1,
+      expiresInMs: -1_000,
+      instanceId: "box-idle-beside-machine",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+
+    await reapSandboxLeases();
+
+    expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    // The turn keeps the machine: same pointer, same route epoch.
+    expect(await readActiveSandbox(db, ids.workspaceId, session.id)).toMatchObject({
+      activeSandboxId: machine.id,
+      activeEpoch: moved.pointer!.activeEpoch,
+    });
   }, 60_000);
 
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
@@ -3205,6 +3300,66 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
   }, 60_000);
 
+  test("(1b-home-route) a home command's output survives the session moving to another machine", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-home-swap",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-home-swap" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    // A command admitted on the session's own home sandbox, the way routed
+    // home mutations are admitted: no explicit route, so the route epoch is
+    // the session's epoch at admission.
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      operation: "execCommand",
+    });
+    expect(admission.routeKind).toBe("home");
+    expect(admission.routeEpoch).toBe(0);
+    // While it runs, the same turn moves the session to another machine.
+    await admin`
+      update sessions set active_epoch = active_epoch + 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    // The home command still settles with its output accepted: moving the
+    // session's active route does not touch what ran on its home sandbox.
+    await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      admission,
+      operation: "execCommand",
+      outcome: "resolved",
+    });
+    const [settled] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(settled?.providerOutcome).toBe("resolved");
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+  }, 60_000);
+
   test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -4447,38 +4602,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBe("terminated");
   }, 180_000);
 
-  test("deadline-command inventory function replays without widening public authority", async () => {
-    if (!available) throw new Error("Real PostgreSQL required for containment migration");
-    const definition = async () => {
-      const [row] = await admin`select pg_get_functiondef(
-        'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure
-      ) as definition`;
-      return String(row!.definition);
-    };
-    const before = await definition();
-    expect(before).toContain("process.reconcile_attempts >= 5");
-    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
-    expect(before).toContain(
-      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
-    );
-    expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
-    const migration = await Bun.file(
-      new URL(
-        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
-        import.meta.url,
-      ),
-    ).text();
-    await admin.begin(async (tx) => {
-      await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
-    });
-    expect(await definition()).toBe(before);
-    const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0
-        and acl.privilege_type = 'EXECUTE'), false) as public_execute
-      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-      where p.oid = 'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure`;
-    expect(permission!.public_execute).toBe(false);
-  }, 60_000);
-
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -5304,6 +5427,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
+      // If this run dies before the finally below, the harness reaper drops it.
+      await recordTestRoleOwner(admin, bypassRole);
       await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
@@ -5337,7 +5462,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expect(await readReconciliationState()).toEqual(beforeBypass);
     } finally {
       await bypassClient?.close();
-      await admin.unsafe(`drop role if exists ${quotedBypassRole}`);
+      // Memberships first, then grants that migrations elsewhere copied to it.
+      // A short deadline keeps this inside the test's own limit; anything
+      // left is for the stale-role cleanup or the shared reaper.
+      const leftovers = await dropScratchBypassRole(admin, shared!.adminUrl, bypassRole, {
+        deadline: Date.now() + 20_000,
+      });
+      if (leftovers.length > 0) console.warn(leftovers.join("; "));
     }
 
     const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {
@@ -7357,6 +7488,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       actor: "reaper",
       instanceId: "box-terminated-reason",
       drainReason: "provider_deadline",
+      providerStopped: true,
     });
   }, 60_000);
 

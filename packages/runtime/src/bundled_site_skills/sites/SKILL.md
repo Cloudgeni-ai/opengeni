@@ -41,8 +41,10 @@ tool calls.
 2. Write one `index.html` with inline CSS and script. Include
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
    follow the readable defaults below and let content reflow into one column
-   on a phone. Use system fonts, text, inline SVG or data-URL images, so
-   nothing has to load beside the file (draw a chart as inline SVG).
+   on a phone. Use system fonts, text, inline SVG or small data-URL images
+   such as icons and logos, so nothing has to load beside the file (draw a
+   chart as inline SVG). Photos and video go outside the HTML (see "Keep
+   the page small").
 3. To keep entries, load the host client with this exact tag before your own
    script, and use Site Data:
 
@@ -172,6 +174,16 @@ Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
 immutable versions and retained source. There is no hard-delete workflow.
 
+### Keep the page small
+
+Visitors download all of the HTML before anything shows, and the Sites gateway
+can't serve a page over 256 MB. Keep it under 5 MB: resize and compress images
+to their shown size (WebP or JPEG), and link video or large images from where
+they are hosted. Site files (`references/site-data.md`) also hold media:
+shared files open for every visitor of the Site, signed-out guests of a public
+Site included. A create or publish result with `warnings` means the page is
+too heavy: shrink or move the media and publish again.
+
 ## Publish to the web
 
 When the user wants a Site outside the console (a public page, a client
@@ -249,7 +261,7 @@ Read the references the app needs with `skill_read`, for example
 
 | The app | Read |
 | --- | --- |
-| Every app: packages, build, local preview with live tools, requested tools, the completion gate | `references/build-and-preview.md` |
+| Every app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
 | Saves records or files (Site Data) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (Site SQL) | `references/site-sql.md` |

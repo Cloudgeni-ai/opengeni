@@ -12,6 +12,7 @@ import {
 import {
   registerTeamsBotRoutes,
   drainTeamsBotOnce,
+  teamsReplyParts,
   teamsTextParts,
 } from "../src/integrations/teams-bot";
 const tenant = "10000000-0000-4000-8000-000000000001";
@@ -37,6 +38,92 @@ const configured = () =>
     teamsBotAllowedTenantIds: [tenant],
   });
 describe("Teams actor and transport boundary", () => {
+  test("reports bounded shape diagnostics without content or identities", () => {
+    const diagnostics: unknown[] = [];
+    const fixture = {
+      ...activity(),
+      text: "private-message-marker",
+      timestamp: new Date(),
+      from: { id: "private-sender-marker" },
+      recipient: { id: "private-recipient-marker" },
+    };
+    expect(normalizeTeamsMessage(fixture, (value) => diagnostics.push(value))).toBeNull();
+    expect(diagnostics).toEqual([
+      { reason: "schema", schemaPaths: "timestamp,from.aadObjectId", timestampType: "date" },
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain("private-");
+    expect(JSON.stringify(diagnostics)).not.toContain(tenant);
+  });
+  test("accepts documented inline HTML representations using canonical text only", () => {
+    for (const contentUrl of [undefined, null]) {
+      const diagnostics: unknown[] = [];
+      const message = normalizeTeamsMessage(
+        {
+          ...activity(),
+          textFormat: "plain",
+          attachments: [
+            {
+              contentType: "text/html",
+              content: "<div>Different <strong>HTML</strong></div>",
+              contentUrl,
+            },
+          ],
+        },
+        (value) => diagnostics.push(value),
+      );
+      expect(message).toEqual(normalizeTeamsMessage(activity()));
+      expect(diagnostics).toEqual([]);
+    }
+    expect(
+      normalizeTeamsMessage({
+        ...activity(),
+        text: "",
+        attachments: [{ contentType: "text/html", content: "<p>HTML is not a text fallback</p>" }],
+      }),
+    ).toBeNull();
+  });
+  test("rejects files, images, URL-backed HTML and mixed attachments without logging content", () => {
+    const html = { contentType: "text/html", content: "<p>private-html-marker</p>" };
+    for (const attachments of [
+      [{ ...html, contentUrl: "https://private-file-marker.test/file" }],
+      [{ contentType: "text/html", content: { unexpected: "private-marker" } }],
+      [{ contentType: "application/pdf", contentUrl: "https://private-file-marker.test/file" }],
+      [{ contentType: "image/png", contentUrl: "https://private-file-marker.test/image" }],
+      [html, { contentType: "application/pdf" }],
+      [null],
+    ]) {
+      const diagnostics: unknown[] = [];
+      expect(
+        normalizeTeamsMessage({ ...activity(), attachments }, (value) => diagnostics.push(value)),
+      ).toBeNull();
+      expect(diagnostics).toEqual([
+        {
+          reason: "attachments",
+          attachmentCount: attachments.length,
+          htmlAttachmentCount: attachments.filter((value) => value?.contentType === "text/html")
+            .length,
+        },
+      ]);
+      expect(JSON.stringify(diagnostics)).not.toContain("private-");
+    }
+  });
+  test("reports exact ignored-message policy and leaves accepted messages unchanged", () => {
+    const diagnostics: unknown[] = [];
+    const observe = (value: unknown) => diagnostics.push(value);
+    expect(normalizeTeamsMessage(activity(), observe)).toEqual(normalizeTeamsMessage(activity()));
+    expect(diagnostics).toEqual([]);
+    normalizeTeamsMessage({ ...activity(), text: "  " }, observe);
+    normalizeTeamsMessage({ ...activity(), from: { ...activity().from, role: "bot" } }, observe);
+    normalizeTeamsMessage(
+      { ...activity(), conversation: { ...activity().conversation, tenantId: actor } },
+      observe,
+    );
+    expect(diagnostics).toEqual([
+      { reason: "empty_text" },
+      { reason: "bot_sender" },
+      { reason: "tenant_mismatch" },
+    ]);
+  });
   test("accepts exact personal message and stable provider-neutral identity", () => {
     const m = normalizeTeamsMessage(activity());
     expect(m?.actorId).toBe(actor);
@@ -103,7 +190,7 @@ describe("Teams actor and transport boundary", () => {
     const token = mintTeamsProof("secret", input, now);
     expect(verifyTeamsProof("secret", token, now).actorId).toBe(actor);
     expect(() => verifyTeamsProof("wrong", token, now)).toThrow();
-    expect(() => verifyTeamsProof("secret", token, now + 600001)).toThrow();
+    expect(() => verifyTeamsProof("secret", token, now + 3_600_001)).toThrow();
     expect(() => verifyTeamsProof("secret", `${token}x`, now)).toThrow();
   });
   test("no session/provider/database access occurs with rollout disabled", async () => {
@@ -130,8 +217,10 @@ describe("Teams actor and transport boundary", () => {
       ).status,
     ).toBe(404);
   });
-  test("rejects unsigned activities before touching persistence", async () => {
+  test("rejects unsigned activities before touching persistence or activity diagnostics", async () => {
+    const diagnostics: unknown[] = [];
     const deps = {
+      observability: { info: (...args: unknown[]) => diagnostics.push(args) },
       settings: configured(),
       db: new Proxy(
         {},
@@ -150,12 +239,28 @@ describe("Teams actor and transport boundary", () => {
       body: JSON.stringify(activity()),
     });
     expect(response.status).toBe(401);
+    expect(diagnostics).toEqual([]);
   });
   test("text delivery splits without loss including multibyte Unicode", () => {
     const text = "🦉 hello ".repeat(12000);
     const parts = teamsTextParts(text);
     expect(parts.join("")).toBe(text);
     expect(parts.every((p) => Buffer.byteLength(p) <= 20000)).toBe(true);
+  });
+  test("a reply shows Claude citation tags as their quoted text", () => {
+    // Built from escapes so no tool that acts on citation tags rewrites this file.
+    const tag = '\u003ccite index="1-2">"FrontierCode v1.1 replaces DeepSWE v1.1"\u003c/cite>';
+    expect(teamsReplyParts(`The news: ${tag}.`)).toEqual([
+      'The news: "FrontierCode v1.1 replaces DeepSWE v1.1".',
+    ]);
+  });
+  test("a reply shows source links without hosted-search tracking", () => {
+    const parts = teamsReplyParts(
+      "Rule 4-1 applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)) and [the video](https://example.com/watch?v=abc&utm_source=openai).",
+    );
+    expect(parts.join("")).toContain("(https://example.com/rules/4-1)");
+    expect(parts.join("")).toContain("(https://example.com/watch?v=abc)");
+    expect(parts.join("")).not.toContain("utm_source");
   });
 });
 

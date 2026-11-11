@@ -1,8 +1,10 @@
-import { configuredStaticUsageLimits } from "@opengeni/config";
+import { configuredStaticUsageLimits, sideFeatureProcessingResidency } from "@opengeni/config";
 import {
   documentEmbeddingCostMicros,
   paidDocumentEmbedding,
   workspaceCreditsDisabled,
+  knowledgeEmbeddingTarget,
+  sideFeatureAllowedForWorkspace,
 } from "@opengeni/core";
 import {
   applyCreditDebitAfterUse,
@@ -14,6 +16,7 @@ import {
   creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
+  billingOriginForAttribution,
   getSpendableCreditBalance,
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
@@ -227,7 +230,19 @@ export function createKnowledgeIndexingActivities(
                 return;
               }
               if (paid && current.nextIndex === 0) {
-                const balance = await getSpendableCreditBalance(lockedDb, claim.accountId);
+                // Funded like the work that added the document (API keys: credits).
+                const balance = await getSpendableCreditBalance(
+                  lockedDb,
+                  claim.accountId,
+                  undefined,
+                  undefined,
+                  undefined,
+                  await billingOriginForAttribution(lockedDb, {
+                    accountId: claim.accountId,
+                    workspaceId: current.billingWorkspaceId,
+                    attribution: claim.billingAttribution,
+                  }),
+                );
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
                   result.deferred++;
@@ -262,6 +277,22 @@ export function createKnowledgeIndexingActivities(
                   });
                   if (used + chunks.length > limit) throw new KnowledgeIndexUsageLimitError();
                 }
+              }
+              // EU-only: Knowledge text is never sent to an embedding route
+              // without an EU residency record. The job keeps its checkpoint
+              // and waits; keyword search covers the entry meanwhile.
+              if (
+                !embedder.local &&
+                !(await sideFeatureAllowedForWorkspace(
+                  lockedDb,
+                  settings,
+                  { accountId: claim.accountId, workspaceId: current.billingWorkspaceId },
+                  knowledgeEmbeddingTarget(embedder),
+                ))
+              ) {
+                await deferKnowledgeIndexJob(lockedDb, claim);
+                result.deferred++;
+                return;
               }
               const inputs = chunks.map((chunk) => chunk.embeddingInput);
               const bytes = inputs.reduce(
@@ -312,6 +343,15 @@ export function createKnowledgeIndexingActivities(
                 sourceResourceType: "knowledge_revision",
                 sourceResourceId: claim.revisionId,
                 idempotencyKey: `knowledge.embedding_bytes:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+                // Where the chunks were embedded (a local embedder sends nothing).
+                ...(embedder.local
+                  ? {}
+                  : {
+                      processingResidency: sideFeatureProcessingResidency(
+                        settings,
+                        knowledgeEmbeddingTarget(embedder),
+                      ),
+                    }),
               });
               if (frozenPolicy.mode === "shadow" && frozenPolicy.rateMicrosPerMillionBytes > 0) {
                 const estimate = documentEmbeddingCostMicros(

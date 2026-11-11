@@ -4,6 +4,7 @@ import {
 } from "@opengeni/contracts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
+  organizationCompatibleConnectionIdOf,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
@@ -15,8 +16,9 @@ import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
 
-/** Claude's two model restrictions, as its core route projects them. */
+/** Claude's model restrictions per id form, as its core route projects them (one answer). */
 export type ClaudeCoreModelRestrictions = {
+  readonly "claude/": readonly string[] | null;
   readonly "organization-claude-subscription/": readonly string[] | null;
   readonly "workspace-claude-subscription/": readonly string[] | null;
 };
@@ -45,7 +47,7 @@ async function listDirectModelConnections(db: Database, workspaceId: string, sub
           isNull(connections.subjectId),
           eq(connections.kind, "api_key"),
           eq(connections.status, "active"),
-          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai')`,
+          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai', 'direct_openai_compatible')`,
         ),
       ),
   );
@@ -90,6 +92,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-openrouter/": [],
     "workspace-opper/": [],
     "workspace-anthropic/": [],
+    "claude/": claudeCoreRestrictions ? copied(claudeCoreRestrictions["claude/"]) : [],
     "workspace-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["workspace-claude-subscription/"])
       : [],
@@ -113,6 +116,10 @@ export async function getWorkspaceConnectionModelRestrictions(
       SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' WHEN 'openai' THEN 'organization-openai/' WHEN 'azure_openai' THEN 'organization-azure-openai/' WHEN 'openrouter' THEN 'organization-openrouter/' END AS prefix,
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active'
         AND provider_kind IN ('vercel_gateway', 'openrouter', 'anthropic', 'opper', 'openai', 'azure_openai')
+      UNION ALL
+      SELECT 'organization-compatible-' || id::text || '/', allowed_model_ids
+        FROM organization_model_provider_connections
+        WHERE status = 'active' AND provider_kind = 'openai_compatible'
       UNION ALL
       SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' WHEN 'opper' THEN 'workspace-opper/' ELSE 'workspace-openrouter/' END,
         allowed_model_ids FROM (
@@ -171,11 +178,18 @@ export async function assertModelConnectionAllowsTurn(
     );
     if (!connection)
       throw new Error(
-        "This OpenAI or Azure OpenAI connection is no longer available; reconnect and select its model",
+        "This model connection is no longer available; reconnect and select its model",
       );
     return;
   }
-  if (
+  const compatibleConnectionId = organizationCompatibleConnectionIdOf(model);
+  if (compatibleConnectionId) {
+    // One of the organization's own OpenAI-compatible endpoints: that exact
+    // endpoint must still be active and reach this workspace.
+    query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
+      WHERE provider_kind = 'openai_compatible' AND id = ${compatibleConnectionId}::uuid AND status = 'active'`;
+  } else if (
+    model.startsWith("claude/") ||
     model.startsWith("workspace-claude-subscription/") ||
     model.startsWith("organization-claude-subscription/") ||
     model.startsWith("codex/") ||

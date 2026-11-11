@@ -50,7 +50,11 @@ test("Office file Skills claim preinstalled only the Python packages the managed
     return new Set(list!.split(/\s+/).map((pin) => pin.split("==")[0]));
   });
   for (const [skill, expected, alsoClaimed] of [
-    ["documents", "python-docx", " and Chromium, and no LibreOffice, pandoc or PDF library"],
+    [
+      "documents",
+      "python-docx",
+      ", Chromium and the `pdftotext`/`pdfinfo` readers, and no LibreOffice, pandoc or PDF editing library",
+    ],
     ["presentations", "python-pptx", " and no slide renderer"],
     ["spreadsheets", "openpyxl", ""],
   ] as const) {
@@ -73,7 +77,9 @@ test("Office file Skills claim preinstalled only the Python packages the managed
   expect(dockerfiles[1]).toMatch(/for alias_name in [^;]*\bchromium\b[^;]*; do \\\s+ln -sf/);
   for (const text of dockerfiles) {
     // Both Skills say these are absent, so agents neither probe for nor expect them.
-    expect(text).not.toMatch(/libreoffice|pandoc|poppler/i);
+    expect(text).not.toMatch(/libreoffice|pandoc/i);
+    // The documents Skill says the PDF readers are present.
+    expect(text).toMatch(/\bpoppler-utils\b/);
   }
 });
 

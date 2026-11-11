@@ -11,7 +11,6 @@ import {
   Menu,
   nativeTheme,
   net,
-  Notification,
   powerMonitor,
   safeStorage,
   screen,
@@ -53,15 +52,23 @@ import {
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
   type DesktopCommand,
-  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
+import {
+  AccountStore,
+  accountToReturnTo,
+  cameFromAfterShowing,
+  readInstalledFrom,
+  type StoredAccount,
+} from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
+import type { Dictation } from "./dictation";
+import { createDesktopDictation } from "./dictation/electron";
+import { handleDictationIpc } from "./dictation/ipc";
 import { ComputerCapabilities, ComputerSettingsStore } from "./computer-capabilities";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
@@ -74,21 +81,16 @@ import {
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
-import {
-  MeetingDetection,
-  MeetingDetectionStore,
-  ownAppRoot,
-  promptText,
-  type MeetingPrompt,
-  type ShownPrompt,
-} from "./meeting-detection";
+import type { MeetingDetection, MeetingRecording } from "./meeting-detection";
+import { createMeetingDetection } from "./meeting-detection/electron";
+import { handleMeetingDetectionIpc } from "./meeting-detection/ipc";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { handleSystemAudioIpc, SystemAudioCaptures, systemAudioUsable } from "./system-audio";
-import { AppTray } from "./tray";
+import { handleSystemAudioIpc, SystemAudioCaptures } from "./system-audio";
+import { AppTray, type TrayMeeting, type TrayMeetingAction } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
 import { MainWindow, openExternalSafely } from "./window";
@@ -179,12 +181,12 @@ export class DesktopShell {
   private readonly inbox: InboxNotifier;
   /** The shortcut that sends the window in front into the composer. */
   private readonly appShots: AppShots;
+  /** Dictation from anywhere: shortcuts that type speech where the person types. */
+  private readonly dictation: Dictation;
   /** Other apps' audio for the web app's meeting recorder. */
   private readonly systemAudio: SystemAudioCaptures;
   /** Offers to record when a call starts, and to stop when it ends. */
   private readonly meetings: MeetingDetection;
-  /** Pages that report whether they record, cleared when they navigate or close. */
-  private readonly meetingPages = new WeakSet<WebContents>();
   /** What Opengeni may do on this computer: the This computer settings page. */
   private readonly capabilities: ComputerCapabilities;
   private tray: AppTray | null = null;
@@ -204,6 +206,8 @@ export class DesktopShell {
   private unreachable: Unreachable | null = null;
   /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
   private addingAccount = false;
+  /** The signed-in account the welcome page was opened from; its Cancel returns there. */
+  private cameFromId: string | null = null;
   private readonly redirectUri: string;
   private readonly paths: AppWebPaths;
 
@@ -369,19 +373,59 @@ export class DesktopShell {
         ended: DESKTOP_IPC.systemAudioEnded,
       },
     });
-    this.meetings = new MeetingDetection({
+    this.meetings = createMeetingDetection({
       helperPath: config.systemAudioHelperPath ?? null,
-      available: systemAudioUsable(config.systemAudioHelperPath),
-      own: {
-        pid: process.pid,
-        bundlePrefix: config.appId,
-        root: ownAppRoot(process.execPath, process.platform),
-        platform: process.platform,
+      appId: config.appId,
+      dataDir: app.getPath("userData"),
+      logDir: app.getPath("logs"),
+      iconPath: config.appIconPath,
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
       },
-      store: new MeetingDetectionStore(app.getPath("userData")),
-      notify: (prompt, act) => this.showMeetingPrompt(prompt, act),
-      request: (request) => this.deliverMeetingRequest(request),
-      onChange: () => this.broadcast(DESKTOP_IPC.meetingDetectionChanged),
+      // The account the window shows records; while its page loads, the choice waits for it.
+      chooseTarget: (pages) => {
+        const accountId = this.window?.accountId;
+        const shown = accountId ? this.window?.contentsFor(accountId) : null;
+        return pages.find((page) => page === shown);
+      },
+      // Reminders before the active account's calendar meetings; that account records.
+      calendar: {
+        account: () => {
+          const active = this.store.active();
+          return active && !active.signedOut && active.workspaceId ? { id: active.id } : null;
+        },
+        upcoming: async (accountId) => {
+          const workspaceId = this.store.get(accountId)?.workspaceId;
+          const client = workspaceId ? await this.client(accountId) : null;
+          if (!client || !workspaceId) return null;
+          try {
+            return await client.requestJson(
+              "GET",
+              `/v1/workspaces/${encodeURIComponent(workspaceId)}/upcoming-meetings`,
+              undefined,
+              {},
+              { timeoutMs: 15_000 },
+            );
+          } catch (caught) {
+            // A server from before reminders has no such route: nothing to remind of.
+            if ((caught as { status?: number }).status === 404) return null;
+            throw caught;
+          }
+        },
+        openUrl: (url) => {
+          if (new URL(url).protocol === "https:") void shell.openExternal(url);
+        },
+      },
+      // A Stop the recording didn't take: show the account it records in.
+      revealPage: (page) => {
+        const accountId = this.window?.accountFor(page as WebContents);
+        app.focus({ steal: true });
+        if (accountId) this.showAccount(accountId);
+        else this.reveal();
+      },
+      describePage: (page) => this.recordingAccountLabel(page as WebContents),
+      recordingChanged: () => this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot()),
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -409,6 +453,30 @@ export class DesktopShell {
       deliver: (result) => this.deliverAppShot(result),
       onChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
       log: (message, caught) => console.warn(message, caught),
+    });
+    this.dictation = createDesktopDictation({
+      productName: config.productName,
+      dataDir: app.getPath("userData"),
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+      guide: (id, granted) => {
+        if (id && granted) this.permissionGuide.granted();
+        else if (id) this.permissionGuide.show(id);
+        else this.permissionGuide.hide();
+      },
+      // The account the window shows records, when its page listens.
+      chooseTarget: (targets) => {
+        const accountId = this.window?.accountId;
+        const shown = accountId ? this.window?.contentsFor(accountId) : null;
+        return targets.find((target) => target === shown);
+      },
+      log: (message, caught) => console.warn(message, caught ?? ""),
+      wake: () => {
+        const active = this.store.active();
+        if (!this.window && active && !active.signedOut) this.openWindow(false);
+      },
     });
     this.inbox = new InboxNotifier({
       accounts: () => {
@@ -485,6 +553,31 @@ export class DesktopShell {
     this.registerIpc();
     this.appShots.start();
     this.meetings.start();
+    this.dictation.start();
+    // Dictation shortcuts work only while the app runs: it opens at login while they are on.
+    let dictating = this.dictation.enabled;
+    this.dictation.onChange(() => {
+      this.tray?.setDictation(this.dictation.menu());
+      if (this.dictation.enabled === dictating) return;
+      dictating = this.dictation.enabled;
+      void this.refreshTray();
+    });
+    // The menu bar shows how a dictation is going, even when its window can't.
+    this.dictation.onActivity((activity) => {
+      if (activity.phase === "done") this.tray?.dictationDone();
+      else this.tray?.setDictation(this.dictation.menu());
+    });
+    // And a meeting being recorded, from any account, with a way back to it.
+    let recordingMeeting = false;
+    this.meetings.onRecording(() => {
+      const recording = this.meetings.recording() !== null;
+      if (recording !== recordingMeeting) {
+        recordingMeeting = recording;
+        void this.refreshTray();
+      } else {
+        this.tray?.setMeeting(this.trayMeeting());
+      }
+    });
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -492,7 +585,13 @@ export class DesktopShell {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
     }
     app.on("activate", () => this.reveal());
-    powerMonitor.on("resume", () => this.retryUnreachable());
+    powerMonitor.on("resume", () => {
+      this.retryUnreachable();
+      this.meetings.refreshCalendar();
+    });
+    powerMonitor.on("unlock-screen", () => this.meetings.refreshCalendar());
+    // Back from connecting a calendar in the browser: settings stop offering it.
+    app.on("browser-window-focus", () => this.meetings.windowFocused());
     app.on("before-quit", (event) => {
       if (this.quitConfirmed) {
         this.quitting = true;
@@ -517,7 +616,8 @@ export class DesktopShell {
     app.on("will-quit", () => {
       this.appShots.stop();
       this.systemAudio.stopAll();
-      this.meetings.stop();
+      this.dictation.stop();
+      this.meetings.shutdown();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -647,7 +747,8 @@ export class DesktopShell {
 
   // --- Window -------------------------------------------------------------------------------------
 
-  private openWindow(): void {
+  /** `show` false loads the account page without showing it (dictation from the menu bar). */
+  private openWindow(show = true): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
       connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
@@ -684,6 +785,7 @@ export class DesktopShell {
       flushMarks();
       if (measuring()) void recordMemory();
     });
+    if (!show) return;
     window.reveal();
     mark("window-shown");
   }
@@ -712,6 +814,7 @@ export class DesktopShell {
     const account = this.store.get(accountId);
     if (!account) return;
     if (!this.window) this.openWindow();
+    this.cameFromId = cameFromAfterShowing(this.store.active(), account, this.cameFromId);
     this.store.setActive(accountId);
     this.addingAccount = false;
     if (account.signedOut) {
@@ -822,12 +925,16 @@ export class DesktopShell {
       if (this.connectingFromLink || this.pending) return;
       const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
       if (account) void this.connectFromLink(account, computerLink);
-      else void this.beginSignIn(computerLink.origin, computerLink);
+      else void this.signInFromLink(computerLink);
       return;
     }
+    // The window shows the whole web app, so a link to any of its pages opens
+    // there: a sign-in finished in the browser returns to the page it started
+    // on (plugins, settings…) with its outcome, not to whatever was showing.
     const link = parseAppLink(raw, {
       scheme: this.config.scheme,
       paths: this.paths,
+      anyPage: true,
     });
     if (!link) {
       this.reveal();
@@ -859,6 +966,47 @@ export class DesktopShell {
   }
 
   // --- Sign-in ------------------------------------------------------------------------------------
+
+  /**
+   * A link never adds a server by itself: signing in to a server this app has
+   * not used needs the person's approval, naming the server, before the
+   * browser opens.
+   */
+  private async signInFromLink(link: ComputerConnectLink): Promise<void> {
+    if (!this.knowsServer(link.origin)) {
+      this.connectingFromLink = true;
+      try {
+        this.reveal();
+        const server = serverLabel(link.origin);
+        const { response } = await dialog.showMessageBox({
+          type: "warning",
+          title: "Sign in to a new server",
+          message: `Sign in to ${server}?`,
+          detail: `A link asked ${this.config.productName} to sign in to ${server}, a server you haven't used in this app. Continue only if you trust ${server} and opened this link yourself.`,
+          buttons: ["Cancel", "Sign in"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (response !== 1) return;
+      } finally {
+        this.connectingFromLink = false;
+      }
+      if (this.pending) return;
+    }
+    await this.beginSignIn(link.origin, link);
+  }
+
+  /** The app's own servers and the servers of accounts already added here. */
+  private knowsServer(serverInput: string): boolean {
+    const baseUrl = normalizeServerUrl(serverInput);
+    if (!baseUrl) return false;
+    return [
+      this.defaultServerUrl(),
+      this.config.defaultServerUrl,
+      ...this.store.snapshot().accounts.map((account) => account.baseUrl),
+    ].some((server) => normalizeServerUrl(server) === baseUrl);
+  }
 
   private async beginSignIn(
     serverInput: string,
@@ -1078,12 +1226,21 @@ export class DesktopShell {
     return this.sdk;
   }
 
-  private clientOptions(baseUrl: string, token?: string) {
+  private clientOptions(baseUrl: string, token?: string, accountId?: string) {
+    // An account's own requests go with its window's cookies, so when one of
+    // them renews the device session the window's sign-in cookie is renewed
+    // too; otherwise the window would be signed out a week after its cookie
+    // was last set, although the app stays signed in.
+    const fetch = accountId
+      ? (input: string, init?: RequestInit) =>
+          session
+            .fromPartition(`persist:account-${accountId}`)
+            .fetch(input, { ...init, credentials: init?.credentials ?? "include" })
+      : (input: string, init?: RequestInit) => net.fetch(input, init);
     return {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
-      fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
-      onDeprecation: false as const,
+      fetch: fetch as never,
       apiContract: "compatible" as const,
     };
   }
@@ -1095,7 +1252,8 @@ export class DesktopShell {
     const cached = this.clients.get(accountId);
     if (cached?.token === token) return await cached.client;
     const client = this.loadSdk().then(
-      ({ OpenGeniClient }) => new OpenGeniClient(this.clientOptions(account.baseUrl, token)),
+      ({ OpenGeniClient }) =>
+        new OpenGeniClient(this.clientOptions(account.baseUrl, token, accountId)),
     );
     this.clients.set(accountId, { token, client });
     return await client;
@@ -1130,15 +1288,37 @@ export class DesktopShell {
     const snapshot = this.store.snapshot();
     return {
       activeId: snapshot.activeId,
-      accounts: snapshot.accounts.map((account) => ({
-        id: account.id,
-        baseUrl: account.baseUrl,
-        serverLabel: serverLabel(account.baseUrl),
-        email: account.email,
-        workspaceId: account.workspaceId,
-        signedOut: Boolean(account.signedOut),
-      })),
+      accounts: snapshot.accounts.map((account) => {
+        const contents = this.window?.contentsFor(account.id) ?? null;
+        return {
+          id: account.id,
+          baseUrl: account.baseUrl,
+          serverLabel: serverLabel(account.baseUrl),
+          email: account.email,
+          workspaceId: account.workspaceId,
+          signedOut: Boolean(account.signedOut),
+          recording: Boolean(contents && this.meetings.isRecording(contents)),
+        };
+      }),
     };
+  }
+
+  /**
+   * The account a recording page belongs to, as the stop card names it: its
+   * server, or with the email too when two accounts share a server. Null
+   * with a single signed-in account, where there is nothing to tell apart.
+   */
+  private recordingAccountLabel(page: WebContents): string | null {
+    const accountId = this.window?.accountFor(page);
+    const account = accountId ? this.store.get(accountId) : null;
+    if (!account) return null;
+    const signedIn = this.store.snapshot().accounts.filter((other) => !other.signedOut);
+    if (signedIn.length < 2) return null;
+    const server = serverLabel(account.baseUrl);
+    const shared = signedIn.some(
+      (other) => other.id !== account.id && serverLabel(other.baseUrl) === server,
+    );
+    return shared ? `${account.email} · ${server}` : server;
   }
 
   private welcomeState(): WelcomeState {
@@ -1290,25 +1470,15 @@ export class DesktopShell {
       captures: this.systemAudio,
       allow: (event) => void this.senderAccount(event),
     });
-    handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
-    handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));
-    ipcMain.on(DESKTOP_IPC.meetingDetectionRecording, (event, recording: unknown) => {
-      try {
-        this.senderAccount(event);
-      } catch {
-        return;
-      }
-      const page = event.sender;
-      if (!this.meetingPages.has(page)) {
-        this.meetingPages.add(page);
-        const id = page.id;
-        const end = () => this.meetings.setRecording(id, false);
-        page.once("destroyed", end);
-        page.on("did-start-navigation", (details) => {
-          if (details.isMainFrame && !details.isSameDocument) end();
-        });
-      }
-      this.meetings.setRecording(page.id, recording === true);
+    handleDictationIpc({
+      ipcMain,
+      dictation: this.dictation,
+      allow: (event) => void this.senderAccount(event),
+    });
+    handleMeetingDetectionIpc({
+      ipcMain,
+      detection: this.meetings,
+      allow: (event) => void this.senderAccount(event),
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -1327,8 +1497,9 @@ export class DesktopShell {
       this.senderWelcome(event);
       this.pending = null;
       this.welcomeError = null;
-      const active = this.store.snapshot().accounts.find((account) => !account.signedOut);
-      if (active) this.showAccount(active.id);
+      const back = accountToReturnTo(this.store.snapshot(), this.cameFromId);
+      this.cameFromId = null;
+      if (back) this.showAccount(back.id);
       else this.pushWelcome();
     });
   }
@@ -1337,6 +1508,8 @@ export class DesktopShell {
     this.pending = null;
     this.welcomeError = null;
     this.addingAccount = true;
+    const from = this.store.active();
+    if (from && !from.signedOut) this.cameFromId = from.id;
     this.clearUnreachable();
     this.window?.showWelcome();
     this.pushWelcome();
@@ -1361,47 +1534,9 @@ export class DesktopShell {
     else send();
   }
 
-  /** A meeting notification: buttons on macOS, a click everywhere. */
-  private showMeetingPrompt(prompt: MeetingPrompt, act: () => void): ShownPrompt {
-    if (!Notification.isSupported()) return { close: () => {} };
-    const text = promptText(prompt, process.platform);
-    const banner = new Notification({
-      title: text.title,
-      body: text.body,
-      actions: [{ type: "button", text: text.action }],
-    });
-    let done = false;
-    const choose = () => {
-      if (done) return;
-      done = true;
-      act();
-    };
-    banner.on("click", choose);
-    banner.on("action", choose);
-    banner.show();
-    return {
-      close: () => {
-        done = true;
-        banner.close();
-      },
-    };
-  }
-
-  /** The person chose a meeting notification: the window comes up and the page acts. */
-  private deliverMeetingRequest(request: DesktopMeetingRequest): void {
-    app.focus({ steal: true });
-    this.reveal();
-    const accountId = this.window?.accountId;
-    const contents = accountId ? this.window?.contentsFor(accountId) : null;
-    if (!contents || contents.isDestroyed()) return;
-    const send = () => {
-      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.meetingDetectionRequest, request);
-    };
-    if (contents.isLoading()) contents.once("did-finish-load", send);
-    else send();
-  }
-
   private accountsChanged(): void {
+    // Only the active account reminds of its meetings.
+    this.meetings.accountChanged();
     this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot());
     Menu.setApplicationMenu(this.menu());
     void this.refreshTray();
@@ -1477,16 +1612,24 @@ export class DesktopShell {
           connected: false,
           running: false,
           reconnecting: false,
+          needsReconnect: false,
           needsPermissions: false,
           missingPermissions: [],
         };
-    if (this.config.thisComputer && app.isPackaged) {
-      const change = this.computer.openAtLoginChange(summary.connected);
+    if (app.isPackaged) {
+      const change = this.computer.openAtLoginChange(
+        this.config.thisComputer && summary.connected,
+        this.dictation.enabled,
+      );
       if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
-    // computer. Elsewhere the tray is how a closed window comes back.
-    const wanted = process.platform === "darwin" ? summary.connected : hasAccounts;
+    // computer, for dictation and for a meeting being recorded. Elsewhere the
+    // tray is how a closed window comes back.
+    const wanted =
+      (process.platform === "darwin" ? summary.connected : hasAccounts) ||
+      this.dictation.enabled ||
+      this.meetings.recording() !== null;
     if (!wanted) {
       this.tray?.destroy();
       this.tray = null;
@@ -1499,8 +1642,52 @@ export class DesktopShell {
       allow: (permission) =>
         void this.computer.requestPermission(permission).catch(() => undefined),
       quit: () => app.quit(),
+      dictation: (action) => this.dictation.menuAction(action),
+      meeting: (action) => this.meetingAction(action),
     });
+    this.tray.setDictation(this.dictation.menu());
+    this.tray.setMeeting(this.trayMeeting());
     this.tray.update(summary);
+  }
+
+  /** The meeting being recorded, for the menu: the newest, in whichever account records it. */
+  private trayMeeting(): TrayMeeting | null {
+    const recording = this.meetings.recording();
+    if (!recording) return null;
+    const accountId = this.recordingAccount(recording);
+    const shown = this.window?.accountId ?? this.store.snapshot().activeId;
+    const other = accountId && accountId !== shown ? this.store.get(accountId) : null;
+    return {
+      title: recording.title,
+      paused: recording.paused,
+      elapsedMilliseconds: recording.elapsedMilliseconds,
+      at: recording.at,
+      canOpen: recording.canOpen,
+      otherAccount: other ? other.email : null,
+    };
+  }
+
+  private recordingAccount(recording: MeetingRecording): string | null {
+    const page = recording.page as WebContents;
+    return this.window?.accountFor(page) ?? null;
+  }
+
+  /**
+   * The menu's meeting items. Opening shows the account that records, switching
+   * to it first, then asks its page to show the meeting's live transcript.
+   */
+  private meetingAction(action: TrayMeetingAction): void {
+    const recording = this.meetings.recording();
+    if (!recording) return;
+    if (action === "stop") {
+      this.meetings.stopRecording();
+      return;
+    }
+    const accountId = this.recordingAccount(recording);
+    if (accountId && accountId !== this.window?.accountId) this.showAccount(accountId);
+    else this.reveal();
+    app.focus({ steal: true });
+    this.meetings.openRecording(recording);
   }
 }
 

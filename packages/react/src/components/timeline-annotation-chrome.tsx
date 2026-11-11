@@ -8,6 +8,7 @@ import { cn } from "../lib/cn";
 import { annotationNoteNeedsDisclosure } from "./timeline-annotation-layout";
 import { useTimelineAnnotationSourceRoot } from "./timeline-annotation-reveal-context";
 import {
+  annotationQuoteText,
   annotationSourceLabel,
   revealLoadedAnnotationSource,
   truncateAnnotationQuote,
@@ -45,16 +46,17 @@ export function AnnotationQuoteSourceButton({
   onUnavailable: (id: string | null) => void;
 }) {
   const t = useOpenGeniText();
-  const preview = quotePreview(annotation.quote);
+  const quoteText = annotationQuoteText(annotation);
+  const preview = quotePreview(quoteText);
   const sourceLabel = annotationSourceLabel(t, annotation.source);
   const sourceRoot = useTimelineAnnotationSourceRoot();
   return (
     <button
       type="button"
-      title={annotation.quote}
+      title={quoteText}
       aria-label={t("timelineAnnotationChrome.viewSourcelabelSourceTruncateannotationquote", {
         sourceLabel,
-        truncateAnnotationQuote: truncateAnnotationQuote(annotation.quote, 88),
+        truncateAnnotationQuote: truncateAnnotationQuote(quoteText, 88),
       })}
       className="block w-full min-w-0 rounded-sm border-0 bg-transparent text-left text-og-sm leading-5 text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       onClick={() => {

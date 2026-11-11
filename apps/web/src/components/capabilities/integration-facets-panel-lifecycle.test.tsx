@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps, type ReactNode } from "react";
@@ -9,11 +10,6 @@ import type {
   IntegrationFacetBindingSummary,
   IntegrationInstanceFacetsResponse,
 } from "@opengeni/react/app/types";
-
-import type {
-  GoogleDriveFacetMutation,
-  GoogleDriveKnowledgeSourceDialogProps,
-} from "./google-drive-knowledge-source-dialog";
 
 const toastSuccess = mock(() => undefined);
 const toastError = mock(() => undefined);
@@ -83,7 +79,7 @@ describe("Integration Facet lifecycle state", () => {
       }
       return response(binding("active", 1));
     });
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
+    const client = { listIntegrationFacets } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -119,7 +115,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets,
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -159,7 +155,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets,
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -199,7 +195,7 @@ describe("Integration Facet lifecycle state", () => {
     const paused = binding("paused", 2);
     let listCount = 0;
     const listIntegrationFacets = mock(async () => response(listCount++ === 0 ? active : paused));
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
+    const client = { listIntegrationFacets } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -236,7 +232,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(active)),
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
 
     await act(async () => button(rendered.container, "Manage facets").click());
@@ -282,7 +278,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(firstActive, secondActive)),
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client, facetCount: 2 });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -332,141 +328,44 @@ describe("Integration Facet lifecycle state", () => {
     }
   });
 
-  test("keeps an older Google Drive success and close scoped to its originating instance", async () => {
-    const instanceA = instance;
-    const instanceB = {
-      ...instance,
-      instanceId: "00000000-0000-4000-8000-000000000204",
-      instanceKey: "operations",
-      displayName: "Inventory — Operations",
-      instanceVersion: 2,
+  test("never shows a removed knowledge_source facet", async () => {
+    const saved = {
+      ...binding("active", 1, "drive-content", "702"),
+      kind: "knowledge_source" as const,
     };
-    const activeA = binding("active", 1, "drive-content", "202");
-    const pausedA = binding("paused", 2, "drive-content", "202");
-    const activeB = binding("active", 1, "drive-content", "205");
-    const pausedB = binding("paused", 2, "drive-content", "205");
-    const listIntegrationFacets = mock(
-      async (_workspaceId: string, _capabilityId: string, instanceKey: string) =>
-        googleDriveResponse(
-          instanceKey === instanceA.instanceKey ? instanceA : instanceB,
-          {
-            [instanceA.instanceKey]: activeA,
-            [instanceB.instanceKey]: activeB,
-          }[instanceKey]!,
-        ),
+    const listed: IntegrationInstanceFacetsResponse = {
+      ...response(binding("active", 1, "inventory-source", "701")),
+    };
+    listed.facets.push(
+      {
+        definition: {
+          facetKey: "drive-content",
+          kind: "knowledge_source",
+          configSchema: { type: "object", properties: {} },
+          capabilities: { provider: "microsoft-onedrive" },
+        },
+        binding: saved,
+      },
+      {
+        definition: {
+          facetKey: "unused-source",
+          kind: "knowledge_source",
+          configSchema: { type: "object", properties: {} },
+          capabilities: {},
+        },
+        binding: null,
+      },
     );
-    let dialogA: GoogleDriveKnowledgeSourceDialogProps | null = null;
-    let dialogB: GoogleDriveKnowledgeSourceDialogProps | null = null;
-    const GoogleDriveDialog = (props: GoogleDriveKnowledgeSourceDialogProps) => {
-      if (props.instance.instanceKey === instanceA.instanceKey) dialogA = props;
-      else dialogB = props;
-      return <div data-google-drive-dialog={props.instance.instanceKey} />;
-    };
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
-    const rendered = await renderPanel({ client, instance: instanceA, GoogleDriveDialog });
+    const client = {
+      listIntegrationFacets: mock(async () => listed),
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
+    const rendered = await renderPanel({ client });
     try {
-      await openGoogleDriveEditor(rendered.container, instanceA.instanceKey);
-      let oldMutation!: GoogleDriveFacetMutation;
-      await act(async () => {
-        oldMutation = requiredDialog(dialogA).onMutationStart();
-      });
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
 
-      await rendered.rerender({ client, instance: instanceB, GoogleDriveDialog });
-      await openGoogleDriveEditor(rendered.container, instanceB.instanceKey);
-      const currentDialog = requiredDialog(dialogB);
-      let currentMutation!: GoogleDriveFacetMutation;
-      await act(async () => {
-        currentMutation = currentDialog.onMutationStart();
-      });
-
-      let oldApplied = true;
-      await act(async () => {
-        oldApplied = oldMutation.apply(pausedA);
-        requiredDialog(dialogA).onClose();
-        oldMutation.finish();
-      });
-
-      expect(oldApplied).toBe(false);
-      expect(currentMutation.isCurrent()).toBe(true);
-      expect(
-        rendered.container.querySelector(`[data-google-drive-dialog="${instanceB.instanceKey}"]`),
-      ).not.toBeNull();
-      expect(requiredFacet(rendered.container, "drive-content").textContent).toContain("Active");
-
-      await act(async () => {
-        expect(currentMutation.apply(pausedB)).toBe(true);
-        currentDialog.onClose();
-        currentMutation.finish();
-      });
-      await waitFor(
-        () =>
-          requiredFacet(rendered.container, "drive-content").textContent?.includes("Paused") ===
-          true,
-      );
-
-      expect(rendered.container.querySelector("[data-google-drive-dialog]")).toBeNull();
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("does not let an older Google Drive finally consume a newer instance mutation", async () => {
-    const instanceA = instance;
-    const instanceB = {
-      ...instance,
-      instanceId: "00000000-0000-4000-8000-000000000304",
-      instanceKey: "operations",
-      displayName: "Inventory — Operations",
-      instanceVersion: 2,
-    };
-    const activeA = binding("active", 1, "drive-content", "302");
-    const activeB = binding("active", 1, "drive-content", "305");
-    const pausedB = binding("paused", 2, "drive-content", "305");
-    const listIntegrationFacets = mock(
-      async (_workspaceId: string, _capabilityId: string, instanceKey: string) =>
-        googleDriveResponse(
-          instanceKey === instanceA.instanceKey ? instanceA : instanceB,
-          {
-            [instanceA.instanceKey]: activeA,
-            [instanceB.instanceKey]: activeB,
-          }[instanceKey]!,
-        ),
-    );
-    let dialogA: GoogleDriveKnowledgeSourceDialogProps | null = null;
-    let dialogB: GoogleDriveKnowledgeSourceDialogProps | null = null;
-    const GoogleDriveDialog = (props: GoogleDriveKnowledgeSourceDialogProps) => {
-      if (props.instance.instanceKey === instanceA.instanceKey) dialogA = props;
-      else dialogB = props;
-      return <div data-google-drive-dialog={props.instance.instanceKey} />;
-    };
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
-    const rendered = await renderPanel({ client, instance: instanceA, GoogleDriveDialog });
-    try {
-      await openGoogleDriveEditor(rendered.container, instanceA.instanceKey);
-      let oldMutation!: GoogleDriveFacetMutation;
-      await act(async () => {
-        oldMutation = requiredDialog(dialogA).onMutationStart();
-      });
-
-      await rendered.rerender({ client, instance: instanceB, GoogleDriveDialog });
-      await openGoogleDriveEditor(rendered.container, instanceB.instanceKey);
-      let currentMutation!: GoogleDriveFacetMutation;
-      await act(async () => {
-        currentMutation = requiredDialog(dialogB).onMutationStart();
-      });
-
-      await act(async () => oldMutation.finish());
-
-      expect(currentMutation.isCurrent()).toBe(true);
-      await act(async () => {
-        expect(currentMutation.apply(pausedB)).toBe(true);
-        currentMutation.finish();
-      });
-      await waitFor(
-        () =>
-          requiredFacet(rendered.container, "drive-content").textContent?.includes("Paused") ===
-          true,
-      );
+      expect(facet(rendered.container, "drive-content")).toBeNull();
+      expect(facet(rendered.container, "unused-source")).toBeNull();
     } finally {
       await rendered.unmount();
     }
@@ -476,7 +375,7 @@ describe("Integration Facet lifecycle state", () => {
     const pluginOwned = binding("active", 1, "inventory-source", "402", [pluginOwner]);
     const client = {
       listIntegrationFacets: mock(async () => response(pluginOwned)),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -509,7 +408,7 @@ describe("Integration Facet lifecycle state", () => {
     );
     const client = {
       listIntegrationFacets: mock(async () => response(externallyManaged)),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -523,6 +422,28 @@ describe("Integration Facet lifecycle state", () => {
       expect(optionalButton(row, "Remove")).toBeNull();
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("the server's canRemove decides whether a facet's Remove is enabled", async () => {
+    for (const [canRemove, enabled] of [
+      [false, false],
+      [true, true],
+    ] as const) {
+      const configured = { ...binding("active", 1), canRemove };
+      const client = {
+        listIntegrationFacets: mock(async () => response(configured)),
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
+      const rendered = await renderPanel({ client });
+      try {
+        await act(async () => button(rendered.container, "Manage facets").click());
+        await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+        const row = requiredFacet(rendered.container, "inventory-source");
+        // A source someone else added stays with admins; the member's own is theirs.
+        expect(button(row, "Remove").disabled).toBe(!enabled);
+      } finally {
+        await rendered.unmount();
+      }
     }
   });
 
@@ -543,7 +464,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(directlyShared)),
       removeIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -574,22 +495,6 @@ describe("Integration Facet lifecycle state", () => {
   });
 });
 
-async function openGoogleDriveEditor(container: ParentNode, instanceKey: string): Promise<void> {
-  await act(async () => button(container, "Manage facets").click());
-  await waitFor(() => facet(container, "drive-content") !== null);
-  await act(async () => button(requiredFacet(container, "drive-content"), "Edit").click());
-  await waitFor(
-    () => container.querySelector(`[data-google-drive-dialog="${instanceKey}"]`) !== null,
-  );
-}
-
-function requiredDialog(
-  dialog: GoogleDriveKnowledgeSourceDialogProps | null,
-): GoogleDriveKnowledgeSourceDialogProps {
-  if (!dialog) throw new Error("Missing Google Drive dialog props");
-  return dialog;
-}
-
 async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacetsPanel>> = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -600,16 +505,12 @@ async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacet
     await act(async () => {
       root.render(
         <IntegrationFacetsPanel
-          client={{} as OpenGeniBrowserClient}
+          client={{} as ChatClient<OpenGeniBrowserClient>}
           workspaceId="00000000-0000-4000-8000-000000000101"
           instance={instance}
           facetCount={1}
           canManage
-          canManagePersonalDestination
-          canManageWorkspaceDestination
-          canManageOrganizationDestination={false}
           refreshRevision={0}
-          GoogleDriveDialog={() => null}
           {...nextProps}
         />,
       );
@@ -672,35 +573,12 @@ function response(
     facets: bindingValues.map((bindingValue) => ({
       definition: {
         facetKey: bindingValue.facetKey,
-        kind: "knowledge_source",
+        kind: "inbound_trigger",
         configSchema: { type: "object", properties: {} },
         capabilities: {},
       },
       binding: bindingValue,
     })),
-  };
-}
-
-function googleDriveResponse(
-  targetInstance: ApiIntegrationInstallationSummary,
-  bindingValue: IntegrationFacetBindingSummary,
-): IntegrationInstanceFacetsResponse {
-  return {
-    capabilityId: targetInstance.capabilityId,
-    instanceKey: targetInstance.instanceKey,
-    providerDomain: targetInstance.providerDomain,
-    connectionId: targetInstance.connectionId,
-    facets: [
-      {
-        definition: {
-          facetKey: "drive-content",
-          kind: "knowledge_source",
-          configSchema: { type: "object", properties: {} },
-          capabilities: { provider: "google-drive" },
-        },
-        binding: bindingValue,
-      },
-    ],
   };
 }
 
@@ -717,7 +595,7 @@ function binding(
   return {
     id: `00000000-0000-4000-8000-000000000${idSuffix}`,
     facetKey,
-    kind: "knowledge_source",
+    kind: "inbound_trigger",
     bindingKey: "finance",
     displayName: "Finance inventory",
     connectionId: "00000000-0000-4000-8000-000000000103",

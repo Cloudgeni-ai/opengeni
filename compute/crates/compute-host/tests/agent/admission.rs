@@ -380,19 +380,21 @@ fn memory_policy(room: bool) -> HostPolicy {
             high_watermark: high,
             compressed_percent: 30,
             balloon_grace: Duration::from_millis(200),
+            outgrowth: None,
         }),
         ..HostPolicy::default()
     }
 }
 
-/// A sandbox in use that was paused and saved for host memory wakes by
-/// itself once there is room, even after the agent that paused it was
-/// restarted: whether it waits for memory is kept across restarts.
+/// A sandbox an earlier release paused and saved for host memory while in
+/// use wakes by itself once there is room, even after a restart: whether
+/// it waits for memory is kept in its holds file across restarts. This
+/// release never pauses a sandbox in use for memory (ADR 24), so the test
+/// writes the wait as that release did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sandbox_paused_for_memory_wakes_by_itself_after_a_restart() {
     let sandbox = id(31);
     let lab = Lab::new(Delays::default(), memory_policy(true)).await;
-    // The fake's VMs hold 100 MiB: above this request.
     let config = SandboxConfig {
         memory_request_mib: Some(64),
         ..SandboxConfig::new(1, 256, NEVER)
@@ -407,15 +409,24 @@ async fn a_sandbox_paused_for_memory_wakes_by_itself_after_a_restart() {
         .unwrap();
     assert_eq!(created, Reply::Done);
     woke(&lab.wake(sandbox).await);
-
-    // No room: its balloon gives nothing back, so it is paused and saved.
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let holds = lab.sandbox_dir(sandbox).join("holds.json");
     let (root, world) = lab.stop().await;
+    std::fs::write(&holds, br#"{"holds":{},"paused_for_memory":104857600}"#).unwrap();
+
+    // No room: it stays saved, and says it waits for memory.
     let lab = Lab::start(root, world, Delays::default(), memory_policy(false)).await;
-    lab.wait_until("the sandbox saved for memory", |status| {
-        Lab::sandbox(status, sandbox).level == LevelName::Saved
+    lab.wait_until("the sandbox waiting for memory", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && view.paused_for_memory.is_some()
     })
     .await;
     sleep_a_little().await;
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Saved
+    );
 
     // A new agent finds room and wakes it, with nothing asking.
     let (root, world) = lab.stop().await;
@@ -427,4 +438,51 @@ async fn a_sandbox_paused_for_memory_wakes_by_itself_after_a_restart() {
 /// Long enough for a background write of the holds file to land.
 async fn sleep_a_little() {
     tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// The VMs' limit counts as what is available: with plenty free on the
+/// host but no room left under the limit, relief pushes an idle sandbox
+/// out as when the host itself runs short, and never pauses one in use
+/// (ADR 24).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_vms_limit_relieves_pressure_like_host_memory() {
+    let (busy, idle) = (id(32), id(33));
+    let lab = Lab::new(Delays::default(), memory_policy(true)).await;
+    // The fake's VMs hold 100 MiB: above these requests.
+    for (sandbox, sleep) in [(busy, NEVER), (idle, SAVE_WHEN_NEEDED)] {
+        let config = SandboxConfig {
+            memory_request_mib: Some(64),
+            ..SandboxConfig::new(1, 256, sleep)
+        };
+        let created = lab
+            .client
+            .call(&Request::Create {
+                id: sandbox,
+                config,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created, Reply::Done);
+        woke(&lab.wake(sandbox).await);
+    }
+    sleep_a_little().await;
+    let status = lab.status().await;
+    for sandbox in [busy, idle] {
+        assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    }
+
+    *lab.world.memory_room.lock().unwrap() = Some(0);
+    let status = lab
+        .wait_until("the idle sandbox saved for the VMs' limit", |status| {
+            Lab::sandbox(status, idle).level == LevelName::Saved
+        })
+        .await;
+    assert_eq!(Lab::sandbox(&status, busy).level, LevelName::Running);
+    sleep_a_little().await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, busy).level, LevelName::Running);
+    assert_eq!(Lab::sandbox(&status, busy).paused_for_memory, None);
+
+    *lab.world.memory_room.lock().unwrap() = Some(1 << 40);
+    lab.assert_clean();
 }

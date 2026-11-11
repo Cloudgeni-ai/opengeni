@@ -41,6 +41,7 @@ import {
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
   SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
+  SCHEDULED_OCCURRENCE_QUIET_GUIDANCE,
   SCHEDULED_OCCURRENCE_TASK_LABEL,
   EVENTS_GET_MODEL_TOOL_NAME,
   type ScheduledOccurrenceEvents,
@@ -109,7 +110,6 @@ import {
   UpdateScheduledTaskRequest,
   GoalSpec,
   UpdateSessionGoalRequest,
-  UpdateSessionVariableSetsRequest,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
@@ -959,40 +959,6 @@ describe("contracts", () => {
     ).toBe("private");
   });
 
-  test("normalizes ordered Variable Set selections and rejects ambiguous precedence", () => {
-    const first = "00000000-0000-4000-8000-000000000011";
-    const last = "00000000-0000-4000-8000-000000000012";
-    expect(
-      CreateSessionRequest.parse({ initialMessage: "inspect", variableSetId: last }),
-    ).toMatchObject({ variableSetIds: [last], variableSetId: last });
-    expect(
-      CreateSessionRequest.parse({
-        initialMessage: "inspect",
-        variableSetIds: [first, last],
-        variableSetId: last,
-      }),
-    ).toMatchObject({ variableSetIds: [first, last], variableSetId: last });
-    expect(
-      CreateSessionRequest.safeParse({
-        initialMessage: "inspect",
-        variableSetIds: [first, last],
-        variableSetId: first,
-      }).success,
-    ).toBe(false);
-    expect(
-      CreateSessionRequest.safeParse({
-        initialMessage: "inspect",
-        variableSetIds: [first, first],
-      }).success,
-    ).toBe(false);
-    expect(UpdateSessionVariableSetsRequest.parse({ variableSetIds: [first, last] })).toEqual({
-      variableSetIds: [first, last],
-    });
-    expect(
-      UpdateSessionVariableSetsRequest.safeParse({ variableSetIds: [last, last] }).success,
-    ).toBe(false);
-  });
-
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
     expect(
       CreateSessionRequest.parse({
@@ -1785,6 +1751,11 @@ describe("contracts", () => {
     expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE);
     expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("schedule-<scheduled task ID>");
     expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("pause this schedule");
+    // A run with nothing for the person ends with the no-reply token and stays
+    // out of their chat; blockers and questions never do.
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_QUIET_GUIDANCE);
+    expect(SCHEDULED_OCCURRENCE_QUIET_GUIDANCE).toContain("exactly NO_REPLY");
+    expect(SCHEDULED_OCCURRENCE_QUIET_GUIDANCE).toContain("Never answer NO_REPLY for a blocker");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
     expect(scheduled.content).not.toContain("Unavailable in this occurrence");

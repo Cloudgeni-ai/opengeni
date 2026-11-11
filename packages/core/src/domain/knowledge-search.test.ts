@@ -57,11 +57,23 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   isCodexBilledTurn: async () => false,
+  // Knowledge queries run in the app unless an outer scope says otherwise.
+  chargeBillingOrigin: (origin?: "app" | "api" | null) => origin ?? "app",
   SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
   // Knowledge queries and document indexing carry no inference model, so the
   // imported billing helper must never consult subscription-route funding.
-  readSubscriptionCoreRouteFunding: async () => {
+  readSubscriptionCoreFunding: async () => {
     throw new Error("Unexpected subscription-route funding lookup in knowledge fixture");
+  },
+  // Knowledge queries make no own-key model call, so the imported billing
+  // helpers must never read the own-key fee balance.
+  getByokFeeSpendableBalance: async () => {
+    throw new Error("Unexpected own-key fee balance read in knowledge fixture");
+  },
+  // Nor does it run on the person's own subscription, so the plan that
+  // subscriptions need is never read either.
+  getOrganizationPlanStanding: async () => {
+    throw new Error("Unexpected own-subscription plan read in knowledge fixture");
   },
   getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
@@ -74,6 +86,9 @@ mock.module("@opengeni/db", () => ({
   countWorkspacesForAccount: async () => 0,
   countActiveApiKeysForWorkspace: async () => 0,
   countActiveOrganizationApiKeysForAccount: async () => 0,
+  // These workspaces are not EU-only; the EU paths are covered in
+  // packages/core/test/side-feature-region.test.ts.
+  isWorkspaceEuOnly: async () => false,
 }));
 const { searchKnowledgeEntries } = await import("./knowledge-search");
 const { checkLimit } = await import("../billing/limits");
@@ -102,6 +117,22 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     createdSince: "2026-10-01T00:00:00Z",
     cursor: "page-2",
   });
+});
+test("a host without an embedder keeps the hybrid keyword fallback and refuses vector mode", async () => {
+  // Gateways built without an embedder resolve none; that sends nothing and
+  // answers like any unavailable provider, outside EU as before.
+  const none = () => undefined as never;
+  const result = await searchKnowledgeEntries(
+    {} as never,
+    serviceContext,
+    { query: "Acme renewal" },
+    none,
+  );
+  expect(result.searchMode).toBe("keyword");
+  expect(result.fallbackReason).toBe("provider_unavailable");
+  await expect(
+    searchKnowledgeEntries({} as never, serviceContext, { query: "Acme", mode: "vector" }, none),
+  ).rejects.toThrow("Knowledge query embedder is unavailable");
 });
 test("keyword and explicit search syntax remain unchanged", async () => {
   for (const query of ['"Acme renewal"', "Acme -expired", "Acme OR renewal"]) {

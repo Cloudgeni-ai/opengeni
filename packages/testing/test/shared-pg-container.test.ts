@@ -1,11 +1,61 @@
 import { describe, expect, test } from "bun:test";
+import { appendFile, cp, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   SHARED_TEST_PG_IMAGE,
   sharedTestContainerNeedsReplacement,
   sharedTestContainerRunArgs,
   sharedTestContainerSpec,
+  sharedTestTemplateName,
+  templateSourceFiles,
 } from "../src/shared-pg";
+
+describe("shared test template name", () => {
+  test("is the same for identical checkouts at different paths", async () => {
+    const dbPackageDir = fileURLToPath(new URL("../../db", import.meta.url));
+    const packagesDir = dirname(dbPackageDir);
+    // The name also covers the workspace sources the template build imports,
+    // so each copy carries the package manifests and those sources (linked;
+    // db's own files are real copies so one can be edited below).
+    const imported = [
+      ...new Set(
+        (await templateSourceFiles(packagesDir))
+          .map((file) => file.split("/").slice(0, 2).join("/"))
+          .filter((source) => !source.startsWith("db/")),
+      ),
+    ];
+    const scratch = await mkdtemp(join(tmpdir(), "opengeni-template-name-"));
+    try {
+      const copies = [join(scratch, "one", "db"), join(scratch, "elsewhere", "two", "db")];
+      for (const copy of copies) {
+        await cp(join(dbPackageDir, "drizzle"), join(copy, "drizzle"), { recursive: true });
+        await cp(join(dbPackageDir, "src"), join(copy, "src"), { recursive: true });
+        for (const entry of await readdir(packagesDir)) {
+          const manifest = join(packagesDir, entry, "package.json");
+          if (!(await Bun.file(manifest).exists())) continue;
+          await mkdir(join(dirname(copy), entry), { recursive: true });
+          await cp(manifest, join(dirname(copy), entry, "package.json"));
+        }
+        for (const source of imported) {
+          await symlink(join(packagesDir, source), join(dirname(copy), source));
+        }
+      }
+      const original = await sharedTestTemplateName(dbPackageDir);
+      expect(original).toMatch(/^og_test_template_[0-9a-f]{12}$/u);
+      expect(await sharedTestTemplateName(copies[0]!)).toBe(original);
+      expect(await sharedTestTemplateName(copies[1]!)).toBe(original);
+
+      // Any change to the template contract still gets its own template.
+      await appendFile(join(copies[1]!, "src", "provision-roles.ts"), "\n// changed\n");
+      expect(await sharedTestTemplateName(copies[1]!)).not.toBe(original);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("shared test PostgreSQL container", () => {
   test("gets enough shared memory for parallel queries across hundreds of connections", () => {

@@ -1,6 +1,5 @@
 import type { ToolGatewayCatalogEntry } from "@opengeni/contracts";
 import { compareCanonicalStrings, parseVerifiedToolGatewayCatalog } from "./catalog";
-import { ToolGatewayPathCollisionError } from "./errors";
 
 export type GenerateToolGatewayDeclarationsOptions = {
   moduleSpecifier?: string;
@@ -81,25 +80,29 @@ function namespaceNode(): NamespaceNode {
   return { children: new Map(), entry: null };
 }
 
+/**
+ * Catalogs built by the gateway never collide. Declarations are typings only,
+ * so an entry that would overlap another is left out rather than failing every
+ * other declaration.
+ */
 function insertEntry(root: NamespaceNode, entry: ToolGatewayCatalogEntry): void {
+  let probe: NamespaceNode | undefined = root;
+  for (const segment of entry.codemodePath) {
+    if (probe.entry) return;
+    probe = probe.children.get(segment);
+    if (!probe) break;
+  }
+  if (probe && (probe.entry || probe.children.size > 0)) return;
   let node = root;
-  for (const [index, segment] of entry.codemodePath.entries()) {
-    if (node.entry) {
-      throw new ToolGatewayPathCollisionError(entry.codemodePath, "extends_leaf");
-    }
+  for (const segment of entry.codemodePath) {
     let child = node.children.get(segment);
     if (!child) {
       child = namespaceNode();
       node.children.set(segment, child);
     }
     node = child;
-    if (index === entry.codemodePath.length - 1) {
-      if (node.entry || node.children.size > 0) {
-        throw new ToolGatewayPathCollisionError(entry.codemodePath, "collision");
-      }
-      node.entry = entry;
-    }
   }
+  node.entry = entry;
 }
 
 function renderChildren(

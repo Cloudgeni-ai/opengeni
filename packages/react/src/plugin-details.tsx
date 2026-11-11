@@ -26,6 +26,7 @@ export function PluginDetails({
   error,
   connections = EMPTY_CONNECTIONS,
   onConnect,
+  showIdentity = true,
 }: {
   item: PluginDiscoveryItem;
   onInstall?: () => void;
@@ -34,6 +35,8 @@ export function PluginDetails({
   error?: string | null;
   connections?: Record<string, boolean>;
   onConnect?: (server: { name: string; endpoint: string | null }) => void;
+  /** False when the host already shows the plugin's name, logo and author. */
+  showIdentity?: boolean;
 }) {
   const t = useOpenGeniText();
   const supported = (server: NonNullable<PluginDiscoveryItem["mcpServers"]>[number]) =>
@@ -54,19 +57,21 @@ export function PluginDetails({
         : t("pluginDetails.customSource");
   return (
     <article className="og-plugin-details">
-      <header className="og-plugin-details-header">
-        <ConnectionLogo
-          src={item.logoUrl}
-          name={item.displayName}
-          fallback={<BoxesIcon aria-hidden="true" />}
-        />
-        <div>
-          <h2>{item.displayName.replace(/-/g, " ")}</h2>
-          {item.author?.name ? (
-            <p>{t("pluginDetails.byName", { name: item.author.name })}</p>
-          ) : null}
-        </div>
-      </header>
+      {showIdentity ? (
+        <header className="og-plugin-details-header">
+          <ConnectionLogo
+            src={item.logoUrl}
+            name={item.displayName}
+            fallback={<BoxesIcon aria-hidden="true" />}
+          />
+          <div>
+            <h2>{item.displayName.replace(/-/g, " ")}</h2>
+            {item.author?.name ? (
+              <p>{t("pluginDetails.byName", { name: item.author.name })}</p>
+            ) : null}
+          </div>
+        </header>
+      ) : null}
       <div className="og-plugin-details-meta">
         <span>{registryLabel}</span>
         {item.category ? <span>{item.category}</span> : null}

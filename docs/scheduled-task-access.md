@@ -10,7 +10,14 @@ runs that create a chat, the task stores the chat's initial tool selection:
   account that can no longer be used). A pin narrows only its own connector;
   every other connector follows the owner's current accounts;
 - for a task an agent created, the creating session's Opengeni tools,
-  permissions and access policy (the creator policy, migration 0428).
+  permissions and access policy (the creator policy, migration 0428). A
+  person, key or app that creates the task over the API can set the same
+  creator selection with `agentConfig.firstPartyMcpTools` and
+  `agentConfig.firstPartyMcpPermissions`, as on session create: tools within
+  the deployment's allowed set, permissions the creating credential holds.
+  They are set once at creation and never stored in `agentConfig`; to change
+  them, or to give a task created without them the app's selection, create the
+  task again. Omitted, the runs follow the defaults as before.
 
 Only a person can pin, through the schedule editor or a human API call; agents,
 API keys and services receive 403. A schedule that posts into an existing chat
@@ -48,6 +55,18 @@ schedule; `new_session_per_run` creates a fresh chat per occurrence. Those modes
 take `agentConfig` creation settings. After a reusable chat exists, change its
 execution settings in that chat. The schedule editor and MCP summary identify
 those settings as inherited rather than displaying stale creation defaults.
+
+Those creation settings also take the chat settings a session create takes:
+`mcpServers` (session MCP servers by id and URL, without headers),
+`skills`, `memoryScope` and `agentAccess`. A generated chat gets them, and
+the run's dispatch fence checks that its skills and servers match the
+accepted snapshot. `memoryScope` and `agentAccess` only narrow: the chat gets
+the narrower of the setting and the creator's own policy. An existing-chat
+schedule rejects them. The agent schedule tools do not offer these fields.
+
+With `overlapPolicy: "skip"`, a `new_session_per_run` occurrence is skipped
+(`scheduled_session_not_idle`) while the chat of the task's previous run is
+still working, so a slow run is never doubled up.
 
 ## Editing messages and destinations
 
@@ -122,7 +141,19 @@ the deployment's configured key, a delegated service, or a delegated bearer
 are ownerless: the key stays the audited creator (`createdBy` with
 `kind: "service"`), runs use service authority with workspace accounts only,
 and anyone holding `scheduled_tasks:manage` (including the key) may change or
-run them.
+run them. Nobody can be notified or called from an ownerless task's run, so
+the chats it starts are not offered `notify_user`, `notification_withdraw`,
+`inbox_tidy` or `call_user`, and keep that exact tool list rather than
+following the defaults at each turn. An app that wants its users notified
+creates their schedules as them (`asUser`), which makes them the owner.
+
+A creator may lock a schedule with `creatorLocked: true` when creating it.
+Only the same creator subject can then change, run or delete it;
+`scheduled_tasks:manage` alone is not enough, and agents always get 403. A
+workspace admin can still pause it. An agent cannot create a locked schedule
+(422). Products use it for schedules
+they manage on a workspace's behalf, so the workspace's own agents cannot edit
+them.
 
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
@@ -146,9 +177,10 @@ organization allows Only me chats.
   owner. The run rechecks that the owner is still an active member who may
   create Only me chats; if not, the run fails closed instead of creating a
   shared chat.
-- A schedule that posts into an Only me chat, saves to the owner's personal
-  knowledge, or runs on the owner's own (personal) Connected Machine is always
-  Only me. Widening it is refused while that holds. See
+- A schedule that posts into an Only me chat or saves to the owner's personal
+  knowledge is always Only me. Widening it is refused while that holds.
+- A schedule runs as its owner, so one on the owner's own (personal) Connected
+  Machine may be Only me or Workspace. See
   [Connected Machines](connected-machines.md) for how each run re-proves the
   owner's access to the machine.
 - Unless the organization turns it off under Security, workspace admins see
@@ -311,7 +343,7 @@ that list. An edit that does not name a `toolPolicy` keeps the one the
 schedule has, so replacing `agentConfig` (for example with the tools a read
 returned) never turns the defaults into a fixed list. Agents cannot set
 `toolPolicy`; they omit `tools` to follow the defaults or list them to fix
-them. Knowledge syncs never follow the defaults.
+them.
 
 Migration 0754 moved schedules whose list nobody chose to follow the defaults:
 those an agent or a service created, which start their own session. Their
@@ -401,6 +433,18 @@ A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.
 
 ## Runs waiting on a person
+
+A chat that a scheduled task or event trigger starts is unattended by default
+(see [`http-api.md`](http-api.md)): the agent is told nobody answers during the
+run, it gets no tool that waits for a person, and a call that needs approval
+is refused at once instead of waiting, so such a run does not wait on a person
+at all. The rest of this section applies to runs that are attended: tasks that
+set `agentConfig.unattended: false`, tasks that set
+`agentConfig.approvalTimeoutSeconds` without `unattended`, runs posted into an
+existing chat, chats whose **Work without me** switch is off, and turns after a
+person wrote into a chat that was unattended only by default (those turns keep
+the instructions and tools the chat started with; only their approvals and
+questions now wait for a person).
 
 A dispatched run whose own turn stops for a tool approval or a structured
 question stays `dispatched` (its lifecycle settles only when the turn

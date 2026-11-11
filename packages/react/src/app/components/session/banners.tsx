@@ -2,15 +2,12 @@ import { AlertTriangleIcon, ArrowLeftIcon, AudioLinesIcon, TerminalIcon } from "
 import { UserMessageBody as CollapsibleUserMessageBody } from "../../../components/user-message-body";
 import type { UserMessageItem } from "../../../timeline";
 import type { TimelineSearchTarget } from "../../../components/timeline-search";
-import { lazy, Suspense } from "react";
-
 import { MarkdownText } from "../markdown";
 import { Button } from "../../../ui/button";
 import { formatTimestamp } from "../../lib/format";
 import type { Session } from "../../types";
-import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";
-
-const MessageResourceAttachments = lazy(() => import("./message-resource-attachments"));
+import { MessageRepositoryChips } from "./message-resource-placeholders";
+import { useOpenGeniText } from "../../../messages/runtime";
 
 export function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
   return (
@@ -60,51 +57,34 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
   );
 }
 
-/** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
+/**
+ * Repository chips + markdown body inside the user bubble. The timeline shows
+ * the message's attached files above the bubble.
+ */
 export function UserMessageBody({
-  workspaceId,
-  sessionId,
   item,
   searchTarget,
 }: {
-  workspaceId: string;
-  sessionId?: string | undefined;
   item: UserMessageItem;
   searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
-  const hasFiles = item.resources.some((resource) => resource.kind === "file");
-  const repositoryChips = item.resources.some((resource) => resource.kind === "repository") ? (
-    <div className="mb-2 flex flex-wrap gap-1.5">
-      <MessageRepositoryChips resources={item.resources} />
-    </div>
-  ) : null;
+  const t = useOpenGeniText();
 
   return (
     <div data-testid="timeline-user">
       {item.presentation ? (
         <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
           <AudioLinesIcon className="size-3.5" />
-          {item.presentation.kind === "realtime_voice_handoff" ? "Voice handoff" : "Voice request"}
+          {item.presentation.kind === "realtime_voice_handoff"
+            ? t("messageTimeline.voiceHandoff")
+            : t("messageTimeline.voiceRequest")}
         </div>
       ) : null}
-      {hasFiles ? (
-        <Suspense
-          fallback={
-            <>
-              <MessageFileSkeletons resources={item.resources} />
-              {repositoryChips}
-            </>
-          }
-        >
-          <MessageResourceAttachments
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            resources={item.resources}
-          />
-        </Suspense>
-      ) : (
-        repositoryChips
-      )}
+      {item.resources.some((resource) => resource.kind === "repository") ? (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          <MessageRepositoryChips resources={item.resources} />
+        </div>
+      ) : null}
 
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
         <MarkdownText text={item.text} compact softLineBreaks searchTarget={searchTarget} />

@@ -18,7 +18,13 @@
 //       never two active concurrently.
 
 import { describe, expect, test } from "bun:test";
-import { SandboxWorkspaceReadNotFoundError, type SandboxSessionLike } from "@openai/agents/sandbox";
+import {
+  SandboxInvalidManifestPathError,
+  SandboxPathResolutionError,
+  SandboxWorkspaceReadNotFoundError,
+  type SandboxSessionLike,
+} from "@openai/agents/sandbox";
+import { createObservability, sandboxOperationMetricObserver } from "@opengeni/observability";
 import { SandboxFilesystemNotFoundError } from "modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 import {
@@ -313,6 +319,91 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       { op: "listDir", outcome: "not_found" },
       { op: "readFile", outcome: "failed" },
     ]);
+  });
+
+  test("a caller path rejection is not counted as a provider failure", async () => {
+    const observations: Array<{ backend: string; op: string; outcome: string }> = [];
+    const firstOperations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    // The pinned SDK's own refusals, as Modal's view_image raised them for
+    // `/tmp/x-1.png` before the box could read it.
+    const escapes = new SandboxInvalidManifestPathError(
+      'Sandbox path "/tmp/x-1.png" escapes the workspace root.',
+    );
+    const remoteEscape = new SandboxPathResolutionError(
+      'Sandbox path "link.png" failed remote validation: workspace escape: /etc/x.png',
+    );
+    const materialization = new SandboxInvalidManifestPathError("manifest entry escapes root");
+    const backend: RoutableBackendSession = {
+      async viewImage() {
+        throw escapes;
+      },
+      async readFile() {
+        throw remoteEscape;
+      },
+      async materializeEntry() {
+        throw materialization;
+      },
+    };
+    const observeMetric = (observation: { backend: string; op: string; outcome: string }) =>
+      observations.push({
+        backend: observation.backend,
+        op: observation.op,
+        outcome: observation.outcome,
+      });
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => firstOperations.push(observation),
+      onOperation: observeMetric,
+    });
+
+    await expect(proxy.viewImage({ path: "/tmp/x-1.png" })).rejects.toBe(escapes);
+    await expect(proxy.readFile({ path: "link.png" })).rejects.toBe(remoteEscape);
+    await expect(
+      proxy.materializeEntry({ path: "../outside", entry: { type: "dir" } } as never),
+    ).rejects.toBe(materialization);
+
+    expect(observations).toEqual([
+      { backend: "modal", op: "viewImage", outcome: "rejected" },
+      { backend: "modal", op: "readFile", outcome: "rejected" },
+      // A platform-issued path is our bug, so it stays a failure.
+      { backend: "modal", op: "materializeEntry", outcome: "failed" },
+    ]);
+    expect(firstOperations).toMatchObject([
+      {
+        op: "viewImage",
+        outcome: "completed",
+        phases: { providerOperation: { outcome: "completed" } },
+      },
+    ]);
+
+    // Through the real Prometheus contract: the rejected operations stay out of
+    // both the failure-ratio numerator and its ok|failed denominator.
+    const obs = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        deploymentRevision: "revision-test",
+        observabilityStructuredLogs: false,
+        observabilityMetricsEnabled: true,
+        observabilityOtlpEndpoint: "",
+        observabilityOtlpHeaders: "",
+      },
+      { component: "worker", now: () => 1 },
+    );
+    const metricProxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onOperation: sandboxOperationMetricObserver(obs),
+    });
+    await expect(metricProxy.viewImage({ path: "/tmp/x-1.png" })).rejects.toBe(escapes);
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="viewImage"[^}]*outcome="rejected"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toMatch(/opengeni_sandbox_operations_total\{[^}]*outcome="failed"/);
   });
 
   test("an observer failure cannot change a provider result", async () => {
@@ -3304,7 +3395,7 @@ describe("defaultIsHome — a machine-pinned attempt's clear-to-null emits the h
     expect((err as Error).message).not.toMatch(/pinned-machine/);
   });
 
-  test("defaultIsHome omitted (machine-home / null-start Modal-home): null resolves to the home default as before", async () => {
+  test("defaultIsHome omitted (a turn established on its group box): null resolves to the home default as before", async () => {
     const home = new FakeBackend("home-box");
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
@@ -3317,25 +3408,6 @@ describe("defaultIsHome — a machine-pinned attempt's clear-to-null emits the h
     });
     const r = await resolve({ activeSandboxId: null, activeEpoch: 0 });
     expect(r.session).toBe(home);
-    expect(r.sandboxId).toBeNull();
-  });
-
-  test("defaultIsHome:true (a genuine machine-HOME turn): null still resolves to the machine (no regression)", async () => {
-    // A machine-HOME session's home IS the machine, so a clear-to-null resolves right
-    // back to it — the throw is scoped to Modal-home turns pinned to a machine.
-    const machine = new FakeBackend("machine-home");
-    const resolve = makeActiveBackendResolver({
-      workspaceId: WS,
-      defaultBackend: machine,
-      defaultKind: "selfhosted",
-      getSandbox: async () => null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => new MockAgentResponder(),
-      relay: RELAY,
-      defaultIsHome: true,
-    });
-    const r = await resolve({ activeSandboxId: null, activeEpoch: 5 });
-    expect(r.session).toBe(machine);
     expect(r.sandboxId).toBeNull();
   });
 

@@ -1,13 +1,21 @@
-import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import {
+  allowMachineForChat,
   currentSessionMachineAccess,
+  type AllowMachineClient,
   recheckSessionAdmission,
+  runSavedMessageOnMachine,
+  savedMessageApprovedMachines,
   savedMessageMachineChoices,
+  sessionAdmissionApprovedElsewhere,
   sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionNeedsMachineAccess,
   sessionAdmissionReason,
   sessionWaitingWorkExplainsBlock,
+  type ApprovedMachineChoice,
   type SessionAdmissionReason,
 } from "../session-admission-model";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
@@ -16,7 +24,7 @@ import { useMachines, type MachinesClientLike } from "./use-machines";
 /** How often a refused message re-reads its machines while it waits. */
 const BLOCKED_MACHINE_POLL_MS = 15_000;
 
-export type UseSessionStartOptions = EmbeddedSessionClientOverride & {
+export type UseSessionStartOptions = EmbeddedSessionClientOverride<ChatClient> & {
   session: Session;
   /** Re-read the session (and its queue) after a machine change or a recheck. */
   onSessionChanged: () => Promise<void>;
@@ -41,6 +49,23 @@ export type UseSessionStartResult = {
   machineAccess: SessionMachineAccess | null;
   /** The saved message was refused because only the machine's owner may start work there. */
   needsDifferentMachine: boolean;
+  /**
+   * The person's own saved message was approved for another machine, not the
+   * one the chat runs on now; a recheck can't start it here.
+   */
+  approvedElsewhere: boolean;
+  /** The machines it was approved for, the ones the chat can move to now first. */
+  approvedMachines: ApprovedMachineChoice[];
+  /**
+   * Move the chat to a machine the saved message was approved for; the
+   * server starts it there by itself. Resolves to an error to show, or null.
+   * Absent when moving isn't possible here.
+   */
+  runOnApprovedMachine: ((sandboxId: string) => Promise<string | null>) | undefined;
+  /** The person's machines, as last read. */
+  machines: readonly MachineView[];
+  /** Move the chat without sending anything. Absent when moving isn't possible here. */
+  moveToMachine: ((sandboxId: string) => Promise<boolean>) | undefined;
   /** The chat runs on somebody else's personal machine, so a new message could not start. */
   warnBeforeSending: boolean;
   /** Machines the person may move the chat to (never another personal machine). */
@@ -51,8 +76,22 @@ export type UseSessionStartResult = {
   chooseMachine: (machine: MachineView) => Promise<string | null>;
   /** A specific reason for the last refused move (for example, the machine went offline). */
   machineChoiceError: string | null;
-  /** One fenced Resume, then fresh reads. Throws when it could not be confirmed. */
+  /**
+   * "Try again" for a failure nothing else lifts: one fenced Resume, then
+   * fresh reads. Throws when it could not be confirmed. Blocks the server
+   * lifts by itself (access allowed or restored, the chat moved) never need it.
+   */
   recheck: () => Promise<void>;
+  /** Re-read the session and its machines. */
+  refresh: () => Promise<void>;
+  /** The saved message waits for approval to use the chat's personal machine. */
+  needsMachineAccess: boolean;
+  /**
+   * As the machine's owner, allow it for this chat; the server then starts
+   * the saved message by itself. Absent unless the viewer owns the machine
+   * and the client can issue the approval. Throws when it could not be confirmed.
+   */
+  allowMachine: (() => Promise<void>) | undefined;
   /**
    * As the machine's owner, let the agent continue with other people's
    * waiting updates, then recheck a blocked chat (or just re-read). Absent
@@ -64,9 +103,10 @@ export type UseSessionStartResult = {
 /**
  * Renderer-neutral state for explaining why a message can't start and the
  * allowed ways forward. Reads machines only while the chat is on a machine,
- * polls only while a refused message waits, and rechecks with one Resume
- * fenced on the session's control ETag, so the saved message is never sent
- * twice. Access control stays on the server.
+ * polls only while a refused message waits. The server starts the saved
+ * message by itself, exactly once, as soon as what blocked it is fixed; only
+ * an unknown failure offers a Try again fenced on the session's control ETag.
+ * Access control stays on the server.
  */
 export function useSessionStart({
   session,
@@ -121,6 +161,31 @@ export function useSessionStart({
       }),
     [client, control, onSessionChanged, refreshMachines, sessionId, workspaceId],
   );
+  const refresh = useCallback(async () => {
+    await Promise.all([onSessionChanged(), refreshMachines()]);
+  }, [onSessionChanged, refreshMachines]);
+  const needsMachineAccess = sessionAdmissionNeedsMachineAccess(reason, machineAccess);
+  const allowClient = client as unknown as Partial<AllowMachineClient>;
+  const ownMachine =
+    needsMachineAccess && machineAccess?.isOwner
+      ? fleet.machines.find((machine) => machine.sandboxId === machineAccess.sandboxId)
+      : undefined;
+  const enrollmentId = ownMachine?.enrollmentId ?? null;
+  const canAllow =
+    enrollmentId !== null &&
+    typeof allowClient.listUserResourceAuthorities === "function" &&
+    typeof allowClient.issueUserResourceGrant === "function";
+  const allowMachine = useCallback(async () => {
+    if (!enrollmentId) return;
+    const allowed = await allowMachineForChat({
+      client: allowClient as AllowMachineClient,
+      workspaceId,
+      session,
+      enrollmentId,
+    });
+    await refresh();
+    if (!allowed) throw new Error("This machine could not be allowed for this chat");
+  }, [allowClient, enrollmentId, refresh, session, workspaceId]);
   const continueClient = client as Partial<{
     continueSessionWaitingWork: (workspaceId: string, sessionId: string) => Promise<unknown>;
   }>;
@@ -157,10 +222,29 @@ export function useSessionStart({
     () => savedMessageMachineChoices(fleet.machines),
     [fleet.machines],
   );
+  const approvedMachines = useMemo(
+    () => savedMessageApprovedMachines(machineAccess, fleet.machines),
+    [machineAccess, fleet.machines],
+  );
+  const runOnApprovedMachine = useCallback(
+    (sandboxId: string) =>
+      runSavedMessageOnMachine({
+        sandboxId,
+        attach,
+        refresh,
+        failedMove: t("sessionAdmission.machineChangeFailed"),
+      }),
+    [attach, refresh, t],
+  );
   return {
     reason,
     machineAccess,
     needsDifferentMachine: sessionAdmissionNeedsDifferentMachine(reason, machineAccess),
+    approvedElsewhere: sessionAdmissionApprovedElsewhere(reason, machineAccess),
+    approvedMachines,
+    runOnApprovedMachine: fleet.canAttach ? runOnApprovedMachine : undefined,
+    machines: fleet.machines,
+    moveToMachine: fleet.canAttach ? attach : undefined,
     // Others' waiting updates keep the composer's machine notice beside them:
     // it is where they choose a machine or ask the owner.
     warnBeforeSending:
@@ -175,6 +259,9 @@ export function useSessionStart({
     chooseMachine,
     machineChoiceError: fleet.mutationError?.message ?? null,
     recheck,
+    refresh,
+    needsMachineAccess,
+    allowMachine: canAllow ? allowMachine : undefined,
     continueWaitingWork: canContinue ? continueWaitingWork : undefined,
   };
 }

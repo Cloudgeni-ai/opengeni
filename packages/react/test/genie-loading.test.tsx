@@ -496,8 +496,8 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   expect(trigger.textContent).not.toMatch(/\d+ steps?/);
   // The reel does not count earlier steps either.
   expect(r.container.textContent).not.toContain("+1 earlier");
-  expect(r.container.textContent).toContain("bun test");
-  expect(r.container.textContent).toContain("bun run build");
+  expect(r.container.textContent).toContain("Running tests");
+  expect(r.container.textContent).toContain("Running build");
   // Both faces exist while the reel rolls to the new step.
   expect(r.container.querySelectorAll(".og-rolling-face").length).toBe(2);
   await act(async () => trigger.click());

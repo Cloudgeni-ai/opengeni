@@ -85,7 +85,7 @@ async function fixture(): Promise<RotationInput> {
         id: "external",
         url: serverUrl,
         headersEncrypted: {
-          authorization: database.encryptVariableSetValue(encryptionKey, "Bearer original"),
+          authorization: database.encryptEnvironmentValue(encryptionKey, "Bearer original"),
         },
       },
     ],
@@ -105,7 +105,7 @@ async function fixture(): Promise<RotationInput> {
         expectedCredentialVersion: 1,
         expectedServerUrl: serverUrl,
         headersEncrypted: {
-          authorization: database.encryptVariableSetValue(encryptionKey, "Bearer replacement"),
+          authorization: database.encryptEnvironmentValue(encryptionKey, "Bearer replacement"),
         },
       },
     ],

@@ -362,7 +362,7 @@ describe("Bundles section browser acceptance", () => {
       await openInstalledPackages(page);
       await expectText(
         page.locator('section[aria-label="Skills and plugins"]'),
-        "Workspace administrators can install, update, and remove these items.",
+        "Ask a workspace admin to install or update these items.",
       );
       expect(await page.getByRole("button", { name: "New skill", exact: true }).count()).toBe(0);
       await page.getByRole("tab", { name: "Plugins", exact: true }).click();
@@ -372,7 +372,7 @@ describe("Bundles section browser acceptance", () => {
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
       const pluginPage = await openPluginPage(page);
-      await expectText(pluginPage, "Only workspace admins can install, update and remove plugins.");
+      await expectText(pluginPage, "Ask a workspace admin to update or remove this plugin.");
       expect(
         await pluginPage.getByRole("button", { name: "Check for update", exact: true }).count(),
       ).toBe(0);
@@ -504,10 +504,6 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/model-catalog`) return json({ models: [] });
-    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/registrations`)
-      return json({ registrations: [], repositories: [] });
-    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/github`)
-      return json({ status: "unavailable", installations: [], missing: [], installUrl: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({
         provider: "skills_sh",

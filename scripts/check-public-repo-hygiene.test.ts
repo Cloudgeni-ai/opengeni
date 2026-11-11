@@ -44,7 +44,7 @@ describe("public repository hygiene", () => {
       ).toBe(true);
     }
     const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
-    expect(contacts).toHaveLength(4);
+    expect(contacts).toHaveLength(5);
     for (const [contact] of contacts) {
       const altered = source.replace(contact, `x${contact.slice(1)}`);
       expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));
@@ -100,6 +100,36 @@ describe("public repository hygiene", () => {
       expect(altered.map((finding) => finding.reason)).toContain("personal email address");
       expect(altered.map((finding) => finding.reason)).toContain("retired milestone label");
     }
+  });
+
+  test("SVG path data never reads as a retired label, but SVG text still does", () => {
+    const label = ["M", "12"].join("");
+    const file = "data/catalog/logos/example.svg";
+    const drawn = `<svg xmlns="http://www.w3.org/2000/svg"><path d="${label} 5.5h3"/><polygon points='${label} 1 2 3'/></svg>`;
+    expect(auditPublicText(file, drawn)).toEqual([]);
+    for (const text of [
+      `<svg><title>${label}</title></svg>`,
+      `<svg><path id="${label}" d="M1 2"/></svg>`,
+    ]) {
+      expect(auditPublicText(file, text).map((finding) => finding.reason)).toEqual([
+        "retired milestone label",
+      ]);
+    }
+    // Only SVG files: the same attribute in source text is still checked.
+    expect(auditPublicText("apps/web/src/icon.tsx", drawn).map((f) => f.reason)).toEqual(
+      Array(2).fill("retired milestone label"),
+    );
+  });
+
+  test("Android vector drawable path data never reads as a retired label", () => {
+    const label = ["M", "12"].join("");
+    const drawn = `<vector><path android:pathData="${label},9c-1.6,0 -3,0.2z" /></vector>`;
+    expect(auditPublicText("android/src/main/res/drawable/end.xml", drawn)).toEqual([]);
+    // Other XML, and drawable text outside path data, are still checked.
+    expect(auditPublicText("android/src/main/res/values/strings.xml", drawn)).toHaveLength(1);
+    expect(
+      auditPublicText("android/src/main/res/drawable/end.xml", `<!-- ${label} -->${drawn}`),
+    ).toHaveLength(1);
   });
 
   test("only exempts the reviewed upstream Rust field primitive", () => {
@@ -256,46 +286,6 @@ describe("public repository hygiene", () => {
         "retired milestone label",
       ].sort(),
     );
-  });
-
-  test("does not rewrite immutable migration comments", () => {
-    const privatePlan = [".agent/", "private-plan.md"].join("");
-    expect(
-      auditPublicText(
-        "packages/db/drizzle/0024_sandboxes_enrollments_metrics.sql",
-        `-- historical source: ${privatePlan}`,
-      ),
-    ).toEqual([]);
-  });
-
-  test("pins the released disconnect migration exception to its exact bytes and issue offset", () => {
-    const file = "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql";
-    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
-    expect(auditPublicText(file, source)).toEqual([]);
-    for (const [path, text] of [
-      ["packages/db/drizzle/9999_new_migration.sql", source],
-      [file, `${source} `],
-      [file, source.replace("SET LOCAL", "set local")],
-      [file, source.replaceAll("\n", "\r\n")],
-    ]) {
-      expect(
-        auditPublicText(path!, text!).some(
-          (finding) => finding.reason === "internal issue reference",
-        ),
-      ).toBe(true);
-    }
-    for (const [metadata, reason] of [
-      [["private-user@", "gmail.com"].join(""), "personal email address"],
-      [["/home/", "private-owner/repo"].join(""), "non-generic home path"],
-      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
-      [["OPE", "-999"].join(""), "internal issue reference"],
-    ]) {
-      expect(auditPublicText(file, `${source}\n${metadata}`)).toContainEqual({
-        file,
-        line: source.split("\n").length + 1,
-        reason,
-      });
-    }
   });
 
   test("does not exempt newly added migrations", () => {

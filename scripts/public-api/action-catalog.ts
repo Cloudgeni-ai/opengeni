@@ -27,6 +27,15 @@ import type { ActionCatalogEntry } from "../../packages/contracts/src/app-action
  * in the browser.
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/configuration$/,
+    reason:
+      "configuration read for compact UI clients; the existing getSession agent action already returns the full configuration",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/decisions$/,
+    reason: "stateless product inference API; agents use the internal configured decision model",
+  },
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
   {
     pattern: /^\/v1\/site-auth\//,
@@ -42,6 +51,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
+    pattern: /^\/v1\/organizations\/:organizationId\/identity\//,
+    reason: "an organization's public auto-connect issuer documents, read by outside apps",
+  },
+  {
     pattern:
       /\/callback$|^\/v1\/integrations\/connect\/finished$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni, and the page it ends on",
@@ -52,6 +65,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
+  {
+    pattern: /^\/v1\/github\/personal\/gateway\//,
+    reason: "the GitHub gateway gh uses as the person from a sandbox",
+  },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
   {
     pattern: /^\/v1\/office\/workbook-tickets$/,
@@ -60,9 +77,14 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
   {
+    pattern: /^\/v1\/shared-sessions\//,
+    reason: "a signed-out read of a chat share link; the link itself is the credential",
+  },
+  {
     pattern:
-      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
-    reason: "meeting recordings reach agents through the meetings_search and meeting_read tools",
+      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models|upcoming-meetings)(\/|$)/,
+    reason:
+      "meeting recordings reach agents through the meetings_search, meeting_read and meeting_notes_save tools",
   },
 ];
 
@@ -83,7 +105,7 @@ export function isActionCatalogExempt(path: string): boolean {
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern:
-      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^POST \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot\/microsoft-sign-in$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
     reason:
       "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
   },
@@ -123,8 +145,6 @@ export type RouteInputs = {
   body: string[];
   query: string[];
   queryParameters: string[];
-  /** The replacement a retired route names (`routeRetired("METHOD /path", ...)`). */
-  retired?: string;
   /** The workspace permission the handler's first access check requires. */
   permission?: string;
 };
@@ -251,7 +271,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
   const looseBody: string[] = [];
   const query: string[] = [];
   const queryParameters = new Set<string>();
-  let retired: string | undefined;
   for (const source of sources) {
     const parsed = parseSync("handler.js", `(${source});`);
     if (parsed.errors.length > 0) continue;
@@ -283,10 +302,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
       if (node.type !== "CallExpression") continue;
       const name = calleeName(node);
       const [first, second] = node.arguments as AstNode[];
-      if (name === "routeRetired") {
-        if (first?.type === "Literal" && typeof first.value === "string") retired = first.value;
-        continue;
-      }
       if (requestQueryCall(node)) {
         const parameter = propertyName(first);
         if (first?.type === "Literal" && parameter) queryParameters.add(parameter);
@@ -334,7 +349,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
     body: [...new Set([...body, ...looseBody])].slice(0, 1),
     query: [...new Set(query)],
     queryParameters: [...queryParameters].sort(),
-    ...(retired ? { retired } : {}),
     ...gatePermission(sources),
   };
 }
@@ -345,13 +359,19 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
  * deps, workspaceId, "sessions:read")`). Workspace settings need
  * workspace:admin; only a Personal workspace's own named owner gets in
  * without it, and nobody acting through another product is that owner.
+ * Shared workspace content (instructions and their reviews, a shared
+ * workspace's name, custom model entries) needs
+ * sessions:create from a person acting as themselves.
  */
 const ACCESS_GATES: Readonly<Record<string, string | null>> = {
   requireAccessGrant: null,
   requireAccessGrantAuthorization: null,
   requireFreshAccessGrant: null,
+  requireIntegrationSetupAuthorization: "connections:write",
   requireMachineAccessGrant: null,
+  requireWorkspaceContributorGrant: "sessions:create",
   requireWorkspaceSettingsGrant: "workspace:admin",
+  requireWorkspaceSettingsAuthorization: "workspace:admin",
 };
 
 /**
@@ -371,9 +391,10 @@ export const ACCESS_GATE_WRAPPERS: ReadonlySet<string> = new Set([
  * permission (`await authorize(c, deps, "read")`), with the permission each
  * operation needs a person in the workspace to hold first, or null for none.
  * The usage and allowance routes (apps/api/src/routes/usage-allowances.ts):
- * reading the workspace's usage or budget and setting a member's allowance
- * need workspace:admin, setting the workspace budget needs an organization
- * admin, and reading one's own usage needs nothing. Organization keys have
+ * reading the workspace's usage and setting a member's allowance need
+ * workspace:admin, reading the workspace budget needs sessions:create (a
+ * person who can start chats there), setting the workspace budget needs an
+ * organization admin, and reading one's own usage needs nothing. Organization keys have
  * their own way in; the route's own checks still decide. A test keeps the
  * operations equal to that file's `Operation` type and checks that every
  * route calling the helper gets its operation's permission.
@@ -383,7 +404,7 @@ export const ACCESS_GATE_OPERATIONS: Readonly<
 > = {
   authorize: {
     read: "workspace:admin",
-    "budget-read": "workspace:admin",
+    "budget-read": "sessions:create",
     "member-write": "workspace:admin",
     "workspace-write": "account:admin",
     own: null,
@@ -597,7 +618,6 @@ export function buildActionCatalog(
         sdk: route?.sdk ?? [],
         request,
         query: inputs.queryParameters,
-        retired: inputs.retired,
         permission: inputs.permission,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
@@ -626,7 +646,6 @@ export function buildActionCatalog(
         ...(route.query.length > 0 ? { query: [...route.query] } : {}),
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
-        ...(route.retired ? { retired: route.retired } : {}),
         ...(route.permission ? { permission: route.permission } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };

@@ -1,5 +1,10 @@
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import type { TimelineAnnotationSourceDescriptor } from "./types";
+import {
+  renderedMarkdownQuote,
+  sourceSpansForRenderedText,
+  type TextSpan,
+} from "./annotation-alignment";
 
 /* ----------------------------------------------------------------------------
    Timeline annotations without the DOM: how a selected quote becomes a draft
@@ -57,8 +62,8 @@ function uniqueNonEmpty(values: string[]): string[] {
 
 /**
  * The part of a rendered selection that appears verbatim in the source text.
- * Rendered text drops markdown syntax, so a selection across formatting falls
- * back to its longest matching prefix, then suffix (at least 8 characters).
+ * Falls back to the longest matching prefix, then suffix (at least 8
+ * characters), for text whose rendering differs from its source (such as math).
  */
 export function matchingQuoteInSource(sourceText: string, quote: string): string | null {
   for (const candidate of uniqueNonEmpty([quote, quote.trim()])) {
@@ -135,15 +140,32 @@ export function bestQuoteOccurrence(
   textBefore: string,
   textAfter: string,
 ): number {
-  if (offsets.length <= 1) return 0;
+  return bestSpanOccurrence(
+    sourceText,
+    offsets.map((start) => ({ start, end: start + quote.length })),
+    textBefore,
+    textAfter,
+  );
+}
+
+/** `bestQuoteOccurrence` for spans of source text that may differ in length. */
+export function bestSpanOccurrence(
+  sourceText: string,
+  spans: readonly TextSpan[],
+  textBefore: string,
+  textAfter: string,
+): number {
+  if (spans.length <= 1) return 0;
   const before = textBefore.slice(-ANNOTATION_SOURCE_CONTEXT_BYTES);
   const after = textAfter.slice(0, ANNOTATION_SOURCE_CONTEXT_BYTES);
   let best = 0;
   let bestScore = -1;
-  offsets.forEach((offset, index) => {
+  spans.forEach((span, index) => {
     const score =
-      commonSuffixLength(before, sourceText.slice(Math.max(0, offset - before.length), offset)) +
-      commonPrefixLength(after, sourceText.slice(offset + quote.length));
+      commonSuffixLength(
+        before,
+        sourceText.slice(Math.max(0, span.start - before.length), span.start),
+      ) + commonPrefixLength(after, sourceText.slice(span.end));
     if (score > bestScore) {
       best = index;
       bestScore = score;
@@ -163,8 +185,9 @@ export type AnnotationSelection = {
   /** The selected text as rendered. */
   text: string;
   /**
-   * Which occurrence of the quote in the source was selected, when the
-   * renderer can count it; otherwise the surrounding rendered text decides.
+   * Which occurrence of the selected text in the rendered message was
+   * selected, when the renderer can count it; otherwise the surrounding
+   * rendered text decides.
    */
   occurrence?: number | undefined;
   /** Rendered text just before the selection (used when `occurrence` is unknown). */
@@ -176,27 +199,21 @@ export type AnnotationSelection = {
 /**
  * A draft annotation for a selection inside `source`, or null when nothing
  * selected is in the source text or the quote is empty or too long.
+ *
+ * The quote is the exact source text behind the selection. A selection that
+ * crosses formatting (bold, links, list items) maps to the markdown that
+ * renders it, so the whole selection is kept rather than just a plain part.
  */
 export function annotationFromSelection(
   source: TimelineAnnotationSourceDescriptor,
   selection: AnnotationSelection,
   id: string = annotationId(),
 ): DraftTimelineAnnotation | null {
-  const quote = matchingQuoteInSource(source.text, selection.text) ?? selection.text;
+  const span = selectionSpanInSource(source.text, selection);
+  if (!span) return null;
+  const { start: startOffset, end: endOffset } = span;
+  const quote = source.text.slice(startOffset, endOffset);
   if (quote.trim().length === 0 || utf8ByteLength(quote) > ANNOTATION_MAX_QUOTE_BYTES) return null;
-  const offsets = occurrenceOffsets(source.text, quote);
-  if (offsets.length === 0) return null;
-  const occurrence =
-    selection.occurrence ??
-    bestQuoteOccurrence(
-      source.text,
-      quote,
-      offsets,
-      selection.textBefore ?? "",
-      selection.textAfter ?? "",
-    );
-  const startOffset = offsets[Math.min(Math.max(0, occurrence), offsets.length - 1)]!;
-  const endOffset = startOffset + quote.length;
   return {
     id,
     quote,
@@ -214,4 +231,60 @@ export function annotationFromSelection(
       ...(source.label ? { label: source.label } : {}),
     },
   };
+}
+
+function pickSpan(
+  sourceText: string,
+  spans: readonly TextSpan[],
+  selection: AnnotationSelection,
+  occurrence: number | undefined,
+): TextSpan | null {
+  if (spans.length === 0) return null;
+  const index =
+    occurrence ??
+    bestSpanOccurrence(sourceText, spans, selection.textBefore ?? "", selection.textAfter ?? "");
+  return spans[Math.min(Math.max(0, index), spans.length - 1)]!;
+}
+
+function selectionSpanInSource(
+  sourceText: string,
+  selection: AnnotationSelection,
+): TextSpan | null {
+  // 1. The selection appears verbatim (plain text, code, tool output).
+  for (const candidate of uniqueNonEmpty([selection.text, selection.text.trim()])) {
+    const offsets = occurrenceOffsets(sourceText, candidate);
+    if (offsets.length === 0) continue;
+    const spans = offsets.map((start) => ({ start, end: start + candidate.length }));
+    return pickSpan(sourceText, spans, selection, selection.occurrence);
+  }
+  // 2. The selection crosses markdown syntax: map it onto the source markdown.
+  const aligned = pickSpan(
+    sourceText,
+    sourceSpansForRenderedText(sourceText, selection.text),
+    selection,
+    selection.occurrence,
+  );
+  if (aligned) return aligned;
+  // 3. Rendering changed the text (math, entities): keep the part that matches.
+  const partial = matchingQuoteInSource(sourceText, selection.text);
+  if (!partial) return null;
+  const spans = occurrenceOffsets(sourceText, partial).map((start) => ({
+    start,
+    end: start + partial.length,
+  }));
+  return pickSpan(sourceText, spans, selection, undefined);
+}
+
+/**
+ * The text an annotation's quote shows as. Quotes of messages are markdown
+ * source, so they are shown the way the message renders them; tool output is
+ * shown as is.
+ */
+export function annotationQuoteText(annotation: {
+  readonly quote: string;
+  readonly source: { readonly kind: TimelineAnnotationSourceDescriptor["kind"] };
+}): string {
+  return annotation.source.kind === "tool_output"
+    ? annotation.quote
+    : renderedMarkdownQuote(annotation.quote);
 }

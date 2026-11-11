@@ -66,7 +66,6 @@ export async function signIn(apiBaseUrl: string, request: SignInRequest): Promis
   if (!code) throw new Error("The sign-in returned no code. Try again.");
   const token = await new OpenGeniClient({
     baseUrl: apiBaseUrl,
-    onDeprecation: false,
   }).exchangeNativeAppCode({ code, codeVerifier: verifier, redirectUri });
   try {
     localStorage.setItem(TOKEN_KEY, token.accessToken);

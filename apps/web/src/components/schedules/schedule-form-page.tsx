@@ -4,8 +4,7 @@ import { Link } from "@tanstack/react-router";
  * New automation, Edit automation and Duplicate: one full page with a back
  * link and a sticky footer. What (a composer-style field with chips) -> When
  * (the cadence sentence and its next runs, and the events that start a run)
- * -> an optional Name -> one closed Settings section. Knowledge source syncs
- * keep a small editor of their own.
+ * -> an optional Name -> one closed Settings section.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
@@ -87,7 +86,6 @@ import {
   draftForEventSource,
   draftFromTemplate,
   hasEventTriggers,
-  isKnowledgeSync,
   mergeSchedulePinnedAccounts,
   nextRunOf,
   newScheduleDraft,
@@ -102,7 +100,6 @@ import {
   type ScheduleDraft,
 } from "./schedule-model";
 import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
-import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
 import {
   useEventSourceLogo,
   useEventSources,
@@ -300,16 +297,6 @@ export function ScheduleFormPage({
   const template = chosen
     ? automationTemplatesFor([chosen], { eventTriggers, workspaceEvents: true })[0]
     : undefined;
-  if (mode.kind === "edit" && task && isKnowledgeSync(task)) {
-    return (
-      <KnowledgeSyncFormPage
-        workspaceId={workspaceId}
-        task={task}
-        onCancel={back.onClick}
-        onSaved={() => go.detail(task.id, { replace: true })}
-      />
-    );
-  }
   return (
     <AgentScheduleForm
       key={`${mode.kind}-${task?.id ?? "new"}-${mode.kind === "create" ? (mode.template ?? mode.sourceSessionId ?? mode.eventSourceId ?? "") : ""}`}
@@ -335,7 +322,6 @@ export function ScheduleFormPage({
 function scheduledLearningScope(
   form: ScheduleDraft,
   sessions: Session[],
-  personal: boolean,
 ): "personal" | "workspace" {
   if (
     form.agentLearningBaselineScope &&
@@ -346,10 +332,7 @@ function scheduledLearningScope(
     form.runMode === "existing_session"
       ? sessions.find((session) => session.id === form.targetSessionId)
       : null;
-  return form.knowledgeSource?.destination.kind === "personal" ||
-    personal ||
-    target?.tenancy?.visibility === "private" ||
-    target?.memoryScope === "user"
+  return target?.tenancy?.visibility === "private" || target?.memoryScope === "user"
     ? "personal"
     : "workspace";
 }
@@ -502,13 +485,11 @@ function AgentScheduleForm({
       };
       if (editing) return fromTask;
       // Duplicate: a new automation you own. Someone else's connected accounts
-      // don't come with it, and the Knowledge source stays with the original.
-      // One that only events start stays that way.
+      // don't come with it. One that only events start stays that way.
       const own = ownsSchedule(task, access.viewerSubjectId);
       return {
         ...fromTask,
         name: `${task.name} (copy)`.slice(0, NAME_MAX_LENGTH),
-        knowledgeSource: undefined,
         pinnedAccounts: own ? fromTask.pinnedAccounts : [],
         cadence: fromTask.cadence ?? (hasEventTriggers(task) ? null : defaultCadence()),
       };
@@ -730,20 +711,11 @@ function AgentScheduleForm({
     draft.runMode === "existing_session"
       ? sessions.find((session) => session.id === draft.targetSessionId)
       : undefined;
-  // A schedule that posts into an Only me chat, or saves to personal
-  // knowledge, is always Only me; the server enforces the same rule.
-  const personalMachineChosen =
-    !inheritsChatSettings &&
-    draft.executionTarget === "machine" &&
-    personalMachines.some((machine) => machine.sandboxId === draft.machineSandboxId);
+  // A schedule that posts into an Only me chat is always Only me; the server
+  // enforces the same rule. One on your own machine can be shared: it runs as
+  // you either way.
   const privateReason =
-    audienceTarget?.tenancy?.visibility === "private"
-      ? "It posts into an Only me chat."
-      : draft.knowledgeSource?.destination.kind === "personal"
-        ? "It saves to your personal knowledge."
-        : personalMachineChosen
-          ? "It runs on your own machine."
-          : null;
+    audienceTarget?.tenancy?.visibility === "private" ? "It posts into an Only me chat." : null;
   useEffect(() => {
     if (privateReason)
       setDraft((current) =>
@@ -849,7 +821,7 @@ function AgentScheduleForm({
   };
 
   /* ----- agent learning (edit loads the stored overrides) */
-  const learningScope = scheduledLearningScope(draft, sessions, personal);
+  const learningScope = scheduledLearningScope(draft, sessions);
   const baselineDestinationKey = scheduledLearningDestinationKey(initial);
   const taskId = editing && task ? task.id : undefined;
   const [learningLoading, setLearningLoading] = useState(Boolean(taskId));
@@ -890,13 +862,9 @@ function AgentScheduleForm({
   }, [baselineDestinationKey, client, learningRetry, taskId, workspaceId]);
 
   /* ----- where it runs */
-  // Your own machines are offered whenever the schedule can be Only me.
-  const offerPersonalMachines =
-    personalMachines.length > 0 &&
-    (personal || canCreatePrivate === true || draft.visibility === "private");
-  const scheduledMachines = offerPersonalMachines
-    ? [...sharedMachines, ...personalMachines]
-    : sharedMachines;
+  // Your own machines run your own schedules, Only me or shared: a schedule
+  // runs as its owner.
+  const scheduledMachines = [...sharedMachines, ...personalMachines];
   const selectableMachines = scheduledMachines.filter((machine) =>
     isMachineComputeSelectable(machine.state),
   );
@@ -920,6 +888,9 @@ function AgentScheduleForm({
     workspaceTarget?.kind === "machine"
       ? scheduledMachines.find((item) => item.sandboxId === workspaceTarget.targetSandboxId)
       : null;
+  // A personal machine runs only the automations it is chosen on, so an
+  // automation can't follow a workspace default that is one.
+  const defaultIsPersonalMachine = workspaceMachine?.scope === "user";
   const defaultMachineLabel =
     workspaceTarget?.kind === "machine"
       ? (workspaceMachine?.name ?? "Machine unavailable")
@@ -933,7 +904,9 @@ function AgentScheduleForm({
     !fleet.loading &&
     (draft.executionTarget === "workspace_default"
       ? workspaceTarget?.kind === "machine"
-        ? !workspaceMachine || !isMachineComputeSelectable(workspaceMachine.state)
+        ? !workspaceMachine ||
+          defaultIsPersonalMachine ||
+          !isMachineComputeSelectable(workspaceMachine.state)
         : machineOnly
       : draft.executionTarget === "machine" &&
         !scheduledMachines.some(
@@ -951,6 +924,12 @@ function AgentScheduleForm({
       value: "workspace_default",
       label: "Workspace default",
       description: defaultMachineLabel,
+      ...(defaultIsPersonalMachine
+        ? {
+            disabled: true,
+            disabledReason: "It's your own machine, which runs only automations it's chosen on.",
+          }
+        : {}),
     },
     {
       value: "managed",
@@ -974,7 +953,7 @@ function AgentScheduleForm({
       }`,
       description:
         machine.scope === "user"
-          ? "Runs on your own computer. Only you can see this automation and its chats."
+          ? "Runs on your own computer, as you."
           : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
@@ -1007,9 +986,7 @@ function AgentScheduleForm({
     draft.overlapPolicy === "skip" ? "skip" : draft.overlapPolicy === "steer" ? "steer" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
   // Secrets: shown while this schedule's agent can use secrets.
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const scheduleSecretsOn =
     !inheritsChatSettings &&
     canListSecrets &&
@@ -1118,7 +1095,7 @@ function AgentScheduleForm({
               now: submitNow,
               agentLearning: learningChanged
                 ? {
-                    scope: scheduledLearningScope(submitted, sessions, personal),
+                    scope: scheduledLearningScope(submitted, sessions),
                     baselineScope: submitted.agentLearningBaselineScope,
                     operationId: crypto.randomUUID(),
                     expectedVersion: submitted.agentLearningVersion!,
@@ -1148,7 +1125,7 @@ function AgentScheduleForm({
         workspaceId,
         createRequestFromDraft(submitted, {
           now: submitNow,
-          learningScope: scheduledLearningScope(submitted, sessions, personal),
+          learningScope: scheduledLearningScope(submitted, sessions),
         }),
       ),
     );
@@ -1201,7 +1178,9 @@ function AgentScheduleForm({
       ? "Only the automation's owner can change it. Duplicate it to make your own."
       : "You need permission to manage automations in this workspace."
     : selectedComputeUnavailable && computeChanged
-      ? "Machine unavailable. Choose another machine or update the workspace default."
+      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+        ? "The workspace default is your own machine. Choose it under Where it runs to run this automation on it."
+        : "Machine unavailable. Choose another machine or update the workspace default."
       : cantRunHere && computeChanged
         ? "Connect a machine first. This Opengeni server can't run automations without one."
         : pinningAccounts && requiresAccountChoice
@@ -1639,7 +1618,9 @@ function AgentScheduleForm({
                   error={errors.machine}
                   hint={
                     selectedComputeUnavailable
-                      ? "Machine unavailable. Choose a replacement or reconnect it."
+                      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+                        ? "The workspace default is your own machine. Choose it here to run this automation on it."
+                        : "Machine unavailable. Choose a replacement or reconnect it."
                       : draft.executionTarget === "workspace_default"
                         ? `Currently: ${defaultMachineLabel}. Follows changes to the workspace default.`
                         : undefined
