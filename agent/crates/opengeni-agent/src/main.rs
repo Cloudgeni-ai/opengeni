@@ -76,7 +76,7 @@ mod windows_task;
 use std::{path::Path, sync::Arc};
 
 use clap::{CommandFactory as _, Parser as _};
-use opengeni_agent_platform::{NativePlatform, Platform};
+use opengeni_agent_platform::{NativePlatform, Platform, PlatformError};
 use opengeni_agent_stream::{RelayCredential, RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -1323,7 +1323,14 @@ fn attach_browser_controller(
         }
         Err(error) => {
             warn!(%error, "browser controller sidecar unavailable; browser-native control is disabled");
-            (platform, None)
+            match error {
+                // A known reason (for example a Linux the controller cannot run
+                // on) is what a browser request reports instead of a generic failure.
+                PlatformError::Unsupported(reason) => {
+                    (platform.with_browser_control_unavailable(reason), None)
+                }
+                _ => (platform, None),
+            }
         }
     }
 }
