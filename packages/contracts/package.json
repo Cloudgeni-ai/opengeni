@@ -94,6 +94,10 @@
       "types": "./src/json-safe.ts",
       "default": "./src/json-safe.ts"
     },
+    "./citation-urls": {
+      "types": "./src/citation-urls.ts",
+      "default": "./src/citation-urls.ts"
+    },
     "./claude-cite-tags": {
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"

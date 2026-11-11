@@ -13,6 +13,7 @@ export default defineConfig({
     "src/learning-refusal.ts",
     "src/values.ts",
     "src/json-safe.ts",
+    "src/citation-urls.ts",
     "src/claude-cite-tags.ts",
     "src/no-reply.ts",
     "src/usage-allowances.ts",
