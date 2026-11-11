@@ -137,9 +137,11 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
   });
 
   test("CI and immutable candidate consume only the run-local verified bundle", async () => {
-    const [ci, candidate] = await Promise.all([
+    const [ci, candidate, browserAcceptance] = await Promise.all([
       readFile(resolve(root, ".github/workflows/ci.yml"), "utf8"),
       readFile(resolve(root, ".github/workflows/release-candidate.yml"), "utf8"),
+      // Batch's browser acceptance job, which ci.yml and pr-ci.yml both call.
+      readFile(resolve(root, ".github/workflows/ci-browser-acceptance.yml"), "utf8"),
     ]);
     for (const source of [ci, candidate]) {
       expect(source).toContain("uses: ./.github/workflows/artifact-runtime.yml");
@@ -148,7 +150,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     }
     expect(candidate).toContain("cancel-in-progress: false");
     expect(ci).toContain("github.event_name != 'workflow_dispatch'");
-    expect(ci).toContain(
+    expect(ci).toContain("uses: ./.github/workflows/ci-browser-acceptance.yml");
+    expect(browserAcceptance).toContain(
       "browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
     for (const suite of [
@@ -157,7 +160,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       "artifact-static-renderer.browser.e2e.ts",
       "editable-artifacts.browser.e2e.ts",
     ]) {
-      expect(ci).toContain(suite);
+      expect(browserAcceptance).toContain(suite);
     }
   });
 
