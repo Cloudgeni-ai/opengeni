@@ -238,7 +238,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                                 .is_some_and(|slot| slot.vm.is_none()))
                 }) =>
                 {
-                    (Some(*sandbox), false)
+                    // A wake already waiting is decided with this batch:
+                    // it reads the disk as a wake asked for now does.
+                    let waiting = self
+                        .core
+                        .sandbox(*sandbox)
+                        .is_some_and(|view| view.wants_awake);
+                    (Some(*sandbox), waiting)
                 }
                 _ => (None, false),
             };
