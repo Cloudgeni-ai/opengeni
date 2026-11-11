@@ -21,8 +21,8 @@
 -- 3. Detect and hold. free_plan_credit_eligible evaluates the current account
 --    only. /24 and /48 prefixes never take part. Manual decisions and
 --    operator releases are never overwritten. Failures fail open.
--- 4. Backfill. Every account denied or held now (including the accounts
---    denied before 1354) is captured account by account.
+-- 4. Backfill. 1362, in its own transaction, captures every account denied
+--    or held now (including the accounts denied before 1354), one by one.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -57,8 +57,8 @@ CREATE INDEX signup_network_owner_addresses_last_seen
   ON opengeni_private.signup_network_owner_addresses (data_schema, last_seen_at);
 REVOKE ALL ON opengeni_private.signup_network_owner_addresses FROM PUBLIC;
 
--- Owners of accounts that were denied or held when they were captured (the
--- coverage the review listing reports). Never invited members.
+-- Owners of accounts that were denied or held, and when they were last
+-- captured (the coverage the review listing reports). Never invited members.
 CREATE TABLE opengeni_private.signup_network_flagged_owners (
   data_schema text NOT NULL,
   account_id uuid NOT NULL,
@@ -177,28 +177,25 @@ BEGIN
   inventory := opengeni_private.open_session_tenancy_fence_inventory(p_data_schema::regnamespace::oid);
   SELECT a.external_id INTO owner_user FROM managed_accounts a
     WHERE a.id = p_account_id AND a.external_source = 'better-auth:user';
+  -- On an error the subtransaction of the caller rolls the capability back.
   PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
-  inventory := NULL;
   IF owner_user IS NULL THEN RETURN false; END IF;
   INSERT INTO opengeni_private.signup_network_flagged_owners(data_schema, account_id, auth_user_id)
     VALUES (p_data_schema, p_account_id, owner_user)
-    ON CONFLICT (data_schema, account_id) DO NOTHING;
+    ON CONFLICT (data_schema, account_id) DO UPDATE
+      SET auth_user_id = excluded.auth_user_id, captured_at = clock_timestamp();
   PERFORM opengeni_private.record_signup_owner_session_networks(p_data_schema, p_account_id, owner_user);
   RETURN true;
-EXCEPTION WHEN OTHERS THEN
-  IF inventory IS NOT NULL THEN
-    PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
-  END IF;
-  RAISE;
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_session_networks(text,uuid) FROM PUBLIC;
 
 -- Captures every account that is denied or held now, one account at a time,
--- each in its own subtransaction. Used by the backfill below; operators can
+-- each in its own subtransaction. Used by the 1362 backfill; operators can
 -- run it again at any time. Owner context only.
 CREATE OR REPLACE FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(p_data_schema text)
 RETURNS jsonb LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE flagged record; accounts integer := 0; captured integer := 0; failed integer := 0;
+  without_owner integer := 0;
 BEGIN
   FOR flagged IN SELECT d.account_id FROM promotion_decisions d
     WHERE d.decision IN ('denied', 'held') ORDER BY d.account_id
@@ -207,13 +204,16 @@ BEGIN
     BEGIN
       IF opengeni_private.capture_flagged_owner_session_networks(p_data_schema, flagged.account_id) THEN
         captured := captured + 1;
+      ELSE
+        without_owner := without_owner + 1;
       END IF;
     EXCEPTION WHEN OTHERS THEN
       failed := failed + 1;
       RAISE WARNING 'denied network capture failed for one account (%)', SQLSTATE;
     END;
   END LOOP;
-  RETURN jsonb_build_object('flaggedAccounts', accounts, 'capturedOwners', captured, 'failed', failed);
+  RETURN jsonb_build_object('flaggedAccounts', accounts, 'capturedOwners', captured,
+    'withoutSelfServeOwner', without_owner, 'failed', failed);
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(text) FROM PUBLIC;
 
@@ -609,32 +609,3 @@ BEGIN
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine);
   END LOOP;
 END $install$;
-
--- Backfill: the owners of every account denied or held now (including those
--- decided before 1354), account by account, and the setups of the last
--- seven days, which can still be evaluated. A failure is reported as a
--- warning with counts; capture_all_flagged_owner_session_networks can be run
--- again by an operator.
-DO $backfill$
-DECLARE target_schema text := current_schema(); recent record; outcome jsonb;
-BEGIN
-  outcome := opengeni_private.capture_all_flagged_owner_session_networks(target_schema);
-  IF (outcome->>'failed')::integer > 0 THEN
-    RAISE WARNING 'denied network backfill incomplete: %', outcome;
-  ELSE
-    RAISE NOTICE 'denied network backfill: %', outcome;
-  END IF;
-  FOR recent IN SELECT s.account_id, s.owner_auth_user_id, s.set_up_at FROM opengeni_private.signup_network_sources s
-    WHERE s.data_schema = target_schema AND s.set_up_at >= clock_timestamp() - interval '7 days'
-    ORDER BY s.set_up_at DESC LIMIT 5000
-  LOOP
-    BEGIN
-      INSERT INTO opengeni_private.signup_network_owner_setups(data_schema, account_id, set_up_at)
-        VALUES (target_schema, recent.account_id, recent.set_up_at) ON CONFLICT (data_schema, account_id) DO NOTHING;
-      PERFORM opengeni_private.record_signup_owner_session_networks(target_schema, recent.account_id,
-        recent.owner_auth_user_id);
-    EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'recent owner session networks skipped (%)', SQLSTATE;
-    END;
-  END LOOP;
-END $backfill$;

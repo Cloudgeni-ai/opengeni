@@ -250,12 +250,15 @@ session networks (newest 200 sessions in the last 90 days) and remembers the
 owner (`opengeni_private.signup_network_flagged_owners`), so the networks
 outlast the sessions. Sign-ins after the decision are captured when the capture
 runs again (`--network-capture-flagged`). Setup itself only writes the new
-account's own rows. The migration captures every
+account's own rows. `1362_signup_denied_network_backfill.sql`, in its own
+transaction so 1361's settings lock is not held meanwhile, captures every
 account already denied or held, account by account, including those decided
 before 1354; a failure is a migration warning with counts, and
-`--network-holds` reports `deniedNetworkCoverage` (denied or held accounts and
-how many owners are captured). Re-run the capture at any time with
-`--network-capture-flagged`. Only account owners are recorded: invited members
+`--network-holds` reports `deniedNetworkCoverage` (denied or held accounts, how
+many owners are captured, how many have no self-serve owner to capture, and the
+oldest capture). Re-run the capture with `--network-capture-flagged`, for
+example daily while the rule is on, so that sign-ins after a decision are
+included. Only account owners are recorded: invited members
 are never recorded, counted or held. Released (`eligible`) accounts stop
 counting. Rows not used for 97 days are removed a few at a time.
 

@@ -394,11 +394,13 @@ test("decisions capture networks that outlive the sessions; the operator capture
     // As the migration backfill runs it: the schema owner, outside any request.
     const captured = await captureFlaggedSignupNetworkOwners(ownerClient!.db);
     expect(captured.failed).toBe(0);
-    expect(captured.capturedOwners).toBe(captured.flaggedAccounts);
+    expect(captured.capturedOwners + captured.withoutSelfServeOwner).toBe(captured.flaggedAccounts);
     const after = await listSignupNetworkHolds(ownerClient!.db);
-    expect(after.deniedNetworkCoverage!.capturedOwners).toBe(
-      after.deniedNetworkCoverage!.flaggedAccounts,
-    );
+    expect(after.deniedNetworkCoverage).toMatchObject({
+      capturedOwners: after.deniedNetworkCoverage!.flaggedAccounts,
+      withoutSelfServeOwner: 0,
+    });
+    expect(Date.parse(after.deniedNetworkCoverage!.oldestCaptureAt!)).toBeGreaterThan(0);
     const afterLegacy = await owner([legacyIp]);
     expect(await decision(afterLegacy.accountId)).toMatchObject(HELD);
   } finally {
