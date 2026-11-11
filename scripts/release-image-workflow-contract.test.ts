@@ -1498,9 +1498,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: plan");
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(publish).toContain("bun scripts/verify-release-packages.ts");
-    expect(publish).toContain("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(publish).toContain("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
     expect(publish).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
-    expect(publish).toContain("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    expect(publish).toContain("actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1");
     expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v[0-9]/);
     expect(publish).not.toMatch(/oven-sh\/setup-bun@v[0-9]/);
     expect(sourceGate).toBeGreaterThan(-1);
@@ -1728,7 +1728,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("https://get.opengeni.ai/install.");
 
     expect(agentRelease).toContain(
-      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+      "uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3",
     );
     expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
     expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
@@ -1889,7 +1889,7 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+          step.uses === "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1901,37 +1901,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
+        fingerprint: "76bfa6fd4243d1ceea7c9f6efbf49e1d6cea1814ba8223fbef0be2082b10927c",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
+        fingerprint: "fa2c0261a67a6fdc2ea06b9a71e1d646fc3007f4b7288cd37c78da582713a061",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
+        fingerprint: "981db1ece738b6a5e907e552c9e353f3edcc566ed6a8999986d3d0f192d8cf02",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
+        fingerprint: "951ec57a8cc29031ef5a0e4c0329c686ae31e653fdc90d4c64e92979afdd9b40",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
+        fingerprint: "1ed3030c3a272b1db3934b4834efed9c94c826441e5acc378246a5099153a6b3",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
+        fingerprint: "9ae7fce453091b4f0f3e89f0b1e38839e763342e498a30af35241f350233ad2f",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
+        fingerprint: "a9312aa7fd998b09a085c8c96baca7935f64d7838029662ee49f53154a51856e",
       },
     ]);
 

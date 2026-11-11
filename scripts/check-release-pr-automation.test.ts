@@ -3908,7 +3908,7 @@ function versionHeadReportLog(
   const payloads = [
     "Current runner version: '2.329.0'",
     `Complete job name: ${RELEASE_AUTOMATION_CONTRACT.checks.automationCiReportJob}`,
-    "##[group]Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    "##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "with:",
     `  ref: ${versionHeadBaseSha}`,
     "env:",
@@ -5178,7 +5178,7 @@ describe("workflow contracts", () => {
       "images",
     ]) {
       const checkout = ci.jobs[jobName].steps.find(
-        (step: any) => step.uses === "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+        (step: any) => step.uses === "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       );
       expect(checkout.with.ref).toBe(
         exactSelectorJobs.has(jobName)
@@ -5188,7 +5188,7 @@ describe("workflow contracts", () => {
       expect(checkout.with["persist-credentials"]).toBe(false);
     }
     expect(admission.steps[0].uses).toBe(
-      "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     );
     expect(admission.steps[0].with).toEqual(
       expect.objectContaining({
@@ -5199,7 +5199,7 @@ describe("workflow contracts", () => {
     expect(admission.steps.find((step: any) => step.name === "Set up Bun").uses).toBe(
       "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
     );
-    expect(report.steps[0].uses).toBe("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(report.steps[0].uses).toBe("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
     expect(report.steps[0].with["persist-credentials"]).toBe(false);
     expect(admission.env).not.toHaveProperty("GITHUB_TOKEN");
     expect(report.env).not.toHaveProperty("GITHUB_TOKEN");
@@ -5666,7 +5666,7 @@ describe("workflow contracts", () => {
     } as const;
     for (const [stepName, expected] of Object.entries(expectedEvidence)) {
       const upload = browser.steps.find((step: any) => step.name === stepName);
-      expect(upload.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+      expect(upload.uses).toBe("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
       expect(upload.if).toBe(expected.if);
       expect(upload.with.name).toBe(expected.name);
       expect(upload.with["if-no-files-found"]).toBe("error");
@@ -5755,7 +5755,7 @@ describe("workflow contracts", () => {
     expect(sealText).not.toContain("pull_request_target");
     expect(sealText).not.toContain("pull-requests: write");
     expect(seal.jobs.seal.steps[0].uses).toBe(
-      "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     );
     expect(seal.jobs.seal.steps[0].with).toEqual(
       expect.objectContaining({
