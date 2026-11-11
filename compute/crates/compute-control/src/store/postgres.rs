@@ -114,7 +114,10 @@ fn big(value: u64) -> Result<i64> {
 /// The run of its agent a host told of in `capacity` ([`Capacity::run`]),
 /// as a parameter: `null` if it told none.
 fn run_of(capacity: Option<&Capacity>) -> Result<Option<i64>> {
-    capacity.and_then(|capacity| capacity.run).map(big).transpose()
+    capacity
+        .and_then(|capacity| capacity.run)
+        .map(big)
+        .transpose()
 }
 
 /// A `bigint` back as a `u64`.
