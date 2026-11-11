@@ -6,7 +6,12 @@ import type { ClaudeSubscriptionAccountMetadata } from "@opengeni/db";
 
 import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connection";
 import { requireAccessGrant } from "@opengeni/core";
-import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
+import {
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
+  ClaudeSubscriptionUsage,
+  ClaudeSubscriptionSetupTokenRequest,
+} from "@opengeni/contracts";
 
 import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
@@ -19,7 +24,11 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
-import { coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
+import {
+  coreClaudeLimitResetClaim,
+  coreClaudeUsage,
+  type CoreClaudeUsageCaller,
+} from "./claude-core-usage";
 import {
   claudeCoreAccount,
   claudePoolCore,
@@ -109,6 +118,22 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     app.post(path + "/refresh", async (c) => {
       const authority = await usageAuthority(c, organization, true);
       return c.json(ClaudeSubscriptionUsage.parse(await coreClaudeUsage(c, deps, authority, true)));
+    });
+  }
+  for (const organization of [false, true]) {
+    const path = organization
+      ? "/v1/organizations/:organizationId/claude/accounts/:accountId/limit-resets/claim"
+      : "/v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim";
+    app.post(path, async (c) => {
+      const authority = await usageAuthority(c, organization, true);
+      const input = ClaimClaudeLimitResetRequest.safeParse(await c.req.json().catch(() => null));
+      if (!input.success)
+        throw new HTTPException(422, { message: "Choose a limit reset and a request ID." });
+      return c.json(
+        ClaimClaudeLimitResetResponse.parse(
+          await coreClaudeLimitResetClaim(c, deps, authority, input.data),
+        ),
+      );
     });
   }
 

@@ -19,6 +19,7 @@ import {
 } from "@opengeni/react/app/lib/subscription-accounts";
 import {
   MODEL_SETTINGS_STALE_TIME_MS,
+  sharedQueryWriter,
   useSharedQuery,
   type SharedQueryKey,
 } from "@opengeni/react/app/lib/shared-query";
@@ -30,6 +31,12 @@ export type ClaudeUsageState = {
   error: boolean;
   canRefresh: boolean;
   refresh(): Promise<void>;
+  /**
+   * Start recording a reading made some other way (the one a limit reset
+   * claim returns). Call it before that request starts: a newer identity or
+   * read in between makes the returned recorder refuse the stale reading.
+   */
+  beginRecord?(): (usage: ClaudeSubscriptionUsage) => void;
 };
 
 // The last successful reading per exact scope + reading kind + credential +
@@ -167,6 +174,13 @@ export function useClaudeUsage({
     if (!epoch.active || !readable || !canManage) return;
     await refreshQuery();
   }, [epoch, readable, canManage, refreshQuery]);
+  const beginRecord = useCallback(() => {
+    const write = sharedQueryWriter(client);
+    const parts = JSON.parse(key) as SharedQueryKey;
+    return (usage: ClaudeSubscriptionUsage) => {
+      if (epoch.active) write(parts, usage);
+    };
+  }, [client, epoch, key]);
   return {
     value: mismatch ? null : query.data,
     error: Boolean(query.error || mismatch),
@@ -174,6 +188,7 @@ export function useClaudeUsage({
     refreshing: query.fetching && !query.loading,
     canRefresh: canManage && readable,
     refresh,
+    beginRecord,
   };
 }
 

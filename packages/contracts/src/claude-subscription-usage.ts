@@ -297,3 +297,29 @@ export const ClaudeLimitResetClaim = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type ClaudeLimitResetClaim = z.infer<typeof ClaudeLimitResetClaim>;
+
+/**
+ * Claim one limit reset grant of a Claude account. `requestId` is the
+ * caller's idempotency key: when the answer is `retryable`, retry with the
+ * same one (Claude settles each request id once).
+ */
+export const ClaimClaudeLimitResetRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      grantId: z.string().regex(/^[a-z0-9_-]{1,40}$/),
+      requestId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    })
+    .strict(),
+);
+export type ClaimClaudeLimitResetRequest = z.infer<typeof ClaimClaudeLimitResetRequest>;
+
+/** Claude's answer to a claim, and the account's usage read right after it. */
+export const ClaimClaudeLimitResetResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      claim: ClaudeLimitResetClaim,
+      usage: ClaudeSubscriptionUsage,
+    })
+    .strict(),
+);
+export type ClaimClaudeLimitResetResponse = z.infer<typeof ClaimClaudeLimitResetResponse>;

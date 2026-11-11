@@ -307,3 +307,152 @@ describe("organization Claude usage on the core route", () => {
     expect(wakes).toEqual([]);
   });
 });
+
+const reset = {
+  result: "reset",
+  reason: null,
+  resetsLeft: 0,
+  cleared: ["seven_day"],
+  weeklyResetsAt: null,
+  cooldownUntil: null,
+  retryable: false,
+};
+const claimBody = JSON.stringify({ grantId: "full-reset-2611", requestId: "req_0123456789" });
+
+describe("claiming a Claude limit reset", () => {
+  test("a workspace administrator claims through the core, gets the usage read after it, and waiters wake", async () => {
+    mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
+      connectionId: CONNECTION,
+      scope: "workspace",
+      row: connectionRow(),
+    }));
+    const claim = mock("claimSubscriptionCoreClaudeWorkspaceLimitReset", async () => ({
+      claim: reset,
+      usage: storedUsage,
+      recovered: true,
+    }));
+    const wakes: unknown[] = [];
+    mock("deliverSubscriptionCoreProviderWake", async (...args: never[]) => {
+      wakes.push(args.slice(1));
+    });
+    const response = await app().request(
+      `/v1/workspaces/${WS}/claude/accounts/${CONNECTION}/limit-resets/claim`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["workspace:read", "workspace:admin"]),
+          "content-type": "application/json",
+        },
+        body: claimBody,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ claim: reset, usage: storedUsage });
+    expect(claim.mock.calls[0]![2]).toMatchObject({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      grantId: "full-reset-2611",
+      requestId: "req_0123456789",
+    });
+    expect(wakes).toEqual([["claude", { accountId: ACCOUNT, reason: "usage_recovered" }]]);
+  });
+
+  test("an answer that lifted nothing wakes no one", async () => {
+    mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
+      connectionId: CONNECTION,
+      scope: "workspace",
+      row: connectionRow(),
+    }));
+    const notLimited = { ...reset, result: "not_limited", resetsLeft: 1, cleared: [] };
+    mock("claimSubscriptionCoreClaudeWorkspaceLimitReset", async () => ({
+      claim: notLimited,
+      usage: storedUsage,
+      recovered: false,
+    }));
+    const wakes: unknown[] = [];
+    mock("deliverSubscriptionCoreProviderWake", async (...args: never[]) => {
+      wakes.push(args.slice(1));
+    });
+    const response = await app().request(
+      `/v1/workspaces/${WS}/claude/accounts/${CONNECTION}/limit-resets/claim`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["workspace:read", "workspace:admin"]),
+          "content-type": "application/json",
+        },
+        body: claimBody,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { claim: unknown }).claim).toEqual(notLimited);
+    expect(wakes).toEqual([]);
+  });
+
+  test("a reader can't claim, a malformed claim is refused, and neither reaches Claude", async () => {
+    mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => ({
+      connectionId: CONNECTION,
+      scope: "workspace",
+      row: connectionRow(),
+    }));
+    const claim = mock("claimSubscriptionCoreClaudeWorkspaceLimitReset", async () => {
+      throw new Error("must not claim");
+    });
+    const path = `/v1/workspaces/${WS}/claude/accounts/${CONNECTION}/limit-resets/claim`;
+    const reader = await app().request(path, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(["workspace:read"]),
+        "content-type": "application/json",
+      },
+      body: claimBody,
+    });
+    expect(reader.status).toBe(403);
+    for (const body of [
+      "{}",
+      "not json",
+      JSON.stringify({ grantId: "full-reset-2611" }),
+      JSON.stringify({ grantId: "Full Reset", requestId: "req_1" }),
+      JSON.stringify({ grantId: "full-reset-2611", requestId: "req_1", extra: true }),
+    ]) {
+      const refused = await app().request(path, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["workspace:read", "workspace:admin"]),
+          "content-type": "application/json",
+        },
+        body,
+      });
+      expect(refused.status).toBe(422);
+    }
+    expect(claim.mock.calls).toHaveLength(0);
+  });
+
+  test("an organization account is claimed through the administrator seam", async () => {
+    const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () => connectionRow());
+    const claim = mock("claimSubscriptionCoreClaudeOrganizationLimitReset", async () => ({
+      claim: reset,
+      usage: storedUsage,
+      recovered: false,
+    }));
+    const path = `/v1/organizations/${ACCOUNT}/claude/accounts/${CONNECTION}/limit-resets/claim`;
+    const posted = await app().fetch(
+      organizationAdminRequest(path, { method: "POST", body: claimBody }),
+    );
+    expect(posted.status).toBe(200);
+    expect(await posted.json()).toEqual({ claim: reset, usage: storedUsage });
+    expect(administrator.mock.calls.length).toBeGreaterThan(0);
+    expect(claim.mock.calls[0]![2]).toMatchObject({
+      organizationId: ACCOUNT,
+      subjectId: "user:org-admin",
+      grantId: "full-reset-2611",
+      requestId: "req_0123456789",
+    });
+    mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () => null);
+    const missing = await app().fetch(
+      organizationAdminRequest(path, { method: "POST", body: claimBody }),
+    );
+    expect(missing.status).toBe(404);
+  });
+});

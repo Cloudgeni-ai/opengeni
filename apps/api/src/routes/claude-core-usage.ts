@@ -10,9 +10,15 @@
 // through the administrator seam (design 5.3, C2c).
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
+import type {
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
+  ClaudeSubscriptionUsage,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  claimSubscriptionCoreClaudeOrganizationLimitReset,
+  claimSubscriptionCoreClaudeWorkspaceLimitReset,
   deliverSubscriptionCoreProviderWake,
   projectSubscriptionCoreClaudeUsage,
   readSubscriptionCoreClaudeOrganizationUsageRow,
@@ -115,4 +121,64 @@ export async function coreClaudeUsage(
       deps.claudeFetch ? { fetchImpl: deps.claudeFetch } : {},
     ),
   );
+}
+
+/**
+ * Claim one limit reset grant of a Claude account, then read its usage.
+ * The same authority as a live refresh: an organization administrator on
+ * the organization route; on a workspace route, whoever may change the
+ * connection's scope (the owner of a personal connection, a workspace
+ * administrator for the workspace's own accounts). Waiting turns are woken
+ * when the read after the claim ended a stored block.
+ */
+export async function coreClaudeLimitResetClaim(
+  c: Context,
+  deps: ApiRouteDeps,
+  caller: CoreClaudeUsageCaller,
+  input: ClaimClaudeLimitResetRequest,
+): Promise<ClaimClaudeLimitResetResponse> {
+  const fetchDeps = deps.claudeFetch ? { fetchImpl: deps.claudeFetch } : {};
+  if (caller.workspaceId === null) {
+    const row = await readSubscriptionCoreClaudeOrganizationUsageRow(deps.db, {
+      organizationId: caller.accountId,
+      subjectId: caller.subjectId,
+      accountIdParam: caller.accountIdParam,
+    });
+    if (!row) throw new HTTPException(404, { message: "Claude account not found" });
+    const outcome = await claimSubscriptionCoreClaudeOrganizationLimitReset(
+      deps.db,
+      deps.settings,
+      { organizationId: caller.accountId, subjectId: caller.subjectId, row, ...input },
+      fetchDeps,
+    );
+    return {
+      claim: outcome.claim,
+      usage: await wakeAfterRecovery(deps, caller.accountId, outcome),
+    };
+  }
+  const workspaceId = caller.workspaceId;
+  const target = await readSubscriptionCoreClaudeWorkspaceUsageTarget(deps.db, {
+    accountId: caller.accountId,
+    workspaceId,
+    subjectId: caller.subjectId,
+    accountIdParam: caller.accountIdParam,
+  });
+  if (!target) throw new HTTPException(404, { message: "Claude account not found" });
+  if (target.scope === "user")
+    await requirePrivateSubscriptionHuman(c, deps, workspaceId, "Claude", "personal_workspace");
+  await requireSubscriptionScopeMutation(
+    c,
+    deps,
+    workspaceId,
+    target.scope,
+    "Claude",
+    "personal_workspace",
+  );
+  const outcome = await claimSubscriptionCoreClaudeWorkspaceLimitReset(
+    deps.db,
+    deps.settings,
+    { accountId: caller.accountId, workspaceId, subjectId: caller.subjectId, target, ...input },
+    fetchDeps,
+  );
+  return { claim: outcome.claim, usage: await wakeAfterRecovery(deps, caller.accountId, outcome) };
 }

@@ -643,6 +643,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "claimClaudeSubscriptionAccountLimitReset",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim",
+    "request": [
+      "ClaimClaudeLimitResetRequest"
+    ],
+    "response": [
+      "ClaimClaudeLimitResetResponse"
+    ]
+  },
+  {
+    "id": "claimOrganizationClaudeSubscriptionAccountLimitReset",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/limit-resets/claim",
+    "request": [
+      "ClaimClaudeLimitResetRequest"
+    ],
+    "response": [
+      "ClaimClaudeLimitResetResponse"
+    ]
+  },
+  {
     "id": "clearCodexAppsAccount",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/codex/apps",
