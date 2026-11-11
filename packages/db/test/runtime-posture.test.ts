@@ -42,6 +42,11 @@ import {
   privateRoutinesCreatedAfter,
   publicTablesCreatedAfter,
 } from "./predecessor-runtime-posture";
+import {
+  migrationTableCount,
+  migrationTableTotal,
+  type RuntimePostureTableClass,
+} from "./runtime-posture-migrations";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -1756,6 +1761,22 @@ describe("runtime database posture evaluator", () => {
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
             [RUNTIME_DML_TABLES, 205],
           ] as const);
+      const tableClasses = new Map<readonly string[], RuntimePostureTableClass>([
+        [FORCE_RLS_TABLES, "forceRls"],
+        [NON_RLS_RUNTIME_TABLES, "nonRls"],
+        [RUNTIME_FULL_DML_TABLES, "fullDml"],
+        [RUNTIME_READ_ONLY_TABLES, "readOnly"],
+        [readUpdateTables, "readUpdate"],
+        [RUNTIME_READ_INSERT_TABLES, "readInsert"],
+        [RUNTIME_READ_INSERT_UPDATE_TABLES, "readInsertUpdate"],
+        [PROTECTED_NO_DIRECT_DML_TABLES, "protectedNoDml"],
+        [RUNTIME_DML_TABLES, "dml"],
+      ]);
+      const tableClass = (tables: readonly string[]): RuntimePostureTableClass => {
+        const name = tableClasses.get(tables);
+        if (!name) throw new Error("unclassified table list");
+        return name;
+      };
       for (const [tables, length] of contracts) {
         // Nine additive embedding tables: three full-DML, four append-only,
         // one link lifecycle journal and one protected identity table.
@@ -2095,153 +2116,8 @@ describe("runtime database posture evaluator", () => {
           // 1032 Knowledge collection activity: FORCE RLS, reached only
           // through the Knowledge owner's routines; no runtime DML.
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
-          // 1061 credential profiles: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1071 shared Site project placements: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1195 where organization Skills work: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1107 agent calls: read, insert and update, FORCE RLS.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1143_agent_call_host_phones: full DML, FORCE RLS.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1175 organization connectors: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1227 transcribed pieces kept for a version's retries: full DML, FORCE RLS.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1150 Slack agents: two full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0) +
-          // 1243 agents and their Slack installations: two full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0) +
-          // 1243 agent revisions: one read-and-insert FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_INSERT_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1152 Slack agent proposals and Ask forms: two full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0) +
-          // 1153 Slack agent update messages: three full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 3
-            : 0) +
-          // 1235 Slack agent intro posts and suggestions: two full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0) +
-          // 1263 MCP auto-connect: five full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 5
-            : 0) +
-          // 1241 credit alert state/receipts/deliveries: three full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 3
-            : 0) +
-          // 1294 Teams install welcome claims: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1300 Teams onboarding reply limits: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1301 Teams reply claims: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1241 current billing recipients: one runtime read-only FORCE-RLS projection.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_ONLY_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1293 GitHub installation repository removal markers: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1257 automatic top-ups: three FORCE-RLS tables; two mutable journals
-          // and one append-only consent/mutation receipt table, never DELETE.
-          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
-            ? 3
-            : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
-              ? 2
-              : tables === RUNTIME_READ_INSERT_TABLES
-                ? 1
-                : 0) +
-          // 1295 model call credit holds: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1258 Teams conversation context: messages and join cutoffs, two full-DML FORCE-RLS tables.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0) +
-          // 1351 turn timing profiles: one full-DML FORCE-RLS table.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
+          // Migrations with an entry in runtime-posture-migrations/, one file each.
+          migrationTableCount(tableClass(tables)) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2305,29 +2181,10 @@ describe("runtime database posture evaluator", () => {
         1 + // 0998 managed-auth passkeys: full-DML auth table without RLS.
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
-        1 + // 1061 credential profiles: full-DML, FORCE-RLS.
-        1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
-        1 + // 1175 organization connectors: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
-        1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
-        1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
-        2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
-        1 + // 1293 GitHub installation repository removal markers: full-DML, FORCE-RLS.
-        3 + // 1243 agents (full DML), Slack installations (full DML), revisions (read and insert): FORCE-RLS.
-        2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
-        3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
-        2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
-        5 + // 1263 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
-        4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
-        3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
-        1 + // 1295 model call credit holds: full-DML, FORCE-RLS.
-        2 + // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
-        1 + // 1294 Teams install welcome claims: full-DML, FORCE-RLS.
-        1 + // 1300 Teams onboarding reply limits: full-DML, FORCE-RLS.
-        1 + // 1301 Teams reply claims: full-DML, FORCE-RLS.
-        1; // 1351 turn timing profiles: full-DML, FORCE-RLS.
+        migrationTableTotal(); // Migrations with an entry in runtime-posture-migrations/.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -2417,8 +2274,6 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          1 + // 1195 where organization Skills work.
-          1 + // 1227 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2436,8 +2291,6 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          1 + // 1195 where organization Skills work.
-          1 + // 1227 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -4252,7 +4105,9 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218 and 1224 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1211's and 1240's stay deferred", () => {
+// The title used to list every migration that grants or defers a definer, so
+// each such PR rewrote it; DEFERRED_RUNTIME_PRIVATE_ROUTINES records which.
+describe("runtime definers: granted ones require runtime EXECUTE, deferred ones stay withheld", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
