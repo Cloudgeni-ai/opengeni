@@ -546,6 +546,7 @@ export * from "./subscription-core-xai";
 // track C2a); every caller reads the Claude provider route first.
 export * from "./subscription-core-claude-usage";
 export * from "./subscription-core-claude-reads";
+export * from "./subscription-core-claude-limit-resets";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {

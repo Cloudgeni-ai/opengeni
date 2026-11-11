@@ -734,6 +734,11 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
         }),
         reason: "extra_credits",
       },
+      {
+        name: "reduced service past a limit while another account has plain capacity",
+        world: sticky({ bound: { quota: quota({ constrainedUntil: NOW + 3_600_000 }) } }),
+        reason: "constrained_capacity",
+      },
     ];
     for (const entry of cases) {
       const verdict = bindingStickiness(entry.world);
@@ -1140,6 +1145,111 @@ describe("whose account pays: own, then pinned, then the workspace's, then the o
     const decision = decidePlacement(world);
     expect(decision).toMatchObject({ connectionId: "codex-mine", personal: true });
     expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+});
+
+describe("reduced service past a limit (slow tier, grace zone)", () => {
+  const constrained = quota({ constrainedUntil: NOW + 3_600_000 });
+
+  test("is neither exhaustion nor plain capacity: it serves, after accounts with plain capacity", () => {
+    const pool = [
+      connection("codex-1", "codex", { quota: constrained }),
+      connection("codex-2", "codex"),
+    ];
+    const world = input({
+      settings: { rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-1" } } },
+      connections: pool,
+    });
+    expect(quotaCapacity(constrained, NOW)).toEqual({ kind: "available" });
+    // Even the pinned primary comes after plain capacity.
+    expect(rankConnections(world, pool).map((candidate) => candidate.id)).toEqual([
+      "codex-2",
+      "codex-1",
+    ]);
+    expect(decidePlacement(world)).toMatchObject({ kind: "run", connectionId: "codex-2" });
+    // Alone it still serves: no wait.
+    const alone = input({ connections: [connection("codex-1", "codex", { quota: constrained })] });
+    expect(decidePlacement(alone)).toMatchObject({ kind: "run", connectionId: "codex-1" });
+  });
+
+  test("comes before paid extra credits, and ends at its deadline", () => {
+    const credits = connection("codex-2", "codex", {
+      extraCreditsEnabled: true,
+      quota: quota({
+        windows: [
+          { id: "weekly", usedPercent: 100, resetsAt: NOW + 3_600_000, status: "exhausted" },
+        ],
+      }),
+    });
+    const pool = [credits, connection("codex-1", "codex", { quota: constrained })];
+    const world = input({ connections: pool });
+    expect(rankConnections(world, pool).map((candidate) => candidate.id)).toEqual([
+      "codex-1",
+      "codex-2",
+    ]);
+    const later = input({
+      now: NOW + 3_600_000,
+      settings: { rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-1" } } },
+      connections: [
+        connection("codex-1", "codex", { quota: constrained }),
+        connection("codex-3", "codex"),
+      ],
+    });
+    expect(decidePlacement(later)).toMatchObject({ kind: "run", connectionId: "codex-1" });
+  });
+
+  test("a constrained binding stays when no other account has plain capacity", () => {
+    const world = input({
+      connections: [
+        connection("codex-1", "codex", { quota: constrained }),
+        connection("codex-2", "codex", { quota: constrained }),
+      ],
+      session: {
+        binding: {
+          connectionId: "codex-2",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW - 60_000,
+        },
+      },
+    });
+    expect(bindingStickiness(world)).toMatchObject({ kind: "keep", connectionId: "codex-2" });
+  });
+});
+
+describe("provider details", () => {
+  const detail = (observedAt: number, value: string) => ({ observedAt, value });
+
+  test("merge part by part: the newer part wins, and a part one side lacks is kept", () => {
+    const current = quota({
+      observedAt: NOW - 1_000,
+      providerDetails: {
+        grants: detail(NOW - 5_000, "usage read"),
+        service: detail(NOW - 1_000, "old"),
+      },
+    });
+    const headers = quota({
+      observedAt: NOW,
+      source: "response_headers",
+      providerDetails: { service: detail(NOW, "new") },
+    });
+    const merged = applyQuotaObservation({ refreshGeneration: 1, quota: current }, headers)!;
+    expect(merged.providerDetails).toEqual({
+      grants: detail(NOW - 5_000, "usage read"),
+      service: detail(NOW, "new"),
+    });
+    expect(storedQuotaDocument(merged).providerDetails).toEqual(merged.providerDetails);
+    // Constrained is the newest observation's alone.
+    const reduced = applyQuotaObservation(
+      {
+        refreshGeneration: 1,
+        quota: quota({ observedAt: NOW - 1_000, constrainedUntil: NOW + 60_000 }),
+      },
+      quota({ observedAt: NOW }),
+    )!;
+    expect(reduced.constrainedUntil).toBeUndefined();
+    expect(storedQuotaDocument(reduced)).not.toHaveProperty("constrainedUntil");
   });
 });
 
