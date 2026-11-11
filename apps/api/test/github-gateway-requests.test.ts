@@ -342,6 +342,24 @@ describe("GitHub gateway force updates and deletions of refs", () => {
       rest("PATCH", "/repos/acme/widgets/git/refs/heads%2Ffeature", { sha: "a", force: true })
         .action,
     ).toMatchObject({ refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] } });
+    // Crafted encodings never confirm a tag or the default branch as a branch.
+    for (const ref of [
+      "heads%2F..%2Ftags%2Fv1",
+      "heads%2Fx%2F..%2F..%2Ftags%2Fv1",
+      "heads%2F.hidden",
+      "heads%2F%2Fmain",
+      "heads%2Fmain%00",
+      "heads%252Fmain",
+      "heads%2",
+    ]) {
+      const action = rest("DELETE", `/repos/acme/widgets/git/refs/${ref}`).action;
+      expect(action).toMatchObject({ sensitive: true });
+      const targets =
+        action.kind === "write" && action.refRewrites ? action.refRewrites.targets : [];
+      for (const target of targets) {
+        if (target.kind === "name") expect(refRewriteFollowsPolicy(target.ref, "main")).toBe(false);
+      }
+    }
     expect(rest("DELETE", "/repos/acme/widgets/git/refs/tags%2Fv1").action).toEqual({
       kind: "write",
       tools: ["ref_create"],

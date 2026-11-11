@@ -4,7 +4,7 @@ import {
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   type ConnectorActionAttemptIdentity,
-  githubGatewayApprovalIdForRequest,
+  githubGatewayApprovalForRequest,
   resolveAttemptConnectorToolDecision,
   type Database,
   type ResolvedConnectorActionPolicy,
@@ -152,7 +152,11 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
       };
     }
     if (strictest === "allow") return { kind: "allow" };
-    const approvalId = await githubGatewayApprovalIdForRequest(db, ledgerIdentity, input.digest);
+    // A request run again after its approval keeps the action it was recorded
+    // under, even if the gateway now classifies it differently.
+    const recorded = await githubGatewayApprovalForRequest(db, ledgerIdentity, input.digest);
+    const approvalId = recorded.approvalId;
+    const approvalTool = recorded.toolName ?? decidingTool;
     const reviewContext: ToolReviewContext = {
       kind: "api",
       title: input.title.slice(0, 256),
@@ -169,8 +173,8 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
       approvalId,
       connectionId: identity.claims.connectionId,
       serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
-      toolName: decidingTool,
-      actionName: decidingTool,
+      toolName: approvalTool,
+      actionName: approvalTool,
       arguments: input.reviewArguments,
       reviewContext,
       defaultDecision: "ask",

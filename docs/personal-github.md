@@ -413,7 +413,9 @@ not. GraphQL mutations are checked against the repositories their input names
 (node IDs, `repositoryNameWithOwner`, github.com URLs). When those can't be
 found, or a write names no repository (account and organization writes, or a
 request the gateway can't read), the allowlist can't apply, so the request
-always asks, whatever the person's policies say (Block still wins). The gateway replaces
+asks whatever the person's policies say (Block still wins). With All my
+repositories at write access and no repository removed from the chat there is
+no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not
 follow redirects, forwards only the request headers GitHub needs, buffers
 API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,

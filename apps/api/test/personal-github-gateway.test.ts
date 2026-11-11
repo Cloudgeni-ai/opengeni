@@ -414,6 +414,31 @@ describe("personal GitHub gateway review fixes", () => {
     expect(upstream.map((call) => call.url)).toEqual(["https://api.github.com/repositories/77"]);
   });
 
+  test("with All my repositories for writing, account writes follow the person's policy", async () => {
+    const allWrite = (removedRepositories: typeof removedWidgets = []) =>
+      authority({
+        removedRepositories,
+        selection: {
+          ...authority().selection,
+          repositories: [],
+          allRepositoriesAccess: "write",
+        } as unknown as PersonalGitHubGatewayAuthority["selection"],
+      });
+    const addKey = () => ({ method: "POST", body: JSON.stringify({ key: "ssh-ed25519 AAAA" }) });
+    const covered = harness({ authority: allWrite() });
+    await covered.send("/user/keys", addKey());
+    expect(covered.decisions[0]!.action).toMatchObject({ sensitive: true });
+    expect(covered.decisions[0]!.action).not.toHaveProperty("unscoped");
+    // A repository removed from the chat is an allowlist again: it asks.
+    const restricted = harness({ authority: allWrite(removedWidgets) });
+    await restricted.send("/user/keys", addKey());
+    expect(restricted.decisions[0]!.action).toMatchObject({ sensitive: true, unscoped: true });
+    // Chosen repositories are an allowlist too.
+    const chosen = harness();
+    await chosen.send("/user/keys", addKey());
+    expect(chosen.decisions[0]!.action).toMatchObject({ unscoped: true });
+  });
+
   test("a mutation naming its repository by name is checked against the allowlist", async () => {
     const { send, upstream } = harness();
     const commit = (repository: string) =>

@@ -280,6 +280,16 @@ export function gatewayRepositoryDecision(
   }
 }
 
+/** All my repositories with write access, and none removed from this chat. */
+export function allowlistCoversEveryRepository(
+  authority: Pick<PersonalGitHubGatewayAuthority, "selection" | "removedRepositories">,
+): boolean {
+  return (
+    authority.selection.allRepositoriesAccess === "write" &&
+    authority.removedRepositories.length === 0
+  );
+}
+
 /**
  * Name the repositories a request addresses by ID (`/repositories/{id}`), so
  * the removed-from-chat check sees them. A selected repository is named from
@@ -807,6 +817,12 @@ export async function handlePersonalGitHubGatewayRequest(
     return authorityError(error);
   }
   action = await applyRefRewritePolicy(services, authority, action, restRepository, checks);
+  // With every repository allowed for writing, there is no allowlist an
+  // unconfirmed write could step around: the person's policy decides.
+  if (action.kind === "write" && action.unscoped && allowlistCoversEveryRepository(authority)) {
+    const { unscoped: _covered, ...scoped } = action;
+    action = scoped;
+  }
 
   let requestId: string | null = null;
   if (action.kind === "write") {
