@@ -92,6 +92,16 @@ const MICROSOFT_LOGIN_ORIGIN = "https://login.microsoftonline.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 const GOOGLE_OAUTH_ISSUER_ORIGIN = "https://accounts.google.com";
 const GOOGLE_TOKEN_ORIGIN = "https://oauth2.googleapis.com";
+/**
+ * Google's account ID (the OpenID `sub`), recorded beside the email the
+ * Gmail, Calendar and Drive checks read. Google never changes or reuses it,
+ * while an account's email can change (a renamed Workspace user or domain), so
+ * once two logins both have it, it alone decides whether they are the same
+ * account. These sign-ins ask for `openid` so that Google reports it: in the
+ * signed ID token from the code exchange, or else in its token info for the
+ * new access token.
+ */
+export const GOOGLE_SUBJECT_KEY = "googleSubject";
 
 /** The slice of discovered authorization-server metadata the pins constrain. */
 export type PinnableAuthorizationServer = {
@@ -173,8 +183,10 @@ export type OAuthProviderProfile = {
    * set from this verified metadata key (an email address), with `prompt`
    * replacing the profile's own, so the provider signs in that account rather
    * than whichever one the browser used last.
+   * `accountIdKey` names a stable account ID the provider also accepts as the
+   * hint; it is preferred when recorded, so a renamed account is still named.
    */
-  reconnectLoginHint?: { metadataKey: string; prompt: string };
+  reconnectLoginHint?: { metadataKey: string; prompt: string; accountIdKey?: string };
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
   /**
@@ -331,7 +343,11 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   // the person gave that client earlier. Reconnecting already asks for the
   // Gmail scopes the account holds (chooseProfileAuthorizeScopes).
   extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
-  reconnectLoginHint: { metadataKey: "gmailEmail", prompt: "consent" },
+  reconnectLoginHint: {
+    metadataKey: "gmailEmail",
+    prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
+  },
   // The Gmail PRM advertises broader grants, including full-mail access. The
   // reviewed connector never lets a caller widen the capability contract: a
   // first connection asks only to read mail, and drafting, sending or
@@ -398,7 +414,11 @@ const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
   },
   sendResourceParameter: false,
   extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
-  reconnectLoginHint: { metadataKey: "googleDriveEmail", prompt: "consent" },
+  reconnectLoginHint: {
+    metadataKey: "googleDriveEmail",
+    prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
+  },
   requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
@@ -448,7 +468,11 @@ const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
   },
   sendResourceParameter: false,
   extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
-  reconnectLoginHint: { metadataKey: "googleCalendarEmail", prompt: "consent" },
+  reconnectLoginHint: {
+    metadataKey: "googleCalendarEmail",
+    prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
+  },
   requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
@@ -764,6 +788,42 @@ export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerif
 /** Generic OpenID Connect identity: the issuer's stable subject. Used only when
  * neither a profile nor a reviewed verifier identifies the account. */
 export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
+
+export const GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo";
+/** Google's published ID-token signing keys, and the issuers its ID tokens name. */
+export const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
+export const GOOGLE_ID_TOKEN_ISSUERS: string[] = [
+  "https://accounts.google.com",
+  "accounts.google.com",
+];
+const GOOGLE_SUBJECT_MCP_URLS: ReadonlySet<string> = new Set([
+  OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+]);
+
+/** The stable account-ID key recorded for an exact MCP URL, when it has one. */
+export function stableAccountSubjectKeyFor(mcpUrl: string): string | undefined {
+  return GOOGLE_SUBJECT_MCP_URLS.has(mcpUrl) ? GOOGLE_SUBJECT_KEY : undefined;
+}
+
+/** The account ID from verified ID-token claims or a tokeninfo answer, only for
+ * a token issued to our own client; anything else proves nothing and throws. */
+export function googleSubjectFromClaims(
+  payload: Record<string, unknown>,
+  clientId: string,
+): string {
+  const sub = payload.sub;
+  if (
+    typeof sub !== "string" ||
+    !sub.trim() ||
+    sub.length > 255 ||
+    !clientId ||
+    (payload.aud !== clientId && payload.azp !== clientId)
+  )
+    throw new Error("Google account verification failed");
+  return sub;
+}
 
 /** Identity keys for a connection: the profile's own, else the reviewed verifier's,
  * else OpenID Connect when this connection's sign-in can use it. */

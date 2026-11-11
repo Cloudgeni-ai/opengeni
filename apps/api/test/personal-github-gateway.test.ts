@@ -8,9 +8,11 @@ import {
   type PersonalGitHubGatewayAuthority,
   type PersonalGitHubGatewayServices,
 } from "../src/routes/personal-github-gateway";
-import type {
-  GatewayDecision,
-  GatewayDecisionInput,
+import {
+  strictestGatewayPolicy,
+  type GatewayDecision,
+  type GatewayDecisionInput,
+  type GatewayPolicyLookup,
 } from "../src/routes/personal-github-gateway-policy";
 
 const claims = { connectionId: "connection-1" } as unknown as PersonalGitHubGitBrokerClaims;
@@ -212,7 +214,7 @@ describe("personal GitHub gateway", () => {
     expect(response.status).toBe(200);
     expect(decisions).toHaveLength(1);
     expect(decisions[0]!.title).toBe("Create issue on acme/widgets");
-    expect(decisions[0]!.action).toMatchObject({ tools: ["issue_create"], alwaysAsk: false });
+    expect(decisions[0]!.action).toMatchObject({ tools: ["issue_create"], sensitive: false });
     expect(decisions[0]!.reviewArguments).toEqual({
       request: "POST /repos/acme/widgets/issues",
       body: { title: "Bug", body: "Details" },
@@ -310,6 +312,17 @@ describe("personal GitHub gateway", () => {
     });
     expect(response.status).toBe(403);
     expect(denied.decisions).toEqual([]);
+    // A node ID in an indented block string is the same ID to GitHub.
+    const hidden = harness({ respond });
+    const blockString = await hidden.send("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query:
+          'mutation { transferIssue(input: {\n  issueId: """\n  I_kwDOSecret1\n  """, repositoryId: "R_kgDOWidgets" }) { issue { id } } }',
+      }),
+    });
+    expect(blockString.status).toBe(403);
+    expect(hidden.decisions).toEqual([]);
   });
 
   test("GraphQL queries check the repositories they name", async () => {
@@ -342,7 +355,117 @@ describe("personal GitHub gateway", () => {
         query: 'mutation { addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId } }',
       }),
     });
-    expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(decisions[0]!.action).toMatchObject({ sensitive: true, unscoped: true });
+  });
+
+  test("a mutation on a node without a repository asks even when every policy allows it", async () => {
+    const { send, decisions } = harness({
+      respond: (_url, init) =>
+        bodyText(init).includes("OpengeniGatewayNodes")
+          ? Response.json({ data: { nodes: [{ __typename: "BranchProtectionRule" }] } })
+          : Response.json({ data: {} }),
+    });
+    await send("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query:
+          'mutation { deleteBranchProtectionRule(input: {branchProtectionRuleId: "BPR_other"}) { clientMutationId } }',
+      }),
+    });
+    const action = decisions[0]!.action;
+    expect(action).toMatchObject({ sensitive: true, unscoped: true });
+    const allowEverything: GatewayPolicyLookup = async () => "allow";
+    expect((await strictestGatewayPolicy(action, allowEverything)).decision).toBe("ask");
+  });
+
+  test("a mutation on an allowed repository can't vouch for an organization write bundled with it", async () => {
+    const nodes: Record<string, unknown> = {
+      PVT_kwDOProject1: { __typename: "ProjectV2" },
+      I_kwDOWidgets1: { __typename: "Issue", repository: { nameWithOwner: "acme/widgets" } },
+    };
+    const respond = (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(bodyText(init)) as { query: string; variables?: { ids?: string[] } };
+      return body.query.includes("OpengeniGatewayNodes")
+        ? Response.json({ data: { nodes: (body.variables?.ids ?? []).map((id) => nodes[id]) } })
+        : Response.json({ data: {} });
+    };
+    const comment =
+      'addComment(input: {subjectId: "I_kwDOWidgets1", body: "hi"}) { clientMutationId }';
+    const send = async (query: string, options: Parameters<typeof harness>[0] = {}) => {
+      const gateway = harness({ respond, ...options });
+      await gateway.send("/graphql", { method: "POST", body: JSON.stringify({ query }) });
+      return gateway.decisions[0]!.action;
+    };
+    // A comment alone is scoped to its repository.
+    expect(await send(`mutation { ${comment} }`)).not.toHaveProperty("unscoped");
+    // A project deletion bundled with it still can't be confirmed.
+    const bundled = `mutation { deleteProjectV2(input: {projectId: "PVT_kwDOProject1"}) { clientMutationId } ${comment} }`;
+    const action = await send(bundled);
+    expect(action).toMatchObject({ sensitive: true, unscoped: true });
+    const allowEverything: GatewayPolicyLookup = async () => "allow";
+    expect((await strictestGatewayPolicy(action, allowEverything)).decision).toBe("ask");
+    // Nor can an unrecognised mutation that names a repository node next to a project.
+    expect(
+      await send(
+        'mutation { moveProjectV2Item(input: {projectId: "PVT_kwDOProject1", contentId: "I_kwDOWidgets1"}) { clientMutationId } }',
+      ),
+    ).toMatchObject({ sensitive: true, unscoped: true });
+    // With every repository allowed for writing, the person's policy decides.
+    const allWrite = authority({
+      selection: {
+        ...authority().selection,
+        repositories: [],
+        allRepositoriesAccess: "write",
+      } as unknown as PersonalGitHubGatewayAuthority["selection"],
+    });
+    expect(await send(bundled, { authority: allWrite })).not.toHaveProperty("unscoped");
+  });
+
+  test("a repository named in free text can't scope an account write", async () => {
+    const respond = (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(bodyText(init)) as { query: string; variables?: { ids?: string[] } };
+      return body.query.includes("OpengeniGatewayNodes")
+        ? Response.json({
+            data: {
+              nodes: (body.variables?.ids ?? []).map((id) =>
+                id === "R_kgDOWidgets"
+                  ? { __typename: "Repository", nameWithOwner: "acme/widgets" }
+                  : null,
+              ),
+            },
+          })
+        : Response.json({ data: {} });
+    };
+    const send = async (body: unknown) => {
+      const gateway = harness({ respond });
+      await gateway.send("/graphql", { method: "POST", body: JSON.stringify(body) });
+      return gateway.decisions[0]!.action;
+    };
+    const sponsor =
+      'createSponsorship(input: {sponsorableLogin: "someone", amount: 500, clientMutationId: "R_kgDOWidgets"}) { clientMutationId }';
+    expect(await send({ query: `mutation { ${sponsor} }` })).toMatchObject({ unscoped: true });
+    expect(
+      await send({
+        query:
+          "mutation($input: CreateSponsorshipInput!) { createSponsorship(input: $input) { clientMutationId } }",
+        variables: {
+          input: { sponsorableLogin: "someone", amount: 500, clientMutationId: "R_kgDOWidgets" },
+        },
+      }),
+    ).toMatchObject({ unscoped: true });
+    expect(
+      await send({
+        query:
+          'mutation { updateSponsorsListing(input: {websiteUrl: "https://github.com/acme/widgets"}) { clientMutationId } }',
+      }),
+    ).toMatchObject({ unscoped: true });
+    // A sensitive mutation on an allowed repository plus a node GitHub won't show.
+    expect(
+      await send({
+        query:
+          'mutation { updateRepository(input: {repositoryId: "R_kgDOWidgets", ownerId: "O_kgDOHidden1"}) { clientMutationId } }',
+      }),
+    ).toMatchObject({ unscoped: true });
   });
 });
 
@@ -392,6 +515,31 @@ describe("personal GitHub gateway review fixes", () => {
     expect(upstream.map((call) => call.url)).toEqual(["https://api.github.com/repositories/77"]);
   });
 
+  test("with All my repositories for writing, account writes follow the person's policy", async () => {
+    const allWrite = (removedRepositories: typeof removedWidgets = []) =>
+      authority({
+        removedRepositories,
+        selection: {
+          ...authority().selection,
+          repositories: [],
+          allRepositoriesAccess: "write",
+        } as unknown as PersonalGitHubGatewayAuthority["selection"],
+      });
+    const addKey = () => ({ method: "POST", body: JSON.stringify({ key: "ssh-ed25519 AAAA" }) });
+    const covered = harness({ authority: allWrite() });
+    await covered.send("/user/keys", addKey());
+    expect(covered.decisions[0]!.action).toMatchObject({ sensitive: true });
+    expect(covered.decisions[0]!.action).not.toHaveProperty("unscoped");
+    // A repository removed from the chat is an allowlist again: it asks.
+    const restricted = harness({ authority: allWrite(removedWidgets) });
+    await restricted.send("/user/keys", addKey());
+    expect(restricted.decisions[0]!.action).toMatchObject({ sensitive: true, unscoped: true });
+    // Chosen repositories are an allowlist too.
+    const chosen = harness();
+    await chosen.send("/user/keys", addKey());
+    expect(chosen.decisions[0]!.action).toMatchObject({ unscoped: true });
+  });
+
   test("a mutation naming its repository by name is checked against the allowlist", async () => {
     const { send, upstream } = harness();
     const commit = (repository: string) =>
@@ -426,7 +574,7 @@ describe("personal GitHub gateway review fixes", () => {
         query: 'mutation { createIssue(input: {title: "x"}) { issue { id } } }',
       }),
     });
-    expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(decisions[0]!.action).toMatchObject({ sensitive: true });
   });
 
   test("GraphQL reads under an owner login are scoped", async () => {
@@ -663,20 +811,47 @@ describe("force updates and deletions of refs", () => {
     expect(decisions.map((decision) => [decision.title, decision.action])).toEqual([
       [
         "Delete branch or tag on acme/widgets",
-        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
       ],
       [
         "Force-update branch on acme/widgets",
-        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
       ],
-      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
-      ["Force-update branch on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
-      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ sensitive: false })],
+      ["Force-update branch on acme/widgets", expect.objectContaining({ sensitive: false })],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ sensitive: false })],
     ]);
     expect(upstream.some((request) => request.init.method === "DELETE")).toBe(true);
   });
 
-  test("of the default branch, a tag or an unconfirmed ref always ask", async () => {
+  test("an agent's merged branch that gh names with encoded slashes follows the person's policy", async () => {
+    // What `gh pr merge --delete-branch` sends for em/staging-live-binary-readiness.
+    const { respond } = github();
+    const { send, decisions, upstream } = harness({ respond });
+    const response = await send(
+      "/repos/acme/widgets/git/refs/heads%2Fem%2Fstaging-live-binary-readiness",
+      { method: "DELETE" },
+    );
+    expect(response.status).toBe(200);
+    expect(decisions.map((decision) => [decision.title, decision.action])).toEqual([
+      [
+        "Delete branch or tag on acme/widgets",
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
+      ],
+    ]);
+    expect(
+      upstream.some(
+        (request) =>
+          request.init.method === "DELETE" &&
+          request.url.endsWith("/git/refs/heads%2Fem%2Fstaging-live-binary-readiness"),
+      ),
+    ).toBe(true);
+    // The default branch, encoded the same way, stays sensitive.
+    await send("/repos/acme/widgets/git/refs/heads%2Fmain", { method: "DELETE" });
+    expect(decisions.at(-1)?.action).toEqual(expect.objectContaining({ sensitive: true }));
+  });
+
+  test("of the default branch, a tag or an unconfirmed ref are sensitive", async () => {
     const { respond } = github();
     const { send, decisions } = harness({ respond });
     await send("/repos/acme/widgets/git/refs/heads/main", { method: "DELETE" });
@@ -710,7 +885,7 @@ describe("force updates and deletions of refs", () => {
       "/graphql",
       graphql('mutation { deleteRef(input: {refId: "REF_kwDOElsewhr"}) { clientMutationId } }'),
     );
-    // Another mutation that always asks keeps the request asking.
+    // Another sensitive mutation keeps the request sensitive.
     await send(
       "/graphql",
       graphql(
@@ -719,7 +894,7 @@ describe("force updates and deletions of refs", () => {
     );
     expect(decisions.map((decision) => decision.action)).toHaveLength(8);
     expect(
-      decisions.every((decision) => decision.action.kind === "write" && decision.action.alwaysAsk),
+      decisions.every((decision) => decision.action.kind === "write" && decision.action.sensitive),
     ).toBe(true);
   });
 
@@ -732,8 +907,8 @@ describe("force updates and deletions of refs", () => {
       graphql('mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } }'),
     );
     expect(decisions.map((decision) => decision.action)).toEqual([
-      expect.objectContaining({ alwaysAsk: true }),
-      expect.objectContaining({ alwaysAsk: true }),
+      expect.objectContaining({ sensitive: true }),
+      expect.objectContaining({ sensitive: true }),
     ]);
   });
 
@@ -748,8 +923,8 @@ describe("force updates and deletions of refs", () => {
       authorized.some((call) => call.url === "https://api.github.com/repos/acme/widgets"),
     ).toBe(true);
     expect(decisions.map((decision) => decision.action)).toEqual([
-      expect.objectContaining({ alwaysAsk: false }),
-      expect.objectContaining({ alwaysAsk: false }),
+      expect.objectContaining({ sensitive: false }),
+      expect.objectContaining({ sensitive: false }),
     ]);
   });
 
@@ -759,7 +934,7 @@ describe("force updates and deletions of refs", () => {
       const context = harness({ respond });
       context.services.decide = async (_identity, input) => {
         context.decisions.push(input);
-        return policy === "allow" && !input.action.alwaysAsk
+        return policy === "allow" && !input.action.sensitive
           ? { kind: "allow" }
           : {
               kind: "refuse",

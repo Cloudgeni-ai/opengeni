@@ -149,6 +149,63 @@ function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): numbe
 }
 
 describe("release image workflow contract", () => {
+  test("the CI image build wrapper forwards every input to one pinned build and one retry", async () => {
+    const wrapper = Bun.YAML.parse(await action("docker-build-retry")) as {
+      inputs: Record<string, unknown>;
+      outputs: Record<string, { value: string }>;
+      runs: {
+        using: string;
+        steps: Array<{
+          id?: string;
+          if?: string;
+          uses?: string;
+          "continue-on-error"?: boolean;
+          with?: Record<string, string>;
+        }>;
+      };
+    };
+    expect(wrapper.runs.using).toBe("composite");
+    const builds = wrapper.runs.steps.filter((step) => step.uses);
+    expect(builds.map((step) => [step.id, step.uses, step.if, step["continue-on-error"]])).toEqual([
+      [
+        "first",
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        undefined,
+        true,
+      ],
+      [
+        "retry",
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "${{ steps.first.outcome == 'failure' }}",
+        undefined,
+      ],
+    ]);
+    const forwarded = Object.fromEntries(
+      Object.keys(wrapper.inputs).map((name) => [name, `\${{ inputs.${name} }}`]),
+    );
+    for (const build of builds) expect(build.with).toEqual(forwarded);
+    expect(wrapper.outputs.digest?.value).toBe(
+      "${{ steps.first.outcome == 'success' && steps.first.outputs.digest || steps.retry.outputs.digest }}",
+    );
+
+    // Every CI image build goes through the wrapper with inputs it declares.
+    const ci = Bun.YAML.parse(
+      await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8"),
+    ) as { jobs: Record<string, { steps?: Array<{ uses?: string; with?: object }> }> };
+    const ciBuilds = Object.values(ci.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((step) => step.uses?.includes("build-push")),
+    );
+    expect(ciBuilds).toEqual([]);
+    const wrapped = Object.values(ci.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((step) => step.uses === "./.github/actions/docker-build-retry"),
+    );
+    // Eight image roles, the batch API image and the two sandbox warm builds.
+    expect(wrapped).toHaveLength(11);
+    for (const step of wrapped) {
+      for (const name of Object.keys(step.with ?? {})) expect(wrapper.inputs).toHaveProperty(name);
+    }
+  });
+
   test("both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
     const [ci, candidate] = await Promise.all([
       workflow("ci.yml"),
@@ -1035,12 +1092,15 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
-      expect(parsed.jobs[jobName]?.needs).toEqual([
-        "automation-admission",
-        "plan",
-        "artifact-runtime",
-      ]);
+    expect(parsed.jobs["artifact-materializer-image"]?.needs).toEqual([
+      "automation-admission",
+      "plan",
+      "artifact-runtime",
+    ]);
+    // The sandbox images build their runtime-independent layers while the
+    // artifact runtime is produced, then wait for its artifact in the job.
+    for (const jobName of ["sandbox-image", "desktop-image"]) {
+      expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
     // The protected API image additionally waits for pre-image validation.
     expect(parsed.jobs["api-image"]?.needs).toEqual([
@@ -1054,6 +1114,7 @@ describe("release image workflow contract", () => {
       "automation-admission",
       "plan",
       "api-image",
+      "batch-api-image",
       "worker-image",
       "web-image",
       "artifact-materializer-image",
@@ -1062,13 +1123,22 @@ describe("release image workflow contract", () => {
       "sandbox-image",
       "desktop-image",
     ]);
-    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
-      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["artifact-materializer-image"]?.if);
+    for (const jobName of ["sandbox-image", "desktop-image"]) {
+      expect(parsed.jobs[jobName]?.if).toBe(
+        parsed.jobs["artifact-materializer-image"]?.if?.replace(
+          "needs.artifact-runtime.result == 'success'",
+          "needs.plan.outputs.artifact_runtime_required == 'true'",
+        ),
+      );
     }
     // Same selection as its peers, plus: a main push requests public-release
     // approval only after every non-image lane succeeded.
+    // A batch builds it in batch-api-image instead, without that gate.
     expect(parsed.jobs["api-image"]?.if).toBe(
       parsed.jobs["artifact-materializer-image"]!.if!.replace(
+        "needs.artifact-runtime.result == 'success' && ",
+        "needs.artifact-runtime.result == 'success' && !startsWith(github.ref, 'refs/heads/batch/') && ",
+      ).replace(
         / \}\}$/u,
         " && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}",
       ),
@@ -1126,7 +1196,9 @@ describe("release image workflow contract", () => {
       apiSteps.findIndex((step) => step.name === "Build API image"),
     );
     expect(images).toContain("Require every workload image build");
-    expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
+    expect(images).toContain(
+      "API_IMAGE_RESULT: ${{ startsWith(github.ref, 'refs/heads/batch/') && needs.batch-api-image.result || needs.api-image.result }}",
+    );
     expect(images).toContain("WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}");
     expect(images).toContain("WEB_IMAGE_RESULT: ${{ needs.web-image.result }}");
     expect(images).toContain(
@@ -1142,7 +1214,8 @@ describe("release image workflow contract", () => {
       (step) => step.name === "Require every workload image build",
     );
     expect(aggregate?.env).toEqual({
-      API_IMAGE_RESULT: "${{ needs.api-image.result }}",
+      API_IMAGE_RESULT:
+        "${{ startsWith(github.ref, 'refs/heads/batch/') && needs.batch-api-image.result || needs.api-image.result }}",
       WORKER_IMAGE_RESULT: "${{ needs.worker-image.result }}",
       WEB_IMAGE_RESULT: "${{ needs.web-image.result }}",
       ARTIFACT_MATERIALIZER_IMAGE_RESULT: "${{ needs.artifact-materializer-image.result }}",
@@ -1181,13 +1254,14 @@ describe("release image workflow contract", () => {
     ).toHaveLength(8);
     expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(8);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(8);
+    // Eight roles plus the never-pushed batch API image.
+    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(9);
     expect(
       images.match(
         /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
       ),
-    ).toHaveLength(8);
-    expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
+    ).toHaveLength(9);
+    expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(6);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA canary receipt");
     expect(images).toContain("Upload exact-main-SHA canary receipt");
@@ -1873,7 +1947,8 @@ ${parser}`,
     // behind the exact main-push condition that restores both platforms.
     const bothPlatforms =
       /platforms: (?:linux\/amd64,linux\/arm64|\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && 'linux\/amd64,linux\/arm64' \|\| 'linux\/amd64' \}\})\n/g;
-    expect(imagesJob.match(bothPlatforms)).toHaveLength(7);
+    // Seven roles, plus the sandbox image's runtime-independent warm build.
+    expect(imagesJob.match(bothPlatforms)).toHaveLength(8);
 
     const imageSteps = [
       "api-image",
@@ -1889,7 +1964,9 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+          step.uses === "./.github/actions/docker-build-retry" &&
+          // Warm builds export nothing; asserted separately below.
+          (step as { with: Record<string, string> }).with.outputs !== "type=cacheonly",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1901,39 +1978,77 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
+        fingerprint: "f9b514069dc7b801a51df6e9f82f995aff9d1dd99dc8b847da7ef99e55aa7a35",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
+        fingerprint: "307774ed642aa66817fc7371a48c40cb6f7d63ea8b4e6e8b09cb37c4f75ba487",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
+        fingerprint: "8be22303b9c3720f675c5dba4f60eb2e24f839eddcc2428841921836a9c4ab09",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
+        fingerprint: "6583f0f1b5b4785d1175081c9600003b3a5fdfd486021e69ad60a1ae1da0ec5e",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
+        fingerprint: "aa4f30a4e0931f9585de0395bfa73392c7ea9501c0326f217d49a5b9abb17809",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
+        fingerprint: "581a68697d8364b519a87099411898b15520eeda56c8b13ca628ac6e6025d444",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
+        fingerprint: "fcea891e6564f38134a9e62c1e7cb03e2d2fab60e10beb070c350d93c905a893",
       },
     ]);
+
+    // The sandbox images' warm builds must hit for every layer the runtime
+    // inputs do not change: the same Dockerfile, platforms, build arguments,
+    // context and cache, without the runtime inputs context and exporting
+    // nothing. The final build alone adds the verified runtime inputs.
+    for (const [jobName, finalId] of [
+      ["sandbox-image", "sandbox_image"],
+      ["desktop-image", "desktop_image"],
+    ] as const) {
+      const steps = parsed.jobs[jobName]!.steps as Array<{
+        id?: string;
+        name?: string;
+        uses?: string;
+        run?: string;
+        env?: Record<string, string>;
+        with?: Record<string, string>;
+      }>;
+      const finalBuild = steps.find((step) => step.id === finalId)!;
+      const warmBuilds = steps.filter((step) => step.with?.outputs === "type=cacheonly");
+      expect(warmBuilds).toHaveLength(1);
+      const warm = warmBuilds[0]!;
+      expect(warm.uses).toBe(finalBuild.uses);
+      for (const key of ["context", "file", "platforms", "build-args", "cache-from"])
+        expect(warm.with?.[key], `${jobName} ${key}`).toBe(finalBuild.with?.[key]);
+      expect(warm.with?.push).toBeUndefined();
+      expect(warm.with?.["cache-to"]).toBeUndefined();
+      expect(warm.with?.["build-contexts"]).toBeUndefined();
+      expect(finalBuild.with?.["build-contexts"]).toBe(
+        "artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime",
+      );
+      const wait = steps.find((step) => step.id === "runtime_inputs")!;
+      const download = steps.find(
+        (step) => step.name === "Download exact artifact runtime inputs",
+      )!;
+      const order = [warm, wait, download, finalBuild].map((step) => steps.indexOf(step));
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      expect(download.with?.path).toBe("${{ runner.temp }}/artifact-runtime");
+    }
 
     const expectedCacheScopes = new Map([
       ["Build API image", "opengeni-ci-api"],

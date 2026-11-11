@@ -1,3 +1,5 @@
+import { requireConnectReturnUrl } from "../integrations/connect-return-url";
+import { oauthBrowserBindingForStart } from "../integrations/oauth-browser-binding";
 import { integrationAvailable } from "../integrations/teams-rollout";
 import { GOOGLE_CONNECTOR_SETUP_UNAVAILABLE } from "../integrations/google-connector-availability";
 import { createHash, createHmac, randomUUID } from "node:crypto";
@@ -79,7 +81,7 @@ import { GOOGLE_DRIVE_CREDENTIAL_ROLE } from "@opengeni/contracts/google-drive";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   curatedOAuthReadiness,
-  microsoftOrganizationApprovalUrl,
+  microsoftOrganizationApprovalUrlForWorkspace,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
@@ -1213,6 +1215,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               ...(continuation ? { externalContinuation: continuation } : {}),
               connectAttemptId: attempt.id,
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+              browserBinding: oauthBrowserBindingForStart(c, deps.settings, authorization, {
+                externalContinuation: continuation,
+              }),
               requestUrl: c.req.url,
               payload: {
                 requestedScopes: attempt.requestedScopes ? [...attempt.requestedScopes] : [],
@@ -1520,6 +1525,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       /[\u0000-\u0020\u007f]/.test(input.returnUrl)
     )
       throw new HTTPException(400, { message: "invalid return URL" });
+    requireConnectReturnUrl(c, deps.settings, authorization, target);
     const actor = await connectRequestActor(deps, authorization);
     const scope = actor.scope;
     assertAgentPreparedConnect(actor, input);
@@ -2039,6 +2045,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     {
                       ...scope,
                       personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+                      browserBinding: oauthBrowserBindingForStart(c, deps.settings, authorization, {
+                        externalContinuation: continuation,
+                      }),
                       ...(continuation ? { externalContinuation: continuation } : {}),
                       connectAttemptId: id,
                       // Lets the callback finish setup with exactly this request's rights.
@@ -2066,14 +2075,14 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         const reconnect = input.reconnectAccountId
           ? await getConnectionMetadata(tx, workspaceId, input.reconnectAccountId, scope.subjectId)
           : null;
-        // One organization approval for every Microsoft service this workspace connects.
+        // One organization approval for every Microsoft service this workspace offers.
         const definition = CORE_INTEGRATION_DEFINITIONS.find(
           (candidate) => candidate.id === input.providerId,
         );
         const organizationApprovalUrl = definition
-          ? microsoftOrganizationApprovalUrl(
-              deps.settings,
-              workspaceId,
+          ? await microsoftOrganizationApprovalUrlForWorkspace(
+              deps,
+              { accountId: scope.accountId, workspaceId },
               definition,
               integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url),
             )

@@ -32,6 +32,7 @@ import {
 } from "../lib/zoom-pan";
 import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "../ui/button";
+import { displayImageSrc } from "../lib/content-hosting";
 
 type ZoomState = {
   key: string;
@@ -456,7 +457,7 @@ export function ZoomPanSurface({
     >
       <img
         ref={img}
-        src={src}
+        src={displayImageSrc(src)}
         alt={alt}
         draggable={false}
         data-zoom-scale={view ? view.scale.toFixed(3) : undefined}

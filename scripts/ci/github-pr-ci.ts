@@ -21,12 +21,16 @@ type PullIdentity = {
 };
 const VERSION_BRANCH = "changeset-release/main";
 /** The bot-authored, same-repository Version PR; only it owns Version dispatch runs. */
+/**
+ * A PR a workflow in this repository opened with its GITHUB_TOKEN (the Version
+ * PR, the pin refreshes). Such pushes start no pull_request workflows, so its
+ * PR CI is dispatched on its exact head instead.
+ */
+export function isAutomationPr(p: PullIdentity, repo: string): boolean {
+  return p.head.repo?.full_name === repo && p.user?.login === "github-actions[bot]";
+}
 export function isVersionPr(p: PullIdentity, repo: string): boolean {
-  return (
-    p.head.ref === VERSION_BRANCH &&
-    p.head.repo?.full_name === repo &&
-    p.user?.login === "github-actions[bot]"
-  );
+  return p.head.ref === VERSION_BRANCH && isAutomationPr(p, repo);
 }
 /**
  * Older PR CI runs of PR `number`. Version PR CI starts by workflow_dispatch on
@@ -319,9 +323,9 @@ export async function runPrCiCommand(
       throw Error("PR CI exact-head identity changed");
     if (
       env.GITHUB_EVENT_NAME === "workflow_dispatch" &&
-      (p.head.ref !== "changeset-release/main" || env.GITHUB_SHA !== head)
+      (!isAutomationPr(p, repo) || env.GITHUB_SHA !== head)
     )
-      throw Error("Version dispatch must run its exact head");
+      throw Error("Dispatched PR CI must run the exact head of a same-repository automation PR");
     const files = await pages(`pulls/${number}/files`);
     output("head", head);
     output("base", p.base.sha);

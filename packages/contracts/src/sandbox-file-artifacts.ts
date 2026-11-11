@@ -50,8 +50,8 @@ export const SandboxFileArtifactReceipt = /* @__PURE__ */ defineSchema(() =>
     .strict()
     .superRefine((value, context) => {
       const pathSegments = value.sandboxPath.split("/");
-      // This is a receipt, not read authority. The publisher confines the path
-      // against its resolved provider root; receipts preserve that native path.
+      // This is a receipt, not read authority. The publisher resolves the path
+      // against its provider root; receipts preserve that native path.
       const unc = value.sandboxPath.startsWith("//");
       const absolute = unc
         ? /^\/\/[^/]+\/[^/]+\/.+/u.test(value.sandboxPath) && !value.sandboxPath.startsWith("//?/")

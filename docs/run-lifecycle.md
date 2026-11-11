@@ -2351,7 +2351,13 @@ invocation boundary also records
 `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` with one closed structural
 outcome: `success`, `provider_declared_error`, `auth_needed`,
 `outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
-`thrown_protocol_error`. `tool` is bounded (`mcpToolMetricLabel` in
+`thrown_protocol_error`, plus `rejected` when a first-party tool refused the
+caller's own arguments before doing any work (a schema mismatch, a bad field
+combination, an unknown ID). The first-party server marks such an error result
+with the `opengeni/argumentRejected` result `_meta` key, which the worker honors
+only from that server and removes before anyone sees the result; the
+`OpenGeniMcpToolFailureRatio` alert leaves `rejected` out of both the failures
+and the total. `tool` is bounded (`mcpToolMetricLabel` in
 `packages/runtime/src/metrics.ts`): it is the tool name only for a verified
 first-party server calling a name in the fixed first-party catalog, and the
 single value `external` for every connector, API-integration, Codex Apps, and

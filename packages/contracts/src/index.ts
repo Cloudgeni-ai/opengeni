@@ -6541,7 +6541,7 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
       repositories.forEach((repository, index) => {
         const canonicalUrl = repository.canonicalUrl.toLowerCase();
         if (
-          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
             repository.fullName,
           ) ||
           repository.canonicalUrl !== `https://github.com/${repository.fullName}`
@@ -21690,6 +21690,18 @@ export const GitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
 
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * what Your GitHub does through `gh` and Git that is hard to undo: repository
+ * settings, secrets, variables and environments, deletions, tag and
+ * default-branch rewrites, and requests the gateway does not recognise. It
+ * defaults to Ask.
+ */
+export const PersonalGitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["routine", "review", "merge", "sensitive"]),
+);
+export type PersonalGitHubActionPolicyGroup = z.infer<typeof PersonalGitHubActionPolicyGroup>;
+
 export const GitHubActionPolicyActor = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21712,6 +21724,12 @@ const GitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 
+const PersonalGitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
+  GitHubActionPolicyGroups.extend({
+    sensitive: GitHubActionPolicyEffectiveDecision,
+  }),
+);
+
 export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21724,7 +21742,7 @@ export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("personal"),
       connectionId: primitives.string.trim().min(1).max(512),
       label: z.string().min(1).max(256),
-      groups: GitHubActionPolicyGroups,
+      groups: PersonalGitHubActionPolicyGroups,
     }),
   ]),
 );
@@ -21741,7 +21759,8 @@ export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesRe
 export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     actor: GitHubActionPolicyActor,
-    group: GitHubActionPolicyGroup,
+    /** `sensitive` applies only to personal actors. */
+    group: PersonalGitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   }),
 );

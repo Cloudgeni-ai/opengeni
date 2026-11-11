@@ -5,6 +5,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { BrowserInteractionController } from "@opengeni/interaction";
 import type { BrowserObservation } from "@opengeni/contracts";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 import { AttachedChromeCdpConnection } from "../src/attached-cdp";
 import { AgentBrowserDriver } from "../src/cdp-driver";
@@ -13,7 +14,11 @@ import { AgentBrowserDriver } from "../src/cdp-driver";
 // Chromium tab next to a stand-in password manager: an extension that shows
 // its inline menu (a frame of its own page) whenever a field gets focus.
 // Chrome ends the extension's debugging of a tab when such a frame appears.
-const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const e2e = quarantineTest(
+  process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip,
+  import.meta.path,
+);
 
 const EXTENSION_ROOT = resolve(import.meta.dir, "../../../apps/browser-extension");
 

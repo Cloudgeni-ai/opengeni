@@ -6,7 +6,9 @@
  * Reads pass. Ordinary writes follow the policy of the matching action
  * (`issue_create`, `pull_request_merge`, ...), or the strictest policy of the
  * routine group when no single action matches. Destructive or hard-to-undo
- * requests, and writes this module does not recognise, always ask.
+ * requests, and writes this module does not recognise, are `sensitive`: they
+ * also follow the person's Settings and deletions policy, which asks unless
+ * the person chose otherwise.
  * Force-updating or deleting a branch other than the repository's default
  * branch follows the `ref_create` policy once the gateway has confirmed the
  * branch (see `refRewrites`).
@@ -42,15 +44,24 @@ export type GitHubGatewayAction =
       kind: "write";
       /** Policy actions whose strictest decision applies. */
       tools: readonly string[];
-      /** Ask even when the policy allows (Block still wins). */
-      alwaysAsk: boolean;
+      /**
+       * Also apply the person's Settings and deletions policy (Ask unless
+       * they chose otherwise); the strictest decision wins.
+       */
+      sensitive: boolean;
+      /**
+       * The gateway can't confirm which repositories this changes, so the
+       * repository allowlist can't apply: it asks whatever the policy says
+       * (Block still wins). Always also sensitive.
+       */
+      unscoped?: true;
       title: string;
       /**
-       * Force updates and deletions of these refs. They set `alwaysAsk`; the
-       * gateway lowers it to `alwaysAskOtherwise` only after confirming that
+       * Force updates and deletions of these refs. They set `sensitive`; the
+       * gateway lowers it to `sensitiveOtherwise` only after confirming that
        * every ref is a branch other than the repository's default branch.
        */
-      refRewrites?: { targets: GitHubGatewayRefTarget[]; alwaysAskOtherwise: boolean };
+      refRewrites?: { targets: GitHubGatewayRefTarget[]; sensitiveOtherwise: boolean };
     };
 
 export type GitHubRestClassification = {
@@ -60,8 +71,8 @@ export type GitHubRestClassification = {
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function write(tools: readonly string[], title: string, alwaysAsk = false): GitHubGatewayAction {
-  return { kind: "write", tools, alwaysAsk, title };
+function write(tools: readonly string[], title: string, isSensitive = false): GitHubGatewayAction {
+  return { kind: "write", tools, sensitive: isSensitive, title };
 }
 
 function routine(title: string): GitHubGatewayAction {
@@ -72,10 +83,17 @@ function sensitive(title: string, tools: readonly string[] = []): GitHubGatewayA
   return write(tools, title, true);
 }
 
+/** A write the repository allowlist can't cover: see `unscoped`. */
+export function unscopedWrite(action: GitHubGatewayAction): GitHubGatewayAction {
+  if (action.kind !== "write") return action;
+  const { refRewrites: _ignored, ...rest } = action;
+  return { ...rest, sensitive: true, unscoped: true };
+}
+
 /**
  * Force-updating or deleting `ref` follows the person's policy when it is a
  * branch other than the repository's default branch. Tags, other refs, the
- * default branch, and an unknown default branch always ask.
+ * default branch, and an unknown default branch are sensitive (Settings and deletions).
  */
 export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | null): boolean {
   if (!defaultBranch || !ref.startsWith("refs/heads/")) return false;
@@ -84,27 +102,30 @@ export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | nul
     branch.length > 0 &&
     branch.split("/").every((part) => part.length > 0 && !part.startsWith(".")) &&
     !branch.includes("..") &&
-    !/[\u0000-\u0020\u007f~^:?*[\\]/u.test(branch) &&
+    // `%`: a name the gateway couldn't decode could reach GitHub as another ref.
+    !/[\u0000-\u0020\u007f~^:?*[\\%]/u.test(branch) &&
     branch.toLowerCase() !== defaultBranch.toLowerCase()
   );
 }
 
 /**
  * A force update or deletion of the ref at `refs/{refPath}`. Only a path
- * under `heads/` can follow the person's policy; any other path asks.
+ * under `heads/` can follow the person's branch policy; any other path is
+ * sensitive. `gh` encodes the slashes of a ref (`heads%2Fmy%2Fbranch`), so
+ * one segment can hold the whole path.
  */
 function refRewrite(title: string, refPath: string[]): GitHubGatewayAction {
   const path = refPath.join("/");
   const action: Extract<GitHubGatewayAction, { kind: "write" }> = {
     kind: "write",
     tools: ["ref_create"],
-    alwaysAsk: true,
+    sensitive: true,
     title,
   };
-  if (refPath[0] === "heads") {
+  if (path.startsWith("heads/")) {
     action.refRewrites = {
       targets: [{ kind: "name", ref: `refs/${path}` }],
-      alwaysAskOtherwise: false,
+      sensitiveOtherwise: false,
     };
   }
   return action;
@@ -142,7 +163,7 @@ function repositoryScope(segments: string[]): {
   return null;
 }
 
-/** Repository paths that change settings, access or secrets: always ask. */
+/** Repository paths that change settings, access or secrets: sensitive (Settings and deletions). */
 const SENSITIVE_REPOSITORY_AREAS = new Set([
   "collaborators",
   "invitations",
@@ -375,9 +396,10 @@ export function classifyGitHubRestRequest(
   if (segments[0] === "notifications") {
     return { action: routine("Change notifications"), repository: null };
   }
+  // Account and organization writes name no repository the allowlist covers.
   return {
-    action: sensitive(
-      normalizedMethod === "DELETE" ? "Delete on GitHub" : "Change GitHub account data",
+    action: unscopedWrite(
+      sensitive(normalizedMethod === "DELETE" ? "Delete on GitHub" : "Change GitHub account data"),
     ),
     repository: null,
   };
@@ -387,10 +409,10 @@ export function classifyGitHubRestRequest(
 // GraphQL
 // ---------------------------------------------------------------------------
 
-/** GraphQL mutations mapped to policy actions. Anything not listed always asks. */
+/** GraphQL mutations mapped to policy actions. Anything not listed is sensitive (Settings and deletions). */
 const GRAPHQL_MUTATIONS: Record<
   string,
-  { tools: readonly string[]; title: string; alwaysAsk?: true }
+  { tools: readonly string[]; title: string; sensitive?: true }
 > = {
   createPullRequest: { tools: ["pull_request_create"], title: "Open pull request" },
   updatePullRequest: { tools: ["pull_request_update"], title: "Update pull request" },
@@ -414,7 +436,7 @@ const GRAPHQL_MUTATIONS: Record<
   dismissPullRequestReview: {
     tools: ["pull_request_review_submit"],
     title: "Dismiss review",
-    alwaysAsk: true,
+    sensitive: true,
   },
   addPullRequestReviewComment: { tools: ["pull_request_comment"], title: "Comment on code" },
   addPullRequestReviewThread: { tools: ["pull_request_comment"], title: "Comment on code" },
@@ -464,14 +486,14 @@ const GRAPHQL_MUTATIONS: Record<
   unmarkFileAsViewed: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Mark file as viewed" },
   addStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Star repository" },
   removeStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Unstar repository" },
-  deleteIssue: { tools: ["issue_update"], title: "Delete issue", alwaysAsk: true },
-  deleteIssueComment: { tools: ["issue_comment"], title: "Delete comment", alwaysAsk: true },
+  deleteIssue: { tools: ["issue_update"], title: "Delete issue", sensitive: true },
+  deleteIssueComment: { tools: ["issue_comment"], title: "Delete comment", sensitive: true },
   deletePullRequestReviewComment: {
     tools: ["pull_request_comment"],
     title: "Delete review comment",
-    alwaysAsk: true,
+    sensitive: true,
   },
-  transferIssue: { tools: ["issue_update"], title: "Transfer issue", alwaysAsk: true },
+  transferIssue: { tools: ["issue_update"], title: "Transfer issue", sensitive: true },
 };
 
 export type GraphqlValue =
@@ -514,6 +536,28 @@ type Token =
 const GRAPHQL_QUERY_MAX_BYTES = 256 * 1024;
 const GRAPHQL_MAX_DEPTH = 64;
 
+/**
+ * A block string's value (GraphQL spec BlockStringValue): the common indent
+ * of the lines after the first is removed, and blank first and last lines are
+ * dropped. The tokenizer only accepts block strings of spaces and newlines,
+ * where GitHub reads them the same way.
+ */
+function blockStringValue(raw: string): string {
+  const lines = raw.split(/\r\n|[\n\r]/u);
+  let common: number | null = null;
+  for (const line of lines.slice(1)) {
+    const indent = /^[\t ]*/u.exec(line)![0].length;
+    if (indent < line.length && (common === null || indent < common)) common = indent;
+  }
+  const dedented = lines.map((line, index) =>
+    index > 0 && common !== null ? line.slice(common) : line,
+  );
+  const blank = (line: string) => /^[\t ]*$/u.test(line);
+  while (dedented.length > 0 && blank(dedented[0]!)) dedented.shift();
+  while (dedented.length > 0 && blank(dedented.at(-1)!)) dedented.pop();
+  return dedented.join("\n");
+}
+
 function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
@@ -538,14 +582,17 @@ function tokenize(source: string): Token[] {
       continue;
     }
     if (source.startsWith('"""', index)) {
-      // Escaped triple quotes (\""") do not end a block string.
-      let close = source.indexOf('"""', index + 3);
-      while (close >= 0 && source[close - 1] === "\\") close = source.indexOf('"""', close + 3);
+      // GitHub's parser doesn't read escaped triple quotes, form feeds,
+      // carriage returns or tab indents the way the spec does, so a block
+      // string with any of them is unrecognised (it asks) rather than read
+      // differently from GitHub.
+      const close = source.indexOf('"""', index + 3);
       if (close < 0) throw new Error("Unterminated block string");
-      tokens.push({
-        kind: "string",
-        value: source.slice(index + 3, close).replace(/\\"""/gu, '"""'),
-      });
+      const raw = source.slice(index + 3, close);
+      if (source[close - 1] === "\\" || /[\r\f\v]|(?:^|\n) *\t/u.test(raw)) {
+        throw new Error("Unsupported block string");
+      }
+      tokens.push({ kind: "string", value: blockStringValue(raw) });
       index = close + 3;
       continue;
     }
@@ -557,12 +604,29 @@ function tokenize(source: string): Token[] {
         if (source[cursor] === "\\") {
           const escaped = source[cursor + 1];
           if (escaped === "u") {
-            value += String.fromCharCode(Number.parseInt(source.slice(cursor + 2, cursor + 6), 16));
-            cursor += 6;
+            // `\uXXXX`, or `\u{…}` with four or more hex digits, as GitHub reads them.
+            const braced = /^\{([0-9A-Fa-f]{4,6})\}/u.exec(source.slice(cursor + 2, cursor + 10));
+            const plain = /^[0-9A-Fa-f]{4}/u.exec(source.slice(cursor + 2, cursor + 6));
+            const hex = braced?.[1] ?? plain?.[0];
+            const codePoint = hex === undefined ? Number.NaN : Number.parseInt(hex, 16);
+            if (!(codePoint <= 0x10ffff)) throw new Error("Unsupported string escape");
+            value += braced ? String.fromCodePoint(codePoint) : String.fromCharCode(codePoint);
+            cursor += 2 + (braced ? braced[0].length : 4);
             continue;
           }
-          const map: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
-          value += map[escaped ?? ""] ?? escaped ?? "";
+          const map: Record<string, string> = {
+            n: "\n",
+            t: "\t",
+            r: "\r",
+            b: "\b",
+            f: "\f",
+            '"': '"',
+            "\\": "\\",
+            "/": "/",
+          };
+          const decoded = map[escaped ?? ""];
+          if (decoded === undefined) throw new Error("Unsupported string escape");
+          value += decoded;
           cursor += 2;
           continue;
         }
@@ -803,7 +867,7 @@ function resolveValue(value: GraphqlValue, variables: Record<string, unknown>): 
 }
 
 const GITHUB_REPOSITORY_URL =
-  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
 
 /** First path segments of github.com URLs that are not repository owners. */
 const GITHUB_RESERVED_OWNERS = new Set([
@@ -891,6 +955,59 @@ function collectNodeIds(value: unknown, into: Set<string>, depth = 0): void {
 
 export const GRAPHQL_NODE_IDS_MAX = 50;
 
+/**
+ * Input keys GitHub type-checks as node IDs (`subjectId`, `labelIds`, `id`),
+ * so a value there can only name what that argument acts on. Free text such
+ * as `clientMutationId` can't scope a mutation.
+ */
+function isNodeIdKey(key: string | null): boolean {
+  return (
+    key !== null &&
+    key !== "clientMutationId" &&
+    (key === "id" || key === "ids" || /[a-z](?:Id|Ids)$/u.test(key))
+  );
+}
+
+/** Input keys that name the repository a mutation acts on. */
+const REPOSITORY_NAMING_KEYS = new Set(["repositoryNameWithOwner", "subIssueUrl"]);
+
+/**
+ * The targets that scope one mutation: node IDs under ID-typed keys, and
+ * whether a repository-naming key names a repository.
+ */
+function collectScopeTargets(
+  value: unknown,
+  into: { nodeIds: Set<string>; namesRepository: boolean; unreadableId: boolean },
+  key: string | null = null,
+  depth = 0,
+): void {
+  if (depth > GRAPHQL_MAX_DEPTH || into.nodeIds.size > GRAPHQL_NODE_IDS_MAX) return;
+  if (typeof value === "string") {
+    if (isNodeIdKey(key) && value !== "") {
+      // A value GitHub might read as an ID that the gateway can't: unscoped.
+      if (looksLikeGitHubNodeId(value)) into.nodeIds.add(value);
+      else into.unreadableId = true;
+    }
+    if (key !== null && REPOSITORY_NAMING_KEYS.has(key) && value !== "") {
+      const named = new Map<string, { owner: string; name: string }>();
+      collectNamedRepositories(value, named, key);
+      if (named.size > 0) into.namesRepository = true;
+      // A repository the gateway can't read can't be write-checked: unscoped.
+      else into.unreadableId = true;
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectScopeTargets(item, into, key, depth + 1);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [child, item] of Object.entries(value)) {
+      collectScopeTargets(item, into, child, depth + 1);
+    }
+  }
+}
+
 export function looksLikeGitHubNodeId(value: string): boolean {
   return (
     value.length <= 128 &&
@@ -913,8 +1030,29 @@ export type GitHubGraphqlClassification = {
   accountLevel: boolean;
   /** Node IDs a mutation acts on; resolved to repositories before it runs. */
   nodeIds: string[];
+  /**
+   * Each top-level mutation with the targets its own input names. A write is
+   * scoped only when every mutation that isn't account-level names a
+   * repository of its own, so bundling a mutation on an allowed repository
+   * can't vouch for another one (an organization or project write).
+   */
+  fields: GitHubGraphqlMutationField[];
   /** Top-level mutation fields, for the approval card. */
   mutations: string[];
+};
+
+export type GitHubGraphqlMutationField = {
+  name: string;
+  /** Node IDs in this mutation's input. */
+  nodeIds: string[];
+  /** Its input names a repository directly (`repositoryNameWithOwner`, a URL). */
+  namesRepository: boolean;
+  /** An ID-typed input holds a value the gateway can't read as a node ID. */
+  unreadableId: boolean;
+  /** It acts on the person's account only (stars, notifications). */
+  accountLevel: boolean;
+  /** Unrecognised, or mapped as sensitive: any node outside a repository leaves it unscoped. */
+  sensitive: boolean;
 };
 
 /**
@@ -923,11 +1061,12 @@ export type GitHubGraphqlClassification = {
  */
 export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassification {
   const unknown = (title: string): GitHubGraphqlClassification => ({
-    action: sensitive(title),
+    action: unscopedWrite(sensitive(title)),
     repositories: [],
     mutationRepositories: [],
     accountLevel: false,
     nodeIds: [],
+    fields: [],
     mutations: [],
   });
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -966,12 +1105,17 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   // (null for viewer), so `repository(name:)` under it is scoped too. A
   // fragment is visited once per owner context.
   const visitedFragments = new Set<string>();
+  // Anything nested past the limit is unread, so the request is unrecognised.
+  let tooDeep = false;
   const visit = (
     selections: GraphqlSelection[],
     depth: number,
     owner: string | null | undefined,
   ) => {
-    if (depth > GRAPHQL_MAX_DEPTH) return;
+    if (depth > GRAPHQL_MAX_DEPTH) {
+      tooDeep = true;
+      return;
+    }
     for (const selection of selections) {
       if (selection.kind === "spread") {
         const key = `${selection.name}\u0000${owner === undefined ? "" : (owner ?? "@viewer")}`;
@@ -1011,6 +1155,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     }
   };
   visit(operation.selections, 0, undefined);
+  if (tooDeep) return unknown("Unrecognised GitHub GraphQL request");
 
   if (operation.type !== "mutation") {
     return {
@@ -1019,6 +1164,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       mutationRepositories: [],
       accountLevel: false,
       nodeIds: [],
+      fields: [],
       mutations: [],
     };
   }
@@ -1026,7 +1172,10 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   const topLevel: GraphqlField[] = [];
   const expanded = new Set<string>();
   const collectTopLevel = (selections: GraphqlSelection[], depth: number) => {
-    if (depth > GRAPHQL_MAX_DEPTH) return;
+    if (depth > GRAPHQL_MAX_DEPTH) {
+      tooDeep = true;
+      return;
+    }
     for (const selection of selections) {
       if (selection.kind === "field") topLevel.push(selection.field);
       else if (selection.kind === "inline") collectTopLevel(selection.selections, depth + 1);
@@ -1037,14 +1186,16 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     }
   };
   collectTopLevel(operation.selections, 0);
+  if (tooDeep) return unknown("Unrecognised GitHub GraphQL request");
   const mutations = topLevel.map((field) => field.name).filter((name) => name !== "__typename");
   if (mutations.length === 0) return unknown("Unrecognised GitHub GraphQL request");
 
   const tools = new Set<string>();
-  let alwaysAsk = false;
+  let anySensitive = false;
   const titles: string[] = [];
   const nodeIds = new Set<string>();
   const named = new Map<string, { owner: string; name: string }>();
+  const fields: GitHubGraphqlMutationField[] = [];
   // Force updates and deletions: they ask unless the gateway confirms every
   // ref is a branch other than the default branch.
   const rewriteTargets: GitHubGatewayRefTarget[] = [];
@@ -1054,8 +1205,18 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     const args = Object.fromEntries(
       Object.entries(field.args).map(([key, value]) => [key, resolveValue(value, variables)]),
     );
+    // Every ID and repository found is checked; only typed targets scope it.
     collectNodeIds(args, nodeIds);
     collectNamedRepositories(args, named);
+    const scope = { nodeIds: new Set<string>(), namesRepository: false, unreadableId: false };
+    collectScopeTargets(args, scope);
+    const fieldTargets = {
+      name: field.name,
+      nodeIds: [...scope.nodeIds],
+      namesRepository: scope.namesRepository,
+      unreadableId: scope.unreadableId,
+      accountLevel: ACCOUNT_LEVEL_MUTATIONS.has(field.name),
+    };
     let mapped = GRAPHQL_MUTATIONS[field.name];
     const input =
       args.input !== null && typeof args.input === "object" && !Array.isArray(args.input)
@@ -1086,8 +1247,11 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
         update !== null && typeof update === "object" ? (update as Record<string, unknown>) : {},
       );
       // A ref whose `afterOid` is all zeros is deleted.
+      // Anything but a full commit ID counts as a deletion.
       const deletes = (update: Record<string, unknown>) =>
-        typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid);
+        typeof update.afterOid !== "string" ||
+        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(update.afterOid) ||
+        /^0+$/u.test(update.afterOid);
       const rewrites = records.filter((update) => deletes(update) || forced(update));
       for (const update of rewrites) {
         if (typeof update.name === "string" && typeof input?.repositoryId === "string") {
@@ -1107,30 +1271,33 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
           : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
     }
     if (!mapped) {
-      alwaysAsk = true;
+      anySensitive = true;
       titles.push(`GitHub ${field.name}`);
+      fields.push({ ...fieldTargets, sensitive: true });
       continue;
     }
+    fields.push({ ...fieldTargets, sensitive: mapped.sensitive === true });
     for (const tool of mapped.tools) tools.add(tool);
-    if (mapped.alwaysAsk) alwaysAsk = true;
+    if (mapped.sensitive) anySensitive = true;
     titles.push(mapped.title);
   }
-  // Too many named repositories to check: ask.
-  if (named.size > GRAPHQL_NODE_IDS_MAX) alwaysAsk = true;
   const action = write(
     [...tools],
     [...new Set(titles)].join(", ").slice(0, 200),
-    alwaysAsk || unknownRewrite || rewriteTargets.length > 0,
+    anySensitive || unknownRewrite || rewriteTargets.length > 0,
   );
+  const confirmed =
+    rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
+      ? { ...action, refRewrites: { targets: rewriteTargets, sensitiveOtherwise: anySensitive } }
+      : action;
   return {
-    action:
-      rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
-        ? { ...action, refRewrites: { targets: rewriteTargets, alwaysAskOtherwise: alwaysAsk } }
-        : action,
+    // Too many named repositories to check: ask.
+    action: named.size > GRAPHQL_NODE_IDS_MAX ? unscopedWrite(action) : confirmed,
     repositories,
     mutationRepositories: [...named.values()],
     accountLevel: mutations.every((name) => ACCOUNT_LEVEL_MUTATIONS.has(name)),
     nodeIds: [...nodeIds],
+    fields,
     mutations,
   };
 }

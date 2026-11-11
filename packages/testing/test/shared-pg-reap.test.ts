@@ -86,6 +86,27 @@ describe("ownership records", () => {
     }
   });
 
+  test("on a server only this machine reaches, an owner from before the last reboot is dead", () => {
+    const sameMachine = { sameMachine: true };
+    // Same host, later boot: no process survives a reboot, even if the pid
+    // and start time happen to match a live process now.
+    expect(ownerStatus(owner, { ...here, boot: "b2" }, probe(true, "100"), sameMachine)).toBe(
+      "dead",
+    );
+    // Without that guarantee an earlier boot proves nothing.
+    expect(ownerStatus(owner, { ...here, boot: "b2" }, probe(true, "100"))).toBe("unknown");
+    // Another host, or a boot id we cannot read, stays unknown either way.
+    expect(
+      ownerStatus(owner, { ...here, host: "x", boot: "b2" }, probe(false, ""), sameMachine),
+    ).toBe("unknown");
+    expect(ownerStatus({ ...owner, boot: "" }, here, probe(false, ""), sameMachine)).toBe(
+      "unknown",
+    );
+    // The same boot follows the ordinary pid rules.
+    expect(ownerStatus(owner, here, probe(true, "100"), sameMachine)).toBe("alive");
+    expect(ownerStatus(owner, here, probe(false, ""), sameMachine)).toBe("dead");
+  });
+
   test("this process is alive to itself", () => {
     expect(ownerStatus(currentDatabaseOwner(), currentProcessIdentity())).toBe("alive");
   });
@@ -214,12 +235,12 @@ test("reaping errors are reported, never thrown", async () => {
   }
 });
 
-test("template pruning is opt-in", () => {
-  expect(templatePruningEnabled({})).toBe(false);
-  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "" })).toBe(false);
+test("template pruning is on unless turned off", () => {
+  expect(templatePruningEnabled({})).toBe(true);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "" })).toBe(true);
   expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "0" })).toBe(false);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: " False " })).toBe(false);
   expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "1" })).toBe(true);
-  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: " TRUE " })).toBe(true);
 });
 
 // Against the real test PostgreSQL, confined to a unique name scope and a
@@ -498,8 +519,31 @@ describe("reaping a real cluster", () => {
       }
       const first = await reap({ maxDrops: 2, pruneTemplates: false });
       expect(first.dropped).toHaveLength(2);
+      expect(first.complete).toBe(false);
       const second = await reap({ maxDrops: 2, pruneTemplates: false });
       expect(second.dropped).toHaveLength(1);
+      expect(second.complete).toBe(true);
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a pass asked to stop stops before its next drop and the next pass carries on",
+    async () => {
+      if (!admin) return;
+      const { sub, reap } = subScope("s");
+      for (let i = 0; i < 3; i += 1) {
+        await createDatabase(`${sub}stop_${hex12()}`, databaseOwnerComment(deadOwner));
+      }
+      let checks = 0;
+      // Asked to stop once the first drop is done.
+      const stopped = await reap({ pruneTemplates: false, shouldStop: () => checks++ >= 1 });
+      expect(stopped.errors).toEqual([]);
+      expect(stopped.dropped).toHaveLength(1);
+      expect(stopped.complete).toBe(false);
+      const next = await reap({ pruneTemplates: false });
+      expect(next.dropped).toHaveLength(2);
+      expect(next.complete).toBe(true);
     },
     DB_TEST_TIMEOUT_MS,
   );
@@ -846,138 +890,108 @@ describe("reaping a real cluster", () => {
     DB_TEST_TIMEOUT_MS,
   );
 
-  test(
-    "prunes idle templates sooner once there are more than the soft cap",
-    async () => {
-      if (!admin) return;
-      const { templatePrefix, reap } = subScope("p");
-      const now = Date.now();
-      const hour = 60 * 60_000;
-      const make = (idleMs: number, by: "harness" | "reaper" = "harness") =>
-        createTemplate(`${templatePrefix}${hex12()}`, templateStampComment(now - idleMs, by));
-      const newest = await make(2 * hour);
-      const a = await make(2 * hour + 1000);
-      const b = await make(3 * hour);
-      const legacy = await make(3 * hour, "reaper");
-      const options = {
-        templateKeep: 1,
-        templateMinIdleMs: 6 * hour,
-        templatePressureIdleMs: hour,
-        maxTemplateDrops: 5,
-      };
-      // Under the cap the 6-hour rule applies: nothing is idle long enough.
-      const relaxed = await reap({ ...options, templateSoftCap: 10 });
-      expect(relaxed.templatesDropped).toEqual([]);
-      const pressed = await reap({ ...options, templateSoftCap: 2 });
-      expect(pressed.errors).toEqual([]);
-      expect(pressed.templatesDropped).toEqual([b, a]);
-      // The most recent one, and an older checkout's, keep their own clocks.
-      for (const kept of [newest, legacy]) expect(await exists(kept)).toBe(true);
-    },
-    DB_TEST_TIMEOUT_MS,
-  );
-
-  test("the harness records its owner and its own detached reaper cleans up after a killed run", async () => {
+  // The real lifecycle: test files run as `bun test --no-orphans` processes
+  // (as in `test:unit`), which stop everything they started the moment they
+  // finish, so nothing may be left to a process that outlives the run.
+  test("what killed runs leave behind is dropped by the next bun test run itself", async () => {
     if (!admin) return;
-    const state = await mkdtemp(join(tmpdir(), "og-reap-harness-"));
-    const stateDir = async () =>
-      join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-"))!);
-    let reaperPid: number | null = null;
-    const reaperExited = async (timeoutMs: number) => {
-      const pid = reaperPid;
-      if (pid === null) return;
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(pid, 0);
-        } catch {
-          return; // the reaper finished
-        }
-        await Bun.sleep(250);
-      }
+    const state = await mkdtemp(join(tmpdir(), "og-reap-lifecycle-"));
+    const harness = fileURLToPath(new URL("../src/shared-pg.ts", import.meta.url));
+    const env = {
+      ...process.env,
+      TMPDIR: state,
+      OPENGENI_TEST_PG_URL: adminUrl,
+      OPENGENI_TEST_PG_NATIVE: undefined,
+      OPENGENI_TEST_PG_REAP: undefined,
+      // Scoped names and a scoped machine identity: only this test's runs can
+      // judge these owners dead.
+      OPENGENI_TEST_PG_REAP_SCOPE: scope,
+      CI: undefined,
     };
-    try {
-      const env = {
-        ...process.env,
-        TMPDIR: state,
-        OPENGENI_TEST_PG_URL: adminUrl,
-        OPENGENI_TEST_PG_NATIVE: undefined,
-        OPENGENI_TEST_PG_REAP: "0",
-        // Scoped names and a scoped machine identity: only this test's own
-        // reaper can judge the orphan's owner dead.
-        OPENGENI_TEST_PG_REAP_SCOPE: scope,
-        CI: undefined,
-      };
-      // A test process that acquires a database and dies without releasing it.
-      const victim = Bun.spawn(
+    const label = scope.slice(3);
+    const scoped = async () =>
+      (
+        await admin!<{ datname: string }[]>`
+          SELECT datname FROM pg_database
+           WHERE starts_with(datname, ${scope}) AND datname ~ '_(victim|run)_[0-9a-f]{12}$'`
+      ).map((row) => row.datname);
+
+    // A test process that acquires a database and dies without releasing it,
+    // either exiting early or killed with SIGKILL. Reaping is off in it, so
+    // only the following run can clean up.
+    const victim = async (kill: boolean): Promise<string> => {
+      const child = Bun.spawn(
         [
           process.execPath,
           "--no-env-file",
           "-e",
-          `const { acquireBlankTestDatabase } = await import("@opengeni/testing/shared-pg");
-             const db = await acquireBlankTestDatabase(${JSON.stringify(`${scope.slice(3)}victim`)});
-             console.log(new URL(db.databaseUrl).pathname.slice(1));
-             process.exit(0);`,
+          `const { acquireBlankTestDatabase } = await import(${JSON.stringify(harness)});
+           const db = await acquireBlankTestDatabase(${JSON.stringify(`${label}victim`)});
+           console.log(new URL(db.databaseUrl).pathname.slice(1));
+           ${kill ? "setInterval(() => undefined, 1000);" : "process.exit(0);"}`,
         ],
+        { cwd: root, env: { ...env, OPENGENI_TEST_PG_REAP: "0" }, stdout: "pipe", stderr: "pipe" },
+      );
+      const reader = child.stdout.getReader();
+      let output = "";
+      while (!output.includes("\n")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        output += new TextDecoder().decode(chunk.value);
+      }
+      if (kill) child.kill("SIGKILL");
+      await child.exited;
+      const name = output.trim();
+      expect(name.startsWith(`${scope}victim_`)).toBe(true);
+      return name;
+    };
+
+    // An ordinary short test file: acquire in beforeAll, release in afterAll.
+    // Every DROP DATABASE waits for a checkpoint, which a busy server can make
+    // slow, so its one test takes a moment, as real ones do.
+    const testFile = join(state, "short-run.test.ts");
+    await writeFile(
+      testFile,
+      `import { afterAll, beforeAll, expect, test } from "bun:test";
+       import { acquireBlankTestDatabase } from ${JSON.stringify(harness)};
+       let db: Awaited<ReturnType<typeof acquireBlankTestDatabase>> = null;
+       beforeAll(async () => { db = await acquireBlankTestDatabase(${JSON.stringify(`${label}run`)}); });
+       afterAll(async () => { await db?.release(); });
+       test("has a database", async () => { expect(db).not.toBeNull(); await Bun.sleep(1000); });
+      `,
+    );
+    const run = async () => {
+      const child = Bun.spawn(
+        [process.execPath, "test", "--no-orphans", "--timeout=60000", testFile],
         { cwd: root, env, stdout: "pipe", stderr: "pipe" },
       );
       const [stdout, stderr, code] = await Promise.all([
-        new Response(victim.stdout).text(),
-        new Response(victim.stderr).text(),
-        victim.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
       ]);
-      expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
-      const orphan = stdout.trim();
-      expect(orphan.startsWith(scope)).toBe(true);
-      const [row] = await admin`
-          SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
-           WHERE datname = ${orphan}`;
-      const owner = parseDatabaseOwnerComment(row!.comment as string);
-      expect(owner?.pid).toBe(victim.pid);
-      expect(owner?.host.endsWith(`#${scope}`)).toBe(true);
+      expect({ code, output: `${stdout}${stderr}` }).toMatchObject({ code: 0 });
+    };
 
-      // The next acquisition starts the background reaper, which drops it.
-      // It stays alive until its reaper exits: `bun test --no-orphans` (as in
-      // `test:unit`) kills a detached grandchild as soon as its parent exits.
-      const next = Bun.spawn(
-        [
-          process.execPath,
-          "--no-env-file",
-          "-e",
-          `const { acquireBlankTestDatabase } = await import("@opengeni/testing/shared-pg");
-             const { readdir, readFile } = await import("node:fs/promises");
-             const { join } = await import("node:path");
-             const db = await acquireBlankTestDatabase("reap-next");
-             await db.release();
-             const state = ${JSON.stringify(state)};
-             const dir = join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-")));
-             const { pid } = JSON.parse(await readFile(join(dir, "reaper.json"), "utf8"));
-             const deadline = Date.now() + 120_000;
-             while (pid > 0 && Date.now() < deadline) {
-               try { process.kill(pid, 0); } catch { break; }
-               await Bun.sleep(250);
-             }`,
-        ],
-        {
-          cwd: root,
-          env: { ...env, OPENGENI_TEST_PG_REAP: undefined },
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      );
-      expect(await next.exited).toBe(0);
-      const marker = JSON.parse(await readFile(join(await stateDir(), "reaper.json"), "utf8")) as {
-        pid: number;
-      };
-      reaperPid = marker.pid;
-      await reaperExited(60_000);
-      expect(await exists(orphan)).toBe(false);
-      // Proof it was this harness's reaper, not another one on the server.
-      const log = await readFile(join(await stateDir(), "reaper.log"), "utf8");
-      expect(log).toContain(orphan);
+    try {
+      const exited = await victim(false);
+      const killed = await victim(true);
+      expect(await scoped()).toEqual(expect.arrayContaining([exited, killed]));
+
+      // The next run cleans up before it ends; nothing is left running after it.
+      await run();
+      expect(await scoped()).toEqual([]);
+      const stateDir = join(state, (await readdir(state)).find((e) => e.startsWith("opengeni-"))!);
+      const log = await readFile(join(stateDir, "reaper.log"), "utf8");
+      expect(log).toContain(exited);
+      expect(log).toContain(killed);
+
+      // And so does the run right after it: no interval between passes.
+      const again = await victim(true);
+      await run();
+      expect(await scoped()).toEqual([]);
+      expect(await readFile(join(stateDir, "reaper.log"), "utf8")).toContain(again);
     } finally {
-      // A reaper still running would recreate its state directory.
-      await reaperExited(30_000);
       await rm(state, { recursive: true, force: true });
     }
   }, 240_000);

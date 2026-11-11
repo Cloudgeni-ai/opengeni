@@ -72,7 +72,11 @@ import {
 } from "@opengeni/db";
 import { parseRequestJson } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
-import { teamsConnectionRefused, teamsLinkConflict } from "./teams-setup-refusals";
+import {
+  teamsConnectionRefused,
+  teamsLinkConflict,
+  teamsLinkIdentityMismatch,
+} from "./teams-setup-refusals";
 import {
   teamsBotConfigured,
   teamsTenantEnabled,
@@ -160,7 +164,7 @@ function configuredBase(deps: ApiRouteDeps): string {
 }
 type TeamsPersonalContact = Pick<
   TeamsMessage,
-  "tenantId" | "actorId" | "conversationId" | "serviceUrl" | "personal"
+  "tenantId" | "actorId" | "actorName" | "conversationId" | "serviceUrl" | "personal"
 >;
 function proofLink(
   deps: ApiRouteDeps,
@@ -174,6 +178,8 @@ function proofLink(
     actorId: m.actorId,
     workspaceId: i?.workspace_id ?? null,
     generation: i?.generation ?? null,
+    // A refused account link names whose link it is.
+    ...(i && m.actorName ? { actorName: m.actorName } : {}),
     // Setup confirms in the chat that asked for it once the organization is connected.
     ...(i ? {} : { conversation: { id: m.conversationId, serviceUrl: m.serviceUrl } }),
   });
@@ -318,7 +324,7 @@ export async function sendTeamsReply(
   return teamsReceipt(response);
 }
 const ONBOARDING_TEXT = {
-  setup: () => "Connect Teams to your Opengeni workspace.",
+  setup: () => "Connect Teams to Opengeni.",
   link: () => "Link your Opengeni account to use this bot.",
   connect: (appName: string) => `Welcome to ${appName}. ${teamsConnectText(appName)}`,
 } as const;
@@ -1503,18 +1509,22 @@ function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
 }
 /**
  * The Microsoft sign-in must belong to this exact setup (proof nonce, tenant,
- * Teams user, Opengeni person and workspace) and prove a tenant administrator.
+ * Teams user, Opengeni person and workspace). Self-serve setup also proves a
+ * tenant administrator; an operator-approved installer proves only that they
+ * are the Teams user the setup link names.
  */
-async function requireTenantAdministrator(
+async function requireSetupSignIn(
   deps: ApiRouteDeps,
   p: TeamsLinkProof,
   grant: AccessGrant,
   microsoft: { code: string; state: string },
+  purpose: "teams-admin-setup" | "teams-installer-setup",
 ): Promise<TeamsAdminIdentity> {
   const config = teamsAdminSignInConfig(deps);
   try {
     const state = verifyTeamsAdminState(config.stateSecret, microsoft.state);
     if (
+      state.purpose !== purpose ||
       state.proofNonce !== p.nonce ||
       state.tenantId !== p.tenantId ||
       state.actorId !== p.actorId ||
@@ -1532,7 +1542,8 @@ async function requireTenantAdministrator(
 /**
  * Starts setup for a verified browser human who administers `grant`'s shared
  * workspace. Returns the Microsoft sign-in URL that proves a tenant
- * administrator, or null when the operator approved this Teams identity.
+ * administrator or, for an installer the operator approved, only that they
+ * are the Teams user the setup link names.
  */
 export async function startTeamsSetupSignIn(
   deps: ApiRouteDeps,
@@ -1541,11 +1552,15 @@ export async function startTeamsSetupSignIn(
 ): Promise<{ authorizationUrl: string | null }> {
   const p = setupProof(deps, setupToken);
   await requireSetupWorkspace(deps, grant.workspaceId, p.tenantId);
-  // An operator-approved installer connects without a Microsoft sign-in.
-  if (operatorApprovedInstaller(deps, p)) return { authorizationUrl: null };
-  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
+  const approved = operatorApprovedInstaller(deps, p);
+  if (!approved && !teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
+    throw setupUnavailable(p.tenantId);
+  // Microsoft can only prove a work or school identity.
+  if (approved && !teamsSelfServeTenantAllowed(p.tenantId))
+    throw teamsConnectionRefused("consumer_tenant");
   const config = teamsAdminSignInConfig(deps);
   const { token, state } = mintTeamsAdminState(config.stateSecret, {
+    purpose: approved ? "teams-installer-setup" : "teams-admin-setup",
     proofNonce: p.nonce,
     tenantId: p.tenantId,
     actorId: p.actorId,
@@ -1557,8 +1572,9 @@ export async function startTeamsSetupSignIn(
 
 /**
  * Binds the Teams tenant to `grant`'s shared workspace for a verified browser
- * human who administers it, and links the installer. Without operator
- * approval this needs the Microsoft sign-in from `startTeamsSetupSignIn`.
+ * human who administers it, and links the installer. It needs the Microsoft
+ * sign-in from `startTeamsSetupSignIn`: as a tenant administrator, or, for an
+ * installer the operator approved, as the Teams user the setup link names.
  */
 export async function completeTeamsSetup(
   deps: ApiRouteDeps,
@@ -1578,13 +1594,18 @@ export async function completeTeamsSetup(
   const p = setupProof(deps, setupToken);
   const approved = operatorApprovedInstaller(deps, p);
   let admin: TeamsAdminIdentity | null = null;
-  if (!approved) {
+  if (approved) {
+    // The installer's Teams account is linked below, so prove who they are
+    // before anything else, as for any account link.
+    if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
+    await requireSetupSignIn(deps, p, grant, microsoft, "teams-installer-setup");
+  } else {
     if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
       throw setupUnavailable(p.tenantId);
     if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
     // Prove the tenant administrator before revealing anything about the
     // tenant's existing binding.
-    admin = await requireTenantAdministrator(deps, p, grant, microsoft);
+    admin = await requireSetupSignIn(deps, p, grant, microsoft, "teams-admin-setup");
   }
   const workspace = await getWorkspace(deps.db, grant.workspaceId);
   if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
@@ -1690,12 +1711,14 @@ export async function completeTeamsSetup(
   return await status(deps, grant.workspaceId, grant.subjectId);
 }
 /**
- * Links the signed-in person to the Teams account a link proof names, in the
- * workspace's current installation. One Teams account per Opengeni account in
- * a workspace and one Opengeni account per Teams account: a conflict says
- * which side is already linked, never to whom.
+ * The account-link proof, when it belongs to `grant`'s workspace and its
+ * current installation.
  */
-export async function linkTeamsAccount(deps: ApiRouteDeps, grant: AccessGrant, token: string) {
+async function currentLinkProof(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  token: string,
+): Promise<{ p: TeamsLinkProof; i: TeamsInstallation }> {
   const p = proof(deps, token);
   const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
   if (
@@ -1709,6 +1732,92 @@ export async function linkTeamsAccount(deps: ApiRouteDeps, grant: AccessGrant, t
     throw new HTTPException(403, {
       message: "This Teams link does not match the current workspace installation.",
     });
+  return { p, i };
+}
+/**
+ * Starts the Microsoft sign-in that proves the person opening an account link
+ * is the Teams user it names. Any member can link their own Teams account, so
+ * it needs no administrator role.
+ */
+export async function startTeamsLinkSignIn(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  token: string,
+): Promise<{ authorizationUrl: string }> {
+  const { p } = await currentLinkProof(deps, grant, token);
+  if (!teamsSelfServeTenantAllowed(p.tenantId))
+    throw teamsConnectionRefused("link_consumer_tenant");
+  const config = teamsAdminSignInConfig(deps);
+  const { token: stateToken, state } = mintTeamsAdminState(config.stateSecret, {
+    purpose: "teams-account-link",
+    proofNonce: p.nonce,
+    tenantId: p.tenantId,
+    actorId: p.actorId,
+    subjectId: grant.subjectId,
+    workspaceId: grant.workspaceId,
+  });
+  return { authorizationUrl: teamsAdminAuthorizationUrl(config, stateToken, state) };
+}
+/**
+ * The Microsoft sign-in must belong to this exact link (proof nonce, tenant,
+ * Teams user, Opengeni person and workspace) and be that Teams user: `tid` and
+ * `oid` equal the link's tenant and Teams user.
+ */
+async function requireLinkedMicrosoftIdentity(
+  deps: ApiRouteDeps,
+  p: TeamsLinkProof,
+  grant: AccessGrant,
+  microsoft: { code: string; state: string },
+): Promise<void> {
+  const config = teamsAdminSignInConfig(deps);
+  try {
+    const state = verifyTeamsAdminState(config.stateSecret, microsoft.state);
+    if (
+      state.purpose !== "teams-account-link" ||
+      state.proofNonce !== p.nonce ||
+      state.tenantId !== p.tenantId ||
+      state.actorId !== p.actorId ||
+      state.subjectId !== grant.subjectId ||
+      state.workspaceId !== grant.workspaceId
+    )
+      throw new TeamsAdminProofError("state_mismatch");
+    await verifyTeamsAdminSignIn(config, state, microsoft.code, deps.teamsAdminSignInFetch);
+  } catch (error) {
+    if (!(error instanceof TeamsAdminProofError)) throw error;
+    deps.observability?.info("Teams account link refused", { reason: error.code });
+    switch (error.code) {
+      case "tenant_mismatch":
+      case "user_mismatch":
+        throw teamsLinkIdentityMismatch(p.actorName, error.signedInAs);
+      case "consumer_tenant":
+        throw teamsConnectionRefused("link_consumer_tenant");
+      case "state_invalid":
+      case "state_expired":
+      case "state_mismatch":
+        throw teamsConnectionRefused("link_sign_in_expired");
+      default:
+        throw teamsConnectionRefused("link_sign_in_failed");
+    }
+  }
+}
+/**
+ * Links the signed-in person to the Teams account a link proof names, in the
+ * workspace's current installation, once a Microsoft sign-in from
+ * `startTeamsLinkSignIn` proves they are that Teams user. A link proof alone
+ * is not enough: whoever it is forwarded to can't link someone else's Teams
+ * account to themselves. One Teams account per Opengeni account in a
+ * workspace and one Opengeni account per Teams account: a conflict says which
+ * side is already linked, never to whom.
+ */
+export async function linkTeamsAccount(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  input: { token: string; microsoft?: { code: string; state: string } | undefined },
+) {
+  const { p, i } = await currentLinkProof(deps, grant, input.token);
+  if (!input.microsoft) throw teamsConnectionRefused("link_sign_in_required");
+  // Prove the Teams identity before revealing anything about existing links.
+  await requireLinkedMicrosoftIdentity(deps, p, grant, input.microsoft);
   try {
     await linkTeamsActor(deps.db, i, {
       actorId: p.actorId,
@@ -1811,12 +1920,30 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     return c.json({ ok: true });
   });
-  app.post(`${ROOT}/link`, async (c) => {
+  app.post(`${ROOT}/link/microsoft-sign-in`, async (c) => {
     const human = await browserHuman(c, deps);
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
     if (grant.subjectId !== human.subjectId) throw new HTTPException(403);
     const { token } = await parseRequestJson(c, z.object({ token: z.string().max(4096) }).strict());
-    await linkTeamsAccount(deps, grant, token);
+    return c.json(await startTeamsLinkSignIn(deps, grant, token));
+  });
+  app.post(`${ROOT}/link`, async (c) => {
+    const human = await browserHuman(c, deps);
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
+    if (grant.subjectId !== human.subjectId) throw new HTTPException(403);
+    const input = await parseRequestJson(
+      c,
+      z
+        .object({
+          token: z.string().max(4096),
+          microsoft: z
+            .object({ code: z.string().min(1).max(4096), state: z.string().min(1).max(4096) })
+            .strict()
+            .optional(),
+        })
+        .strict(),
+    );
+    await linkTeamsAccount(deps, grant, input);
     return c.json({ ok: true });
   });
   app.delete(`${ROOT}/link`, async (c) => {

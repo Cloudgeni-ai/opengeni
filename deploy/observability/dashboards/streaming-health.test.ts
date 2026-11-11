@@ -53,9 +53,12 @@ describe("streaming health dashboard", () => {
     expect(exprs.some((expr) => expr.includes('content="any"'))).toBe(true);
     expect(exprs.some((expr) => expr.includes('content="text"'))).toBe(true);
 
-    const baseline = byTitle("Provider TTFT p90: last 30m vs trailing 24h baseline");
+    const baseline = byTitle("Provider regression signal p90: last 30m vs trailing 24h baseline");
     expect(JSON.stringify(baseline?.targets)).toContain(
-      "opengeni:model_provider_ttft_seconds:p90_24h_baseline",
+      "opengeni:model_provider_regression_signal_seconds:p90_24h_baseline",
+    );
+    expect(JSON.stringify(baseline?.targets)).toContain(
+      "opengeni:model_provider_regression_signal_seconds:p90_30m",
     );
 
     const ours = byTitle("Opengeni pre-dispatch p95 / p50 (model entry -> provider dispatch)");

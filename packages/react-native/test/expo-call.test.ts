@@ -125,4 +125,32 @@ describe("Expo call adapter on Android", () => {
     expect(await incoming.openFullScreenRingSettings!()).toBe(true);
     expect(opened).toEqual(["settings"]);
   });
+
+  test("voice commands: launcher shortcuts and start requests that name the workspace", async () => {
+    const written: unknown[] = [];
+    const pinned: unknown[] = [];
+    // Builds before voice commands offer neither.
+    expect(createExpoCallAdapter()!.setCallCommands).toBeUndefined();
+    expect(createExpoCallAdapter()!.pinCallCommand).toBeUndefined();
+    Object.assign(androidModule, {
+      setCallCommands: async (commands: unknown[]) => void written.push(commands),
+      pinCallCommand: async (command: unknown) => {
+        pinned.push(command);
+        return true;
+      },
+      takePendingStartRequest: async () => ({ target: "s1", workspaceId: "w2" }),
+    });
+    const adapter = createExpoCallAdapter()!;
+    const command = { id: "c1", workspaceId: "w2", sessionId: "s1", name: "Research" };
+    await adapter.setCallCommands!([command]);
+    expect(written).toEqual([[{ ...command, synonyms: [] }]]);
+    expect(await adapter.pinCallCommand!(command)).toBe(true);
+    expect(pinned).toEqual([{ ...command, synonyms: [] }]);
+    expect(await adapter.takePendingStartRequest()).toEqual({ target: "s1", workspaceId: "w2" });
+    Object.assign(androidModule, {
+      takePendingStartRequest: async () => ({ target: null, workspaceId: "w2" }),
+    });
+    expect(await adapter.takePendingStartRequest()).toEqual({ target: null, workspaceId: null });
+    Object.assign(androidModule, { takePendingStartRequest: async () => null });
+  });
 });
