@@ -828,7 +828,34 @@ a `batch/<id>` branch (CI runs exactly what the combined change affects,
 including integration, end-to-end and browser lanes) and lands each PR as one
 squash commit, so the PR shows as merged. Agent comments, VM attestations and
 reviewer session UUIDs are not admission requirements, and the batcher adds no
-human or agent approval gate beyond the repository's protection policy.
+human or agent approval gate beyond the repository's protection policy and the
+model request review below.
+
+### Model request changes
+
+A change to what Opengeni sends to model providers lands only with an
+approving review by the maintainer, `@jorgensandhaug`, on the PR's current
+head commit. That covers provider request construction and adapters (request
+bodies, headers, betas, model options, reasoning replay, signatures,
+cache-control placement), history projection and replay into model input,
+compaction requests, system prompt and context assembly, and central
+model-facing tool schema and result shaping. The exact paths are the model
+request section of [`.github/CODEOWNERS`](.github/CODEOWNERS). The merge
+batcher enforces it with its own check: it holds such a PR, even with
+`queue-ready`, until the maintainer approves its head, and every new push needs
+a new approval. The **Model request review** status shows the same verdict on
+the PR.
+
+- Open such a change as a **draft** PR whose description says in plain words
+  what changes on the wire and the possible quality, prompt-caching, behaviour
+  or bug risks. Prompt-cache stability comes first: never change text an
+  earlier request already sent.
+- Only the maintainer approves it. Agents must never submit the approving
+  review (or the `/approve-model-request` review on his own PRs) themselves,
+  including with his credentials or token, and must never work around the gate
+  by splitting, renaming or moving the change out of the guarded paths.
+- Adding a new place that builds model requests? Add its path to the CODEOWNERS
+  section in the same PR.
 
 The batcher is the **only normal path to main**. Do not squash or merge a PR to
 main directly, use `--admin`, call a merge API or push main. Do not create,

@@ -231,6 +231,7 @@ export {
   connectorActionPoliciesForAccountRoutes,
   connectorToolPolicyRevision,
   ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
 } from "./connector-action-policy";
 import {
   agentSelectionNotes,
@@ -31849,17 +31850,21 @@ export async function resolveAttemptConnectorToolDecision(
     serverId: string;
     toolName: string;
     defaultDecision: "allow" | "ask";
+    /** Decide from the resolved policy instead of its plain decision. */
+    decide?: (resolved: ResolvedConnectorActionPolicy) => "allow" | "ask" | "block";
   },
 ): Promise<"allow" | "ask" | "block"> {
+  const { decide, ...policyInput } = input;
   return await withRlsContext(
     db,
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
       const resolved = resolveConnectorActionPolicy(snapshot, {
-        ...input,
-        actionName: input.toolName,
+        ...policyInput,
+        actionName: policyInput.toolName,
       });
+      if (decide) return decide(resolved);
       return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
     },
   );

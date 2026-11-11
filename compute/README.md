@@ -255,7 +255,8 @@ what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
 reading. Everything else that writes is booked the same way, before it can
 write: an awake VM books what its disk may still grow by (its length in
-whole allocation units, less what it holds alone, measured every sample;
+whole allocation units, less what it holds alone, measured every sample
+off the agent's loop, which never waits long for it;
 on XFS and btrfs only blocks no template or base image shares count); a
 wake from object storage books its local disk, the memory image its pager
 fills and its device state until the image is whole; a new sandbox's

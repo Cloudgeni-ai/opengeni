@@ -1,0 +1,20 @@
+name: Model request review signal
+# Only wakes the Model request review workflow (through workflow_run) when a
+# review is submitted, edited or dismissed. It runs from the PR's merge ref, so
+# it does nothing itself: the evaluation runs from main.
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+jobs:
+  signal:
+    name: Signal a review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Signal
+        env:
+          PULL: ${{ github.event.pull_request.number }}
+        run: echo "Review on #$PULL; the Model request review workflow evaluates it from main."

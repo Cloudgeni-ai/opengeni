@@ -146,17 +146,19 @@ function appContext(permissions: string[], update: ReturnType<typeof mock>) {
     personalGitHubSelection: null,
     personalGitHubBusy: false,
     client: {
-      getGitHubActionPolicies: mock(async () => ({
-        enabled: true,
-        actors: [
-          {
-            kind: "workspace_app" as const,
-            installationId: 71,
-            label: "Opengeni bot on Cloudgeni-ai",
-            groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
-          },
-        ],
-      })),
+      getGitHubActionPolicies: mock(
+        async (): Promise<GitHubActionPoliciesResponse> => ({
+          enabled: true,
+          actors: [
+            {
+              kind: "workspace_app" as const,
+              installationId: 71,
+              label: "Opengeni bot on Cloudgeni-ai",
+              groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
+            },
+          ],
+        }),
+      ),
       updateGitHubActionPolicy: update,
     },
     disconnectGitHubInstallation: async () => true,
@@ -426,6 +428,72 @@ describe("GitHub action approval controls", () => {
       });
       expect(policies(rendered.model()).failure).toBeUndefined();
       expect(policyCell(rendered.model(), "merge").value).toBe("ask");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("offers Settings and deletions for Your GitHub only", async () => {
+    const personal = {
+      kind: "personal" as const,
+      connectionId: "personal-1",
+      label: "@benyhh",
+      groups: {
+        routine: "allow" as const,
+        review: "allow" as const,
+        merge: "allow" as const,
+        sensitive: "ask" as const,
+      },
+    };
+    const update = mock(async () => ({
+      ...personal,
+      groups: { ...personal.groups, sensitive: "allow" as const },
+    }));
+    const context = appContext(["github:manage", "connections:write"], update);
+    const workspaceApp = (await context.client.getGitHubActionPolicies()).actors[0]!;
+    context.client.getGitHubActionPolicies = mock(async () => ({
+      enabled: true,
+      actors: [workspaceApp, personal],
+    }));
+    const rendered = await renderAdapter(context);
+    try {
+      const row = policies(rendered.model()).rows.find((candidate) => candidate.id === "sensitive");
+      expect(row?.label).toBe("Settings and deletions");
+      // The Opengeni app has no gh gateway: no cell, and All actions ignores it.
+      expect(policies(rendered.model()).cell("sensitive", "app")).toBeUndefined();
+      expect(policyCell(rendered.model(), "sensitive", "personal").value).toBe("ask");
+      expect(policies(rendered.model()).all?.cell("personal")?.value).toBe("mixed");
+      expect(policies(rendered.model()).all?.cell("app")?.value).not.toBeUndefined();
+      await act(async () => {
+        policies(rendered.model()).onChange("sensitive", "personal", "allow");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(WORKSPACE_ID, {
+        actor: { kind: "personal", connectionId: "personal-1" },
+        group: "sensitive",
+        decision: "allow",
+      });
+      expect(policyCell(rendered.model(), "sensitive", "personal").value).toBe("allow");
+      expect(policies(rendered.model()).all?.cell("personal")?.value).toBe("allow");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a table with only the Opengeni app has no Settings and deletions row", async () => {
+    const rendered = await renderAdapter(
+      appContext(
+        ["github:manage"],
+        mock(async () => ({})),
+      ),
+    );
+    try {
+      expect(policies(rendered.model()).rows.map((row) => row.id)).toEqual([
+        "routine",
+        "review",
+        "merge",
+      ]);
     } finally {
       await rendered.unmount();
     }

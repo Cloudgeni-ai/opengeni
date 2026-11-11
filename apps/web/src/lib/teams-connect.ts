@@ -158,7 +158,7 @@ export function teamsMicrosoftSignInPurpose(state: string | undefined): "setup" 
     const { purpose } = JSON.parse(atob(base64)) as { purpose?: unknown };
     return purpose === "teams-account-link"
       ? "link"
-      : purpose === "teams-admin-setup"
+      : purpose === "teams-admin-setup" || purpose === "teams-installer-setup"
         ? "setup"
         : null;
   } catch {

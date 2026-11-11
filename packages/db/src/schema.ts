@@ -2235,7 +2235,7 @@ export const personalGitHubRepositorySelections = pgTable(
             or ${table.permissions}->'maintain' = 'true'::jsonb)
         ))
         and octet_length(${table.ownerSubjectId}) between 1 and 512
-        and ${table.canonicalFullName} ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$'
+        and ${table.canonicalFullName} ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,38}/[A-Za-z0-9_.-]{1,100}$'
         and octet_length(${table.canonicalFullName}) between 3 and 140
         and octet_length(${table.defaultBranch}) between 1 and 255`,
     ),

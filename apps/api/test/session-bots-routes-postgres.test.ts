@@ -1,8 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission, SessionAvatar } from "@opengeni/contracts";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  signDelegatedAccessToken,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
+  createConnection,
   createDb,
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -504,6 +509,64 @@ describe("bots through the API (real PostgreSQL)", () => {
     expect(
       (await callTool(server, "bot_template_save", { name: "Empty", instructions: "  " })).isError,
     ).toBe(true);
+  }, 180_000);
+
+  test("an agent made in a chat is asked by name in the linked Slack workspace", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots agent slack");
+    await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted: "fixture-bots-slack",
+      grantedScopes: ["chat:write"],
+      verifiedInstallAt: new Date(),
+      verifiedInstallVersion: 1,
+      metadata: {
+        credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+        credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+        slackTeamId: "T_BOTS",
+        slackTeamName: "Bots Slack",
+        botId: "B_BOTS",
+        botUserId: "UB_BOTS",
+        botDisplayName: "Opengeni Staging",
+        verifiedAt: new Date().toISOString(),
+      },
+    });
+    const auth = await bearer(workspace, "bots-person", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const created = await call(auth, "POST", `/v1/workspaces/${workspace.workspaceId}/sessions`, {
+      initialMessage: "I want an agent I can ask about growth numbers",
+      model: "scripted-model",
+    });
+    const server = buildOpenGeniMcpServer(deps, agentGrant(workspace, created.json.id as string));
+    const saved = await callTool(server, "bot_template_save", {
+      name: "Growth analyst",
+      instructions: "Answer questions about growth and usage numbers.",
+    });
+    expect(saved.isError).toBe(false);
+    expect(saved.body.slack).toEqual([
+      {
+        slackWorkspace: "Bots Slack",
+        ask: "@Opengeni Staging Growth analyst",
+        where: expect.stringContaining("a new message"),
+      },
+    ]);
+    const [install] = await shared.admin<{ name_key: string }[]>`
+      select name_key from agent_slack_installs where agent_id = ${saved.body.agent.id}`;
+    expect(install?.name_key).toBe("growthanalyst");
+    // A second agent with that name would be ambiguous in Slack: refused, with why.
+    const twin = await callTool(server, "bot_template_save", {
+      name: "growth-analyst",
+      instructions: "Something else.",
+    });
+    expect(twin.isError).toBe(true);
+    expect(twin.body.error).toContain("Choose another name");
   }, 180_000);
 
   test("the agent in an Only me chat saves an Only me template", async () => {

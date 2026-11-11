@@ -13,6 +13,7 @@ import {
   SESSION_AVATAR_ICONS,
   SESSION_DESCRIPTION_MAX_LENGTH,
   SessionAvatar,
+  slackAgentCallText,
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
@@ -44,6 +45,11 @@ import {
   ensureAgentMemoryCollection,
   type AgentMemoryStatus,
 } from "../integrations/agent-memory-collection";
+import {
+  agentSlackNameRefusal,
+  ensureAgentInLinkedSlack,
+  linkedSlackInstallations,
+} from "../integrations/agent-slack-availability";
 import { requireUsableSessionAvatar } from "../routes/session-avatar";
 
 /**
@@ -179,7 +185,7 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
+        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat; a shared agent also works in every Slack workspace linked to this workspace, and the result's slack field says how people ask it there, so tell the person. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
@@ -240,8 +246,20 @@ export function registerBotTemplateTools(input: {
       await requireUsableSessionAvatar(deps, grant, request.avatar, {
         sharedWithWorkspace: visibility === "workspace",
       });
+      const home = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+      if (visibility === "workspace") {
+        // Its name is how people ask it in Slack.
+        const refusal = await agentSlackNameRefusal(deps, home, {
+          agentId: null,
+          name: request.name,
+        });
+        if (refusal) {
+          throw new HTTPException(refusal.code === "agent_slack_name_taken" ? 409 : 422, {
+            message: refusal.message,
+          });
+        }
+      }
       try {
-        const home = { accountId: grant.accountId, workspaceId: grant.workspaceId };
         const { agent: created } = await createAgent(deps.db, home, {
           visibility: request.visibility,
           ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
@@ -284,6 +302,21 @@ export function registerBotTemplateTools(input: {
             );
           },
         );
+        const installs = await ensureAgentInLinkedSlack(deps, home, agent);
+        const linked = installs.length > 0 ? await linkedSlackInstallations(deps, home) : [];
+        const slack = installs.flatMap((install) => {
+          const installation = linked.find((row) => row.connectionId === install.connectionId);
+          return installation
+            ? [
+                {
+                  slackWorkspace: installation.slackTeamName,
+                  ask: slackAgentCallText(agent.name, `@${installation.botDisplayName}`),
+                  // A reply in a thread stays with that thread's chat.
+                  where: "a new message in any channel the app is in, or a direct message",
+                },
+              ]
+            : [];
+        });
         return input.json({
           ok: true,
           agent: {
@@ -294,6 +327,7 @@ export function registerBotTemplateTools(input: {
             revision: agent.currentRevision,
           },
           memory: AGENT_MEMORY_RESULT[memory],
+          ...(slack.length > 0 ? { slack } : {}),
         });
       } catch (error) {
         if (error instanceof AgentLimitError) {

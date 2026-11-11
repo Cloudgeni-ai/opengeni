@@ -10630,6 +10630,13 @@ export type GitHubRepositoriesResponse = {
 export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
 export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
 export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * repository settings, secrets, environments, deletions, tag and
+ * default-branch rewrites and unrecognised requests made with `gh` or Git. It
+ * defaults to Ask.
+ */
+export type PersonalGitHubActionPolicyGroup = GitHubActionPolicyGroup | "sensitive";
 
 export type GitHubActionPolicyActor =
   | { kind: "workspace_app"; installationId: number }
@@ -10637,7 +10644,10 @@ export type GitHubActionPolicyActor =
 
 export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
   label: string;
-  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+  /** `sensitive` is present for personal actors only. */
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision> & {
+    sensitive?: GitHubActionPolicyEffectiveDecision;
+  };
 };
 
 export type GitHubActionPoliciesResponse = {
@@ -10647,7 +10657,8 @@ export type GitHubActionPoliciesResponse = {
 
 export type UpdateGitHubActionPolicyRequest = {
   actor: GitHubActionPolicyActor;
-  group: GitHubActionPolicyGroup;
+  /** `sensitive` applies only to personal actors. */
+  group: PersonalGitHubActionPolicyGroup;
   decision: GitHubActionPolicyDecision;
 };
 
