@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import * as db from "@opengeni/db";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import {
@@ -40,6 +41,29 @@ const sandbox = {
 } as never;
 
 describe("a turn whose personal machine isn't allowed", () => {
+  test("says what every other surface says, from the one shared sentence", () => {
+    expect(new PersonalMachineAccessRequiredError("Studio Mac").message).toBe(
+      machineAccessNeededMessage("Studio Mac"),
+    );
+    expect(new PersonalMachineAccessRequiredError("  ").message).toBe(machineAccessNeededMessage());
+    expect(machineAccessNeededMessage("Studio Mac")).toBe(
+      "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+    );
+  });
+
+  test("the move's own not-live refusal is a machine access refusal too", () => {
+    expect(isPersonalMachineAccessRefusal(new db.PersonalMachineAuthorityNotLiveError())).toBe(
+      true,
+    );
+    expect(
+      isPersonalMachineAccessRefusal(
+        new Error("attach failed", {
+          cause: new db.PersonalMachineAuthorityNotLiveError(),
+        }),
+      ),
+    ).toBe(true);
+  });
+
   test.each([
     ["42501", "personal machine authority is no longer live"],
     ["42501", "personal machine use requires explicit grant"],

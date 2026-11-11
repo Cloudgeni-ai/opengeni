@@ -351,7 +351,8 @@ export function personalGitHubRepositoryResources(
     if (!isPersonalGitHubRepositoryCandidate(resource)) {
       if (resource.kind === "repository" && resource.connectionType === "github_personal") {
         throw new HTTPException(422, {
-          message: "personal GitHub repository resources require the dedicated GitHub provider",
+          message:
+            'personal GitHub repository resources require the dedicated GitHub provider: provider "github", credentialBindingId, repositoryId and access from the person\'s Your GitHub repository list. A session or schedule an agent creates can name just uri, ref and connectionType when its turn holds Your GitHub access.',
         });
       }
       continue;

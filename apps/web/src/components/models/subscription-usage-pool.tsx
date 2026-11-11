@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { RelativeTime, formatShortTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
 import { UsageMeter, UsageReadout } from "@opengeni/react/ui/usage-meter";
@@ -133,7 +134,7 @@ export function SubscriptionUsagePoolView({
 /** Shares one retained, caller-scoped read across all provider sections. */
 /** One provider's pooled limits for an organization or workspace, from the one shared read. */
 export function useSubscriptionUsagePool(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   scope: "organization" | "workspace",
   id: string | undefined,
   provider: SubscriptionUsagePool["provider"],
@@ -225,7 +226,7 @@ export function ConnectedSubscriptionUsagePool({
   id,
   provider,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "organization" | "workspace";
   id: string;
   provider: SubscriptionUsagePool["provider"];

@@ -18,6 +18,7 @@ import {
   type SandboxBackend,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   isSecretReferenceError,
+  machineAccessNeededMessage,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
@@ -27,6 +28,7 @@ import {
   getSession,
   getLiveEnrollmentConnection,
   getSandbox,
+  isPersonalMachineAccessRefusal,
   listEnrollments,
   listSandboxes,
   meetingSummarySessionScope,
@@ -43,6 +45,7 @@ import {
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -79,6 +82,8 @@ export type FleetServices = {
    * this to the same viewer/provider verification + rematerialization path; core
    * tests may omit it when exercising pointer mechanics only. */
   ensureSessionGroupReady?: (ctx: FleetContext) => Promise<FleetReadinessHold>;
+  /** Deliver wakes now when a move lets a waiting saved message start. */
+  requestSessionWorkflowWakeDispatch?: () => Promise<void>;
 };
 
 export type FleetReadinessHold = {
@@ -296,17 +301,37 @@ function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
 
 export type PersonalMachineRefusalCode =
   | "personal_machine_permission_required"
-  | "personal_machine_not_permitted";
+  | "personal_machine_not_permitted"
+  | "machine_access_required";
 
 /**
  * Plain refusal for a personal ("Only me") Connected Machine that the database
  * admission (`authorize_session_attempt_personal_machine`) turned down. The
  * function raises SQLSTATE 42501 for policy refusals and P0002 when a required
- * owner, authority or enrollment row is not current. Only failures of that
- * admission statement are mapped; anything else is a real failure and stays an
- * error. The raw database error is never shown.
+ * owner, authority or enrollment row is not current. The check right before
+ * the machine is used (`assert_session_attempt_personal_machine`) can still
+ * find this turn's approval used up, revoked or expired; that is
+ * `machine_access_required`, named after the machine when known. Anything else
+ * is a real failure and stays an error. The raw database error is never shown.
  */
 export function personalMachineRefusal(
+  error: unknown,
+  machineName?: string | null,
+): { code: PersonalMachineRefusalCode; reason: string } | null {
+  const admission = personalMachineAdmissionRefusal(error);
+  // Admission's "requires explicit grant" has its own setup card. Otherwise the
+  // exact pre-use refusal wins, even when one statement ran both checks.
+  if (admission?.code === "personal_machine_permission_required") return admission;
+  if (!isPersonalMachineAccessRefusal(error)) return admission;
+  return {
+    code: "machine_access_required",
+    reason:
+      `${machineAccessNeededMessage(machineName)} ` +
+      "This turn's approval for it ended, or the turn lost access to it another way, so trying again won't help during this turn. Keep working where you are, and tell the person that the machine's owner can allow it for this chat.",
+  };
+}
+
+function personalMachineAdmissionRefusal(
   error: unknown,
 ): { code: PersonalMachineRefusalCode; reason: string } | null {
   const sqlState = nestedPostgresSqlState(error);
@@ -672,7 +697,7 @@ export function fleetAgentNotice(fleet: FleetListResult): string {
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
 
 type ResolvedNamedSandboxTarget =
-  | { ok: true; targetSandboxId: string; workspaceRoot?: string }
+  | { ok: true; targetSandboxId: string; workspaceRoot?: string; name?: string }
   | { ok: false; reason: string; code: BackendUnresolvableCode };
 
 /** Resolve one named sandbox, independent of any existing session pointer. */
@@ -764,6 +789,7 @@ async function resolveNamedSandboxTarget(
   return {
     ok: true,
     targetSandboxId: sandbox.id,
+    name: sandbox.name,
     ...(targetWorkspaceRoot ? { workspaceRoot: targetWorkspaceRoot } : {}),
   };
 }
@@ -823,7 +849,7 @@ async function resolveTarget(
   ctx: FleetContext,
   target: string,
 ): Promise<
-  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string }
+  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string; name?: string }
   | { ok: false; reason: string; code: BackendUnresolvableCode }
 > {
   // The session's own group box → the default pointer (null).
@@ -975,7 +1001,7 @@ export async function swapActiveSandbox(
       } catch (error) {
         // The admission refusal rolled the whole CAS transaction back, so the
         // pointer read above is still current.
-        const refusal = personalMachineRefusal(error);
+        const refusal = personalMachineRefusal(error, resolved.name);
         if (!refusal) throw error;
         return {
           swapped: false,
@@ -985,6 +1011,22 @@ export async function swapActiveSandbox(
         };
       }
       if (result.swapped && result.pointer) {
+        // A saved message may have been waiting for a machine its sender may
+        // use. An agent moving its own running turn has nothing waiting.
+        if (!ctx.attemptAuthority) {
+          await releaseAdmissionBlocksAfterAccessChange(
+            {
+              db: services.db,
+              requestSessionWorkflowWakeDispatch: services.requestSessionWorkflowWakeDispatch,
+            },
+            {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              change: "machine",
+              sessionIds: [ctx.sessionId],
+            },
+          );
+        }
         return {
           swapped: true,
           activeSandboxId: result.pointer.activeSandboxId,
@@ -1468,7 +1510,7 @@ export async function resolveRunOnMachine(
         };
       }
     } catch (error) {
-      const refusal = personalMachineRefusal(error);
+      const refusal = personalMachineRefusal(error, sandbox.name);
       return {
         targetName: sandbox.name,
         ok: false,

@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   catalogServiceIdentity,
+  collapseConnectionService,
+  connectedConnectionServices,
   mergeConnectionServices,
   partitionConnectionServices,
 } from "./connection-services";
@@ -62,4 +64,56 @@ test("merging preserves host curation order rather than alphabetizing services",
       { id: "a", name: "A", options: [option("a")] },
     ]).map((service) => service.id),
   ).toEqual(["z", "a"]);
+});
+
+type TestState = "attention" | "unavailable" | "loading" | "added" | "available";
+const stated = (id: string, state: TestState, connected = state !== "available") => ({
+  ...option(id, connected),
+  status: state,
+  state,
+});
+const collapsed = (service: Parameters<typeof collapseConnectionService>[0]) =>
+  collapseConnectionService(service, { description: undefined, onOpen: () => {} });
+
+test("the full Connected list puts every connection that needs attention first, in order", () => {
+  const services = [
+    { id: "slack", name: "Slack", options: [stated("slack", "added")] },
+    { id: "posthog", name: "PostHog", options: [stated("posthog", "added")] },
+    { id: "mail", name: "Mail", options: [stated("mail", "available")] },
+    { id: "github", name: "GitHub", options: [stated("github", "attention")] },
+    // Restricted access is a limit the person can't fix, not a problem to surface.
+    { id: "drive", name: "Drive", options: [stated("drive", "unavailable")] },
+    {
+      id: "atlassian",
+      name: "Jira & Confluence",
+      options: [stated("jira", "added"), stated("confluence", "attention")],
+    },
+    { id: "notion", name: "Notion", options: [stated("notion", "added")] },
+  ].map(collapsed);
+  expect(connectedConnectionServices(services).map((service) => service.id)).toEqual([
+    "github",
+    "atlassian",
+    "slack",
+    "posthog",
+    "drive",
+    "notion",
+  ]);
+});
+
+test("a provider row needs attention when any of its options does", () => {
+  const [row] = collapsed({
+    id: "atlassian",
+    name: "Jira & Confluence",
+    options: [
+      stated("jira", "added"),
+      { ...stated("confluence", "attention"), status: "Reconnect" },
+    ],
+  }).options;
+  expect(row).toMatchObject({ state: "attention", status: "Reconnect", connected: true });
+  const [restricted] = collapsed({
+    id: "atlassian",
+    name: "Jira & Confluence",
+    options: [stated("jira", "added"), stated("confluence", "unavailable")],
+  }).options;
+  expect(restricted).toMatchObject({ state: "added", status: "Connected" });
 });

@@ -63,7 +63,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * names-only member list (1211), the Slack agent update sweeper's
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
- * compact (1240). Each is
+ * compact (1240), and the session storage pass's inventory of sessions with
+ * content to collect and its collector of unreferenced content blobs (1359).
+ * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -95,6 +97,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
 ] as const;
 
 /**
@@ -125,16 +130,26 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1240 withheld the inventory of meeting tracks not yet kept compact and
- * 1282 granted it.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact, 1282
+ * granted it and 1283 withholds it again: the binary then in production
+ * (6327db2c) did not know the routine and rejects its runtime grant. Until a
+ * later migration grants it, existing meetings keep their audio as it is and
+ * only new transcripts keep it compact.
+ * 1344 withholds the end of a call's ring on the other phones; until it is
+ * granted, settling a call sends no ended push and those phones ring out.
+ * 1359 withholds the session content collector and its inventory; until they
+ * are granted, unreferenced content blobs stay until the session is archived.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "read_external_identity_v1(uuid, text, text)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -233,6 +248,23 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "recording_tracks",
     "recording_chunks",
     "recording_transcript_versions",
+  ],
+  "end_agent_call_rings_v1(uuid)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
+  "session_content_garbage_candidates_v1(integer)": [
+    "session_attempt_model_context_snapshots",
+    "sessions",
+    "opengeni_private.session_content_collections",
+  ],
+  "collect_session_content_garbage_v1(uuid, uuid, integer)": [
+    "sessions",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_content_blobs",
+    "opengeni_private.session_content_collections",
   ],
 };
 
@@ -2443,6 +2475,7 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "turn_timing_profiles",
   "usage_events",
   "vault_field_versions",
   "vault_item_fields",
@@ -2807,6 +2840,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  // 1351_turn_timing_profiles: per-turn timing profiles written by the maintenance sweep.
+  "turn_timing_profiles",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -3225,6 +3260,21 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+
+/**
+ * Whether this binary requires runtime EXECUTE on a private routine: every
+ * declared one except owner-internal, retired and deferred routines. A retired
+ * routine still present is reported once, as retired (it is never granted
+ * again, so its missing EXECUTE is not a second finding).
+ */
+function runtimeRequiresPrivateRoutineExecute(name: string): boolean {
+  return (
+    DECLARED_PRIVATE_ROUTINES.has(name) &&
+    !OWNER_INTERNAL_PRIVATE_ROUTINES.has(name) &&
+    !RETIRED_PRIVATE_ROUTINES.has(name) &&
+    !DEFERRED_PRIVATE_ROUTINE_NAMES.has(name)
+  );
+}
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -3306,6 +3356,12 @@ export type RuntimeDatabasePostureOptions = {
    * migration creates them; when one is present it is checked like every other contract table.
    */
   tablesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for runtime definers (named without their argument list): a definer a later
+   * migration creates may be absent even though every table it works on already exists. When
+   * one is present it is checked like every other definer.
+   */
+  routinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -3760,8 +3816,16 @@ export async function inspectRuntimeDatabasePosture(
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
               ORDER BY acl.privilege_type
             ) AS extra_privileges,
+            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+            -- the table-level privilege, or that privilege on a live user column.
+            -- A column without its own ACL grants nothing beyond the table, so only
+            -- columns with an ACL need a check. has_any_column_privilege reads every
+            -- column through the catalog cache, which on a fresh connection loads
+            -- thousands of pg_attribute rows one by one on each readiness probe.
             ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
+              WHERE has_table_privilege(current_user, c.oid, privilege)
+                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           left join (
@@ -3770,6 +3834,12 @@ export async function inspectRuntimeDatabasePosture(
               bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
             from pg_policy group by polrelid
           ) policies on policies.polrelid = c.oid
+          left join (
+            select attrelid, array_agg(attnum) as attnums
+            from pg_attribute
+            where attnum > 0 and not attisdropped and attacl is not null
+            group by attrelid
+          ) column_acls on column_acls.attrelid = c.oid
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
@@ -4007,7 +4077,17 @@ const COLUMN_DENIED_PRIVATE_TABLES = new Set<string>([
   "session_usage_limit_capabilities",
 ]);
 
-/** Pure deterministic evaluator used by startup/readiness and unit tests. */
+/**
+ * Pure deterministic evaluator used by startup/readiness and unit tests.
+ *
+ * Invariant for {@link classifyRuntimeDatabasePosture}: a missing runtime
+ * EXECUTE grant may only ADD findings. Never let `execute === false` skip,
+ * guard or select another check (for example `if (routine.execute) continue;`
+ * ahead of owner or search_path checks, or an unsafe check nested under
+ * `if (!routine.execute)`): the classifier would see that unsafe finding
+ * disappear once the grant is present and report it as degraded. Use
+ * `!execute` only as a direct term of the finding's own condition.
+ */
 export function evaluateRuntimeDatabasePosture(
   catalogPosture: RuntimeDatabasePosture,
   options: RuntimeDatabasePostureOptions,
@@ -6742,7 +6822,6 @@ export function evaluateRuntimeDatabasePosture(
         !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
     )
       violations.push("Teams wake trigger has unsafe execution, ownership or search path");
-    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
       ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
         routine.name,
@@ -6815,22 +6894,19 @@ export function evaluateRuntimeDatabasePosture(
         `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
       );
     }
-    // A retired routine still present is reported once, as retired (it is
-    // never granted again, so its missing EXECUTE is not a second finding).
-    if (
-      DECLARED_PRIVATE_ROUTINES.has(routine.name) &&
-      !routine.execute &&
-      !ownerInternalRoutine &&
-      !RETIRED_PRIVATE_ROUTINES.has(routine.name) &&
-      !DEFERRED_PRIVATE_ROUTINE_NAMES.has(routine.name)
-    ) {
+    if (!routine.execute && runtimeRequiresPrivateRoutineExecute(routine.name)) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  const notYetCreatedRoutines = new Set(options.routinesCreatedByLaterMigrations ?? []);
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
       RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
-      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1 &&
+      !(
+        notYetCreatedRoutines.has(name.slice(0, name.indexOf("("))) &&
+        !posture.privateRoutines.some((routine) => routine.name === name)
+      )
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);
     }
@@ -6897,11 +6973,220 @@ export async function assertRuntimeDatabasePosture(
   return posture;
 }
 
+/**
+ * Findings of {@link evaluateRuntimeDatabasePosture}, split by what they mean
+ * for a running process. Together they are exactly the strict findings.
+ *
+ * - `fatal`: unsafe or unknowable posture (excess or PUBLIC privileges, wrong
+ *   owner, search_path or RLS, forbidden roles or memberships, missing CONNECT
+ *   or schema USAGE, missing or ambiguous objects, failed shape checks).
+ * - `degraded`: findings caused only by the runtime role lacking an EXECUTE
+ *   grant that this binary's contract requires. Only the features behind those
+ *   routines fail (PostgreSQL refuses the call); nothing is exposed.
+ */
+export type RuntimeDatabasePostureFindings = {
+  fatal: string[];
+  degraded: string[];
+};
+
+function countFindings(findings: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const finding of findings) counts.set(finding, (counts.get(finding) ?? 0) + 1);
+  return counts;
+}
+
+/**
+ * The posture with every EXECUTE grant the contract requires of the runtime
+ * role present: declared private routines it must execute, and the
+ * target-schema capabilities. Nothing else changes. Returns null when no such
+ * grant is missing.
+ */
+function withRequiredRuntimeExecuteGranted(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePosture | null {
+  const targetCapabilities = new Set<string>(
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  );
+  let changed = false;
+  const grant = <T extends RuntimeRoutinePosture>(routine: T, required: boolean): T => {
+    if (routine.execute || !required) return routine;
+    changed = true;
+    return { ...routine, execute: true };
+  };
+  const granted = {
+    ...posture,
+    privateRoutines: posture.privateRoutines.map((routine) =>
+      grant(routine, runtimeRequiresPrivateRoutineExecute(routine.name)),
+    ),
+    targetRoutines: posture.targetRoutines.map((routine) =>
+      grant(routine, targetCapabilities.has(routine.name)),
+    ),
+  };
+  return changed ? granted : null;
+}
+
+/**
+ * Classifies the strict findings for runtime startup and readiness. A finding
+ * is degraded only when granting the missing contract-required EXECUTE grants
+ * removes it and raises no finding the actual catalog does not already have
+ * (a grant that would expose another problem means the missing grant was
+ * hiding it, so everything stays fatal). This holds for every check, present
+ * and future, without tagging individual messages.
+ *
+ * Release and CI gates (the posture CLI, the compatibility workflow, the
+ * previous-binary checks) keep using {@link evaluateRuntimeDatabasePosture},
+ * where every finding fails.
+ */
+export function classifyRuntimeDatabasePosture(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePostureFindings {
+  const findings = evaluateRuntimeDatabasePosture(posture, options);
+  if (findings.length === 0) return { fatal: [], degraded: [] };
+  const granted = withRequiredRuntimeExecuteGranted(posture, options);
+  if (!granted) return { fatal: findings, degraded: [] };
+  const strict = countFindings(findings);
+  const remaining = countFindings(evaluateRuntimeDatabasePosture(granted, options));
+  for (const [finding, count] of remaining) {
+    if (count > (strict.get(finding) ?? 0)) return { fatal: findings, degraded: [] };
+  }
+  const fatal: string[] = [];
+  const degraded: string[] = [];
+  for (const finding of findings) {
+    const count = remaining.get(finding) ?? 0;
+    if (count > 0) {
+      fatal.push(finding);
+      remaining.set(finding, count - 1);
+    } else {
+      degraded.push(finding);
+    }
+  }
+  return { fatal, degraded };
+}
+
+/** Receives the degraded findings of every runtime readiness inspection (empty when none). */
+export type RuntimeDatabaseDegradedListener = (degraded: readonly string[]) => void;
+
+/**
+ * The startup and readiness form of {@link assertRuntimeDatabasePosture}: it
+ * throws {@link RuntimeDatabasePostureError} with the fatal findings only.
+ * Degraded findings (a missing required EXECUTE grant) go to `onDegraded`
+ * and do not make the process unready: one withheld or revoked grant must not
+ * take every pod out of service for one feature.
+ */
+export async function assertRuntimeDatabaseReadiness(
+  db: Database,
+  options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
+): Promise<{ posture: RuntimeDatabasePosture; degraded: string[] }> {
+  const posture = await inspectRuntimeDatabasePosture(db, options);
+  const { fatal, degraded } = classifyRuntimeDatabasePosture(posture, options);
+  try {
+    onDegraded?.(degraded);
+  } catch {
+    // Reporting is best effort; it never decides readiness.
+  }
+  if (fatal.length > 0) {
+    throw new RuntimeDatabasePostureError(fatal);
+  }
+  return { posture, degraded };
+}
+
+export type RuntimeDatabaseDegradedObserver = {
+  warn(message: string, attributes: Record<string, string | number | boolean>): void;
+  info(message: string, attributes: Record<string, string | number | boolean>): void;
+  setGauge(input: { name: string; help?: string; value: number }): void;
+};
+
+/**
+ * Degraded findings of the latest completed posture inspection in this
+ * process. An inspection that throws (database unreachable, a fatal finding
+ * still reports first) leaves the previous value.
+ */
+export const RUNTIME_DATABASE_DEGRADED_GAUGE = "opengeni_runtime_database_degraded_findings";
+/** At most this many findings are named in one log line; the count is exact. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS = 20;
+/** A persisting degraded posture is logged again at most this often. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Reports degraded runtime posture: the gauge holds the number of degraded
+ * findings of the latest completed inspection; a structured warning names them when
+ * they change, and again at most every
+ * {@link RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS} while they persist; an
+ * info line records recovery. Use one reporter per process for startup and
+ * readiness, so a pod logs a degraded posture once, not once per path.
+ */
+export function reportRuntimeDatabaseDegraded(
+  observability: RuntimeDatabaseDegradedObserver,
+  source: string,
+  options: { logIntervalMs?: number; now?: () => number } = {},
+): RuntimeDatabaseDegradedListener {
+  const interval = options.logIntervalMs ?? RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  let last = "";
+  let lastCount = 0;
+  let loggedAt = 0;
+  return (degraded) => {
+    try {
+      observability.setGauge({
+        name: RUNTIME_DATABASE_DEGRADED_GAUGE,
+        help: "Runtime database posture findings that disable a feature (a missing required EXECUTE grant) without failing readiness, from the latest completed inspection.",
+        value: degraded.length,
+      });
+    } catch {
+      // Metrics are best effort.
+    }
+    const findings = sorted(degraded);
+    const current = findings.join("; ");
+    const changed = current !== last;
+    const previousCount = lastCount;
+    last = current;
+    lastCount = findings.length;
+    if (!changed && (findings.length === 0 || now() - loggedAt < interval)) return;
+    loggedAt = now();
+    try {
+      if (findings.length === 0) {
+        observability.info("Runtime database posture is no longer degraded", {
+          source,
+          previousFindingCount: previousCount,
+        });
+      } else {
+        const named = findings.slice(0, RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS);
+        const omitted = findings.length - named.length;
+        observability.warn(
+          "Runtime database posture is degraded: features that need these grants will fail; readiness is unaffected",
+          {
+            source,
+            findingCount: findings.length,
+            findings: named.join("; ") + (omitted > 0 ? `; and ${omitted} more` : ""),
+          },
+        );
+      }
+    } catch {
+      // Logging is best effort.
+    }
+  };
+}
+
 export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
-  return async () => {
-    await assertRuntimeDatabasePosture(db, options);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Concurrent probes share
+    // the outstanding inspection, as the worker readiness check does, so slow
+    // database answers cannot pile up one pooled connection per probe. The
+    // next probe after it settles always runs a fresh inspection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      await assertRuntimeDatabaseReadiness(db, options, onDegraded);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }

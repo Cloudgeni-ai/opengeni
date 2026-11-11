@@ -43,6 +43,7 @@ import { codemodeSessionRequest } from "./codemode";
 import { siteFrameGuard } from "./site-frame-guard";
 import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
+import { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
@@ -66,11 +67,13 @@ import {
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   codeSearchDeploymentPolicy,
+  CLAUDE_CONNECTION_KINDS,
   agentConfigDeploymentPolicy,
   azureOpenAIDeploymentIdentityAvailable,
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
+  landingOriginEntries,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -124,7 +127,8 @@ import {
   setConnectAttemptTransitionObserver,
   dbSql,
   getManagedAuthSessionSetSnapshot,
-  getWorkspace,
+  getWorkspaceSettings,
+  loadWorkspaceModelCatalogInputs,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionAdminAuthority,
@@ -173,6 +177,7 @@ import {
   githubRepositoryUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
+  authenticationRequiredHttpError,
   missingPermissionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
@@ -454,6 +459,7 @@ import {
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
+  DISPLAY_IDENTITY_PATH,
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
   scrubManagedAuthProviderResponse,
@@ -943,36 +949,7 @@ export function createAppComposition(
       "X-OpenGeni-Subject",
       "X-OpenGeni-User-Activity",
     ],
-    exposeHeaders: [
-      "Accept-Ranges",
-      "Content-Range",
-      "Link",
-      "X-OpenGeni-Api-Contract",
-      "X-OpenGeni-Actor-Epoch",
-      "X-OpenGeni-Actor-State",
-      "X-OpenGeni-Browser-Frame",
-      "X-OpenGeni-Browser-Frame-Note",
-      "X-OpenGeni-Conversation-Filter",
-      "X-OpenGeni-Correlation-Id",
-      "X-OpenGeni-Covered-First",
-      "X-OpenGeni-Covered-Last",
-      "X-OpenGeni-Event-Direction",
-      "X-OpenGeni-Event-Mode",
-      "X-OpenGeni-Event-Result",
-      "X-OpenGeni-Event-Result-Mode",
-      "X-OpenGeni-Export-Next-Cursor",
-      "X-OpenGeni-Export-Truncated",
-      "X-OpenGeni-Forensic-Exact",
-      "X-OpenGeni-Has-More",
-      "X-OpenGeni-Next-After",
-      "X-OpenGeni-Next-Before",
-      "X-OpenGeni-Page-Bytes",
-      "X-OpenGeni-Page-Max-Bytes",
-      "X-OpenGeni-Page-Truncated",
-      "X-OpenGeni-Payload-Mode",
-      "X-OpenGeni-Session-Sequence",
-      "X-OpenGeni-Truncated-By",
-    ],
+    exposeHeaders: [...OPENGENI_BROWSER_RESPONSE_HEADERS],
   };
   const publicApiCors = cors({
     ...corsHeaders,
@@ -984,6 +961,16 @@ export function createAppComposition(
     credentials: true,
     origin: (origin) =>
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
+  });
+
+  // The marketing site may read only the display identity, with cookies, and
+  // only from its exact configured origins. This never widens the regex above.
+  const landingOrigins = new Set(landingOriginEntries(deps.settings.landingOrigins));
+  const displayIdentityCors = cors({
+    allowHeaders: ["Accept"],
+    allowMethods: ["GET"],
+    credentials: true,
+    origin: (origin) => origin,
   });
 
   const localCorsOriginAllowed = createLocalCorsOriginPolicy(deps.settings, localBrowserBoundary);
@@ -1005,10 +992,21 @@ export function createAppComposition(
       // CORS grant (in local development the boundary above refused them).
       return origin ? localCors(c, next) : next();
     }
+    if (origin && landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
+      return displayIdentityCors(c, next);
+    }
     const middleware =
       origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
         ? credentialedCors
         : publicApiCors;
+    if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
+      // The answer depends on the caller's origin and cookie; caches must not
+      // share it across origins (the credentialed middlewares add Vary already).
+      return middleware(c, async () => {
+        await next();
+        c.res.headers.append("vary", "Origin");
+      });
+    }
     return middleware(c, next);
   });
 
@@ -1670,17 +1668,41 @@ export function createAppComposition(
       if (context && workspaceId) {
         const grant = await requireAccessGrant(c, routeDeps, workspaceId);
         await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+          // Catalog overlay and picker project the same live metadata, not two
+          // separately loaded copies. Subscription/provider liveness stays fresh.
+          const catalogInputs = await loadWorkspaceModelCatalogInputs(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKinds: [
+              "vercel_gateway",
+              "openrouter",
+              "opper",
+              ...CLAUDE_CONNECTION_KINDS.filter(
+                (kind) => kind !== "claude_subscription" || deps.settings.claudeSubscriptionEnabled,
+              ),
+            ],
+            organizationProviderKinds: [
+              "vercel_gateway",
+              "openrouter",
+              "opper",
+              "openai",
+              "azure_openai",
+              ...CLAUDE_CONNECTION_KINDS,
+            ],
+          });
           catalogSettings = (
             await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
               accountId: grant.accountId,
               workspaceId,
+              catalogInputs,
+              deploymentCatalog: resolvedCatalog,
             })
           ).settings;
           selections = await resolveCallerWorkspaceModelSelections(
             deps.db,
             catalogSettings,
             { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-            { observeAvailability: true },
+            { observeAvailability: true, catalogInputs },
           );
           const billingOrigin = await billingOriginForAccessGrant(routeDeps, grant);
           if (connectedSubscriptionsRefusedForOrigin(deps.settings, billingOrigin)) {
@@ -1699,9 +1721,9 @@ export function createAppComposition(
               settings: catalogSettings,
             })
           ).requiredModelGeography;
-          const workspace = await getWorkspace(deps.db, workspaceId);
+          const workspaceSettings = await getWorkspaceSettings(deps.db, workspaceId);
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
-            workspace?.settings.voiceInput,
+            workspaceSettings?.voiceInput,
           ).data;
           const voiceContext = {
             accountId: grant.accountId,
@@ -1714,17 +1736,25 @@ export function createAppComposition(
             // `providers` lists every ready provider (the workspace picker);
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.
-            voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
-            voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
-            voiceInputAvailable =
-              voiceInputProviders.length > 0 &&
-              (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+            if (transcription.availability) {
+              const voice = await transcription.availability(voiceContext);
+              voiceInputProviders = voice.providers;
+              voiceInputModels = voice.models;
+              voiceInputAvailable = voice.providers.length > 0 && voice.available;
+            } else {
+              voiceInputProviders =
+                (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+              voiceInputModels = (await transcription.availableModels?.(voiceContext)) ?? [];
+              voiceInputAvailable =
+                voiceInputProviders.length > 0 &&
+                (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+            }
           }
 
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
             accountId: grant.accountId,
-            workspaceSettings: workspace?.settings ?? {},
+            workspaceSettings: workspaceSettings ?? {},
             selections,
             billingOrigin,
           });
@@ -1760,6 +1790,7 @@ export function createAppComposition(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        ...(deps.settings.claudeCodeApiKeyEnabled ? { claudeCodeApiKeyEnabled: true } : {}),
         ...(azureOpenAIDeploymentIdentityAvailable(deps.settings)
           ? { azureOpenAIDeploymentIdentity: true }
           : {}),
@@ -2726,6 +2757,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             insufficientCreditsHttpError(rawError) ??

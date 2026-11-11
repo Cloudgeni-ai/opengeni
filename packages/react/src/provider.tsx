@@ -1,3 +1,4 @@
+import type { ChatClient, OpenGeniClient } from "@opengeni/sdk";
 import { ToolDetailsProvider } from "./timeline/tool-details";
 import type { ToolDetails } from "./timeline/tool-presentation";
 import {
@@ -28,8 +29,8 @@ export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 const CONTRACT_RELOAD_STORAGE_PREFIX = "opengeni.reloadForApiContract:";
 
-export type OpenGeniProviderProps = {
-  client: SessionClientLike;
+export type OpenGeniProviderProps<Client extends ChatClient = OpenGeniClient> = {
+  client: SessionClientLike<Client>;
   workspaceId: string;
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
   onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
@@ -83,6 +84,8 @@ export type OpenGeniProviderProps = {
 /**
  * Supplies the Opengeni client + workspace to all hooks below it. Hooks also
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
+ * Preserves the supplied client's response projection; pass an explicitly
+ * compact client for a chat-only surface.
  */
 export function OpenGeniProvider({
   client,
@@ -97,7 +100,7 @@ export function OpenGeniProvider({
   productName,
   toolDetails = "full",
   children,
-}: OpenGeniProviderProps) {
+}: OpenGeniProviderProps<ChatClient>) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
     null,
   );

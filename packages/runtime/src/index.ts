@@ -214,7 +214,6 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
-  requestHumanInputToolParameters,
   type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
@@ -417,6 +416,7 @@ import {
   connectMcpServers,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
+  ModelBehaviorError,
   RunState,
   run,
   Runner,
@@ -1006,6 +1006,8 @@ export {
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
   PROVIDER_QUOTA_RETRY_HINT_MS,
+  classifyProviderAccountRefusal,
+  classifyProviderAccountRefusalError,
   classifyProviderQuotaError,
   providerMessageRetryHintMs,
   providerQuotaExhaustedMessage,
@@ -3106,6 +3108,44 @@ function withHumanInputWireParameters<T extends { parameters: unknown }>(
 }
 
 /**
+ * What the Agents SDK parses a `request_human_input` call against before the
+ * tool's input guardrail runs: any JSON object. The SDK redacts every
+ * argument it cannot parse (Opengeni sets OPENAI_AGENTS_DONT_LOG_TOOL_DATA),
+ * hands the guardrail blank arguments and replaces its rejection with "Tool
+ * execution failed. Error details are redacted.", so the model could not
+ * learn what to fix. The guardrail validates the full contract instead and
+ * names each invalid field; turns run it before the approval pause
+ * (`preApprovalInputGuardrails`), so no invalid request reaches the person.
+ * The model-facing schema is set separately (`withHumanInputWireParameters`),
+ * so this changes nothing the model sees.
+ */
+const HumanInputSdkArguments = z.looseObject({});
+
+const HUMAN_INPUT_ISSUES_SHOWN = 5;
+
+/** A model-facing explanation of invalid `request_human_input` arguments. */
+export function humanInputArgumentsRejection(input: unknown): string | null {
+  const parsed = RequestHumanInputToolInput.safeParse(input);
+  if (parsed.success) return null;
+  const questionsText =
+    input !== null &&
+    typeof input === "object" &&
+    typeof (input as { questions?: unknown }).questions === "string";
+  const issues = parsed.error.issues.map(
+    (issue) => `${issue.path.map(String).join(".") || "arguments"}: ${issue.message}`,
+  );
+  const shown = issues.slice(0, HUMAN_INPUT_ISSUES_SHOWN);
+  if (issues.length > shown.length) shown.push(`and ${issues.length - shown.length} more`);
+  return [
+    "Nothing was asked: the request_human_input arguments do not match its schema.",
+    questionsText ? "questions must be an array of question objects, not JSON text." : null,
+    `Fix ${issues.length === 1 ? "this" : "these"} and call request_human_input again: ${shown.join("; ")}.`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
+
+/**
  * The tool view the modular composer reads. An attempt that cannot install the
  * search router (see `lazyToolTransportFor`) has no tool search, so the
  * composer leaves out its guidance even when the host did not say so.
@@ -3708,6 +3748,25 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+/**
+ * errorFunction for built-in tools whose execution failures must stay fatal.
+ * With `errorFunction: null` the SDK also rethrows its own InvalidToolInputError
+ * (arguments that do not match the schema), which ends the whole turn over a
+ * correctable model mistake. This returns that one error to the model as a tool
+ * result and rethrows every other error unchanged. The SDK's own parser stays the
+ * authority (including strict-mode null stripping). Tool data is redacted in this
+ * process (OPENAI_AGENTS_DONT_LOG_TOOL_DATA), so the error carries no field
+ * detail; the model already has the schema.
+ */
+function invalidToolInputOnlyErrorFunction(toolName: string) {
+  return (_context: unknown, error: unknown): string => {
+    if (!(error instanceof ModelBehaviorError) || error.name !== "InvalidToolInputError") {
+      throw error;
+    }
+    return `The ${toolName} tool was not called because its arguments do not match its input schema. Correct the arguments and call the tool again.`;
+  };
+}
+
 const SkillReadToolInput = z.object({
   skill: z.string().min(1).max(512),
   listFiles: z.boolean().optional(),
@@ -3833,7 +3892,7 @@ export function buildOpenGeniAgent(
         description:
           "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
         parameters: GenerateImageToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_image"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
@@ -3852,7 +3911,7 @@ export function buildOpenGeniAgent(
         description:
           "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
         parameters: GetVideoGenerationCapabilitiesToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("get_video_generation_capabilities"),
         execute: async () => {
           const adapter = options.videoGeneration;
           if (!adapter) throw new Error("Video-generation capability changed during execution");
@@ -3866,7 +3925,7 @@ export function buildOpenGeniAgent(
         description:
           "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
         parameters: GenerateVideoToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_video"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
@@ -3900,7 +3959,8 @@ export function buildOpenGeniAgent(
           ]
             .filter((part): part is string => typeof part === "string")
             .join(" "),
-          parameters: requestHumanInputToolParameters(humanInputFeatures),
+          // Replaced on the wire by the feature schema; see HumanInputSdkArguments.
+          parameters: HumanInputSdkArguments,
           needsApproval: true,
           inputGuardrails: [
             {
@@ -3924,7 +3984,8 @@ export function buildOpenGeniAgent(
                 const parsed = RequestHumanInputToolInput.safeParse(input);
                 if (!parsed.success) {
                   return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                    humanInputArgumentsRejection(input) ??
+                      "Invalid request_human_input arguments. Call the tool again with an object matching its schema.",
                   );
                 }
                 const approvalRejection = secretApprovalQuestionRejection(parsed.data);
@@ -3983,7 +4044,7 @@ export function buildOpenGeniAgent(
           description:
             "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
           parameters: SkillReadToolInput,
-          errorFunction: null,
+          errorFunction: invalidToolInputOnlyErrorFunction("skill_read"),
           execute: (input) =>
             JSON.stringify(
               readRuntimeSkill(skillComposition, {
@@ -11470,7 +11531,7 @@ export const CODE_SEARCH_DIRECTIVE =
   "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
-  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. " +
+  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data within the live attempt instead of consuming your context window. Background commands keep the launching attempt's credentials; a new turn does not renew those processes. Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn. For a later recheck, let the session wake, then launch a fresh command. " +
   'When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` takes the same list, show, call, and read commands and uses the same public Codemode operation journal. Otherwise use a compatible `ogtool` from PATH (managed sandboxes put the worker-release client there for every command); if none is compatible, with Bun and $OPENGENI_OGTOOL_PACKAGE_SPEC use the exact pinned `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. ' +
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff; `list --json` is structured and `list --full` includes all schemas. Inspect a tool with `ogtool show <tool-path>` and call it with `ogtool call <tool-path> '<json-args>'`. " +
   'When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)` (do not import the older image-baked package or invoke /usr/local/bin/ogtool directly); otherwise import them from "@opengeni/codemode"; `ogtool declarations <file.d.ts>` writes catalog types. ' +

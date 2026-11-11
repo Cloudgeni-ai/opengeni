@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import {
   chatComposerPlaceholder,
   failedSessionCopy,
@@ -105,6 +106,49 @@ test("known provider failures get plain copy with the exact recorded text as det
       ).reason,
     ).toBe(`${reason} Choose another model below.`);
   }
+});
+
+test("encrypted reasoning another model or account left in the chat points at the model picker", () => {
+  // Recorded in production when a chat moved from a Codex subscription to Azure OpenAI.
+  const azure =
+    "400 The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+  const openAi =
+    "400 Could not decrypt the provided encrypted_content. Ensure the value is the unmodified encrypted_content from a previous response.";
+  for (const recorded of [
+    azure,
+    openAi,
+    "400 Failed to parse encrypted_content.",
+    "400 The reasoning artifact could not be decrypted.",
+    "400 {'code': 'invalid_encrypted_content'}",
+  ]) {
+    // Retry stays: the worker resends the reasoning as readable text where it can.
+    expect(failedSessionCopy({ ...summary, reason: recorded }, false, false, true)).toEqual({
+      reason: "This model can’t read earlier reasoning in this chat. Choose another model below.",
+      unavailableModel: false,
+      retryUnhelpful: false,
+      detail: recorded,
+    });
+  }
+  // Once another model is selected, the headline stands alone.
+  expect(failedSessionCopy({ ...summary, reason: azure }, false, true, true).reason).toBe(
+    "This model can’t read earlier reasoning in this chat.",
+  );
+  // Request-shape errors that only mention the field, other statuses, and
+  // coded failures keep their own copy.
+  for (const failure of [
+    { reason: "400 Unsupported parameter: encrypted_content could not be parsed." },
+    { reason: "400 Unknown parameter: 'include[0]' (reasoning.encrypted_content)." },
+    { reason: "500 encrypted_content decryption failed upstream." },
+    { reason: "400 Encrypted content could not be decrypted.", failureCode: "codex_unavailable" },
+  ])
+    expect(failedSessionCopy({ ...summary, ...failure }).reason).not.toContain("earlier reasoning");
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: "400 Encrypted content could not be decrypted.",
+      failureCode: "provider_unavailable",
+    }).reason,
+  ).toBe("This model is temporarily unavailable. Try again in a few minutes.");
 });
 
 test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
@@ -593,4 +637,9 @@ test("a turn refused for machine access says so, never a database error", () => 
     unavailableModel: false,
     machineAccess: true,
   });
+  // The banner, this fallback and the worker's recorded reason share one sentence.
+  expect(machineAccessNeededMessage("Studio Mac")).toBe(recorded);
+  expect(
+    failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }).reason,
+  ).toBe(machineAccessNeededMessage());
 });

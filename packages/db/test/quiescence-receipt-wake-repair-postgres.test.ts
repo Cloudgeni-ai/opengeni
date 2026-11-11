@@ -17,7 +17,7 @@ import {
   repairMissingQuiescenceReceiptWakes,
   requestSessionTurnRecovery,
   mutateSessionControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -417,7 +417,7 @@ describe("missing quiescence-receipt wake repair", () => {
     await ageDeliveredWake(child.sessionId);
     expect(await discovered(child.sessionId)).toBe(true);
 
-    await withWorkspaceRls(client.db, child.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(client.db, child.workspaceId, (db) =>
       db.transaction((tx) =>
         mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: child.accountId,

@@ -456,6 +456,35 @@ describe("dictation", () => {
     h.dictation.stop();
   });
 
+  test("a failure fixed in the settings offers Open settings, which shows them", async () => {
+    const h = harness();
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    tap(h.keys);
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "failed",
+      message: "You're no longer in Acme. Choose a workspace in Settings.",
+      retryable: false,
+      fix: "settings",
+    });
+    expect(h.last()).toEqual({
+      kind: "notice",
+      tone: "error",
+      message: "You're no longer in Acme. Choose a workspace in Settings.",
+      actions: ["settings", "dismiss"],
+    });
+    h.hudAction("settings");
+    expect(h.sent.slice(-2)).toEqual([
+      { kind: "settings" },
+      { kind: "dismiss", dictationId: "d1" },
+    ]);
+    expect(h.revealed).toBe(1);
+    expect(h.last()).toEqual({ kind: "hidden" });
+    h.dictation.stop();
+  });
+
   test("only the Cancel button and the cancel shortcut cancel; Escape never does", async () => {
     const h = harness({
       settings: { cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+3" } },
@@ -972,6 +1001,7 @@ describe("dictation settings", () => {
       vocabulary: [],
       retryShortcut: null,
       cancelShortcut: null,
+      workspace: null,
     });
     expect(defaultDictationSettings("win32").profiles[0]!.shortcut.kind).toBe("accelerator");
   });
@@ -1062,6 +1092,45 @@ describe("dictation settings", () => {
         profiles: [profile, { ...english, model: { providerId: "x y", model: 3 } }],
       }).profiles[1],
     ).toEqual(english);
+    // Its name, as shown when it was picked, is kept to name it later; a bad one is dropped.
+    const named = { ...model, name: " Azure Speech · MAI-Transcribe-2 " };
+    expect(
+      mergeDictationSettings(current, { profiles: [profile, { ...english, model: named }] })
+        .profiles[1]?.model,
+    ).toEqual({ ...model, name: "Azure Speech · MAI-Transcribe-2" });
+    expect(
+      mergeDictationSettings(current, {
+        profiles: [profile, { ...english, model: { ...model, name: "x".repeat(201) } }],
+      }).profiles[1]?.model,
+    ).toEqual(model);
+  });
+
+  test("dictations keep the workspace saved for them, with its name", () => {
+    const current = defaultDictationSettings("darwin");
+    expect(current.workspace).toBeNull();
+    const acme = { id: "3e7157ca-9d54-4c0d-b5fb-135454e3cb35", name: "Acme" };
+    const chosen = mergeDictationSettings(current, { workspace: { ...acme, name: "  Acme " } });
+    expect(chosen.workspace).toEqual(acme);
+    // Another change keeps it, and so does a malformed one; null clears it.
+    expect(mergeDictationSettings(chosen, { mode: "hold" }).workspace).toEqual(acme);
+    for (const workspace of [
+      { id: "../etc", name: "Acme" },
+      { id: acme.id, name: "  " },
+      { id: acme.id },
+      "3e7157ca",
+      7,
+    ]) {
+      expect(
+        mergeDictationSettings(chosen, {
+          workspace,
+        } as unknown as Partial<DesktopDictationSettings>).workspace,
+      ).toEqual(acme);
+    }
+    expect(mergeDictationSettings(chosen, { workspace: null }).workspace).toBeNull();
+    expect(
+      mergeDictationSettings(current, { workspace: { id: acme.id, name: "x".repeat(300) } })
+        .workspace?.name,
+    ).toHaveLength(200);
   });
 
   test("vocabulary is trimmed, without repeats, and within the limits", () => {

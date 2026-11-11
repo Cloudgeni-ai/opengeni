@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
@@ -88,7 +89,7 @@ test("Enable account shows Enabled or Disabled and still maps to the allocator",
   };
   function Harness({ canManage }: { canManage: boolean }) {
     pool = useClaude({
-      client: client as unknown as OpenGeniBrowserClient,
+      client: client as unknown as ChatClient<OpenGeniBrowserClient>,
       canManage,
       workspaceId,
     });
@@ -167,7 +168,7 @@ for (const [organization, poll] of [
       };
       function Harness() {
         pool = useClaude({
-          client: client as unknown as OpenGeniBrowserClient,
+          client: client as unknown as ChatClient<OpenGeniBrowserClient>,
           canManage: true,
           ...(organization ? { organizationId: workspaceId } : { workspaceId }),
         });
@@ -247,7 +248,7 @@ for (const [outcome, changeScope] of [
       };
       function Harness({ identity }: { identity: string }) {
         const current = useClaude({
-          client: client as unknown as OpenGeniBrowserClient,
+          client: client as unknown as ChatClient<OpenGeniBrowserClient>,
           canManage: true,
           workspaceId: identity,
         });
@@ -322,7 +323,7 @@ test("a workspace admin reads, never live-refreshes or edits, an organization ac
   };
   function Harness() {
     pool = useClaude({
-      client: client as unknown as OpenGeniBrowserClient,
+      client: client as unknown as ChatClient<OpenGeniBrowserClient>,
       canManage: true,
       workspaceId,
     });

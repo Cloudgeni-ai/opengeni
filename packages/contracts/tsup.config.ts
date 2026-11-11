@@ -4,6 +4,7 @@ import { defineConfig } from "tsup";
 // stay external so consumers can deduplicate their schema and hashing runtimes.
 export default defineConfig({
   entry: [
+    "src/browser-response-headers.ts",
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/billing-credit-notifications.ts",
@@ -12,6 +13,7 @@ export default defineConfig({
     "src/learning-refusal.ts",
     "src/values.ts",
     "src/json-safe.ts",
+    "src/citation-urls.ts",
     "src/claude-cite-tags.ts",
     "src/no-reply.ts",
     "src/usage-allowances.ts",
@@ -88,6 +90,8 @@ export default defineConfig({
     "src/automation-templates.ts",
     "src/mcp-elicitation.ts",
     "src/mcp-elicitation-model.ts",
+    "src/machine-access.ts",
+    "src/encrypted-reasoning-refusal.ts",
   ],
   format: ["esm"],
   target: "es2022",

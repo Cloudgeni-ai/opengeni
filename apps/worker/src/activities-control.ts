@@ -17,6 +17,7 @@ import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-main
 import { createSessionStateActivities } from "./activities/session-state";
 import { createSessionArchiveActivities } from "./activities/session-archive";
 import { createSessionStorageActivities } from "./activities/session-storage";
+import { createTurnTimingProfileActivities } from "./activities/turn-timing-profiles";
 import type { ActivityDependencies, ControlActivityServices } from "./activities/types";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 
@@ -48,6 +49,7 @@ export function createControlActivitiesFromServices(
     ...createRecordingActivities(services),
     ...createBrowserRecordingActivities(services),
     ...createModelCallFactReconcilerActivities(services),
+    ...createTurnTimingProfileActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),

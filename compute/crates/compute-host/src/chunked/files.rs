@@ -19,7 +19,7 @@ use super::{
     CHUNK_BYTES, Chunked, DOWNLOADS_PER_FILE, Identity, Piece, Seed, UPLOADS_PER_FILE, ZSTD_LEVEL,
     hash_from_hex, storage_error,
 };
-use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps};
+use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps, punch_hole};
 use crate::layout::Staging;
 
 /// A chunk an earlier copy holds at an offset of the file being stored: a
@@ -599,31 +599,6 @@ async fn copy_seed(seed: &Seed, staging: &Path) -> Result<bool, EngineError> {
         tracing::debug!(%error, "could not start from the base image");
         false
     }))
-}
-
-/// Makes `range` of `file` read as zeros, freeing its blocks.
-#[cfg(target_os = "linux")]
-fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
-    use rustix::fs::{FallocateFlags, fallocate};
-    fallocate(
-        file,
-        FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
-        range.start,
-        range.end - range.start,
-    )
-    .map_err(io::Error::from)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
-    let zeros = vec![0_u8; usize::try_from(CHUNK_BYTES).unwrap_or(0)];
-    let mut at = range.start;
-    while at < range.end {
-        let length = usize::try_from((range.end - at).min(CHUNK_BYTES)).unwrap_or(0);
-        file.write_all_at(&zeros[..length], at)?;
-        at += length as u64;
-    }
-    Ok(())
 }
 
 /// What an archive may reuse of a file, by offset: what its own earlier

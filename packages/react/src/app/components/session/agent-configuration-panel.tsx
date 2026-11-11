@@ -87,6 +87,38 @@ export function AgentConfigurationPanel(props: {
     session.workspaceId,
     "sessions:control",
   );
+  const [configuration, setConfiguration] = useState<Session | null>(null);
+  const [configurationError, setConfigurationError] = useState<string | null>(null);
+  const [configurationRead, setConfigurationRead] = useState(0);
+  useEffect(() => {
+    setConfiguration(null);
+    setConfigurationError(null);
+    if (!canEdit) return;
+    const abort = new AbortController();
+    context.client
+      .getSessionConfiguration(session.workspaceId, session.id, {
+        fresh: true,
+        signal: abort.signal,
+      })
+      .then(
+        (value) => {
+          if (!abort.signal.aborted) setConfiguration(value);
+        },
+        () => {
+          if (!abort.signal.aborted) setConfigurationError("Could not load tool details.");
+        },
+      );
+    return () => abort.abort();
+  }, [
+    context.client,
+    canEdit,
+    session.workspaceId,
+    session.id,
+    session.toolPolicyVersion,
+    session.model,
+    session.activeSandboxId,
+    configurationRead,
+  ]);
   const sectionId = useId();
   const learningHeading = useRef<HTMLHeadingElement>(null);
   const config = session.agent ?? null;
@@ -391,8 +423,29 @@ export function AgentConfigurationPanel(props: {
                   />
                 </PanelSection>
               ) : null}
-              <ConnectedApps session={session} />
-              <TechnicalDetails session={session} />
+              {canEdit ? (
+                configurationError ? (
+                  <Notice tone="failed">
+                    {configurationError}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setConfigurationRead((value) => value + 1)}
+                    >
+                      Try again
+                    </Button>
+                  </Notice>
+                ) : configuration?.id === session.id ? (
+                  <>
+                    <ConnectedApps session={configuration} />
+                    <TechnicalDetails session={configuration} />
+                  </>
+                ) : (
+                  <p role="status" className="text-sm text-fg-muted">
+                    Loading tool details…
+                  </p>
+                )
+              ) : null}
             </>
           )}
         </div>

@@ -395,6 +395,31 @@ describe("core new-session draft hydration", () => {
       const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
       expect(consumed.text).toBe("");
       expect(consumed.revision).toBe(saved.revision + 1);
+      // Restoring the seed on another client must not turn Customize into a
+      // pinned empty list. The exclusions distinguish these two policies,
+      // even when the person merely opened Customize without turning one off.
+      expect(consumed.options.excludedMcpServerIds).toEqual(excludedMcpServerIds);
+      const restored = await saveActorNewSessionDraft(
+        { db, settings, objectStorage: null },
+        grant,
+        grant.workspaceId!,
+        { ...consumed, text: "Search again", expectedRevision: consumed.revision },
+      );
+      const exclusionOnly =
+        restored.tools.length === 0 && restored.options.excludedMcpServerIds !== undefined;
+      const next = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: restored.text,
+        ...restored.options,
+        ...(restored.toolsProvided && !exclusionOnly ? { tools: restored.tools } : {}),
+        model: restored.model,
+        reasoningEffort: restored.reasoningEffort,
+        latencyMode: restored.latencyMode,
+        expectedNewSessionDraftRevision: restored.revision,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(next.toolPolicy.mode).toBe("workspace_default");
+      expect(next.toolPolicy.excludedMcpServerIds ?? []).toEqual(excludedMcpServerIds);
+      expect(next.tools.map((tool) => tool.id)).toEqual(session.tools.map((tool) => tool.id));
     }
   }, 180_000);
 

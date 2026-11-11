@@ -1055,8 +1055,64 @@ describe("structured human-input runtime boundary", () => {
       },
     ]);
     const retryInput = JSON.stringify(model.requests[1]?.input);
-    expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
+    expect(retryInput).not.toContain("Error details are redacted");
+    expect(retryInput).toContain("questions must be an array of question objects, not JSON text");
     expect(retryInput).toContain("human-call-invalid");
+  });
+
+  test("tells the model which human-input field is invalid instead of a redacted failure", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const validQuestion = {
+      id: "proceed",
+      kind: "single_select",
+      prompt: "Proceed with the exchange?",
+      confirm: true,
+      options: [
+        { id: "yes", label: "Yes" },
+        { id: "no", label: "No" },
+      ],
+    };
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            {
+              questions: [
+                {
+                  ...validQuestion,
+                  options: [...validQuestion.options, { id: "later", label: "Later" }],
+                },
+              ],
+              allowSkip: false,
+            },
+            "human-call-three-option-confirm",
+          ),
+        ],
+      },
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: [validQuestion], allowSkip: false },
+            "human-call-fixed",
+          ),
+        ],
+      },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+
+    const result = await runAgentStream(agent, "Ask me to confirm", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(2);
+    expect(result.interruptions).toHaveLength(1);
+    expect(result.interruptions[0]?.rawItem).toMatchObject({ callId: "human-call-fixed" });
+    const retryInput = JSON.stringify(model.requests[1]?.input);
+    expect(retryInput).not.toContain("Error details are redacted");
+    expect(retryInput).toContain("questions.0.confirm");
+    expect(retryInput).toContain("confirm questions are single_select with exactly two options");
   });
 
   test("refuses a question once the chat is switched to work without a person", async () => {
@@ -6310,6 +6366,23 @@ describe("runtime event normalization", () => {
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(staticInstructions(off.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
     expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+  });
+
+  test("Codemode guidance keeps delayed polling inside its credential lifetime", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("intermediate data within the live attempt");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Background commands keep the launching attempt's credentials; a new turn does not renew those processes.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "For a later recheck, let the session wake, then launch a fresh command.",
+    );
+    // It does not advise replaying a possibly committed operation.
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Observation failure or outcome_unknown does not prove execution failed",
+    );
   });
 
   test("no token minted for the turn omits the directive", () => {

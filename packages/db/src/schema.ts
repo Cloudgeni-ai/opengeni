@@ -5944,6 +5944,9 @@ export const sessionRealtimeModes = pgTable(
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
+    // A non-active provider connection prepared for one ringing phone.
+    incomingCallId: uuid("incoming_call_id"),
+    incomingCallDevice: text("incoming_call_device"),
     // The voice owner's account intent, copied onto every turn this lease admits.
     connectionAccountIntent: jsonb(
       "connection_account_intent",
@@ -5990,9 +5993,17 @@ export const sessionRealtimeModes = pgTable(
     activeLease: index("session_realtime_modes_active_lease_idx")
       .on(table.leaseExpiresAt, table.workspaceId, table.sessionId)
       .where(sql`${table.state} = 'active'`),
+    incomingCall: index("session_realtime_modes_incoming_call_idx")
+      .on(table.incomingCallId)
+      .where(sql`${table.incomingCallId} is not null`),
+    incomingCallValid: check(
+      "session_realtime_modes_incoming_call_check",
+      sql`(${table.incomingCallId} is null and ${table.incomingCallDevice} is null and ${table.state} <> 'preparing')
+        or (${table.incomingCallId} is not null and ${table.incomingCallDevice} is not null and length(${table.incomingCallDevice}) between 1 and 300)`,
+    ),
     stateValid: check(
       "session_realtime_modes_state_check",
-      sql`${table.state} in ('active', 'ended')`,
+      sql`${table.state} in ('preparing', 'active', 'ended')`,
     ),
     modelValid: check(
       "session_realtime_modes_model_check",
@@ -6034,7 +6045,7 @@ export const sessionRealtimeModes = pgTable(
     ),
     terminalValid: check(
       "session_realtime_modes_terminal_check",
-      sql`(${table.state} = 'active' and ${table.endedAt} is null and ${table.endReason} is null)
+      sql`(${table.state} in ('preparing', 'active') and ${table.endedAt} is null and ${table.endReason} is null)
         or (${table.state} = 'ended' and ${table.endedAt} is not null and ${table.endReason} is not null)`,
     ),
   }),
@@ -6207,6 +6218,11 @@ export const sessionRealtimeEntries = pgTable(
     ),
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
+      .where(sql`${table.sourceUpdateId} is not null`),
+    // Deleting a machine input (archive purge) sets this to null; that check
+    // has only source_update_id, which the unique index above does not lead.
+    sourceUpdateLookup: index("session_realtime_entries_source_update_idx")
+      .on(table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
     // History deletion's ON DELETE SET NULL check has only history_item_id,
     // not a realtime_id. Avoid a full ledger scan for every archived item.
@@ -7986,6 +8002,13 @@ export const sessionTurns = pgTable(
       table.status,
       table.position,
     ),
+    // Next turn position, max(position) + 1, as one backward probe instead of
+    // a row-security check of every earlier turn (migration 1355).
+    sessionPosition: index("session_turns_session_position_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.position,
+    ),
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
@@ -8005,6 +8028,11 @@ export const sessionTurns = pgTable(
         table.position.desc(),
         table.createdAt.desc(),
       )
+      .where(sql`${table.finishedAt} is not null`),
+    // Finished turns of a workspace by finish time, for the turn timing
+    // profile sweep's recent window (migration 1352).
+    workspaceFinished: index("session_turns_workspace_finished_idx")
+      .on(table.workspaceId, table.finishedAt)
       .where(sql`${table.finishedAt} is not null`),
     // "Mine" session-list filter (migration 0799): prompts a person sent
     // directly, by sender, so a workstream probe is one index lookup per tree
@@ -9208,6 +9236,13 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    // Attempt-claim recovery-warning guards probe one action of one session
+    // (migration 1356).
+    targetAction: index("session_command_receipts_target_action_idx").on(
+      table.workspaceId,
+      table.targetSessionId,
+      table.action,
+    ),
     promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
       .on(
         table.workspaceId,
@@ -9573,6 +9608,12 @@ export const sessionSystemUpdates = pgTable(
     deliveredTurn: index("session_system_updates_delivered_turn_idx")
       .on(table.workspaceId, table.deliveredTurnId)
       .where(sql`${table.deliveredTurnId} is not null`),
+    // Deleting a history item (archive purge, session deletion) checks the
+    // deferred session_system_updates_history_item_fk by delivered_history_item_id
+    // alone; without its own index that check scans every workspace's entries.
+    deliveredHistoryItem: index("session_system_updates_delivered_history_item_idx")
+      .on(table.deliveredHistoryItemId)
+      .where(sql`${table.deliveredHistoryItemId} is not null`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -9659,6 +9700,17 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.dedupeKey,
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
+    // The newest terminal notice a child wrote for its parent, which decides
+    // whether that child's failure is already the parent agent's (migration 1360).
+    childTerminalSource: index("session_system_update_outbox_child_terminal_source_idx")
+      .on(
+        table.workspaceId,
+        table.sourceSessionId,
+        table.targetSessionId,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`${table.kind} = 'child_terminal_result'`),
   }),
 );
 
@@ -10156,6 +10208,85 @@ export const sessionEvents = pgTable(
     duplicateReasonBytes: check(
       "session_events_duplicate_reason_bytes_check",
       sql`${table.duplicateReason} is null or octet_length(${table.duplicateReason}) <= 4096`,
+    ),
+  }),
+);
+
+/**
+ * Where the wall time of one finished logical turn went (migration 1351).
+ * Computed from the session event log by a control maintenance sweep after
+ * the turn settles, never on the turn's own path. The `*_ms` segments are
+ * exclusive and add up to `wall_ms`; `steps` lists model requests, tool
+ * calls, sandbox operations and waits with their start, end and duration.
+ * Dimensions are frozen copies of the turn row. Rows outlive the turn's raw
+ * events (which an idle archive may purge) and go with the turn.
+ */
+export const turnTimingProfiles = pgTable(
+  "turn_timing_profiles",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    version: integer("version").notNull(),
+    status: text("status").notNull(),
+    model: text("model").notNull(),
+    provider: text("provider"),
+    reasoningEffort: text("reasoning_effort").notNull(),
+    latencyMode: text("latency_mode").notNull(),
+    surface: text("surface"),
+    source: text("source").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }).notNull(),
+    wallMs: bigint("wall_ms", { mode: "number" }).notNull(),
+    queueMs: bigint("queue_ms", { mode: "number" }).notNull(),
+    turnStartMs: bigint("turn_start_ms", { mode: "number" }).notNull(),
+    dispatchMs: bigint("dispatch_ms", { mode: "number" }).notNull(),
+    modelInferenceMs: bigint("model_inference_ms", { mode: "number" }).notNull(),
+    modelProviderOtherMs: bigint("model_provider_other_ms", { mode: "number" }).notNull(),
+    modelNetworkMs: bigint("model_network_ms", { mode: "number" }).notNull(),
+    modelUnsplitMs: bigint("model_unsplit_ms", { mode: "number" }).notNull(),
+    modelStalledMs: bigint("model_stalled_ms", { mode: "number" }).notNull(),
+    webSearchMs: bigint("web_search_ms", { mode: "number" }).notNull(),
+    mcpToolMs: bigint("mcp_tool_ms", { mode: "number" }).notNull(),
+    sandboxToolMs: bigint("sandbox_tool_ms", { mode: "number" }).notNull(),
+    ownToolMs: bigint("own_tool_ms", { mode: "number" }).notNull(),
+    sandboxSetupMs: bigint("sandbox_setup_ms", { mode: "number" }).notNull(),
+    humanWaitMs: bigint("human_wait_ms", { mode: "number" }).notNull(),
+    capacityWaitMs: bigint("capacity_wait_ms", { mode: "number" }).notNull(),
+    afterModelMs: bigint("after_model_ms", { mode: "number" }).notNull(),
+    afterToolMs: bigint("after_tool_ms", { mode: "number" }).notNull(),
+    recoveryMs: bigint("recovery_ms", { mode: "number" }).notNull(),
+    turnEndMs: bigint("turn_end_ms", { mode: "number" }).notNull(),
+    attempts: integer("attempts").notNull(),
+    modelRequests: integer("model_requests").notNull(),
+    toolCalls: integer("tool_calls").notNull(),
+    steps: jsonb("steps").$type<unknown[]>().notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .default(sql`statement_timestamp()`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.turnId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "turn_timing_profiles_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+      name: "turn_timing_profiles_workspace_turn_fk",
+    }).onDelete("cascade"),
+    workspaceFinished: index("turn_timing_profiles_workspace_finished_idx").on(
+      table.workspaceId,
+      table.finishedAt,
+    ),
+    finished: index("turn_timing_profiles_finished_idx").on(table.finishedAt),
+    stepsArray: check(
+      "turn_timing_profiles_steps_array_chk",
+      sql`jsonb_typeof(${table.steps}) = 'array'`,
     ),
   }),
 );

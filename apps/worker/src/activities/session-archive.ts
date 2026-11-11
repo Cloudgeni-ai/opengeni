@@ -21,6 +21,7 @@ import {
   readSessionArchiveTree,
   readSessionArchiveSessionRow,
   readSessionArchiveTranscriptEvents,
+  sessionArchiveTranscriptEvent,
   readPendingSessionContentRestore,
   restoreArchivedSessionContent,
   sessionArchiveObjectKeys,
@@ -74,10 +75,20 @@ export const SESSION_ARCHIVE_CANDIDATES_PER_PASS = 25;
 export const SESSION_ARCHIVE_TIME_BUDGET_MS = 10 * 60 * 1_000;
 export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
+/** Page size for kept events appended after the bundle read its events. */
+export const SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS = 500;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
 
-/** Write the full-fidelity bundle: header, every exported row as exact JSON, footer. */
-async function writeBundle(db: Database, scope: SessionArchiveScope, path: string) {
+/**
+ * Write the full-fidelity bundle (header, every exported row as exact JSON,
+ * footer), handing each exported row to `onRow` after it is written.
+ */
+async function writeBundle(
+  db: Database,
+  scope: SessionArchiveScope,
+  path: string,
+  onRow: (table: string, row: string) => Promise<void>,
+) {
   const rowCounts: Record<string, number> = {};
   const sessionRow = await readSessionArchiveSessionRow(db, scope);
   const spool = await writeCompressedJsonLines(path, async (write) => {
@@ -94,6 +105,7 @@ async function writeBundle(db: Database, scope: SessionArchiveScope, path: strin
       })) {
         for (const row of rows) {
           await write(`{"table":${JSON.stringify(spec.table)},"row":${row}}`);
+          await onRow(spec.table, row);
         }
         count += rows.length;
       }
@@ -104,10 +116,29 @@ async function writeBundle(db: Database, scope: SessionArchiveScope, path: strin
   return { spool, rowCounts };
 }
 
-/** Write the readable transcript: public SessionEvent objects, one per line. */
-async function writeTranscript(db: Database, scope: SessionArchiveScope, path: string) {
+/**
+ * Write the bundle and the readable transcript (public SessionEvent objects,
+ * one per line) together. The transcript comes from the event rows the bundle
+ * export reads, in the same sequence order, instead of a second read.
+ * Each kept event goes straight into the transcript's compressed stream, which
+ * waits for it to drain and fails the export if writing the file fails.
+ *
+ * Nothing stops new events while a session archives, so a kept event can be
+ * appended after the bundle has read its events. Such events are not in the
+ * bundle, but they stay live (kept types are never purged), and the transcript
+ * still lists them: once the bundle is written, one more read takes the kept
+ * events after the last sequence it saw, normally none. Each session's events
+ * commit in sequence order (every insert must exactly continue the session's
+ * locked event cursor), so a later event never has a lower sequence.
+ */
+async function writeBundleAndTranscript(
+  db: Database,
+  scope: SessionArchiveScope,
+  paths: { bundle: string; transcript: string },
+) {
   let events = 0;
-  const spool = await writeCompressedJsonLines(path, async (write) => {
+  let bundle: Awaited<ReturnType<typeof writeBundle>> | undefined;
+  const spool = await writeCompressedJsonLines(paths.transcript, async (write) => {
     await write(
       JSON.stringify({
         format: SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
@@ -116,20 +147,31 @@ async function writeTranscript(db: Database, scope: SessionArchiveScope, path: s
         sessionId: scope.sessionId,
       }),
     );
-    let afterSequence = 0;
+    let lastEventRow: string | undefined;
+    bundle = await writeBundle(db, scope, paths.bundle, async (table, row) => {
+      if (table !== "session_events") return;
+      lastEventRow = row;
+      const event = sessionArchiveTranscriptEvent(row);
+      if (!event) return;
+      await write(JSON.stringify({ event }));
+      events += 1;
+    });
+    let afterSequence = lastEventRow
+      ? (JSON.parse(lastEventRow) as { sequence: number }).sequence
+      : 0;
     for (;;) {
       const page = await readSessionArchiveTranscriptEvents(db, scope, {
         afterSequence,
-        limit: 500,
+        limit: SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS,
       });
       for (const event of page) await write(JSON.stringify({ event }));
       events += page.length;
-      if (page.length < 500) break;
+      if (page.length < SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS) break;
       afterSequence = page.at(-1)!.sequence;
     }
     await write(JSON.stringify({ end: true, events }));
   });
-  return { spool, events };
+  return { bundle: bundle!, transcript: { spool, events } };
 }
 
 export type ArchiveSessionOutcome = "archived" | "skipped" | "failed";
@@ -255,8 +297,10 @@ export function createSessionArchiveActivities(
     if (!begun) return "skipped";
     const directory = await mkdtemp(join(tmpdir(), "opengeni-session-archive-"));
     try {
-      const bundle = await writeBundle(db, scope, join(directory, "bundle.jsonl.zst"));
-      const transcript = await writeTranscript(db, scope, join(directory, "transcript.jsonl.zst"));
+      const { bundle, transcript } = await writeBundleAndTranscript(db, scope, {
+        bundle: join(directory, "bundle.jsonl.zst"),
+        transcript: join(directory, "transcript.jsonl.zst"),
+      });
       await upload(storage, keys.bundle, bundle.spool);
       await upload(storage, keys.transcript, transcript.spool);
       const manifest: SessionArchiveManifest = {
@@ -292,12 +336,17 @@ export function createSessionArchiveActivities(
     deadline: number,
   ): Promise<number> {
     let purged = 0;
+    // Resume at the table the last step left unfinished; the step itself
+    // ends with a full pass that confirms every table is empty.
+    let fromTable = 0;
     while (now() < deadline) {
       const step = await purgeArchivedSessionContent(db, scope, {
         batchSize: SESSION_ARCHIVE_PURGE_BATCH_ROWS,
+        fromTable,
       });
       purged += step.deleted;
       if (step.complete) break;
+      fromTable = step.nextTable;
     }
     return purged;
   }

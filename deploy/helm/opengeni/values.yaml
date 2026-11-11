@@ -93,6 +93,9 @@ config:
   MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
+  # Comma-separated exact hosts, optionally host:port, allowed to resolve privately.
+  # Example: "admin-api.example.com:443,auth.example.com:8443". No wildcards or URLs.
+  OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS: ""
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"
@@ -297,6 +300,10 @@ api:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
+  # After SIGTERM the API drains: responses close their keep-alive connections, idle
+  # ones close, live streams end and in-flight requests finish, all within the grace
+  # left after preStop (rendered as OPENGENI_API_SHUTDOWN_GRACE_MS). It must exceed
+  # preStopDrainSeconds.
   terminationGracePeriodSeconds: 30
   # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
   # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
@@ -1764,11 +1771,15 @@ observability:
     # Must cover at least three configured sandbox reaper periods; Helm rejects
     # an incompatible pairing before generating a rule that would age out live data.
     inventoryFreshnessSeconds: 300
-    # Cumulative p95 startup SLOs, measured from the durable turn queue time.
-    # Keep these aligned with the canonical Turn Startup dashboard annotations.
-    turnStartupQueueP95Seconds: 5
-    # Accepted turn -> first provider dispatch is Opengeni-owned latency, so it
-    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # Age of the oldest runnable prompt (not held behind an active turn, a
+    # Pause, a capacity wait or a required human action). Prompts queued behind
+    # a running turn in their own chat are normal and never alert.
+    turnReadyPromptAgeSeconds: 60
+    turnReadyPromptAgeCriticalSeconds: 300
+    # Startup p95s measured from the start of the turn attempt, so they exclude
+    # time behind an earlier turn, capacity waits and recovery gaps. Attempt
+    # start -> first provider dispatch is Opengeni-owned preparation, so it gets
+    # tight tiers: a warning (investigate) and a paging critical tier that
     # replaces it. Normal p95 is a few seconds.
     turnStartupProviderDispatchP95Seconds: 20
     turnStartupProviderDispatchCriticalP95Seconds: 60

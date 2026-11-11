@@ -2473,21 +2473,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_connection_is_named_instead_of_a_bare_send_error() {
-        // Bound but not listening: connections are refused, and no parallel
-        // test can take the port meanwhile.
+    async fn a_failed_connection_names_its_cause_instead_of_a_bare_send_error() {
+        // Keep the port reserved without a listener. Linux refuses the dial;
+        // macOS can leave it pending until the client's connect timeout.
         let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
         reserved.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
         let address = reserved.local_addr().expect("address");
-        let client =
+        let mut client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        client.http = Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
         let message = client.catalog().await.unwrap_err().to_string();
         drop(reserved);
-        assert_eq!(
-            message,
-            format!(
-                "Can't reach Opengeni: the connection to {address} was refused. Check this machine's network, firewall and proxy settings."
-            )
+        assert!(
+            ["was refused", "timed out"].iter().any(|cause| message == format!(
+                "Can't reach Opengeni: the connection to {address} {cause}. Check this machine's network, firewall and proxy settings."
+            )),
+            "{message}"
         );
     }
 
@@ -2516,29 +2521,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_call_that_loses_opengeni_after_the_catalog_names_the_cause_and_its_operation() {
-        // A second socket shares the listener's port from the start and never
-        // listens. Once the listener closes, it keeps the port bound, so the
-        // submission and its read-back that follow the catalog are refused
-        // and no parallel test can take the port in between.
-        let shared_socket = || {
-            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-            socket.set_reuseaddr(true).expect("reuseaddr");
-            #[cfg(unix)]
-            socket.set_reuseport(true).expect("reuseport");
-            socket
-        };
-        let listening = shared_socket();
-        listening
-            .bind("127.0.0.1:0".parse().unwrap())
-            .expect("bind");
-        let address = listening.local_addr().expect("address");
-        let reserved = shared_socket();
-        reserved.bind(address).expect("share the port");
-        let listener = listening.listen(16).expect("listen");
+        // Keep one listener owning the port throughout. Sharing a port with a
+        // non-listening SO_REUSEPORT socket is platform-dependent and can keep
+        // the catalog from reaching this listener on macOS.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("catalog");
             read_request(&mut stream).await;
-            drop(listener);
             write_response(
                 &mut stream,
                 &json!({
@@ -2551,11 +2541,26 @@ mod tests {
                 }),
             )
             .await;
+            drop(stream);
+            // Both submission and observation lose their response to a TCP
+            // reset. Unlike a graceful HTTP EOF, this has a named I/O cause.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("failed request");
+                read_request(&mut stream).await;
+                // Zero linger deliberately sends RST on drop. The deprecation
+                // warns about blocking with positive linger, which is not used.
+                #[allow(deprecated)]
+                stream
+                    .set_linger(Some(Duration::ZERO))
+                    .expect("reset on drop");
+                drop(stream);
+            }
         });
         let client =
             CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
-        let error = client
-            .call_as(
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.call_as(
                 CodemodeCallArgs {
                     tool: "demo.write".into(),
                     arguments: "{}".into(),
@@ -2563,13 +2568,15 @@ mod tests {
                     save_image: None,
                 },
                 "operation-refused".to_string(),
-            )
+            ),
+        )
+        .await
+        .expect("connection loss is observed promptly")
+        .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(10), server)
             .await
-            .unwrap_err();
-        server.await.unwrap();
-        drop(reserved);
-        // Under heavy load Linux occasionally resets instead of refusing a
-        // connection to the closed listener's port; both are named causes.
+            .expect("fixture served submission and observation")
+            .unwrap();
         let message = error.to_string();
         let prefix = format!(
             "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} "

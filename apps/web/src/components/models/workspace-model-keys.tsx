@@ -4,6 +4,7 @@ import {
   directModelConnectionSpec,
   type DirectModelProvider,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useRef, useState } from "react";
@@ -42,7 +43,7 @@ import type { ConnectCompatibleEndpoint } from "./organization-compatible-endpoi
 
 /** The workspace's own model keys, metadata only. */
 export function useWorkspaceModelKeys(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   enabled: boolean,
 ) {
@@ -69,7 +70,7 @@ function modelKeyTitle(connection: ConnectionMetadata): string {
 
 /** Save a workspace key after the API's short test request; returns the connection. */
 async function createWorkspaceModelKey(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   config: DirectModelProviderMetadata,
   apiKey: string,
@@ -118,7 +119,7 @@ export function useWorkspaceModelKeyConnect({
   provider,
   canManage,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   provider: Extract<DirectModelProvider, "openai" | "azure_openai">;
   canManage: boolean;
@@ -164,7 +165,7 @@ export function useWorkspaceModelKeyConnect({
 
 /** Connect a custom endpoint as one workspace's own key. */
 export function workspaceEndpointConnect(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
 ): ConnectCompatibleEndpoint {
   return async (request, operationId) => {
@@ -199,7 +200,7 @@ export function WorkspaceModelKeyRows({
   canManage,
   onChange,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   keys: readonly ConnectionMetadata[];
   /** Who uses the key: "Everyone in Design". */

@@ -77,6 +77,7 @@ import { needsSandboxRecoveryCheck } from "../lib/sandbox-failure";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
+  allowMachineForChat,
   recheckSessionAdmission,
   SessionAdmissionNotice,
 } from "../components/session/session-admission-notice";
@@ -349,7 +350,7 @@ import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
   McpElicitationAnswer,
-  LineageNode,
+  ChatLineageNode as LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
@@ -3936,14 +3937,7 @@ function SessionChatPane(props: {
             />
           );
         }
-        return (
-          <UserMessageBody
-            sessionId={props.session.id}
-            workspaceId={props.session.workspaceId}
-            item={item}
-            searchTarget={renderContext.searchTarget}
-          />
-        );
+        return <UserMessageBody item={item} searchTarget={renderContext.searchTarget} />;
       }
       return (
         <div data-testid="assistant-markdown">
@@ -3964,7 +3958,6 @@ function SessionChatPane(props: {
       context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,
-      props.session.id,
       props.session.workspaceId,
       renderInteractiveBlock,
       renderImage,
@@ -4275,6 +4268,11 @@ function SessionChatPane(props: {
                       >
                         <MessageTimeline
                           resolveLink={resolveLink}
+                          artifactScope={{
+                            client: context.client,
+                            workspaceId: props.session.workspaceId,
+                            sessionId: props.session.id,
+                          }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                           trailingState={
@@ -4485,6 +4483,32 @@ function SessionChatPane(props: {
                     refresh: [props.onReloadSession, props.queue.refresh],
                   })
                 }
+                onRefresh={async () => {
+                  await Promise.all([props.onReloadSession(), props.queue.refresh()]);
+                }}
+                onAllowMachine={
+                  machineAccess?.isOwner &&
+                  runsOn.activeMachine?.enrollmentId &&
+                  runsOn.activeMachine.sandboxId === props.session.activeSandboxId
+                    ? async () => {
+                        const enrollmentId = runsOn.activeMachine?.enrollmentId;
+                        const allowed = enrollmentId
+                          ? await allowMachineForChat({
+                              client: context.client,
+                              workspaceId: props.session.workspaceId,
+                              session: props.session,
+                              enrollmentId,
+                            })
+                          : false;
+                        await Promise.allSettled([
+                          props.onReloadSession(),
+                          props.queue.refresh(),
+                          runsOn.fleet.refresh(),
+                        ]);
+                        if (!allowed) throw new Error("machine could not be allowed");
+                      }
+                    : undefined
+                }
                 onContinueWaitingWork={async () => {
                   await context.client.continueSessionWaitingWork(
                     props.session.workspaceId,
@@ -4515,7 +4539,14 @@ function SessionChatPane(props: {
               {waitingSubSessions.length > 0 ? (
                 <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
-                  <OpenGeniLinkProvider resolveLink={resolveLink}>
+                  <OpenGeniLinkProvider
+                    resolveLink={resolveLink}
+                    artifactScope={{
+                      client: context.client,
+                      workspaceId: props.session.workspaceId,
+                      sessionId: props.session.id,
+                    }}
+                  >
                     <DescendantRequests
                       client={context.client}
                       workspaceId={props.session.workspaceId}

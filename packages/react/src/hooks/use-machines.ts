@@ -1,4 +1,6 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useRef, useState } from "react";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import type {
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
@@ -92,7 +94,7 @@ export type MachinesClientLike = {
   attachMachine?: (workspaceId: string, sessionId: string, sandboxId: string) => Promise<unknown>;
 };
 
-export type UseMachinesOptions = ClientOverride & {
+export type UseMachinesOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
   /** Scope the list to a session (adds the synthetic Modal group box + pointer). */
@@ -177,6 +179,9 @@ function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse):
       return t("hooks.useMachines.theMachineSOwnerHas");
     case "personal_machine_not_permitted":
       return t("hooks.useMachines.onlyTheMachineSOwner");
+    // Trying again won't help while the chat isn't allowed to use the machine.
+    case "machine_access_required":
+      return machineAccessNeededMessage();
     // Neither is fixed by trying again: say what to do instead.
     case "workspace_root_unavailable":
       return t("hooks.useMachines.thatMachineHasntReported");

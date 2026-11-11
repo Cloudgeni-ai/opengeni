@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { Session, SessionTurn } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionTurn } from "@opengeni/sdk";
 import { conversationTimeline } from "../../session";
 import { sessionInputWait } from "./session-rail";
 import {

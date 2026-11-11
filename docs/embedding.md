@@ -587,6 +587,10 @@ recording a `session.resources.removed` event. Matching ignores letter case
 and a trailing `.git`. Removing a repository that is not attached is a no-op,
 so a retry completes a partial removal.
 
+When a person approves an agent's `github_repository_attach` call, the
+repository is added to the session and a `session.resources.added` event
+records it (see [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository)).
+
 Access through Opengeni ends on the next call: the personal Git broker, the
 GitHub tools and every new Git credential mint check the session's current
 repositories each time, including for a running turn, a child or a goal
@@ -1319,9 +1323,11 @@ fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
 `dispatcher`; it is not a bypass for destination policy.
 
 Private integration targets are denied by default. A self-hosted operator may
-explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
-trusted internal MCP/OAuth endpoints; local/test already has the narrow
-loopback escape needed by fixtures. Keep credential resolution outside the
+set `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS` to exact trusted
+hosts, optionally restricted by port; see [private destinations](workspace-integrations.md#trusted-private-network-destinations).
+The older `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` opens all
+private targets and is not needed for this list. Local/test retains its existing
+private-network escape. Keep credential resolution outside the
 pinned final transport so headers are attached only to the exact request URL
 that the broker audience-checks.
 

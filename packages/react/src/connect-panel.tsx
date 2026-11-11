@@ -1,4 +1,5 @@
 import { ConnectAccounts } from "./connect-accounts";
+import type { ChatClient } from "@opengeni/sdk";
 import { ConnectChooser } from "./connect-chooser";
 import { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 import { useConnect } from "./hooks/use-connect";
@@ -19,7 +20,7 @@ export type ConnectPanelProps = ConnectSetupProps & {
   /** Include ready, non-custom adapters from the host's Connect catalogue. */
   showProviderConnections?: boolean;
   presentation?: "select" | "catalog";
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
 };
 
 /** Optional composition over the same unstyled surfaces. Import
@@ -46,7 +47,7 @@ export function ConnectPanel({
   const activeSetup =
     attempt !== null && !["complete", "cancelled", "expired"].includes(attempt.state);
   const serviceName = attempt
-    ? connectionServicePresentation({ id: attempt.providerId, label: "" }).name
+    ? connectionServicePresentation({ id: attempt.providerId, label: "" }, t).name
     : "";
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
@@ -95,6 +96,7 @@ export function ConnectPanel({
       {activeSetup && (
         <ConnectSetup
           {...setup}
+          serviceName={setup.serviceName ?? (serviceName || undefined)}
           authorizeLabel={
             setup.authorizeLabel ??
             (serviceName

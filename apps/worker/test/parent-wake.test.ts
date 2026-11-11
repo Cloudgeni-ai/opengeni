@@ -92,12 +92,6 @@ for (const scenario of [
       17,
       {
         claimPendingSessionWorkflowWakes,
-        repairPendingChildTerminalResultWakes: async () => ({
-          examined: 0,
-          registered: 0,
-          failed: 0,
-          cursor: null,
-        }),
       },
     );
 

@@ -1,13 +1,15 @@
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import { ConnectChooser } from "./connect-chooser";
 import {
   capabilityConnectProviderId,
   connectionServicePresentation,
+  connectionServiceWording,
   isServiceConnectProvider,
 } from "./connection-service-presentation";
 import type { CapabilityCatalogItem, ConnectionMetadata, OpenGeniClient } from "@opengeni/sdk";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 import { ConnectionSkeleton } from "./connection-skeleton";
@@ -18,7 +20,7 @@ import { useOpenGeniText } from "./messages/runtime";
 import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectionDiscoveryProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
@@ -45,11 +47,35 @@ function ScopedDiscovery({
   onConfigured,
 }: ConnectionDiscoveryProps) {
   const t = useOpenGeniText();
-  const [providers, setProviders] = useState<ConnectProvider[] | null>(null);
+  const [loadedProviders, setProviders] = useState<ConnectProvider[] | null>(null);
+  // The host's name and description for each service, as everywhere else it is shown.
+  const providers = useMemo(
+    () =>
+      loadedProviders?.map((provider) => {
+        const own = connectionServiceWording(t, provider.id);
+        return { ...provider, label: own.name ?? provider.label, description: own.description };
+      }) ?? null,
+    [loadedProviders, t],
+  );
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
   const [providerFailed, setProviderFailed] = useState(false);
-  const [items, setItems] = useState<CapabilityCatalogItem[] | null>(null);
+  const [loadedItems, setItems] = useState<CapabilityCatalogItem[] | null>(null);
+  // A reviewed connector for a known service (Gmail) takes the same host wording.
+  const items = useMemo(
+    () =>
+      loadedItems?.map((item) => {
+        const providerId = capabilityConnectProviderId(item);
+        if (!providerId) return item;
+        const own = connectionServiceWording(t, providerId);
+        return {
+          ...item,
+          name: own.name ?? item.name,
+          description: own.description ?? item.description,
+        };
+      }) ?? null,
+    [loadedItems, t],
+  );
   const [failed, setFailed] = useState(false);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [reload, setReload] = useState(0);
@@ -121,7 +147,9 @@ function ScopedDiscovery({
   const providerMatches = (providers ?? []).filter(
     (provider) =>
       !items?.some((item) => capabilityConnectProviderId(item) === provider.id) &&
-      provider.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+      `${provider.label} ${provider.description ?? ""}`
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase()),
   );
   const loading = (!items && !failed) || Boolean(controller && !providers && !providerFailed);
   if (selectedProvider && controller)
@@ -183,6 +211,7 @@ function ScopedDiscovery({
             <CapabilityCatalogRow
               key={provider.id}
               name={provider.label}
+              description={provider.description}
               icon={
                 <ConnectionLogo
                   name={provider.label}

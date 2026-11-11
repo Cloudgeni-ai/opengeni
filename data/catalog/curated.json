@@ -144,7 +144,7 @@
       "notes": [
         "scopesHint is what a first connection asks for: read access only. gmail.compose and gmail.modify are asked for later through incremental consent, when a tool call needs them, and never beyond the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
-        "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
+        "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset, so nothing is vendored or hotlinked. @opengeni/react bundles the Gmail product mark (packages/react/src/assets) and shows it for this MCP URL."
       ]
     },
     {
@@ -200,7 +200,7 @@
       "provenance": "official:mcp-registry:com.mobbin/mobbin@1.0.1",
       "authKind": "oauth2",
       "scopesHint": ["openid"],
-      "logoSourceUrl": null,
+      "logoSourceUrl": "https://integrations.sh/logo/mobbin.com",
       "homepageUrl": "https://mobbin.com/mcp",
       "installUrl": "https://docs.mobbin.com/mcp/clients/overview",
       "documentationUrl": "https://docs.mobbin.com/mcp/introduction",
@@ -213,7 +213,7 @@
       "repositoryUrl": "https://github.com/mobbin/mobbin-mcp-server",
       "sourceCommit": "bbee2a6be34d251c580ba80bb8b407c87587aba7",
       "notes": [
-        "logoSourceUrl is null because Mobbin has not published a reusable logo license with its MCP listing. Keep the calm monogram rather than copying an unlicensed vendor asset."
+        "Logo: Mobbin's own mark as integrations.sh serves it for mobbin.com, vendored by catalog:vendor-logos like every other registry mark and shown only to identify Mobbin's connector (nominative use). It replaced a letter monogram so every reviewed connector shows its brand (2026-11-09)."
       ]
     },
     {
@@ -477,10 +477,12 @@
         "permissionSummary": "Atlassian asks you to approve access to the sites you choose. Agents only see what your Atlassian account can see. If connecting fails with a domain or policy error, an Atlassian organization admin must allow the Opengeni domain for the Rovo MCP server in Atlassian Administration."
       },
       "documentationUrl": "https://developer.atlassian.com/cloud/rovo-mcp/guides/getting-started/",
+      "logoSourceUrl": "https://cdn.simpleicons.org/atlassian",
       "notes": [
         "Atlassian's recommended v2 endpoint. ?tools=all is Atlassian's documented, non-secret switch to a flat tool list instead of discover and execute gateway tools, so every tool keeps its own approval policy; it is the one reviewed query string in REVIEWED_QUERY_MCP_URLS.",
         "Same authorization server as v1. A v1 token can't call v2, so v1 and v2 connections stay separate resources; the v1 row stays for existing connections.",
-        "Keyed to jira.com like the v1 row. Not marked official for the same reason: mcp.atlassian.com is not mechanically checkable against the snapshot domain jira.com."
+        "Keyed to jira.com like the v1 row. Not marked official for the same reason: mcp.atlassian.com is not mechanically checkable against the snapshot domain jira.com.",
+        "Logo: Simple Icons \"atlassian\" (CC0-1.0 icon data, Atlassian's brand blue). The registry's jira.com asset is the full Atlassian wordmark, which is unreadable in a square tile. The mark remains Atlassian's and identifies the service by nominative use."
       ]
     },
     {
@@ -507,10 +509,12 @@
         "permissionSummary": "Atlassian asks you to approve access to the sites you choose. Agents only see what your Atlassian account can see. If connecting fails with a domain or policy error, an Atlassian organization admin must allow the Opengeni domain for the Rovo MCP server in Atlassian Administration."
       },
       "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+      "logoSourceUrl": "https://cdn.simpleicons.org/atlassian",
       "notes": [
         "Superseded by https://mcp.atlassian.com/v2/mcp?tools=all. Kept enabled because catalog rows are keyed by MCP URL and connections are bound to their URL: dropping it would disable existing installations. Atlassian switches v1 connections to v2 tools on 1 March 2027.",
         "Snapshot name was the bare domain 'jira.com'. Upstream discovery for atlassian.com no longer lists an MCP surface, so the Rovo server row is keyed to jira.com; the earlier atlassian.net row for the same endpoint is superseded by this one.",
-        "Not marked official: the server is Atlassian's own but lives on mcp.atlassian.com, which is not mechanically checkable against the snapshot domain jira.com. official must stay a checkable claim."
+        "Not marked official: the server is Atlassian's own but lives on mcp.atlassian.com, which is not mechanically checkable against the snapshot domain jira.com. official must stay a checkable claim.",
+        "Logo: Simple Icons \"atlassian\", as for the v2 row; the registry asset is an unreadable wordmark."
       ]
     },
     {
@@ -578,7 +582,8 @@
       "logoSourceUrl": null,
       "documentationUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
       "notes": [
-        "Google remote tools/list verified 2026-10-22. Official server remains Developer Preview; supplemental REST tools share the same personal grant. Disabled by deployment until preview, API enablement and OAuth verification are complete."
+        "Google remote tools/list verified 2026-10-22. Official server remains Developer Preview; supplemental REST tools share the same personal grant. Disabled by deployment until preview, API enablement and OAuth verification are complete.",
+        "logoSourceUrl is null, so nothing is vendored or hotlinked. @opengeni/react bundles Google's Drive product mark (packages/react/src/assets) and shows it for this MCP URL."
       ]
     },
     {
@@ -648,7 +653,7 @@
       "notes": [
         "scopesHint is the least-privilege set for the reviewed tools: calendar-list read, events read/write and free/busy. The broad calendar and calendar.readonly scopes are deliberately not requested. OAuth discovery uses pinned Google metadata and verifies the consenting account with calendarList/primary. Google Calendar connections are personal-only; every member connects their own calendar.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Calendar REST bridge (packages/runtime/src/google-calendar-rest-mcp.ts) against the Calendar v3 API, never Google's hosted Calendar MCP endpoint, whose URL is kept only as the connection identity. create_event, update_event and delete_event use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
-        "logoSourceUrl is null because Google has not published a reusable Calendar MCP logo asset. Keep the self-hosted icon rather than hotlinking a brand asset."
+        "logoSourceUrl is null because Google has not published a reusable Calendar MCP logo asset, so nothing is vendored or hotlinked. @opengeni/react bundles Google's Calendar product mark (packages/react/src/assets) and shows it for this MCP URL."
       ]
     }
   ],

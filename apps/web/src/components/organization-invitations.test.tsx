@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
@@ -110,7 +111,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -186,7 +187,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -237,7 +238,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -302,7 +303,7 @@ describe("global organization invitations", () => {
     const client = {
       listOrganizationInvitations,
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -436,7 +437,7 @@ describe("global organization invitations", () => {
     const client = {
       listOrganizationInvitations,
       acceptOrganizationInvitation,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({

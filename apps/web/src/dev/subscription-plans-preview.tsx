@@ -1,4 +1,5 @@
 import { useLayoutEffect, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { AppContext } from "@opengeni/react/app/app-context";
@@ -132,7 +133,7 @@ export function SubscriptionPlansPreview() {
     async createSubscriptionPortalSession() {
       throw new Error("Preview only. Manage billing opens Stripe.");
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const billing: BillingSummary = {
     mode: "stripe",
     balance: {

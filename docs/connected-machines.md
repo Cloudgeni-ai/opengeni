@@ -40,11 +40,27 @@ generation and invalidates existing grants.
 
 ### Control transport recovery
 
+An accepted command's output reattaches from its contiguous received sequence
+when the same runner announces its ready connection, or the controller's shared
+NATS transport reconnects. The existing silence probe remains the fallback, not
+the first opportunity to recover. Reattachment never restarts the command or
+extends its execution deadline. A successor runner has a different subject and
+cannot recover work by impersonating the original process.
+
 The API/worker uses its shared NATS connection for control RPC, operation frames,
-and acknowledgements. The native supervisor treats either control- or bulk-lane
-loss, including scheduled five-minute user-JWT expiry, as a transport-generation
-change: it reconnects, authenticates again, resubscribes, and detaches rather than
-restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+and acknowledgements. The broker's five-minute credential bounds established
+access after enrollment revocation; fresh admission checks enrollment authority.
+Ordinary enrollment-token renewal updates the next-dial bearer and the
+relay's future registrations in place, leaving accepted operations and healthy
+sockets untouched. Authority, consent, endpoint or authentication-state changes
+still replace the link.
+
+The native supervisor treats either control- or bulk-lane loss as a
+transport-generation change: it reconnects, authenticates again, resubscribes, and
+detaches rather than restarts accepted commands. Each generation owns both NATS
+connection tasks and closes them on every exit, including partial setup and
+cancelled dials. Retained RPC client clones cannot keep an old socket reconnecting
+alongside its replacement. The WebSocket/QUIC relay is a separate stream plane;
 it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
@@ -156,7 +172,15 @@ once the ledger has recorded that stop. A turn records it through its own
 adoption; a direct terminal or file request records it in the same ledger
 without a turn. If recording fails, the caller keeps custody and goes on
 stopping it, as for a machine that stopped answering, and the text claims no
-stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+stop. For an attempt-owned command whose foreground consumer has ended without
+terminal proof, finalization retries this exact-operation ledger handoff,
+including after protocol failures not classified as offline. Its cancellation
+and observation requests do not block the independent ledger commit. A pending
+live foreground adoption still owns the command; cleanup cannot take it over
+until that consumer ends. Failed ledger writes retain the physical writer,
+while a committed stop request transfers it to the existing reconciler without
+replaying the command or acknowledging output.
+A direct terminal exec whose own deadline passes meanwhile ends with that
 same answer, not exit 124: it reports 124 only when its deadline provably ended
 the command. The reconciler alone decides the outcome: it delivers the stop if the old
 runner answers again, and settles the command as lost once the enrollment
@@ -604,10 +628,11 @@ turn, and the next run discovers again.
 
 ### Bundled rg and jq
 
-Release agents embed official, SHA-256-pinned builds of ripgrep and jq for
-their own platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows
-x64 and arm64). At start the agent writes them to
-`/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+Release agents embed SHA-256-pinned builds of ripgrep and jq for their own
+platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x64 and
+arm64): the official release builds, except on Linux, where jq is a static musl
+build of the official jq source, so it runs on any Linux distribution. At start
+the agent writes them to `/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
 (so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
 and appends that directory to the end of every command's PATH, including the
 PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
@@ -1706,7 +1731,9 @@ renewal itself cannot change ownership, scope or screen-control consent. Who can
 use a machine changes in place through **Who can use it?** (see
 [Change who can use a machine](#change-who-can-use-a-machine)), and screen
 control through its own request below; neither needs a reconnect. Updated
-credentials load into the existing process, preserving host operations.
+credentials load into the existing process. Renewal of the same credential family
+updates login/relay tokens without replacing its live NATS connections; changes
+to authority or other connection settings still reconcile through link replacement.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
@@ -1827,6 +1854,12 @@ Two refusals are registered today:
   attempt get no card. Only these API tools emit it today; the worker poster
   passes no requested machine, so an interaction tool that emitted it would get
   a machine card that names no machine.
+  `machine_access_required` is also a plain refusal: the move or `run_on` got
+  past admission, but the check right before the machine is used found this
+  turn's approval used up, revoked or expired. Its reason starts with the same
+  "Machine access needed" sentence a failed turn shows
+  (`machineAccessNeededMessage`, `packages/contracts`), and the chat stays
+  where it was.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`

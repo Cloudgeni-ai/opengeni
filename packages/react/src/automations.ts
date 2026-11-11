@@ -60,6 +60,7 @@ export {
 } from "./components/automations/automation-when-field";
 export {
   AUTOMATION_NAME_MAX_LENGTH,
+  automationAgentOpeningMessage,
   automationCadence,
   automationCadenceIssue,
   automationCadenceRepeats,

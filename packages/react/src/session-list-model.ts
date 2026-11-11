@@ -7,9 +7,9 @@ import {
   deriveSessionDisplayTitle,
   sessionTitleIsPending,
   type ClientModel,
-  type Session,
+  type ChatSession as Session,
   type SessionListEntry,
-  type SessionLineageResponse,
+  type ChatSessionLineageResponse as SessionLineageResponse,
   type SessionStatus,
 } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";

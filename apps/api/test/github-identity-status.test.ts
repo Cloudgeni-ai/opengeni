@@ -39,7 +39,7 @@ function read(
     baseUrl: "https://app.example.test/",
     person: writer,
     loadConnection: async () => null,
-    loadRepositoryCount: async () => 0,
+    loadRepositoryChoice: async () => ({ repositoryCount: 0, allRepositoriesAccess: null }),
     ...overrides,
   });
 }
@@ -66,6 +66,7 @@ describe("personal GitHub identity status for the agent", () => {
       status: "not_connected",
       login: null,
       repositoryCount: null,
+      allRepositories: null,
       connectUrl: LINK,
       manageUrl: null,
     });
@@ -82,10 +83,13 @@ describe("personal GitHub identity status for the agent", () => {
   });
 
   test("connected reports the login and allowed repository count, and the chooser link", async () => {
-    const loadRepositoryCount = mock(async () => 4);
+    const loadRepositoryChoice = mock(async () => ({
+      repositoryCount: 4,
+      allRepositoriesAccess: null,
+    }));
     const status = await read({
       loadConnection: async () => connection("active"),
-      loadRepositoryCount,
+      loadRepositoryChoice,
     });
     expect(status).toEqual({
       enabled: true,
@@ -93,10 +97,30 @@ describe("personal GitHub identity status for the agent", () => {
       status: "connected",
       login: "octocat",
       repositoryCount: 4,
+      allRepositories: { enabled: false, access: null },
       connectUrl: null,
       manageUrl: LINK,
     });
-    expect(loadRepositoryCount).toHaveBeenCalledWith("person-a", connection("active"));
+    expect(loadRepositoryChoice).toHaveBeenCalledWith("person-a", connection("active"));
+  });
+
+  test("connected reports All my repositories and its access", async () => {
+    for (const access of ["read", "write"] as const) {
+      const status = await read({
+        loadConnection: async () => connection("active"),
+        loadRepositoryChoice: async () => ({ repositoryCount: 0, allRepositoriesAccess: access }),
+      });
+      expect(status).toMatchObject({
+        connected: true,
+        repositoryCount: 0,
+        allRepositories: { enabled: true, access },
+      });
+      // No repositories are chosen, but none need to be.
+      expect(status.note).toBeUndefined();
+      expect(personalGitHubSetupProjection(status).detail).toBe(
+        `Your GitHub is connected as @octocat with all their repositories (${access === "write" ? "read and write" : "read only"}).`,
+      );
+    }
   });
 
   test("connected with no allowed repositories points at the chooser", async () => {
@@ -108,7 +132,7 @@ describe("personal GitHub identity status for the agent", () => {
   test("a failed repository count still reports the connection", async () => {
     const status = await read({
       loadConnection: async () => connection("active", {}),
-      loadRepositoryCount: async () => {
+      loadRepositoryChoice: async () => {
         throw new Error("GitHub is rate limited");
       },
     });
@@ -117,6 +141,7 @@ describe("personal GitHub identity status for the agent", () => {
       status: "connected",
       login: null,
       repositoryCount: null,
+      allRepositories: null,
     });
   });
 
@@ -138,7 +163,7 @@ describe("personal GitHub identity status for the agent", () => {
     const connected = await read({
       person: reader,
       loadConnection: async () => connection("active"),
-      loadRepositoryCount: async () => 2,
+      loadRepositoryChoice: async () => ({ repositoryCount: 2, allRepositoriesAccess: null }),
     });
     expect(connected).toMatchObject({ connected: true, repositoryCount: 2, manageUrl: null });
     const loadConnection = mock(async () => connection("active"));
@@ -269,6 +294,7 @@ describe("Your GitHub setup card readiness", () => {
     status: "connected",
     login: "octocat",
     repositoryCount: 3,
+    allRepositories: { enabled: false, access: null },
     connectUrl: null,
     manageUrl: LINK,
   };

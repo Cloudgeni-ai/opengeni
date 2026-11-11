@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BrowserAction,
   BrowserActionBatch,
@@ -35,7 +36,7 @@ export type BrowserInputFailure = Pick<BrowserActionReceipt, "operationId" | "er
   state: Exclude<BrowserActionReceipt["state"], "completed">;
 };
 
-export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
   pollIntervalMs?: number | undefined;

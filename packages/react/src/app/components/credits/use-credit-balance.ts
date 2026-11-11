@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /**
@@ -16,7 +17,7 @@ export type CreditBalance = {
 };
 
 export function useCreditBalance(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   accountId: string | null | undefined,
   canReadBilling: boolean,
 ): { balance: CreditBalance | null; settled: boolean } {

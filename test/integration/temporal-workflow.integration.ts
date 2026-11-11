@@ -2725,13 +2725,13 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "file upload reaper preserves activity order and replays both sides of patch retirement",
+    "file upload reaper preserves activity order and replays retired-patch histories",
     async () => {
       const legacyPath = new URL(
         "../../apps/worker/test/fixtures/legacy-file-upload-reaper-workflow.ts",
         import.meta.url,
       ).pathname;
-      const expected = [
+      const legacyExpected = [
         "reapExpiredFileUploads",
         "maintainRetainedScreenshots",
         "maintainBrowserStateArtifacts",
@@ -2741,7 +2741,9 @@ describe("Temporal workflow integration", () => {
         "applyRecordingRetention",
         "reconcileRecentModelCallFacts",
       ];
-      const execute = async (workflowsPath: string) => {
+      // The turn timing sweep is a patched step after the existing ones.
+      const currentExpected = [...legacyExpected, "recordRecentTurnTimingProfiles"];
+      const execute = async (workflowsPath: string, expected: string[]) => {
         const taskQueue = `reaper-retirement-${crypto.randomUUID()}`;
         const calls: string[] = [];
         const worker = await Worker.create({
@@ -2749,7 +2751,7 @@ describe("Temporal workflow integration", () => {
           taskQueue,
           workflowsPath,
           activities: Object.fromEntries(
-            expected.map((name) => [
+            currentExpected.map((name) => [
               name,
               async () => {
                 calls.push(name);
@@ -2773,18 +2775,21 @@ describe("Temporal workflow integration", () => {
           await run;
         }
       };
-      const legacy = await execute(legacyPath);
+      const legacy = await execute(legacyPath, legacyExpected);
       await Worker.runReplayHistory(
         { workflowsPath: workflowDefinitionsPath },
         legacy.history,
         legacy.workflowId,
       );
-      const current = await execute(workflowDefinitionsPath);
+      const current = await execute(workflowDefinitionsPath, currentExpected);
       await Worker.runReplayHistory(
-        { workflowsPath: legacyPath },
+        { workflowsPath: workflowDefinitionsPath },
         current.history,
         current.workflowId,
       );
+      // A run that reached the patched sweep needs a worker that has it; an
+      // older worker that picks up its next task fails it and Temporal retries
+      // it on a current worker. Each run is one short sweep.
     },
     temporalWorkflowTestTimeoutMs,
   );
@@ -2876,6 +2881,273 @@ describe("Temporal workflow integration", () => {
       } finally {
         worker.shutdown();
         await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher retries a silent attempt and retains signals without another sweep",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      let dispatches = 0;
+      let releaseStalled!: () => void;
+      const stalled = new Promise<void>((resolve) => {
+        releaseStalled = resolve;
+      });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchSessionWorkflowWakes: async () => {
+          dispatches += 1;
+          if (dispatches === 1) await stalled;
+          return expected;
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId: `wake-dispatch-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await waitFor(() => dispatches === 1, { timeoutMs: 10_000 });
+        // These signals must survive the activity timeout. No maintenance tick
+        // or new producer is available to restart the workflow after failure.
+        await Promise.all(Array.from({ length: 31 }, () => handle.signal("dispatchRequested")));
+        await resultWithin(handle, 45_000);
+        expect(await handle.result()).toEqual(expected);
+        expect(dispatches).toBe(3); // stalled attempt, retry, coalesced new requests
+        const history = await handle.fetchHistory();
+        expect(history.events?.some((event) => event.workflowExecutionFailedEventAttributes)).toBe(
+          false,
+        );
+        const started = history.events?.filter((event) => event.activityTaskStartedEventAttributes);
+        expect(
+          started?.some((event) => event.activityTaskStartedEventAttributes?.attempt === 2),
+        ).toBe(true);
+      } finally {
+        releaseStalled();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher does not wait for blocked ancillary maintenance",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      let maintenanceStarted = false;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        maintainSessionWorkflowWakes: async () => {
+          maintenanceStarted = true;
+          await blocked;
+        },
+        dispatchSessionWorkflowWakes: async () => expected,
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const maintenance = await client.workflow.start("sessionWorkflowWakeMaintenanceWorkflow", {
+          taskQueue,
+          workflowId: `wake-maintenance-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await waitFor(() => maintenanceStarted, { timeoutMs: 10_000 });
+        const dispatch = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId: `wake-dispatch-${crypto.randomUUID()}`,
+          args: [],
+        });
+        await resultWithin(dispatch, 10_000);
+        expect(await dispatch.result()).toEqual(expected);
+        expect((await maintenance.describe()).status.name).toBe("RUNNING");
+        release();
+        await maintenance.result();
+      } finally {
+        release();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher carries a pending request across its history bound",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const workflowId = `wake-dispatch-${crypto.randomUUID()}`;
+      const client = new Client({ connection });
+      let dispatches = 0;
+      const expected = {
+        claimed: 0,
+        signaled: 0,
+        delivered: 0,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchSessionWorkflowWakes: async () => {
+          dispatches += 1;
+          if (dispatches <= 50)
+            await client.workflow.getHandle(workflowId).signal("dispatchRequested");
+          return expected;
+        },
+      });
+      const run = worker.run();
+      try {
+        const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [],
+        });
+        await resultWithin(handle, 30_000);
+        expect(await handle.result()).toEqual(expected);
+        expect(dispatches).toBe(51);
+        const history = await client.workflow
+          .getHandle(workflowId, handle.firstExecutionRunId)
+          .fetchHistory();
+        expect(
+          history.events?.some((event) => event.workflowExecutionContinuedAsNewEventAttributes),
+        ).toBe(true);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "workflow-wake dispatcher replays frozen pre-upgrade histories including the old completion boundary",
+    async () => {
+      const legacyPath = new URL(
+        "../../apps/worker/test/fixtures/legacy-workflow-wake.ts",
+        import.meta.url,
+      ).pathname;
+      const client = new Client({ connection });
+      const expected = {
+        claimed: 1,
+        signaled: 1,
+        delivered: 1,
+        pendingAdmission: 0,
+        unconfirmed: 0,
+        pendingAdmissionBlockers: {},
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      for (const scenario of ["completed", "history-boundary", "failed", "in-flight"] as const) {
+        const taskQueue = `wake-upgrade-${scenario}-${crypto.randomUUID()}`;
+        const workflowId = `wake-upgrade-${scenario}-${crypto.randomUUID()}`;
+        let dispatches = 0;
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          namespace: "default",
+          taskQueue,
+          workflowsPath: legacyPath,
+          activities: {
+            dispatchSessionWorkflowWakes: async () => {
+              dispatches += 1;
+              if (scenario === "failed") throw new Error("legacy dispatch failed");
+              if (scenario === "in-flight" && dispatches === 1) await blocked;
+              if (scenario === "history-boundary") {
+                await client.workflow.getHandle(workflowId).signal("dispatchRequested");
+              }
+              return expected;
+            },
+          },
+        });
+        const run = worker.run();
+        try {
+          const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+            taskQueue,
+            workflowId,
+            args: [],
+          });
+          if (scenario === "in-flight") {
+            await waitFor(() => dispatches === 1, { timeoutMs: 10_000 });
+            await Promise.all(Array.from({ length: 31 }, () => handle.signal("dispatchRequested")));
+          } else if (scenario === "failed") {
+            await expect(handle.result()).rejects.toThrow();
+          } else {
+            expect(await handle.result()).toEqual(expected);
+          }
+          const history = await handle.fetchHistory();
+          const scheduled = history.events?.find(
+            (event) => event.activityTaskScheduledEventAttributes,
+          )?.activityTaskScheduledEventAttributes;
+          expect(Number(scheduled?.startToCloseTimeout?.seconds)).toBe(300);
+          expect(
+            scheduled?.heartbeatTimeout?.seconds == null ||
+              Number(scheduled.heartbeatTimeout.seconds) === 0,
+          ).toBe(true);
+          expect(scheduled?.retryPolicy?.maximumAttempts).toBe(1);
+          if (scenario === "history-boundary") {
+            expect(dispatches).toBe(50);
+            expect(
+              history.events?.some((event) => event.workflowExecutionCompletedEventAttributes),
+            ).toBe(true);
+          }
+          if (scenario === "in-flight") {
+            expect(
+              history.events?.filter((event) => event.workflowExecutionSignaledEventAttributes),
+            ).toHaveLength(31);
+            expect(
+              history.events?.some((event) => event.activityTaskCompletedEventAttributes),
+            ).toBe(false);
+          }
+          // Real old-server history, current production workflow bundle; not a
+          // mocked workflow runtime or a history recorded with the new options.
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            history,
+            workflowId,
+          );
+          if (scenario === "in-flight") {
+            release();
+            await handle.result();
+          }
+        } finally {
+          release();
+          worker.shutdown();
+          await run;
+        }
       }
     },
     temporalWorkflowTestTimeoutMs,

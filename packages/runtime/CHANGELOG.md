@@ -1,5 +1,129 @@
 # @opengeni/runtime
 
+## 6.14.0
+
+### Minor Changes
+
+- ec9cfe4: Distinguish proven customer-provider failures from platform failures in operational metrics, including an OpenRouter account restricted to its own provider keys (on turns, compaction requests and model calls), an OpenRouter key refused at the credit or budget limit the customer set on it, model calls on the workspace's direct and organization compatible connections, Vercel AI Gateway credit, budget and payment-verification refusals, and compaction requests refused for exhausted provider quota. Preserve unknown, generic 404 and malformed-request failures in platform reliability signals.
+
+### Patch Changes
+
+- 4664732: Dependencies with known vulnerabilities are upgraded to fixed releases: `hono` 4.13.17 (`@opengeni/core`), `zod` 4.6.7 (`@opengeni/runtime`) and `katex` 0.18.11 (`@opengeni/react`). Behavior is unchanged.
+- 537656b: Claude Fable 5.2 now runs on Claude subscriptions. Anthropic refused it with HTTP 400 because subscription requests presented Claude Code 2.1.285, and Fable 5.2 needs 2.1.290 or newer. Fable 5.2 requests now present Claude Code 2.1.321 (Agent SDK 0.3.321). Every other model keeps 2.1.285, so the billing block at the start of sessions that are already running never changes and their prompt cache stays intact.
+- 68b9dc4: A command's output is no longer streamed to nobody after the call that launched or read it returns. `OpAck` gains `detach`: the consumer stops following the operation, and agent 0.1.159 stops sending its frames while the command keeps running and its output stays retained for the next read. Previously the departing consumer granted unlimited credit, so every yielded launch or read made the agent push the command's entire retained output over the machine's single shared output connection, delaying other commands' output and completion by minutes on a slower link. Older agents keep the previous behavior.
+
+  A `command_read` or `command_wait` that refreshes a background command whose result Opengeni had just stored and released no longer fails with "the runner reported it lost": it reads the stored result.
+
+- c243348: When an agent calls `request_human_input` with arguments that don't match its schema (for example `questions` sent as JSON text, or `confirm` on a question without exactly two options), it now gets back which fields are wrong and why, and can correct the call. Before, it only saw "Tool execution failed. Error details are redacted." The tool definition the model sees is unchanged.
+- c7ba98b: On Modal sandboxes, `view_image` now reads any file the agent's own shell can read, such as a page `pdftoppm` just rendered to `/tmp`, the same as on Connected Machine and compute sandboxes. Paths resolve the way the shell resolves them (absolute as given, relative from the workspace root) and are read with the box's own file read, which also removes one validation round trip per image. A path the SDK refuses on a caller-addressed file operation is now counted as `outcome="rejected"` in `opengeni_sandbox_operations_total` instead of `failed`, so it no longer trips the sandbox operation failure-ratio alert.
+- cbb6761: Configured agents without a sandbox or Connected Machine no longer receive instructions they cannot act on: editing or publishing sandbox files, workspace file links, sandbox paths, background-command acknowledgement and sandbox CLI lists. Site guidance stays, since Sites are created from inline HTML. The verification rule names a goal and its completion audit only when goals are on, so a session with compute but without goals also gets the shorter rule; sessions with goals and a sandbox or Connected Machine keep their exact prompt.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [e33947d]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [68b9dc4]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [7c926f8]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/agent-proto@6.14.0
+  - @opengeni/capabilities@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/decisions@6.14.0
+  - @opengeni/interaction@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+  - @opengeni/vaults@6.14.0
+  - @opengeni/jev@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- 83d6c60: When the model sends invalid arguments to `generate_image`, `get_video_generation_capabilities`, `generate_video` or `skill_read`, the turn no longer fails. The model gets a tool result saying the tool was not called and to correct its arguments. Errors while these tools run still end the turn as before.
+- Updated dependencies [1c7aa2a]
+- Updated dependencies [67905a7]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+  - @opengeni/config@6.13.0
+  - @opengeni/capabilities@6.13.0
+  - @opengeni/codemode@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/decisions@6.13.0
+  - @opengeni/interaction@6.13.0
+  - @opengeni/observability@6.13.0
+  - @opengeni/tool-gateway@6.13.0
+  - @opengeni/vaults@6.13.0
+  - @opengeni/jev@6.13.0
+  - @opengeni/agent-proto@6.13.0
+  - @opengeni/network@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- c0b9f88: Add workspace-scoped stateless typed decisions with SDK `decide`. Reuse the
+  deployment's configured decision model, chat-completions authority, usage settlement
+  and residency checks. Calls are deployment-funded, independent of customer agent
+  allowances, with optional tenant-label attribution and off-path usage receipts.
+  Preserve typed refusals and reported, estimated and unknown provider costs.
+
+### Patch Changes
+
+- 43d3a37: The agent's shell now has `rg` (ripgrep 15.2.0) and `jq` (1.8.2) on every placement, including sandboxes on custom images, Connected Machines and run_on targets. Official release builds, pinned by SHA-256, ship with Opengeni's own runtime tools: the machine agent embeds its target's build and the worker delivers the Linux builds to managed sandboxes beside the Codemode client (agents without Codemode on those sandboxes keep only the image's own tools). Their directory is appended to the end of PATH, so a system `rg` or `jq` always wins, and nothing is downloaded when a command runs. Licence notices ship beside the binaries.
+- 2117a2d: When a chat's own model cannot summarize older history, the turn no longer fails with "start a new session". On an OpenAI-compatible endpoint, a summary request rejected with HTTP 400 or 422 is first sent once more without its output cap, and a summary from that retry is held to the cap by cutting it from the middle. If the summary still fails in a way that repeating it cannot fix (a definitive rejection, a non-temporary failed response, or an empty or unusable summary, including one cut off at the output limit), the history is trimmed instead: platform context and the newest requests are kept as a summarized checkpoint keeps them, and a fixed note stands in for the summary. No other model is asked, so no history leaves the chat's provider. Retryable, temporary, transport, authentication and quota failures, cancellation, Codex remote compaction and the rebuild when a Codex chat switches model keep their existing handling, with history unchanged. The provider's own error message, bounded, is now recorded in the structured `providerMessage` field of the session's events (the trimmed checkpoint's `fallback`, the `summarization_failed` skip and `turn.failed`), never in free-text errors or worker logs. The timeline shows "Older messages trimmed" with the provider's reason behind Details.
+- 26c2fbd: Reattach Connected Machine command output from its retained position as soon as the exact runner or controller reconnects, instead of waiting for the silence probe. Reuses the existing operation and receipt without restarting commands, extending deadlines, or changing credential expiry.
+- f8b792f: Repository setup no longer fails with "could not lock config file .gitconfig" when several preparations run on one sandbox at once, such as chats created together that share a box, each cloning several repositories. Every write to the global Git config during preparation (the credential helper, the Git HTTP broker include, the default commit identity and safe.directory) now runs as one unit under a per-sandbox lock, and each write retries for a bounded time while another writer holds Git's own lock. Where `flock` is unavailable (macOS machines) the bounded retry still applies. Concurrent preparations also stop adding duplicate credential helper and safe.directory entries.
+- 33a26d7: Deleting or force-updating a branch other than the repository's default branch as the person now follows the person's GitHub "Create and update work" setting instead of always asking, so with Allow an agent can rebase and force-push its own pull request branches and delete merged ones without stopping for approval. This applies to `git push` (force pushes and ref deletions) and to `gh` requests through the personal GitHub gateway (REST `git/refs` deletes and forced updates, GraphQL `deleteRef`, forced `updateRef`, and `updateRefs`). Force-updating or deleting the default branch, deleting or force-moving tags, and anything the gateway cannot confirm still always ask; with Ask first every rewrite still asks, and Block still wins. The gateway reads the default branch with the person's token (cached for a minute per connection and repository), and Git pushes use the default branch from the live repository check the broker already makes. In managed sandboxes with a repository mounted as the person, the agent prompt says so in one sentence.
+- ccb5188: Keep best-effort attempt-private secret-file deletion out of turn finalization. Clean each original recipient independently without resolving a new route or waiting for workspace capture, and retain mandatory run-credential cleanup and writer-drain guarantees.
+- a17033b: Retry durable stop-request handoff for unresolved Connected Machine commands during turn finalization, independently of stalled cancellation or observation requests. Preserve exact operation identity and retain the writer until custody commits or terminal completion is proven.
+- 76da55e: The `jq` bundled for Linux is now a static musl build of jq 1.8.2 instead of jq's official Linux release executable, which statically links glibc. Opengeni builds it reproducibly from the checksum-pinned jq source and zig toolchain (`scripts/build-static-jq.sh`); it gives the same results, runs on any Linux distribution, and is less than half the size. macOS and Windows keep jq's official builds, and the licence notices now list exactly what the Linux build contains.
+- 913e2b4: Allow deployment operators to permit exact private-network integration hosts, optionally restricted by port, without enabling private destinations globally. Apply the allowlist at DNS-pinned connection time across MCP and OAuth traffic.
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [af5b686]
+- Updated dependencies [e9222e0]
+- Updated dependencies [f817cf5]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [a64e6e4]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [913e2b4]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/config@6.12.0
+  - @opengeni/contracts@6.12.0
+  - @opengeni/sdk@6.12.0
+  - @opengeni/observability@6.12.0
+  - @opengeni/network@6.12.0
+  - @opengeni/decisions@6.12.0
+  - @opengeni/capabilities@6.12.0
+  - @opengeni/codemode@6.12.0
+  - @opengeni/codex@6.12.0
+  - @opengeni/interaction@6.12.0
+  - @opengeni/tool-gateway@6.12.0
+  - @opengeni/vaults@6.12.0
+  - @opengeni/xai-subscription@6.12.0
+  - @opengeni/jev@6.12.0
+  - @opengeni/agent-proto@6.12.0
+
 ## 6.11.0
 
 ### Minor Changes

@@ -8,8 +8,11 @@ import {
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  RuntimeDatabasePostureError,
+  runtimeDatabaseReadyCheck,
 } from "../src/runtime-posture";
 import {
   loadRuntimePostureBaseline,
@@ -75,6 +78,64 @@ realTest("readiness inspects both namespaces once without caching posture", asyn
     driver.options.debug = originalDebug;
   }
 });
+
+realTest(
+  "readiness stays up on a revoked required EXECUTE grant and still fails on excess privilege",
+  async () => {
+    const admin = database!.admin;
+    const sweep = "opengeni_private.list_due_recording_retention_v1(integer)";
+    const reader = "opengeni_private.read_sender_connection(uuid, uuid, uuid, text)";
+    const missing =
+      "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)";
+    const reported: (readonly string[])[] = [];
+    const ready = runtimeDatabaseReadyCheck(client!.db, options, (degraded) =>
+      reported.push(degraded),
+    );
+    await ready();
+    expect(reported.at(-1)).toEqual([]);
+    try {
+      // One background sweep loses its grant: only that sweep breaks.
+      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${sweep} FROM opengeni_app`);
+      await ready();
+      expect(reported.at(-1)).toEqual([missing]);
+      expect((await assertRuntimeDatabaseReadiness(client!.db, options)).degraded).toEqual([
+        missing,
+      ]);
+      // Release and CI gates keep the strict finding.
+      await expect(assertRuntimeDatabasePosture(client!.db, options)).rejects.toThrow(missing);
+
+      // Excess privilege is fatal, also next to the degraded finding.
+      await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${reader} TO opengeni_app`);
+      const error = await ready().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(RuntimeDatabasePostureError);
+      expect((error as RuntimeDatabasePostureError).violations).toEqual([
+        "runtime or PUBLIC can call the internal sender connection reader",
+      ]);
+      expect(reported.at(-1)).toEqual([missing]);
+      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${reader} FROM opengeni_app`);
+      await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${sweep} TO PUBLIC`);
+      await expect(ready()).rejects.toThrow(
+        "PUBLIC can execute runtime definer list_due_recording_retention_v1(integer)",
+      );
+    } finally {
+      await admin.unsafe(`
+        REVOKE EXECUTE ON FUNCTION ${reader} FROM opengeni_app;
+        REVOKE EXECUTE ON FUNCTION ${sweep} FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION ${sweep} TO opengeni_app;
+      `);
+    }
+    await ready();
+    expect(reported.at(-1)).toEqual([]);
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
+    ).toEqual([]);
+  },
+  180_000,
+);
 
 realTest(
   "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
@@ -362,7 +423,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272, 1274 and 1282 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272 and 1274 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -379,7 +440,6 @@ realTest(
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
       "summarize_queued_turns_by_hold()",
-      "list_uncompacted_recording_tracks_v1(integer, text)",
     ]) {
       try {
         await admin.unsafe(

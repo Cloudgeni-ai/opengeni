@@ -1854,6 +1854,7 @@ function MeetingDetailPageForRecording({
           segments={segments}
           speakers={transcript.speakers}
           tracks={recording.tracks}
+          durationMilliseconds={recording.durationMilliseconds}
           people={people.people}
           activeSegment={activeSegment}
           actions={actions}

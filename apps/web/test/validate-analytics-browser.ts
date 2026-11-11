@@ -51,7 +51,7 @@ async function validateAnalyticsJourney() {
       },
     );
     await page.goto(baseUrl!);
-    await page.getByText("What should the agent do?", { exact: true }).waitFor();
+    await page.getByText("What can I help with?", { exact: true }).waitFor();
     assert.equal(events.length, 0);
     const workspaceId = new URL(page.url()).pathname.match(/^\/workspaces\/([^/]+)/)?.[1];
     if (!workspaceId) throw new Error("The app did not open a workspace");

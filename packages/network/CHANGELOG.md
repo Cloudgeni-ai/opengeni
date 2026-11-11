@@ -1,5 +1,15 @@
 # @opengeni/network
 
+## 6.14.0
+
+## 6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 913e2b4: Allow deployment operators to permit exact private-network integration hosts, optionally restricted by port, without enabling private destinations globally. Apply the allowlist at DNS-pinned connection time across MCP and OAuth traffic.
+
 ## 6.11.0
 
 ## 6.10.0

@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { ChatClient } from "@opengeni/sdk";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import {
   organizationLandingWorkspaceId,
@@ -55,7 +56,7 @@ interface AccountState {
   accounts: StoredAccount[];
   /** The account in use; null while signed out. */
   account: StoredAccount | null;
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   adapters: OpenGeniReactNativeAdapters;
   accessContext: AccessContext | null;
   workspaces: Workspace[];
@@ -97,13 +98,13 @@ interface AccountState {
 
 const AccountContext = createContext<AccountState | null>(null);
 
-function newClient(baseUrl: string, token?: string | null): OpenGeniClient {
+function newClient(baseUrl: string, token?: string | null): ChatClient<OpenGeniClient> {
   return new OpenGeniClient({
     baseUrl,
     // The latest requests are remembered (in memory) so a feedback report can show them.
     fetch: recordingRequests(expoStreamingFetch),
     ...(token ? { apiKey: token } : {}),
-  });
+  }).withSessionResponse("chat");
 }
 
 function unauthorized(caught: unknown): boolean {

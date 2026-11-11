@@ -44,7 +44,7 @@ describe("public repository hygiene", () => {
       ).toBe(true);
     }
     const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
-    expect(contacts).toHaveLength(4);
+    expect(contacts).toHaveLength(5);
     for (const [contact] of contacts) {
       const altered = source.replace(contact, `x${contact.slice(1)}`);
       expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));
@@ -119,6 +119,17 @@ describe("public repository hygiene", () => {
     expect(auditPublicText("apps/web/src/icon.tsx", drawn).map((f) => f.reason)).toEqual(
       Array(2).fill("retired milestone label"),
     );
+  });
+
+  test("Android vector drawable path data never reads as a retired label", () => {
+    const label = ["M", "12"].join("");
+    const drawn = `<vector><path android:pathData="${label},9c-1.6,0 -3,0.2z" /></vector>`;
+    expect(auditPublicText("android/src/main/res/drawable/end.xml", drawn)).toEqual([]);
+    // Other XML, and drawable text outside path data, are still checked.
+    expect(auditPublicText("android/src/main/res/values/strings.xml", drawn)).toHaveLength(1);
+    expect(
+      auditPublicText("android/src/main/res/drawable/end.xml", `<!-- ${label} -->${drawn}`),
+    ).toHaveLength(1);
   });
 
   test("only exempts the reviewed upstream Rust field primitive", () => {

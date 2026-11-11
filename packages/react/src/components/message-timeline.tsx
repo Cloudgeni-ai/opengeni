@@ -103,6 +103,7 @@ import {
 } from "../older-history";
 import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
+import type { ArtifactLinkScope } from "./artifact-link-scope";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
@@ -226,6 +227,7 @@ import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { isChunkLoadError } from "../lib/chunk-load-error";
 import { LazyPart } from "./lazy-part";
+import { MessageAttachments } from "./message-attachments";
 import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
@@ -345,6 +347,13 @@ export type MessageTimelineProps = {
    * sandbox downloads by default.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Reads in the conversation's workspace: workspace-less `artifact:` links
+   * resolve through it, and the files sent with each user message load from
+   * it (`getFile` and `createFileDownloadUrl`), shown above the message the
+   * way they looked in the composer. `SessionConversation` supplies it.
+   */
+  artifactScope?: ArtifactLinkScope | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -678,6 +687,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   resolveLink,
+  artifactScope,
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
@@ -985,6 +995,10 @@ export function MessageTimeline({
    * or explicit Jump to latest releases this fence.
    */
   const disclosureKeepsUnpinnedRef = useRef(false);
+  /** The in-place disclosure the reader last toggled while that fence holds. */
+  const disclosureToggleRef = useRef<Element | null>(null);
+  /** Distance from the end measured on the DOM right before this commit. */
+  const tipGapBeforeCommitRef = useRef<number | null>(null);
   /**
    * Unarmed scroll-away observed; waiting for scrollend (or rAF fallback).
    * Blocks layout tip-follow so a stream token cannot yank before leave settles.
@@ -1347,6 +1361,7 @@ export function MessageTimeline({
         stopSettlement();
         releasePinFromReader();
         disclosureKeepsUnpinnedRef.current = true;
+        disclosureToggleRef.current = null;
       }
     };
     node.ownerDocument.addEventListener("selectionchange", onSelection);
@@ -1925,6 +1940,8 @@ export function MessageTimeline({
     previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
     const readingAnchor = readingAnchorRef.current;
     readingAnchorRef.current = null;
+    const tipGapBeforeCommit = tipGapBeforeCommitRef.current;
+    tipGapBeforeCommitRef.current = null;
     const settlement = settlementRef.current;
     settlementRef.current = null;
     const attempt = olderLoadAttemptRef.current;
@@ -2039,6 +2056,25 @@ export function MessageTimeline({
           applyPinned(false);
         }
       }
+    } else if (
+      autoFollow &&
+      !pinnedRef.current &&
+      !hasNewer &&
+      disclosureKeepsUnpinnedRef.current &&
+      tipGapBeforeCommit !== null &&
+      tipGapBeforeCommit <= 1 &&
+      disclosureToggleRef.current?.isConnected === true &&
+      disclosureToggleRef.current.getAttribute("aria-expanded") === "false" &&
+      !timelineHasSelection(node)
+    ) {
+      // A toggle keeps the view where the reader left it, but once the
+      // reader has closed it again and sits at the very end, nothing is open
+      // for them to read: new content follows like any reader at the tip,
+      // instead of growing out of view behind a Jump to latest.
+      disclosureKeepsUnpinnedRef.current = false;
+      disclosureToggleRef.current = null;
+      applyPinned(true);
+      snapToBottom(node);
     } else if (!pinnedRef.current && readingAnchor && readableTurns) {
       // A live work row moves behind newly streamed prose. Correct only the
       // residual movement native anchoring did not absorb, using the reader's
@@ -2754,6 +2790,7 @@ export function MessageTimeline({
                               }
                               releasePinFromReader();
                               disclosureKeepsUnpinnedRef.current = true;
+                              disclosureToggleRef.current = target;
                             }
                           }}
                           onFocusCapture={(event) => {
@@ -2795,6 +2832,9 @@ export function MessageTimeline({
                                 !pinnedRef.current && scrollRef.current
                                   ? captureTimelineAnchor(scrollRef.current)
                                   : null;
+                              tipGapBeforeCommitRef.current = scrollRef.current
+                                ? maxScrollOf(scrollRef.current) - scrollRef.current.scrollTop
+                                : null;
                               settlementRef.current =
                                 readableTurns &&
                                 autoFollow &&
@@ -3139,7 +3179,7 @@ export function MessageTimeline({
   );
   // Agent-authored object links resolve through the host, never the console.
   return (
-    <OpenGeniLinkProvider resolveLink={resolveLink}>
+    <OpenGeniLinkProvider resolveLink={resolveLink} artifactScope={artifactScope}>
       <MessageSenderContext.Provider value={renderMessageSender}>
         <AgentIdentityProvider
           items={resolvedItems}
@@ -4512,10 +4552,14 @@ function UserMessageRow({
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const deliveryFailed = item.delivery?.state === "failed";
+  const resources = item.resources ?? [];
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         <MessageSenderSlot item={item} />
+        {resources.some((resource) => resource.kind === "file") ? (
+          <MessageAttachments resources={resources} className="justify-end" />
+        ) : null}
         <CopyHoverFrame
           copyText={
             item.text ||

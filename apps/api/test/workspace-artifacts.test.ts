@@ -40,6 +40,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 
 import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifacts";
+import { registerArtifactCatalogRoutes } from "../src/routes/artifact-catalog";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const SIGNING_SECRET = "workspace-artifacts-test-signing-secret";
@@ -172,6 +173,10 @@ beforeAll(async () => {
     },
   } as unknown as ObjectStorageDependency;
   app = new Hono();
+  registerArtifactCatalogRoutes(app, {
+    settings: testSettings({ productAccessMode: "local", delegationSecret: SIGNING_SECRET }),
+    db: client.db,
+  } as ApiRouteDeps);
   registerWorkspaceArtifactRoutes(app, {
     settings: testSettings({
       productAccessMode: "local",
@@ -210,6 +215,39 @@ async function request(
   if (init.body) headers.set("content-type", "application/json");
   return await app.request(`http://x${path}`, { ...init, headers });
 }
+
+test("UUID link lookup uses real visibility and file precedence across artifact domains", async () => {
+  const base = `/v1/workspaces/${grant.workspaceId}`;
+  const created = await request(grant, ["artifacts:publish"], `${base}/published-artifacts`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: "Link resolution",
+      html: "<!doctype html><h1>Site</h1>",
+      idempotencyKey: crypto.randomUUID(),
+    }),
+  });
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { artifact } = WorkspaceArtifactMutationResponse.parse(await created.json());
+  const path = `${base}/artifact-catalog/${artifact.id}/resolve`;
+  const read = () => request(grant, ["artifacts:read", "files:read"], path);
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "site" });
+  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key)
+    VALUES(${artifact.id},${grant.accountId},${grant.workspaceId},'ready','link.txt','link.txt','text/plain',10,${"a".repeat(64)},'fixture',${artifact.id})`;
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "file" });
+  // Another workspace cannot discover either half of the collision.
+  const foreign = await request(
+    otherGrant,
+    ["artifacts:read", "files:read"],
+    `/v1/workspaces/${otherGrant.workspaceId}/artifact-catalog/${artifact.id}/resolve`,
+  );
+  expect(foreign.status).toBe(404);
+  const missing = await request(
+    grant,
+    ["artifacts:read", "files:read"],
+    `${base}/artifact-catalog/${crypto.randomUUID()}/resolve`,
+  );
+  expect(missing.status).toBe(404);
+});
 
 test("direct uploads publish large HTML with optional downloadable source and immutable retries", async () => {
   const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;

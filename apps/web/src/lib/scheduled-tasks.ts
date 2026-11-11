@@ -1,4 +1,5 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
 import type {
   ReasoningEffort,
@@ -872,7 +873,7 @@ export function scheduledTaskRunSessionAccess(
 
 /** Fetch every matching schedule without truncating the session navigation at one page. */
 export async function loadSessionSchedules(
-  client: Pick<OpenGeniClient, "listScheduledTasks">,
+  client: Pick<ChatClient<OpenGeniClient>, "listScheduledTasks">,
   workspaceId: string,
   sessionId: string,
 ): Promise<ScheduledTask[]> {

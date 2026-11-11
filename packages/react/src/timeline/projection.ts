@@ -21,6 +21,7 @@ import {
   prescanTurnAnchors,
 } from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import { isNoReplyText, mayBecomeNoReplyText } from "@opengeni/contracts/no-reply";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
@@ -2596,14 +2597,20 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * attribute) become their quoted text. The Claude transport already links them to their
  * search results where it can; any tag left over, for example in an answer
  * stored before that, would otherwise show as raw markup. Code keeps them.
+ *
+ * Source links lose the tracking a hosted web search tags onto them
+ * (`utm_source=openai` and the `_t_q` search query); the page's own
+ * parameters stay. Stored history keeps the links as the model wrote them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return rewriteClaudeCiteTags(
-    text
-      .replace(PROVIDER_CITATION_HANDLE, "")
-      .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
-      .replace(PROVIDER_CITATION_DELIMITER, "")
-      .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
+  return withoutProviderTrackingInText(
+    rewriteClaudeCiteTags(
+      text
+        .replace(PROVIDER_CITATION_HANDLE, "")
+        .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+        .replace(PROVIDER_CITATION_DELIMITER, "")
+        .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
+    ),
   );
 }
 
@@ -2938,6 +2945,16 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   }
 }
 
+/**
+ * Some models emit a whitespace-only assistant message (often just "\n\n")
+ * around every tool call. It has nothing to read, so it never becomes a
+ * timeline row: an empty row still takes the list's row gap, and dozens of
+ * them open a blank band in a long turn. It shows up once it has text.
+ */
+function isBlankAgentMessage(item: TimelineItem): boolean {
+  return item.kind === "agent-message" && !item.text.trim();
+}
+
 export type GroupTimelineOptions = {
   /** Readable assistant prose with an independent work summary for each turn. */
   readableTurns?: boolean;
@@ -2980,6 +2997,7 @@ export function groupTimeline(
       foldSettledTurn(groups, item);
       continue;
     }
+    if (isBlankAgentMessage(item)) continue;
     groups.push({ kind: "item", item });
   }
   return groups;
@@ -3233,7 +3251,8 @@ function groupReadableTurns(
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
+      if (!liveApprovalWait && !liveStatusWait && !isBlankAgentMessage(item))
+        groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&

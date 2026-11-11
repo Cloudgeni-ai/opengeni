@@ -110,7 +110,7 @@ jobs:
     # Skip the main -> production promotion PR: its head already ran as a main push.
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Linux native command supervisor
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
       - name: Check out repository
@@ -126,7 +126,7 @@ jobs:
     # Skip the main -> production promotion PR: its head already ran as a main push.
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Rust 1.82 compatibility
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       RUSTUP_TOOLCHAIN: 1.82.0
@@ -151,7 +151,7 @@ jobs:
     # Skip the main -> production promotion PR: its head already ran as a main push.
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: fmt + clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -191,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -272,7 +272,8 @@ jobs:
             browser_sidecar::tests::complete_embedded_bundle_ignores_stale_adjacent_helpers_and_refuses_changed_materialization \
             embedded_runtime::tests::materializes_the_exact_complete_runtime_idempotently \
             browser_sidecar::tests::ready_document_requires_the_exact_runtime_identity \
-            browser_sidecar::tests::incompatible_ready_document_names_every_mismatched_field; do
+            browser_sidecar::tests::incompatible_ready_document_names_every_mismatched_field \
+            shell_tools::tests::embedded_tools_materialize_and_run; do
             cargo test --locked -p opengeni-agent "$proof" -- --exact | tee "$runtime_fixture/proof.log"
             grep -Fq 'test result: ok. 1 passed; 0 failed;' "$runtime_fixture/proof.log"
           done
@@ -295,7 +296,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

@@ -1,4 +1,5 @@
 import type { OpenGeniClient, WorkspaceInstructionPolicyHead } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 
 /**
  * Keep one logical save's operation IDs across uncertain transport outcomes.
@@ -8,7 +9,7 @@ import type { OpenGeniClient, WorkspaceInstructionPolicyHead } from "@opengeni/s
  */
 export function createWorkspaceInstructionSave(
   client: Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createWorkspaceInstructionPolicyDraft"
     | "activateWorkspaceInstructionPolicyRevision"
     | "updateWorkspace"

@@ -1,4 +1,4 @@
-import { deriveSessionDisplayTitle, type Session } from "@opengeni/sdk";
+import { deriveSessionDisplayTitle, type ChatSession as Session } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";

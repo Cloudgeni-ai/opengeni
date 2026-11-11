@@ -87,7 +87,7 @@ function productionRoute() {
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
-      defaultAgentChatVisibility, prepareAgentChatCreate } = ports;
+      defaultAgentChatVisibility, prepareAgentChatCreate, compactSessionResponse } = ports;
     ${code}
     return handler;
   `,
@@ -164,6 +164,8 @@ function routeFixture() {
       return hold.create.promise;
     },
     sessionCreateErrorResponse: (_c: unknown, error: unknown) => ({ createError: error }),
+    // A request without the chat Accept preference keeps the full response.
+    compactSessionResponse: () => false,
     withEffectivePolicy: (...args: unknown[]) => {
       calls.push({ name: "projection", args });
       return hold.projection.promise;
@@ -211,7 +213,7 @@ test("exact production route retains authorization, create and post-commit proje
     await flush();
     expect(f.calls.at(-1)).toEqual({
       name: "projection",
-      args: [f.deps, "workspace", "private-subject", session],
+      args: [f.deps, "workspace", "private-subject", session, false],
     });
     f.hold.projection.resolve(projected);
     expect(await running).toEqual({ body: projected, status: 202 });

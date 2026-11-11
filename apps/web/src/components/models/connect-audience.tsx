@@ -1,4 +1,5 @@
 import type { ModelConnectionAccessPolicy } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useState } from "react";
 
@@ -35,7 +36,7 @@ export const EVERYONE: ConnectAudience = { workspaceIds: null, personalWorkspace
 
 /** The organization's shared workspaces, for the "Only selected workspaces" list. */
 export function useOrganizationWorkspaces(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   organizationId: string,
   enabled: boolean,
 ): { workspaces: { id: string; name: string }[] | null; error: boolean; retry: () => void } {
@@ -96,7 +97,7 @@ export function audiencePolicy(
  * couldn't be saved; the account then stays available in every workspace.
  */
 export async function applyConnectAudience(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   target: { organizationId: string; kind: ConnectionAccessKind; connectionId: string },
   audience: ConnectAudience,
 ): Promise<boolean> {

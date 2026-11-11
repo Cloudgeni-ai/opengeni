@@ -1351,21 +1351,23 @@ fn supervisor_links(
         .iter()
         .map(|connection| {
             let credentials = connection.credentials.clone();
+            let relay_credential = RelayCredential::fixed(
+                credentials.relay_url.clone(),
+                credentials.relay_token.clone(),
+            );
             let hub = RelayHub::new(RelayHubConfig {
                 workspace_id: credentials.workspace_id.clone(),
                 agent_id: credentials.agent_id.clone(),
-                credential: RelayCredential::fixed(
-                    credentials.relay_url.clone(),
-                    credentials.relay_token.clone(),
-                ),
+                credential: relay_credential.clone(),
                 allow_screen_control: credentials.consented_screen_control
                     && !screen_control_turned_off(),
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
-            let link =
+            let mut link =
                 SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
                     .with_authentication_state(connection.authentication_state)
                     .with_connection_instance_id(connection_instance_id);
+            link.relay_credential = Some(relay_credential);
             link.with_api_url(connection.api_url.clone())
         })
         .collect()

@@ -134,6 +134,15 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
+  test("compact UI configuration reads do not add a redundant agent action", () => {
+    const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
+    expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);
+    expect(isActionCatalogExempt(path)).toBe(false);
+    expect(isActionCatalogExempt(`${path}/skills`)).toBe(false);
+    expect(ACTION_CATALOG.find((entry) => entry.id === "getSession")?.path).toBe(path);
+    expect(ACTION_CATALOG.some((entry) => entry.path === `${path}/configuration`)).toBe(false);
+  });
+
   test("covers every registered route except the listed exemptions, and is current", () => {
     const registered = registeredApiRoutes();
     // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.

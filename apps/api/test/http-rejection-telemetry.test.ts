@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { MissingPermissionRefusal, WORKSPACE_SETTINGS_REFUSAL } from "@opengeni/core";
+import {
+  AuthenticationRequiredRefusal,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+} from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
 import {
   httpRejectionFactsFromEnvelope,
@@ -174,6 +178,27 @@ describe("HTTP rejection telemetry", () => {
     expect(
       httpRejectionFactsFromError(new Error("missing permission: members:manage"), "forbidden"),
     ).toMatchObject({ code: "forbidden", reason: "permission:members:manage" });
+  });
+
+  test("a lapsed or missing sign-in is classified, not unclassified", () => {
+    expect(
+      httpRejectionFactsFromEnvelope(
+        {
+          error: {
+            code: "unauthenticated",
+            message: "authentication required",
+            details: { code: "session_missing" },
+          },
+        },
+        "unauthenticated",
+      ),
+    ).toMatchObject({ code: "unauthenticated", reason: "session_missing" });
+    expect(
+      httpRejectionFactsFromError(
+        new AuthenticationRequiredRefusal("session_expired"),
+        "unauthenticated",
+      ),
+    ).toMatchObject({ code: "unauthenticated", reason: "session_expired" });
   });
 
   test("reads small JSON bodies without consuming the client response", async () => {
@@ -360,5 +385,46 @@ describe("API request middleware", () => {
     expect(
       series.some((line) => line.includes('code="not_found"') && line.includes('status="404"')),
     ).toBe(true);
+  });
+
+  test("a request without a sign-in says why, in the envelope and the rejection metric", async () => {
+    const { createApp } = await import("../src/app");
+    const { testSettings } = await import("@opengeni/testing/settings");
+    const settings = testSettings({ productAccessMode: "managed" });
+    const observability = createObservability(
+      { ...settings, observabilityStructuredLogs: false, observabilityMetricsEnabled: true },
+      { component: "api" },
+    );
+    const app = createApp({
+      settings,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      observability,
+    });
+    // A lapsed sign-in (a cookie or app credential that no longer signs anyone
+    // in) needs the database; the desktop sign-in integration test covers it.
+    const response = await app.request("/v1/access/me");
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as {
+      error: { code: string; message: string; details?: { code?: string } };
+    };
+    expect(body.error).toMatchObject({
+      code: "unauthenticated",
+      message: "authentication required",
+      details: { code: "session_missing" },
+    });
+    const series = (await observability.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_http_request_rejections_total{"));
+    expect(
+      series.some(
+        (line) =>
+          line.includes('code="unauthenticated"') && line.includes('reason="session_missing"'),
+      ),
+      series.join("\n"),
+    ).toBe(true);
+    expect(series.some((line) => line.includes('reason="unclassified"'))).toBe(false);
   });
 });

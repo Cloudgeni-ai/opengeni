@@ -122,7 +122,11 @@ import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
 import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-core";
 import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
-import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
+import {
+  providerRecoveryCause,
+  recordProviderRecoveryOutcome,
+  turnRecoveryCauseForCode,
+} from "./provider-recovery-metrics";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
@@ -185,6 +189,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       if (recovery) {
         deps.control.activityStatus = "recovering";
         deps.control.turnMetricOutcome = "recovering";
+        deps.control.turnRecoveryCause = "database";
         deps.control.activityError = error;
         throw recovery;
       }
@@ -311,6 +316,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (!databaseRecovery) throw checkpointError;
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
       control.activityError = error;
       throw databaseRecovery;
     }
@@ -324,6 +330,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "sandbox";
     control.activityError = error;
     return claimedResult({ status: "recovering", deferredUntilWake: true });
   }
@@ -416,6 +423,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({
         status: "recovering",
         ...(transitionRetryAfterMs !== undefined
@@ -475,6 +483,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
@@ -491,6 +500,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "control";
       control.activityError = error;
       return claimedResult({
         status: "recovering",
@@ -526,6 +536,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      // A swap or detach moved the active sandbox mid-turn: continuing on the
+      // new route is the designed boundary, not a fault. Only a home backend
+      // that still needs recovery is a sandbox problem.
+      control.turnRecoveryCause =
+        routeTransitionCode === "home_backend_recovery_pending" ? "sandbox" : "route_change";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
@@ -570,6 +585,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       console.error(
@@ -609,6 +625,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "worker";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       // The database transition is atomic. If it could not commit, surface
@@ -671,6 +688,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       // ordinary durable quiescence/writer fences.
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
       control.activityError = error;
       throw recoveryFailure;
     }
@@ -879,6 +897,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "provider";
     return claimedResult({ status: "recovering" });
   }
   // Definitive Codex credential/account refusals are the only provider
@@ -1033,6 +1052,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
@@ -1048,6 +1068,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       control.activityError = error;
       return claimedResult({ status: "recovering", continueDelayMs });
@@ -1337,6 +1358,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
@@ -1507,6 +1529,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         acknowledgeRecoveryQuiescence();
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "sandbox";
         control.activityStatus = "recovering";
         control.activityError = error;
         return claimedResult({ status: "recovering" });
@@ -1550,6 +1573,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         acknowledgeRecoveryQuiescence();
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = turnRecoveryCauseForCode(recoveryCode);
         control.activityStatus = "recovering";
         control.activityError = error;
         const recoveryCause = providerRecoveryCause(recoveryCode);
@@ -1609,6 +1633,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (escaped) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "tool";
         control.activityError = error;
         throw escaped;
       }
@@ -1640,6 +1665,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }

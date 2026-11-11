@@ -1,3 +1,11 @@
+import {
+  MACHINE_ACCESS_REQUIRED_CODE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts/machine-access";
+import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
 import { t } from "./console-text";
 import {
   creditRefusalHeadline,
@@ -40,7 +48,8 @@ export type KnownFailureKind =
   | "monthly_limit"
   | "provider_quota"
   | "rate_limited"
-  | "provider_error";
+  | "provider_error"
+  | "model_history";
 
 const CREDENTIALS: KnownFailure = {
   kind: "provider_credentials",
@@ -100,6 +109,30 @@ const PROVIDER_ERROR: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+/**
+ * The provider refused encrypted reasoning another model or account left in
+ * this chat. Retry stays: the worker resends that reasoning as readable text
+ * where it can, and failures recorded before it did succeed on Retry.
+ */
+const UNREADABLE_HISTORY: KnownFailure = {
+  kind: "model_history",
+  message: "This model can’t read earlier reasoning in this chat.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+
+/**
+ * The same HTTP 400 refusal the runtime recovers from
+ * (`classifyEncryptedArtifactRejection`). Recorded with no failure code: a coded
+ * failure keeps its own copy and retry decision.
+ */
+function isUnreadableHistory(recorded: string, status: string | null): boolean {
+  return (
+    status === "400" &&
+    (new RegExp(`\\b${ENCRYPTED_CONTENT_REJECTION_CODE}\\b`).test(recorded) ||
+      isEncryptedReasoningRefusalText(recorded))
+  );
+}
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
@@ -108,9 +141,8 @@ const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 const COMPACTION_FAILURE =
   "Couldn’t compact conversation history. If the next message fails too, start a new session.";
 /** The worker's code for a turn whose personal machine isn't allowed in this chat. */
-export const MACHINE_ACCESS_REQUIRED_CODE = "machine_access_required";
-const MACHINE_ACCESS_REQUIRED =
-  "Machine access needed: this chat isn’t allowed to use its machine right now.";
+export { MACHINE_ACCESS_REQUIRED_CODE };
+const MACHINE_ACCESS_REQUIRED = machineAccessNeededMessage();
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -164,6 +196,7 @@ export function classifyProviderFailure(
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
   const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
+  if (!failureCode && isUnreadableHistory(recorded, status)) return UNREADABLE_HISTORY;
   if (
     status === "401" ||
     /\b(?:incorrect|invalid)[ _-]?(?:api[ _-]?key|x-api-key|subscription key)\b/.test(text) ||

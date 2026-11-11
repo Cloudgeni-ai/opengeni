@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/core",
-  "version": "6.11.0",
+  "version": "6.14.0",
   "description": "Opengeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {
@@ -69,7 +69,7 @@
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/vaults": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
-    "hono": "^4.12.18",
+    "hono": "^4.13.17",
     "zod": "^4.2.1"
   },
   "devDependencies": {

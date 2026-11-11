@@ -4,10 +4,10 @@
 // A leaf module so the session route can decide cheaply whether to load the
 // card at all.
 import type {
-  LineageNode,
+  ChatLineageNode as LineageNode,
   SessionEvent,
   SessionEventType,
-  SessionSummary,
+  ChatSession as SessionSummary,
   WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { approvalsDecidable, projectPendingApprovals, type PendingApproval } from "../../approvals";

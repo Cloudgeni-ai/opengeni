@@ -1229,7 +1229,7 @@ export async function acquireSharedTestDatabase(
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the names-only member list (1211) and the inventory
- * of meeting tracks not yet kept compact (1240). Tests that
+ * of meeting tracks not yet kept compact (1240, withheld again by 1283). Tests that
  * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
@@ -1257,6 +1257,12 @@ export async function grantDeferredRuntimeAccess(
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_member_names_v1(uuid)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.end_agent_call_rings_v1(uuid)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.session_content_garbage_candidates_v1(integer),
+      opengeni_private.collect_session_content_garbage_v1(uuid, uuid, integer)
       TO ${grantee};
   `);
 }

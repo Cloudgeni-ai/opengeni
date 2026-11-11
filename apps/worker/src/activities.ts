@@ -153,7 +153,10 @@ export const failBrowserRecording = defaultControlActivities.failBrowserRecordin
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
+export const recordRecentTurnTimingProfiles =
+  defaultControlActivities.recordRecentTurnTimingProfiles;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

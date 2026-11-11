@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, test } from "bun:test";
 import { useMemo } from "react";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/sdk";
@@ -17,7 +18,7 @@ test("control bursts do not refetch model metadata; admitted turns and reconcili
       return [];
     },
   });
-  const context: OpenGeniContextValue = {
+  const context: OpenGeniContextValue<ChatClient> = {
     client,
     workspaceId: WORKSPACE_ID,
     workspaceControlEvent: null,

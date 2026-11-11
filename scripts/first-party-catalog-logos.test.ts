@@ -22,11 +22,13 @@ describe("first-party catalog logo assets", () => {
     const manifest = JSON.parse(await readFile(manifestUrl, "utf8")) as FirstPartyLogoManifest;
     expect(manifest.version).toBe(1);
     expect(manifest.entries.map((entry) => entry.capabilityId).sort()).toEqual([
+      "api:1password",
       "api:excel-addin",
       "api:fiken",
       "api:github-app",
       "api:reddit",
       "api:x",
+      "mcp:codex_apps",
     ]);
 
     for (const entry of manifest.entries) {

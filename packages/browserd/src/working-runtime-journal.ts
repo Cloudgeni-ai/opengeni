@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { InteractionOperationState } from "@opengeni/contracts";
 import { InteractionControllerError } from "@opengeni/interaction";
 import { SqliteInteractionOperationJournal } from "./operation-journal";
@@ -345,6 +345,47 @@ export async function assertDirectory(path: string): Promise<ProfileDirectoryIde
   return { device: metadata.dev, inode: metadata.ino };
 }
 
+const LINUX_PROCESS_BIRTH = /^([0-9a-f-]{36}):[0-9]+$/iu;
+let bootIdLookup: Promise<string | null> | undefined;
+
+/** This boot's id on Linux (the same id recorded in a Linux browser
+ * process's birth), or null where the platform has none. */
+export function currentBootId(): Promise<string | null> {
+  if (process.platform !== "linux") return Promise.resolve(null);
+  bootIdLookup ??= readFile("/proc/sys/kernel/random/boot_id", "utf8").then(
+    (value) => {
+      const id = value.trim();
+      return /^[0-9a-f-]{36}$/iu.test(id) ? id.toLowerCase() : null;
+    },
+    () => null,
+  );
+  return bootIdLookup;
+}
+
+/** Whether `profile`, found at `profileDirectory`, is the directory
+ * `receipt` recorded. A device number is assigned when its filesystem is
+ * mounted, and Linux numbers NVMe and other partitions dynamically, so the
+ * same untouched directory can come back with another device number after a
+ * reboot. Within the boot that recorded the receipt (or when that boot is
+ * unknown) the device and inode must both match. After a reboot the same
+ * inode at the exact recorded path is the same directory; a copy or restore
+ * still has another inode or another path. */
+export function sameRecordedProfile(
+  receipt: Pick<BrowserWorkingRuntimeReceipt, "profile" | "process">,
+  profile: ProfileDirectoryIdentity,
+  restart?: { profileDirectory: string; bootId: string | null },
+): boolean {
+  if (receipt.profile.inode !== profile.inode) return false;
+  if (receipt.profile.device === profile.device) return true;
+  if (!restart?.bootId || !receipt.process) return false;
+  const recordedBoot = LINUX_PROCESS_BIRTH.exec(receipt.process.birth)?.[1]?.toLowerCase();
+  return (
+    recordedBoot !== undefined &&
+    recordedBoot !== restart.bootId &&
+    receipt.process.profileDirectory === resolve(restart.profileDirectory)
+  );
+}
+
 /** True only when a launch receipt proves no browser can be adopted from it:
  * it was settled failed, or (for receipts written before failed settlement
  * existed) it is a dispatched restore launch with no recorded process whose
@@ -467,6 +508,7 @@ export function assertWorkingRuntimeReceipt(
   authority: BrowserWorkingRuntimeAuthority,
   launchDigest: string,
   profile: ProfileDirectoryIdentity,
+  restart?: { profileDirectory: string; bootId: string | null },
 ): asserts receipt is BrowserWorkingRuntimeReceipt & { process: OwnedManagedBrowserProcess } {
   if (!receipt) throw unavailable("receipt_not_adoptable");
   if (
@@ -481,7 +523,7 @@ export function assertWorkingRuntimeReceipt(
   if (JSON.stringify(receipt.authority) !== JSON.stringify(authority))
     throw unavailable("authority_changed");
   if (receipt.launchDigest !== launchDigest) throw unavailable("launch_configuration_changed");
-  if (receipt.profile.device !== profile.device || receipt.profile.inode !== profile.inode)
+  if (!sameRecordedProfile(receipt, profile, restart))
     throw unavailable("profile_identity_changed");
 }
 

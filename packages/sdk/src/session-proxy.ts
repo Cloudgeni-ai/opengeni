@@ -3,7 +3,12 @@ import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
 import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+  OPENGENI_SESSION_CHAT_ACCEPT,
+} from "./types";
 import type {
   AccessGrant,
   AccessContext,
@@ -358,7 +363,8 @@ export type SessionProxyHandlerOptions = {
         route: SessionProxyRoute,
         response: Response,
         context: SessionProxyContext,
-      ) => Response | undefined | Promise<Response | undefined>)
+        // `void` lets a record-only `async` hook end without `return undefined`.
+      ) => Response | undefined | void | Promise<Response | undefined | void>)
     | undefined;
   /**
    * Attach your product's MCP tool server to every chat this relay creates,
@@ -474,14 +480,7 @@ const FORWARDED_REQUEST_HEADERS = [
 
 /** Response headers relayed besides Opengeni's own `x-opengeni-*` metadata. */
 const RELAYED_RESPONSE_HEADERS = [
-  "content-type",
-  "content-length",
-  "content-disposition",
-  "content-range",
-  "accept-ranges",
-  "etag",
-  "last-modified",
-  "retry-after",
+  ...OPENGENI_BROWSER_RESPONSE_HEADERS,
   "cross-origin-resource-policy",
 ] as const;
 
@@ -490,6 +489,8 @@ const RELAYED_RESPONSE_HEADERS = [
  * `${method} ${route after sessions/{id}}`, or the workspace route.
  */
 const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
+  "GET configuration",
+  "GET model-context",
   "PUT agent",
   "PUT tool-policy",
   "PUT skills",
@@ -762,7 +763,9 @@ export function createSessionProxyHandler(
       ) {
         return errorJson(404, "session_not_found", "Session not found.");
       }
-      const op = inSession ? `${method} ${route.slice(2).join("/")}` : "";
+      const op = inSession
+        ? `${method === "HEAD" ? "GET" : method} ${route.slice(2).join("/")}`
+        : "";
       if (serverOwnsSetup && (SERVER_OWNED_SESSION_ROUTES.has(op) || isChatCompletions(route))) {
         return notAllowed();
       }
@@ -812,7 +815,9 @@ export function createSessionProxyHandler(
           upstream = await send();
         }
         const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
-        return (await options.afterForward?.(routeInfo, relayed, context)) ?? relayed;
+        // A record-only hook returns `void`, which is `undefined` at runtime.
+        const answered = await options.afterForward?.(routeInfo, relayed, context);
+        return (answered as Response | undefined) ?? relayed;
       };
 
       // --- Server-owned additions: the few routes whose body the relay reads.
@@ -1250,7 +1255,15 @@ function forwardedHeaders(request: Request, jsonBody: boolean): Headers {
     if (value !== null) headers.set(name, value);
   }
   if (jsonBody) headers.set("content-type", "application/json");
-  if (!headers.has("accept")) headers.set("accept", "application/json");
+  // A browser cannot opt back into the legacy full-configuration response.
+  // Accept already crosses older CORS hosts; don't introduce a new request header.
+  const accept = headers.get("accept");
+  if (!accept?.split(",").some((value) => value.trim() === OPENGENI_SESSION_CHAT_ACCEPT)) {
+    headers.set(
+      "accept",
+      accept ? `${accept}, ${OPENGENI_SESSION_CHAT_ACCEPT}` : OPENGENI_SESSION_CHAT_ACCEPT,
+    );
+  }
   return headers;
 }
 
@@ -1266,7 +1279,10 @@ function relayResponse(
 ): Response {
   if (upstream.status === 401) warnRejectedApiKey(upstream, rejectedKeyNotice);
   const headers = new Headers({ "Cache-Control": "no-store" });
+  headers.set("Access-Control-Expose-Headers", OPENGENI_BROWSER_RESPONSE_HEADERS.join(", "));
   for (const name of RELAYED_RESPONSE_HEADERS) {
+    // The relay deliberately does not claim the upstream server's contract.
+    if (name === OPENGENI_API_CONTRACT_HEADER) continue;
     const value = upstream.headers.get(name);
     if (value !== null) headers.set(name, value);
   }

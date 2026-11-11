@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BrowserIdentity,
   BrowserIdentityMutationResponse,
@@ -15,7 +16,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseBrowserIdentitiesOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserIdentitiesOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   includeArchived?: boolean | undefined;
 };
@@ -263,4 +264,4 @@ function mergeIdentity(
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type BrowserIdentitiesClient = EmbeddedBrowserInteractionClientLike;
+export type BrowserIdentitiesClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

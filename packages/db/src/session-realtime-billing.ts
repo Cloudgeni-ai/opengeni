@@ -18,7 +18,7 @@ export type SessionRealtimeBillingFacts = {
   realtimeId: string;
   model: SessionRealtimeModel;
   ownerSubjectId: string;
-  state: "active" | "ended";
+  state: "preparing" | "active" | "ended";
   connections: SessionRealtimeBillableConnection[];
 };
 
@@ -90,7 +90,7 @@ export async function loadSessionRealtimeBillingFacts(
       realtimeId: mode.id,
       model: mode.model as SessionRealtimeModel,
       ownerSubjectId: mode.ownerSubjectId,
-      state: mode.state as "active" | "ended",
+      state: mode.state as SessionRealtimeBillingFacts["state"],
       connections: rows
         .map((row) => {
           const closed = row.closedAt ?? observedUntil;

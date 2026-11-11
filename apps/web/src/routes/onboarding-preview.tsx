@@ -1,4 +1,5 @@
 import { t } from "@opengeni/react/app/lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
@@ -154,7 +155,11 @@ const previewMethods = {
     return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: previewModel ? [previewModel] : [] };
+    // A new organization starts on Free, which doesn't include own subscriptions.
+    return {
+      models: previewModel ? [previewModel] : [],
+      ownSubscriptionPlan: { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 },
+    };
   },
   async getNewSessionDraft() {
     return {
@@ -197,7 +202,7 @@ const previewMethods = {
     return { id: "preview-setup-session" };
   },
 };
-const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
+const previewClient = previewMethods as unknown as ChatClient<OpenGeniBrowserClient>;
 
 function PreviewResult({ view }: { view: string }) {
   const params = new URLSearchParams(window.location.search);

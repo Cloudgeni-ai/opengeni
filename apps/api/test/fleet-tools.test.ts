@@ -21,7 +21,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
-import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
+import {
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -764,6 +767,36 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     // Without the chat's permission the same request is refused.
     await revokeThisChat();
     await expect(agentRequest()).rejects.toThrow();
+  }, 60_000);
+
+  test("an agent moving onto a machine whose approval ended this turn gets machine access needed, not a raw error", async () => {
+    if (!available) return;
+    const { targetWorkspaceId, machine, ctx, services, allowThisChat, revokeThisChat } =
+      await seedPersonalMachineChat("none");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The owner withdraws this chat's approval while the turn runs. Admission
+    // already holds this turn's authorization for the machine, so only the
+    // check right before use can refuse the agent's next move onto it.
+    await revokeThisChat();
+    const before = await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId);
+    const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(refused).toMatchObject({
+      swapped: false,
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+      code: "machine_access_required",
+    });
+    expect(refused.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+    expect(refused.reason).not.toContain("Failed query");
+    expect(refused.reason).not.toContain("no longer live");
+    expect(await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId)).toEqual(before);
+    const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(refusedRun).toMatchObject({ ok: false, code: "machine_access_required" });
+    expect(refusedRun.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
   }, 60_000);
 
   // The interaction tools move the chat and list its machines through the

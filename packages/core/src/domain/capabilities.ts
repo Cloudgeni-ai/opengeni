@@ -6,6 +6,7 @@ import {
   type PersonalWorkspaceExtensionMcpServer,
 } from "./personal-workspace-connectors";
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
+import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   integrationMentionMatcher,
   integrationNamesAgree,
@@ -200,10 +201,11 @@ export async function buildCapabilityCatalog(input: {
   );
   const builtIns = [
     ...configuredMcpCatalogItems(input.settings),
-    ...providerIntegrationCatalogItems(socialConnections),
-    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
-    onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
-    excelAddinCatalogItem(excelAddin(input.settings)),
+    ...builtInConnectorCatalogItems({
+      settings: input.settings,
+      socialConnections,
+      workspaceConnections,
+    }),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -1735,6 +1737,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     oneReadAtATime?: boolean;
     /** The workspace's organization, when the caller knows it (skips a lookup). */
     accountId?: string;
+    /**
+     * One connection-account resolution's shared reads, when `db` is that
+     * resolution's transaction (see `ConnectionAccountReads`).
+     */
+    connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
   const readApiIntegrations = () =>
@@ -1781,11 +1788,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
         ? options.codexApps.accountId
         : undefined) ??
       (await rlsContextForWorkspace(db, workspaceId)).accountId;
-    const origins = await personalWorkspaceOwnerOriginConnections(db, {
-      accountId,
-      workspaceId,
-      subjectId: extensionSubject,
-    });
+    const origins = await personalWorkspaceOwnerOriginConnections(
+      db,
+      { accountId, workspaceId, subjectId: extensionSubject },
+      options?.connectionAccountReads,
+    );
     if (origins.length > 0) {
       enabled = [
         ...enabled,
@@ -2464,6 +2471,26 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
 } as const;
 
 /**
+ * Opengeni's own connector rows. No registry import supplies them, so each
+ * needs a mark bundled with the shared UI (see capability-logo-source); a
+ * test fails when one is added without it. Codex Apps is the other built-in
+ * connector (codexAppsCatalogItem); deployment-configured MCP servers are the
+ * operator's own and carry no known brand.
+ */
+export function builtInConnectorCatalogItems(input: {
+  settings: Parameters<typeof excelAddin>[0];
+  socialConnections: SocialConnection[];
+  workspaceConnections: ConnectionMetadata[];
+}): CapabilityCatalogItem[] {
+  return [
+    ...providerIntegrationCatalogItems(input.socialConnections),
+    fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
+  ];
+}
+
+/**
  * The first-party Fiken accounting connector tile. Enablement is derived from
  * the workspace-shared verified Fiken connection (either lane), mirroring how
  * the social provider tiles derive theirs from social connections.
@@ -2820,6 +2847,8 @@ export function nativeConnectionCapabilityRecommendations(
     connectedMachines?: boolean;
     /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
     personalGitHub?: boolean;
+    /** All my repositories is offered: the person may allow all their repositories. */
+    personalGitHubAllRepositories?: boolean;
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
@@ -2856,7 +2885,11 @@ export function nativeConnectionCapabilityRecommendations(
       actions: ["connect", "inspect"],
       metadata: {
         endpointPath: "/v1/workspaces/{workspaceId}/github/app",
-        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        firstPartyMcpTools: [
+          "github_connect_link",
+          "github_repositories_list",
+          "github_repository_attach",
+        ],
         recommendationOnly: true,
       },
     }),
@@ -2868,8 +2901,7 @@ export function nativeConnectionCapabilityRecommendations(
         kind: "api",
         source: "built_in",
         name: "Your GitHub",
-        description:
-          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+        description: `The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${options.personalGitHubAllRepositories ? " or all of theirs" : ""}. Use for 'connect my GitHub', 'use my account' or 'do it as me'.`,
         category: "source-control",
         tags: [
           "github",

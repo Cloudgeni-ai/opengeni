@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 import {
   cachedLists,
   rememberLists,

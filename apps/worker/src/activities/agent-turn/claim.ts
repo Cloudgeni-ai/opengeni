@@ -1,3 +1,5 @@
+import type { FailureOrigin } from "@opengeni/observability";
+import { recordSettledTurnFailureOrigin } from "./failure-attribution";
 import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
@@ -71,6 +73,8 @@ import {
   ensureRunAllowed,
   AllowanceExhaustedError,
   SessionUsageLimitReachedError,
+  TurnAdmissionRefusedError,
+  HostEntitlementDeniedError,
   sessionUsageLimitStopEvents,
   type AllowanceRefusal,
 } from "./admission";
@@ -94,7 +98,7 @@ import type {
   TurnSettleInput,
 } from "./turn-context";
 import type { TurnEventPublisher } from "./model-usage";
-import { createTurnEventLane } from "./turn-event-lane";
+import { createTurnEventPublisher } from "./turn-event-lane";
 
 export type ClaimTurnDeps = {
   /** Optional read-only hint; run owns its promise even if admission later exits. */
@@ -619,6 +623,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;
   let sessionUsageLimitRefusal: SessionUsageLimitReachedRefusal | null = null;
+  let creditsRefusal: string | null = null;
   let sessionUsageCustodyWait = false;
   try {
     await waitForTurnOperation(
@@ -647,6 +652,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       recordSessionUsageLimitEvent(observability, "claim", "reached");
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
+    } else if (
+      (error instanceof TurnAdmissionRefusedError && error.stopsAsBudgetLimit) ||
+      error instanceof HostEntitlementDeniedError
+    ) {
+      creditsRefusal = error.message;
     } else if (sessionUsageCustodyPending(error)) {
       // An earlier single call's receipt is still owed: wait, not a failure.
       sessionUsageCustodyWait = true;
@@ -693,6 +703,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const emittedModelUsageSourceKeys = new Set<string>();
   const recordCanonicalStartupMilestones = (
     receipts: CanonicalTurnStartupMilestoneReceipt[],
+    origin?: FailureOrigin,
   ): void => {
     for (const receipt of receipts) {
       recordTurnStartupMilestone(observability, {
@@ -700,11 +711,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         provider: turnExecutionPolicy.providerId,
         backend: sandboxState.startupMilestoneBackend ?? turn.sandboxBackend,
         outcome: receipt.outcome,
+        ...(origin ? { failureOrigin: origin } : {}),
         durationSeconds: receipt.durationMs / 1_000,
+        // The receipt is returned right after the checkpoint commits, so this
+        // attempt's own monotonic clock measures claim, preparation and (for
+        // first_byte) provider latency, without queue, capacity or recovery waits.
+        sinceAttemptStartSeconds: (performance.now() - activityStarted) / 1_000,
       });
     }
   };
-  const append: TurnEventPublisher = async (events, immediate = false, mutate) => {
+  const append: TurnEventPublisher = async (events, _immediate = false, mutate, project) => {
     const inputs = events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -732,7 +748,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
             durationSeconds,
           }),
       },
-      mutate ? { rowProjection: "event", mutate } : undefined,
+      mutate || project
+        ? {
+            rowProjection: "event",
+            mutate: mutate ?? (async () => true),
+            ...(project ? { project } : {}),
+          }
+        : undefined,
     );
     if (inputs.length > 0 && !appended.accepted) {
       throw new TurnAttemptFencedError("turn execution generation was fenced");
@@ -746,22 +768,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       phase: "events_published",
       producerSeq,
     });
-    if (immediate) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
+    // The durable append and fan-out above already yielded to I/O. Returning
+    // their acknowledgement needs no additional event-loop timer.
     return appended;
   };
   // Progress receipts go out in the background; awaited appends and the
   // settlement start after the receipts issued before them.
-  const eventLane = createTurnEventLane();
-  eventing.publish = (events, immediate, mutate) =>
-    eventLane.run(() => append(events, immediate, mutate));
-  eventing.publishInBackground = (events, options) => {
-    eventLane.runInBackground(() =>
-      options?.measureDelivery ? options.measureDelivery(() => append(events)) : append(events),
-    );
-  };
-  eventing.backgroundEventsSettled = () => eventLane.backgroundSettled();
+  const publisher = createTurnEventPublisher(append);
+  eventing.publish = publisher.publish;
+  eventing.publishInBackground = publisher.publishInBackground;
+  eventing.backgroundEventsSettled = publisher.backgroundSettled;
   const settle = async (
     inputSettlement: TurnSettleInput & { requirePendingSteer?: boolean },
   ): Promise<boolean | "pending_steer_withdrawn"> => {
@@ -827,7 +843,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       control.turnMetricOutcome = "cancelled";
       return false;
     }
-    recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
+    const origin = recordSettledTurnFailureOrigin(
+      control,
+      turnExecutionPolicy.billing,
+      inputSettlement.turnStatus,
+      inputSettlement.events,
+    );
+    recordCanonicalStartupMilestones(result.canonicalStartupMilestones, origin);
     turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     if (inputSettlement.turnStatus === "requires_action") {
@@ -850,7 +872,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   };
   // The settlement's events follow the progress receipts issued before it.
   eventing.settle = ((inputSettlement: Parameters<typeof settle>[0]) =>
-    eventLane.run(() => settle(inputSettlement))) as TurnSettleFn;
+    publisher.run(() => settle(inputSettlement))) as TurnSettleFn;
   activityContext?.heartbeat({
     ...heartbeatDetails,
     phase: "turn_started",
@@ -926,6 +948,31 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     control.activityStatus = "idle";
     return { exit: claimedResult({ status: "idle" }) };
   }
+  if (creditsRefusal) {
+    // Out of credits before any provider or sandbox work: the same stop as
+    // running out between model calls. The session stays usable (a failed
+    // session would end a parent's work and hide the credits notice), and an
+    // active goal pauses for limits at the next continuation evaluation.
+    if (
+      !(await eventing.settle({
+        events: [
+          {
+            type: "turn.completed",
+            payload: { output: "", segmentLimit: "budget_exhausted", detail: creditsRefusal },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      }))
+    ) {
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    control.turnMetricOutcome = "completed";
+    control.activityStatus = "idle";
+    return { exit: claimedResult({ status: "idle" }) };
+  }
   if (sessionUsageCustodyWait) {
     // Nothing has run in this attempt. Park the same turn as recovering so
     // its replacement attempt re-checks admission after a bounded delay; the
@@ -949,6 +996,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "control";
     control.activityStatus = "recovering";
     return {
       exit: claimedResult({

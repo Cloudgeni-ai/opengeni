@@ -18,6 +18,7 @@ import {
   modelUsesCredits,
   projectClientModelRows,
   projectPickerRows,
+  requiredPlanHint,
 } from "../src/model-policy";
 import { createOpenGeniText } from "../src/messages/runtime";
 import { modelPickerMenuView } from "../src/model-picker-model";
@@ -76,6 +77,24 @@ describe("model-policy", () => {
       "Uses credits",
       "Not covered by your credits",
     ]);
+  });
+  test("names the plan an own subscription waits for, and keeps it selectable", () => {
+    const team = { key: "team", label: "Team", monthlyPriceMicros: 30_000_000 };
+    const rows = projectPickerRows(englishText, [
+      catalogModel({
+        id: "codex/gpt-6-astra",
+        label: "GPT-6 Astra",
+        cost: "subscription",
+        requiredPlan: team,
+      }),
+      catalogModel({ id: "codex/gpt-6-luna", label: "GPT-6 Luna", cost: "subscription" }),
+    ]);
+    expect(rows.map((row) => [row.id, row.selectable, row.fundingHint ?? null])).toEqual([
+      ["codex/gpt-6-astra", true, "Needs Team"],
+      ["codex/gpt-6-luna", true, null],
+    ]);
+    expect(requiredPlanHint(englishText, rows[0]!.catalog)).toBe("Needs Team");
+    expect(requiredPlanHint(englishText, rows[1]!.catalog)).toBe(null);
   });
   test.each([
     {

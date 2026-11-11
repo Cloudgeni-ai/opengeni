@@ -886,7 +886,7 @@ for (const width of [1280, 390]) {
       await capture("empty-history-ready");
       assert.equal(await page.getByRole("button", { name: "Retry conversation" }).count(), 0);
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await state.gates.streamError.entered;
@@ -898,7 +898,7 @@ for (const width of [1280, 390]) {
         1,
       );
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await capture("post-open-stream-error");
@@ -930,7 +930,7 @@ for (const width of [1280, 390]) {
       await transcript.getByText(state.session.initialMessage, { exact: true }).waitFor();
       await page.locator("[data-sonner-toast]").waitFor({ state: "hidden" });
       await capture("ready");
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       await input.fill("Start this next step.");
       await input.press("Enter");
       await state.gates.send.entered;
@@ -981,9 +981,7 @@ for (const width of [1280, 390]) {
         .waitFor();
       await startup.getByText("A little longer than usual…", { exact: true }).waitFor();
       await startup.getByRole("button", { name: "Behind the magic" }).click();
-      await page
-        .getByText("Your messages are saved. No agent turn is running yet.", { exact: true })
-        .waitFor();
+      await page.getByText("No agent turn is running yet.", { exact: true }).waitFor();
       await page
         .getByText("The start request was accepted; a worker has not started the turn yet.", {
           exact: true,
@@ -1000,7 +998,7 @@ for (const width of [1280, 390]) {
       await page.reload();
       await startup
         .getByRole("status")
-        .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+        .getByText("Unable to start yet.", { exact: true })
         .waitFor();
       await startup.getByRole("button", { name: "Behind the magic" }).click();
       await page.getByText("3 dispatch attempts.", { exact: true }).waitFor();
@@ -1021,12 +1019,7 @@ for (const width of [1280, 390]) {
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
       assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
-      assert.equal(
-        await page
-          .getByText("Unable to start yet. Your messages are saved.", { exact: true })
-          .count(),
-        0,
-      );
+      assert.equal(await page.getByText("Unable to start yet.", { exact: true }).count(), 0);
       await capture("running");
       state.turns = [
         {
@@ -1113,7 +1106,7 @@ for (const width of [1280, 390]) {
       const capture = (name: string) =>
         page.screenshot({ path: `${output}/${width}-${origin}-${name}.png` });
       const transcript = page.locator('[data-testid="timeline-user"]');
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       const assertRetained = async () => {
         assert.equal(
           await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
@@ -1125,7 +1118,9 @@ for (const width of [1280, 390]) {
       try {
         if (origin === "created") {
           await page.goto(`${base}/workspaces/${workspaceId}/sessions`);
-          const create = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+          const create = page
+            .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
+            .first();
           await create.fill(state.session.initialMessage);
           await create.press("Enter");
           await state.gates.create.entered;
@@ -1434,7 +1429,7 @@ for (const width of [1280, 390]) {
         await page.getByRole("button", { name: "Open navigation", exact: true }).click();
       await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await assertNotFocused();
@@ -1469,7 +1464,7 @@ for (const width of [1280, 390]) {
     await page.route(`**/${composerMenuAsset}`, (route) => route.abort("failed"));
     try {
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       await input.waitFor();
       // Preserve the app's existing one-time stale-chunk reload; exercise the
       // local fallback when that recovery has already been attempted.
@@ -1513,7 +1508,7 @@ for (const width of [1280, 390]) {
       await (++requests === 1 ? first : second).wait();
       await route.abort("failed");
     });
-    const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+    const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
     const openFiles = async () => {
       const open = page.getByRole("button", { name: "Open workspace", exact: true });
       if (await open.isVisible()) await open.click();

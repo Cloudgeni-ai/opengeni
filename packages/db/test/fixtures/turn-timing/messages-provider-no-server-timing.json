@@ -1,0 +1,208 @@
+{
+ "description": "Messages provider without server timing; first-party session and machine tools.",
+ "turn": {
+  "createdAt": "2026-11-09T11:54:25.679Z",
+  "startedAt": "2026-11-09T11:54:26.146Z",
+  "finishedAt": "2026-11-09T11:54:32.895Z",
+  "status": "completed"
+ },
+ "attempts": [
+  {
+   "id": "00000000-0000-4000-8000-000000000001",
+   "startedAt": "2026-11-09T11:54:25.679Z",
+   "closedAt": "2026-11-09T11:54:32.895Z",
+   "outcome": "completed"
+  }
+ ],
+ "events": [
+  {
+   "type": "turn.started",
+   "sequence": 3,
+   "occurredAt": "2026-11-09T11:54:26.146Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {}
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 4,
+   "occurredAt": "2026-11-09T11:54:26.346Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_mint",
+    "durationMs": 0.5796660017222166
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 6,
+   "occurredAt": "2026-11-09T11:54:26.567Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "tools",
+    "durationMs": 114
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 7,
+   "occurredAt": "2026-11-09T11:54:26.641Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "client_publication",
+    "durationMs": 34.86221099831164
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 9,
+   "occurredAt": "2026-11-09T11:54:26.804Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "model_preparation",
+    "durationMs": 76
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 10,
+   "occurredAt": "2026-11-09T11:54:26.774Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "dispatchId": "2",
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 11,
+   "occurredAt": "2026-11-09T11:54:27.680Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "dispatchId": "2",
+    "durationMs": 865,
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 12,
+   "occurredAt": "2026-11-09T11:54:29.760Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "organization-claude-subscription",
+    "model": "organization-claude-subscription/claude-opus-5-5",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 2838,
+     "preDispatchMs": 136
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 13,
+   "occurredAt": "2026-11-09T11:54:29.748Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "dispatchId": "2",
+    "durationMs": 2933,
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 14,
+   "occurredAt": "2026-11-09T11:54:30.024Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_1",
+    "name": "opengeni__session_send_message",
+    "toolFamily": "session_send_message"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 15,
+   "occurredAt": "2026-11-09T11:54:30.133Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_1",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 16,
+   "occurredAt": "2026-11-09T11:54:30.148Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "dispatchId": "2",
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 17,
+   "occurredAt": "2026-11-09T11:54:31.332Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "dispatchId": "2",
+    "durationMs": 1185,
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 18,
+   "occurredAt": "2026-11-09T11:54:32.697Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "organization-claude-subscription",
+    "model": "organization-claude-subscription/claude-opus-5-5",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 2383,
+     "preDispatchMs": 248
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 19,
+   "occurredAt": "2026-11-09T11:54:32.687Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "dispatchId": "2",
+    "durationMs": 2539,
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 21,
+   "occurredAt": "2026-11-09T11:54:32.816Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_2",
+    "name": "opengeni__wait_for_input",
+    "toolFamily": "wait_for_input"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 22,
+   "occurredAt": "2026-11-09T11:54:32.848Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_2",
+    "output": {}
+   }
+  }
+ ]
+}

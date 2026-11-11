@@ -1,6 +1,11 @@
 import { expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { CapabilityCatalogItem, ConnectionMetadata, Session } from "@opengeni/sdk";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  ChatSession as Session,
+} from "@opengeni/sdk";
 import {
   selectedConnectionAccounts,
   sessionConnectionAccounts,
@@ -34,7 +39,7 @@ function harness(accounts: unknown[] = [account]) {
     listOwnConnectionAccounts: async () => accounts,
     issueUserResourceGrant,
     listUserResourceAuthorities,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return { client, issueUserResourceGrant, listUserResourceAuthorities };
 }
 

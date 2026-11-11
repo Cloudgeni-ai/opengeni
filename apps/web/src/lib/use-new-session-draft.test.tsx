@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   FileAsset,
   NewSessionDraft,
@@ -91,7 +92,10 @@ function asset(id: string, overrides: Partial<FileAsset> = {}): FileAsset {
   };
 }
 
-type DraftClient = Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDraft" | "getFile">;
+type DraftClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "getNewSessionDraft" | "saveNewSessionDraft" | "getFile"
+>;
 
 type RouteDraftHookProps = {
   launchChannelId: string | null | undefined;
@@ -142,7 +146,7 @@ function DraftsEventHost({
   children: ReactNode;
 }) {
   const value = useMemo(
-    () => ({ workspaceDraftsEvent: props.event }) as unknown as OpenGeniContextValue,
+    () => ({ workspaceDraftsEvent: props.event }) as unknown as OpenGeniContextValue<ChatClient>,
     [props.event],
   );
   return <OpenGeniContext.Provider value={value}>{children}</OpenGeniContext.Provider>;

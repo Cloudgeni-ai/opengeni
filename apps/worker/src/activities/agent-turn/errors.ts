@@ -1,4 +1,5 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import { findPersonalMachineAccessRequiredError } from "./machine-access";
@@ -28,12 +29,16 @@ import {
   SandboxLeaseTransitionError,
   KnowledgeLearningScopeChangedError,
   nestedErrorRecords,
+  nestedPostgresMessage,
+  isPersonalMachineAccessRefusal,
+  type SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
   AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  classifyProviderAccountRefusalError,
   compactionProviderRejection,
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
@@ -758,6 +763,31 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
   });
 }
 
+const MEMBERSHIP_CLAIM_REFUSALS = new Set(["initiating human lacks target-workspace membership"]);
+
+/**
+ * Name the condition that blocked a claim, so the chat can say what fixes it
+ * and start the saved message by itself once it is fixed. A personal machine
+ * refused for lack of approval is machine access whatever SQLSTATE carried it.
+ */
+function preClaimBlockReason(
+  failure: SessionEventPersistenceError,
+):
+  | "initiator_membership_required"
+  | "personal_resource_grant_required"
+  | "database_claim_rejected" {
+  const sqlState = failure.details.sqlState;
+  if (sqlState === "OG001") return "initiator_membership_required";
+  if (sqlState === "OG002" || isPersonalMachineAccessRefusal(failure)) {
+    return "personal_resource_grant_required";
+  }
+  if (sqlState === "42501") {
+    const message = nestedPostgresMessage(failure);
+    if (message && MEMBERSHIP_CLAIM_REFUSALS.has(message)) return "initiator_membership_required";
+  }
+  return "database_claim_rejected";
+}
+
 /**
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
@@ -783,14 +813,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
     ...(persistenceFailure && rejectedClaim
       ? {
           sqlState: persistenceFailure.details.sqlState,
-          reason:
-            persistenceFailure.details.stage === "session_attempts.claim" &&
-            persistenceFailure.details.sqlState === "OG001"
-              ? ("initiator_membership_required" as const)
-              : persistenceFailure.details.stage === "session_attempts.claim" &&
-                  persistenceFailure.details.sqlState === "OG002"
-                ? ("personal_resource_grant_required" as const)
-                : ("database_claim_rejected" as const),
+          reason: preClaimBlockReason(persistenceFailure),
           retryPolicy: "explicit_recheck" as const,
         }
       : {}),
@@ -1444,11 +1467,13 @@ export function compactionFailureTurnEventPayload(
   providerRejection?: CompactionProviderRejection;
   providerMessage?: string;
   quotaScope?: ProviderQuotaScope;
+  providerAccountRefusal?: ProviderAccountRefusal;
 } {
   const rejection = compactionProviderRejection(error);
   // The same closed marker as a `provider_quota_exhausted` turn failure, so
   // clients can name the exhausted limit and offer another model here too.
   const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
+  const accountRefusal = rejection ? null : chatModelProviderAccountRefusal(error);
   const providerMessage = compactionFailureProviderMessage(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
@@ -1459,7 +1484,36 @@ export function compactionFailureTurnEventPayload(
     ...(rejection ? { providerRejection: rejection } : {}),
     ...(providerMessage ? { providerMessage } : {}),
     ...(quota ? { quotaScope: quota.scope } : {}),
+    ...(accountRefusal ? { providerAccountRefusal: accountRefusal } : {}),
   };
+}
+
+/**
+ * The chat model provider's own account refused the request (see
+ * `classifyProviderAccountRefusal`). A function tool's provider and the
+ * subscription transports, which own their account semantics, never count.
+ * Operational attribution only: it changes no retry, copy or recovery.
+ */
+function chatModelProviderAccountRefusal(error: unknown): ProviderAccountRefusal | null {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
+  ) {
+    return null;
+  }
+  return classifyProviderAccountRefusalError(error);
+}
+
+/** Mark a terminal failure with the closed provider-account refusal, if any. */
+function withProviderAccountRefusal(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.retryable === true) return failure;
+  const refusal = chatModelProviderAccountRefusal(error);
+  return refusal ? { ...failure, providerAccountRefusal: refusal } : failure;
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -2146,11 +2200,14 @@ export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
-  return withProviderCondition(
+  return withProviderAccountRefusal(
     error,
-    withSandboxProviderAttribution(
+    withProviderCondition(
       error,
-      withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      withSandboxProviderAttribution(
+        error,
+        withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      ),
     ),
   );
 }
@@ -2431,6 +2488,8 @@ function baseAgentRunFailurePayload(
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
   requestSize?: AnthropicRequestSize;
   quotaScope?: ProviderQuotaScope;
+  /** Closed provider-account refusal for operational attribution; never changes retries or copy. */
+  providerAccountRefusal?: ProviderAccountRefusal;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
   /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */

@@ -13,6 +13,7 @@ import type {
   PreviewOrganizationApiIntegrationRequest,
   UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { PlugIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -79,7 +80,7 @@ import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
    API shows under its Custom APIs).
    -------------------------------------------------------------------------- */
 
-type Client = OpenGeniBrowserClient;
+type Client = ChatClient<OpenGeniBrowserClient>;
 
 export const CONNECTOR_LOGIN_LABEL: Record<OrganizationConnectorLogin, string> = {
   auto_connect: "Connects everyone automatically",

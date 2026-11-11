@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type EmbeddedComputerInteractionClientOverride,
@@ -21,7 +22,7 @@ type PostureState = {
 /** Semantic-only targets need caller authority without opening a pixel stream.
  * A source change synchronously discards the previous posture. */
 export function useComputerInputPosture(
-  options: EmbeddedComputerInteractionClientOverride & {
+  options: EmbeddedComputerInteractionClientOverride<ChatClient> & {
     computerSessionId: string | null;
     controllerGeneration: string | null;
     enabled: boolean;

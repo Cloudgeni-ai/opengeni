@@ -61,6 +61,17 @@ const shots: Shot[] = [
     height: 1500,
     ready: text("Make this an agent"),
   },
+  { name: "new-agent", view: "new-agent", height: 1100, ready: text("Remember across chats") },
+  {
+    name: "new-agent-icon-open",
+    view: "new-agent",
+    height: 1100,
+    ready: (page) => page.getByRole("button", { name: "Change icon" }).waitFor(),
+    act: async (page) => {
+      await page.getByRole("button", { name: "Change icon" }).click();
+      await page.getByRole("dialog", { name: "Icon" }).waitFor();
+    },
+  },
   {
     name: "composer-agent-chip-open",
     view: "composer",

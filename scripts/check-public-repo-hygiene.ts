@@ -100,14 +100,14 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "agent/vendor/async-nats/src/lib.rs": {
-    bytes: 61_798,
-    sha256: "d87f015a7be4c3abffa9df0366e59e2b6dfd64c89bee26d2437f50f280f296fe",
+    bytes: 61_891,
+    sha256: "f453d8de7e2dfc7bf479e63c24485a45e489472ed4520e5ff5d52b2f00943572",
     // Only the signed-byte field primitive, not a string or comment.
     offsets: [9_379],
   },
 };
-// Preserve the four published copyright contacts from agentkeepalive, fastq,
-// follow-redirects and isomorphic-ws. Only these personal-mail matches are
+// Preserve the five published copyright contacts from agentkeepalive, fastq,
+// follow-redirects, isomorphic-ws and yaml. Only these personal-mail matches are
 // suppressed, at this exact notices path, UTF-8 size, hash and string offsets.
 // Every other rule still runs; changed license bytes require renewed review.
 const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
@@ -115,9 +115,9 @@ const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
   { bytes: number; sha256: string; offsets: readonly number[] }
 > = {
   "packages/runtime/THIRD_PARTY_NOTICES": {
-    bytes: 153_257,
-    sha256: "e6f51121859869e0c64026f8ffb87065d04321661f1aaff7fa491cd9d182aada",
-    offsets: [84_593, 101_439, 102_325, 124_221],
+    bytes: 153_969,
+    sha256: "30d9bdbf27f1f06272f2cb8ffe49bfd737c7eecb3ce842b9d442b5b1ea2c5a17",
+    offsets: [84_471, 101_317, 102_203, 124_099, 153_247],
   },
 };
 const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");
@@ -495,11 +495,21 @@ function collectMatches(
 // Only the values of a `.svg` file's `d` and `points` attributes are skipped,
 // and only for that rule; text, titles and every other attribute still run.
 const SVG_PATH_DATA_ATTRIBUTE = /\s(?:d|points)\s*=\s*("[^"]*"|'[^']*')/g;
+// Android vector drawables draw with the same path syntax.
+const ANDROID_PATH_DATA_ATTRIBUTE = /\sandroid:pathData\s*=\s*("[^"]*"|'[^']*')/g;
 
+/** Where an SVG or an Android vector drawable keeps its path coordinates. */
 function svgPathDataRanges(file: string, source: string): Array<[number, number]> {
-  if (extname(file).toLowerCase() !== ".svg") return [];
+  const extension = extname(file).toLowerCase();
+  const attribute =
+    extension === ".svg"
+      ? SVG_PATH_DATA_ATTRIBUTE
+      : extension === ".xml" && /(?:^|\/)res\/drawable[^/]*\//u.test(file)
+        ? ANDROID_PATH_DATA_ATTRIBUTE
+        : null;
+  if (!attribute) return [];
   const ranges: Array<[number, number]> = [];
-  for (const match of source.matchAll(SVG_PATH_DATA_ATTRIBUTE)) {
+  for (const match of source.matchAll(attribute)) {
     const value = match[1]!;
     const start = (match.index ?? 0) + match[0].length - value.length;
     ranges.push([start, start + value.length]);

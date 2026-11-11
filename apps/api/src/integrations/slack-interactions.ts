@@ -177,6 +177,7 @@ import {
   getActorNewSessionStartChoices,
   hasPermission,
   recordSlackEvent,
+  releaseAdmissionBlocksAfterAccessChange,
   requireAccessContext,
   requireAccessGrant,
   requireSessionAuthorizationListScope,
@@ -196,7 +197,11 @@ import {
   SlackBotProviderError,
   slackHistoryRateLimited,
 } from "./slack-bot";
-import { slackMrkdwnFromMarkdown, slackMrkdwnKeepingClaudeCiteTags } from "./slack-mrkdwn";
+import {
+  slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingClaudeCiteTags,
+  slackMrkdwnKeepingProviderTracking,
+} from "./slack-mrkdwn";
 import { sessionAvatarImageUrl } from "./session-avatar-image";
 import { slackMentionedUserIds, slackReadableRequestText } from "./slack-request-text";
 import {
@@ -1231,6 +1236,15 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
             : {}),
           ...(payload.role !== undefined ? { role: payload.role } : {}),
         });
+        // The new membership may be what that person's saved messages wait for.
+        await releaseAdmissionBlocksAfterAccessChange(
+          {
+            db: deps.db,
+            requestSessionWorkflowWakeDispatch: () =>
+              deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+          },
+          { accountId: grant.accountId, workspaceId, change: "membership" },
+        );
         const workspace = await getWorkspace(deps.db, workspaceId);
         return c.json(
           SlackUserLinkAccessRequest.parse({
@@ -8177,7 +8191,8 @@ async function postDelivery(
  * claimed-but-unposted row, a response-loss retry, or a page replayed across
  * the deploy) must keep them, or every retry would conflict and wedge the
  * interaction. Earlier releases sent the unformatted bytes, then the
- * formatting from before Claude citation tags were rewritten. The ledger
+ * formatting from before Claude citation tags were rewritten, then the
+ * formatting from before source links lost hosted-search tracking. The ledger
  * reports a conflict from its durable claim, before any Slack write, so
  * retrying with each earlier rendering that differs under the same operation
  * id is safe. The id itself never changes: action handles and the post lookups
@@ -8219,6 +8234,7 @@ async function deliverSlackModelText(
 /** Current Slack formatting first, then each rendering an earlier release used. */
 const SLACK_MODEL_TEXT_RENDERINGS: readonly ((text: string) => string)[] = [
   slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingProviderTracking,
   slackMrkdwnKeepingClaudeCiteTags,
   (text) => text,
 ];

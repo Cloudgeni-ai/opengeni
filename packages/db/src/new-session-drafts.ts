@@ -713,6 +713,12 @@ export async function seedNewSessionDraftInTransaction(
   const rememberRig =
     typeof options.rigId === "string" && options.rigId.length > 0 && !defaults.hasDefaultRig;
   const safeOptions: NewSessionDraftOptionsValue = {
+    // Keep the connector policy together. An exclusion-only draft stores
+    // [] + toolsProvided=true; dropping its exclusions (even []) would turn
+    // the next restored draft into an explicit selection of no connectors.
+    ...(options.excludedMcpServerIds !== undefined
+      ? { excludedMcpServerIds: options.excludedMcpServerIds }
+      : {}),
     ...(options.visibility ? { visibility: options.visibility } : {}),
     ...(rememberCompute && options.sandboxBackend
       ? { sandboxBackend: options.sandboxBackend }

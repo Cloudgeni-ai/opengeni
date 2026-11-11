@@ -240,6 +240,7 @@ describe("useRecording", () => {
       chunkCount: 12,
       totalBytes: 1_000,
       durationMilliseconds: 60_000,
+      unrecorded: [],
       playable,
       video: null,
       live: null,

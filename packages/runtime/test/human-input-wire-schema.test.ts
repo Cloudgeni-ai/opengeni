@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import {
   allAgentCapabilities,
+  noneAgentCapabilities,
   RequestHumanInputToolInput,
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
@@ -64,6 +65,21 @@ function without(full: Node, secrets: boolean, skillReview: boolean): Node {
 }
 
 describe("request_human_input as sent", () => {
+  // Asking questions is one of the essentials of "none"; humanInput: false
+  // (or an unattended session) is how an embedder turns it off.
+  test('"none" keeps the question tool and humanInput: false removes it', async () => {
+    const attached = async (capabilities: ResolvedAgentCapabilities) => {
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+        agentConfig: { ...config({}), from: "none", capabilities },
+        skillCatalog: [],
+      });
+      const tools = await agent.getAllTools(new RunContext());
+      return tools.some((tool) => tool.name === HUMAN_INPUT_TOOL_NAME);
+    };
+    expect(await attached(noneAgentCapabilities())).toBe(true);
+    expect(await attached({ ...noneAgentCapabilities(), humanInput: false })).toBe(false);
+  });
+
   test("a reduced schema is the full one minus only the disabled fields", async () => {
     const full = await wireSchema(null);
     expect((await wireSchema(config({}))).schema).toEqual(full.schema);

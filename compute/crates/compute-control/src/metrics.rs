@@ -445,12 +445,12 @@ fn host_gauges() -> [HostGauge; 11] {
         ),
         (
             "compute_fleet_host_disk_bytes",
-            "Disk a host gives sandboxes in all.",
+            "State filesystem size sampled at host-agent startup; restart the agent after a filesystem resize.",
             |host| bytes(host.info.disk_mib),
         ),
         (
-            "compute_fleet_host_disk_free_bytes",
-            "Disk free for sandboxes on a host, as it last reported.",
+            "compute_fleet_host_disk_booking_headroom_bytes",
+            "Unbooked disk headroom after worst-case sandbox growth and reserve, not filesystem free space; placement also counts reclaimable bytes.",
             |host| bytes(host.capacity.disk_free_mib),
         ),
         (
@@ -499,6 +499,20 @@ fn render_fleet(out: &mut Text, hosts: &[Known], led: &Led) {
         out.family(name, "gauge", help);
         for host in &counted {
             out.num(name, &[("host_name", &host.target.name)], value(host));
+        }
+    }
+    out.family(
+        "compute_fleet_host_disk_available_bytes",
+        "gauge",
+        "Filesystem space available on the host's state volume before bookings and reserve; absent when the host has no reading or predates this metric.",
+    );
+    for host in &counted {
+        if let Some(available) = host.capacity.disk_available_mib {
+            out.num(
+                "compute_fleet_host_disk_available_bytes",
+                &[("host_name", &host.target.name)],
+                bytes(available),
+            );
         }
     }
     out.family(

@@ -40,7 +40,7 @@ export function makeAgent(patch: Partial<Agent> = {}): Agent {
     sourceSessionId: null,
     createdBySubjectId: "user-me",
     revision: 1,
-    hasFirstMessage: Boolean(patch.firstMessage),
+    hasFirstMessage: false,
     memory: { enabled: false, collectionId: null, scope: "workspace", reviewFirst: false },
     slack: [],
     viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: true },
@@ -163,6 +163,10 @@ export function fakeAgentsClient(
     },
     async getSession(workspaceId: string, id: string) {
       calls.push(["getSession", workspaceId, id]);
+      return { id, workspaceId, title: null, description: null, avatar: null, ...options.session };
+    },
+    async getSessionConfiguration(workspaceId: string, id: string) {
+      calls.push(["getSessionConfiguration", workspaceId, id]);
       return { id, workspaceId, title: null, description: null, avatar: null, ...options.session };
     },
   };

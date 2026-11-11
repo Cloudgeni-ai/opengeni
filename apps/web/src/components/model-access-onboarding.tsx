@@ -1,8 +1,14 @@
 import { modelDisplayName } from "@opengeni/sdk/model-display";
+import type { ChatClient } from "@opengeni/sdk";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { COMPATIBLE_ENDPOINT_CHOICE } from "@/components/models/organization-compatible-endpoints";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
+import type {
+  BillingCheckoutStatus,
+  CodexConnectPoll,
+  CodexConnectStart,
+  OwnSubscriptionPlan,
+} from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -11,6 +17,7 @@ import { showCodexConnected } from "@/lib/codex-connect-result";
 
 import { CreditAmountPicker } from "@opengeni/react/app/components/credit-amount-picker";
 import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import { ownSubscriptionPlanSentence } from "@opengeni/react/app/components/credits/own-subscription-plan-notice";
 import {
   OpenGeniCreditsTile,
   type ModelProviderId,
@@ -147,7 +154,7 @@ export function ModelAccessOnboardingPanel({
   footer,
   onComplete,
 }: {
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   /** The new organization's name, for "Shared with everyone in Acme". */
   organizationName?: string | undefined;
@@ -196,6 +203,13 @@ export function ModelAccessOnboardingPanel({
     credential: string;
     operationId: string;
   } | null>(null);
+
+  // A new organization starts on Free, which doesn't include using a
+  // connected subscription: its sign-in says which plan does, from the catalog.
+  const ownSubscriptionPlan = useOwnSubscriptionPlan(
+    codexEnabled || supergrokEnabled ? client : undefined,
+    workspaceId,
+  );
 
   const variant = startingCredits ? "credits" : includedModel ? "included" : "choose";
   useEffect(() => {
@@ -560,6 +574,14 @@ export function ModelAccessOnboardingPanel({
               ? "Sign in with the ChatGPT account whose plan should pay for new chats."
               : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."}
           </p>
+          {ownSubscriptionPlan ? (
+            <p
+              className="m-0 text-xs leading-relaxed text-fg"
+              data-testid="own-subscription-plan-note"
+            >
+              {ownSubscriptionPlanSentence(ownSubscriptionPlan)}
+            </p>
+          ) : null}
           <Button
             type="button"
             className="w-full sm:w-fit"
@@ -888,4 +910,26 @@ export function ModelAccessOnboardingPanel({
       </div>
     </section>
   );
+}
+
+/** The plan the organization needs before a connected subscription runs, or null. */
+function useOwnSubscriptionPlan(
+  client: Pick<OpenGeniBrowserClient, "getWorkspaceModelCatalog"> | undefined,
+  workspaceId: string,
+): OwnSubscriptionPlan | null {
+  const [plan, setPlan] = useState<OwnSubscriptionPlan | null>(null);
+  useEffect(() => {
+    if (!client) return;
+    const abort = new AbortController();
+    // Any failure, even a client without the read, only leaves the hint out.
+    Promise.resolve()
+      .then(() => client.getWorkspaceModelCatalog(workspaceId, { signal: abort.signal }))
+      .then((catalog) => {
+        if (!abort.signal.aborted) setPlan(catalog.ownSubscriptionPlan ?? null);
+      })
+      // Unknown says nothing; Send still names the plan if it's needed.
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [client, workspaceId]);
+  return plan;
 }

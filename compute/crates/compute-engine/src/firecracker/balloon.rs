@@ -34,6 +34,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use super::api::Api;
 use crate::error::{EngineError, ErrorKind};
+use crate::profile::PageSize;
 
 /// How often a balloon let go is looked at until its guest holds nothing
 /// in it.
@@ -43,6 +44,33 @@ const EMPTYING_POLL: Duration = Duration::from_millis(50);
 /// before the request fails, to be asked again later; and how long one
 /// that cannot report it is given before it counts as done.
 const EMPTYING_LIMIT: Duration = Duration::from_secs(10);
+
+/// Guest kernel parameter for the smallest free block, as a power of two of
+/// 4 KiB pages, that the guest reports to the host for reclaim through the
+/// balloon device.
+pub(super) const REPORTING_ORDER: &str = "page_reporting.page_reporting_order";
+
+/// The reporting order that matches the pages backing guest memory.
+///
+/// The host can give back only whole backing pages. A reported range smaller
+/// than one of the 2 MiB huge pages frees nothing (Firecracker's discard of
+/// it fails) and still costs the guest and the VMM a report, which also
+/// slows the reports that would free memory. So a guest on huge pages reports
+/// only blocks of at least one huge page (order 9), and a guest on 4 KiB
+/// pages every free page (order 0), the most it can give back. Firecracker's
+/// ballooning guide gives the same advice: reported ranges should match the
+/// backing page size.
+///
+/// The order is the guest kernel's, set when it boots: a sandbox restored
+/// from a memory image keeps the order it booted with, whatever pages back
+/// it after the restore. A fleet whose hosts all run one memory profile
+/// never sees a difference. Were a guest booted on base pages restored
+/// onto huge pages, its reports smaller than a huge page would free
+/// nothing; one booted on huge pages and restored onto base pages gives
+/// back less than it could.
+pub(super) fn reporting_order(pages: PageSize) -> u32 {
+    (pages.bytes() / PageSize::Base.bytes()).trailing_zeros()
+}
 
 /// One VM's balloon.
 #[derive(Debug)]

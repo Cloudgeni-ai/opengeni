@@ -175,6 +175,7 @@ const expectedOutput = [
 
 describe("Claude progress updates before a tool call", () => {
   test("every model asks for reasoning summaries, so thinking stays readable", async () => {
+    expect(anthropicWritesProgressUpdates("claude-fable-5-2")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-opus-5-5")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-sonnet-5-5")).toBe(true);
     for (const model of ["claude-haiku-5-5", "claude-opus-5", "claude-opus-4-6", "claude-x"])
@@ -192,7 +193,7 @@ describe("Claude progress updates before a tool call", () => {
       await claude.getResponse(request());
     }
     for (const { body, betas } of sent) {
-      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.thinking).toMatchObject({ type: "adaptive", display: "summarized" });
       expect(betas).not.toContain("thinking-display-updates-2026-08-18");
     }
   });

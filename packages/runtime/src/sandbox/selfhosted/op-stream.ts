@@ -92,10 +92,12 @@ export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
  *  reply-recovery round, and stops the start's retries long before their
  *  15-minute resend horizon. */
 export const OP_START_UNANSWERED_MS = 180_000;
-/** A detached background consumer grants the runner the complete uint64 credit
- * range. Retention remains bounded by the runner's ring/spool quotas, so a noisy
- * command reaches the existing typed OP_OVERFLOW terminal instead of stalling
- * forever merely because the turn that launched it finished. */
+/** A consumer that stops following a retained op detaches it (`OpAck.detach`):
+ * the runner stops sending frames nobody receives and keeps draining the child
+ * into retention, bounded by its ring/spool quotas, so a noisy command reaches
+ * the existing typed OP_OVERFLOW terminal instead of stalling forever merely
+ * because the turn that launched it finished. Runners without the field read
+ * this complete uint64 credit range instead and keep draining by streaming. */
 const OP_STREAM_BACKGROUND_CREDIT_BYTES = "18446744073709551615";
 /** The out-of-order stash is a disposable replay optimization, never retained
  *  command output. Bound it in bytes to two live-flow windows per op: a gap that
@@ -648,6 +650,7 @@ export class OpStreamExecClient {
         creditBytes: "0",
         final: true,
         attachGeneration: generation,
+        detach: false,
       }).finish(),
     );
     return "published";
@@ -699,6 +702,7 @@ export class OpStreamExecClient {
         creditBytes: "0",
         final: true,
         attachGeneration: op.generation,
+        detach: false,
       }).finish();
       try {
         await this.deps.transport.publish(ackSubject, ack);
@@ -774,6 +778,7 @@ class OpConsumer {
   private lastFrameAt: number;
   private silenceSince: number | undefined;
   private attachInFlight = false;
+  private attachHealRequested = false;
   private subscription: OpStreamSubscription | undefined;
   private ackTimer: ReturnType<typeof setInterval> | undefined;
   private settleResolve: (() => void) | undefined;
@@ -929,6 +934,8 @@ class OpConsumer {
     try {
       // Subscription BEFORE OpStart (protocol invariant): no frame can be
       // published before the consumer exists on a healthy path.
+      let attached = false;
+      let readyDuringStart = false;
       const subscribing = this.deps.transport.subscribe(
         opFrameSubject(
           this.deps.workspaceId,
@@ -937,6 +944,10 @@ class OpConsumer {
           this.deps.connectionInstanceId,
         ),
         (payload) => this.onFramePayload(payload),
+        () => {
+          if (attached) this.requestAttachHeal();
+          else readyDuringStart = true;
+        },
       );
       try {
         this.subscription = await startWall.race(subscribing);
@@ -956,6 +967,8 @@ class OpConsumer {
       await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
         throw startedOpError(error, this.startConfirmed);
       });
+      attached = true;
+      if (readyDuringStart) this.requestAttachHeal();
     } finally {
       startWall.clear();
     }
@@ -1016,7 +1029,7 @@ class OpConsumer {
             // The runner retains later output; do not accumulate it while the
             // database is slow. Foreground/adoption receipt behavior is unchanged.
             if (this.captureOnly) this.teardown();
-            await this.sendBackgroundCredit();
+            await this.sendDetach();
             const partial = this.snapshotOutput();
             await yieldOptions.captureOutput?.(this.outputFrames.splice(0));
             return {
@@ -1128,13 +1141,18 @@ class OpConsumer {
     }
   }
 
-  private async sendBackgroundCredit(): Promise<void> {
+  /** Leave the op retained without a follower: nothing is listening on its
+   * frame subject once this consumer returns, so the runner must not spend the
+   * machine's shared bulk connection replaying or streaming output to nobody
+   * (that backlog delays every other command's frames and completion). */
+  private async sendDetach(): Promise<void> {
     const ack = OpAck.encode({
       opId: this.opId,
       ackedSeq: "0",
       creditBytes: OP_STREAM_BACKGROUND_CREDIT_BYTES,
       final: false,
       attachGeneration: this.generation,
+      detach: true,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -1381,7 +1399,11 @@ class OpConsumer {
    *  as a heal (the observer's `healed` breadcrumb). Failures are left to the
    *  liveness watcher — a dead link fails typed there, not here. */
   private requestAttachHeal(): void {
-    if (this.attachInFlight || this.torn) {
+    if (this.torn) {
+      return;
+    }
+    if (this.attachInFlight) {
+      this.attachHealRequested = true;
       return;
     }
     this.attachInFlight = true;
@@ -1402,6 +1424,10 @@ class OpConsumer {
       })
       .finally(() => {
         this.attachInFlight = false;
+        if (this.attachHealRequested) {
+          this.attachHealRequested = false;
+          this.requestAttachHeal();
+        }
       });
   }
 
@@ -1522,6 +1548,7 @@ class OpConsumer {
       creditBytes: (this.receivedPayloadBytes + BigInt(this.windowBytes)).toString(),
       final: false,
       attachGeneration: this.generation,
+      detach: false,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -1770,6 +1797,16 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
     retryable: false,
     detail: { lost_reason: String(status.lostReason) },
   });
+}
+
+/** Whether a read failed only because Opengeni already released the op's
+ *  output. A runner releases output only after Opengeni durably stored all of
+ *  it, so the stored command record holds the result, not the runner. */
+export function isReleasedOpError(error: unknown): boolean {
+  return (
+    error instanceof SelfhostedControlError &&
+    error.detail.lost_reason === String(OpLostReason.OP_LOST_REASON_RELEASED)
+  );
 }
 
 /** The runner's answer for op `opId` cancelled before it ever began (its

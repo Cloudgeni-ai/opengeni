@@ -4,7 +4,10 @@ import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client
 import { HTTPException } from "hono/http-exception";
 import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
-import { OPENGENI_BROWSER_REQUEST_HEADERS } from "@opengeni/sdk/browser";
+import {
+  OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+} from "@opengeni/sdk/browser";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
@@ -558,13 +561,16 @@ describe("API helpers", () => {
     expect(externalResponse.status).toBe(200);
     expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
     expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+    // Header names are case-insensitive; the exposed list is the SDK's lowercase contract.
+    const exposedHeaders = (externalResponse.headers.get("access-control-expose-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_RESPONSE_HEADERS.filter((name) => !exposedHeaders.includes(name)),
+    ).toEqual([]);
+    for (const exposedHeader of [
       "Accept-Ranges",
-    );
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
-    );
-    for (const eventHeader of [
       "X-OpenGeni-Browser-Frame",
       "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Forensic-Exact",
@@ -574,7 +580,7 @@ describe("API helpers", () => {
       "X-OpenGeni-Page-Bytes",
       "X-OpenGeni-Truncated-By",
     ]) {
-      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+      expect(exposedHeaders).toContain(exposedHeader.toLowerCase());
     }
 
     const trusted = await preflight("http://localhost:5173");

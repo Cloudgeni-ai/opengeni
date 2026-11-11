@@ -7,6 +7,7 @@ import {
   ReasoningEffort,
   type SessionRealtimeMode,
 } from "@opengeni/contracts";
+import { isNoReplyText } from "@opengeni/contracts/no-reply";
 import {
   parseAcceptedMcpAccountBindings,
   parseConnectionAccountIntent,
@@ -473,6 +474,12 @@ export async function claimSessionRealtimeConnectionInTransaction(
     };
   }
   if (staleRotationError) throw staleRotationError;
+  if (mode.state === "preparing" && (promotionMode !== "staged" || input.rotate)) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Ringing connections must wait for acceptance",
+    );
+  }
   if (mode.connectionEpoch !== input.expectedConnectionEpoch) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_CHANGED",
@@ -648,7 +655,11 @@ async function lockConnectionFinalizationMode(
     )
     .for("update")
     .limit(1);
-  if (!mode || mode.state !== "active" || mode.leaseExpiresAt <= (input.now ?? new Date())) {
+  if (
+    !mode ||
+    !["active", "preparing"].includes(mode.state) ||
+    mode.leaseExpiresAt <= (input.now ?? new Date())
+  ) {
     throw new SessionRealtimeConflictError(
       "REALTIME_NOT_ACTIVE",
       "Realtime mode is no longer active",
@@ -760,6 +771,12 @@ export async function activateSessionRealtimeConnectionInTransaction(
       ...input,
       expectedVersion: input.expectedVersion + 1,
     });
+  }
+  if (mode.state !== "active") {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Incoming call has not been accepted",
+    );
   }
 
   const [connection] = await db
@@ -1739,10 +1756,16 @@ export async function appendSessionRealtimeOutboundInTransaction(
 }
 
 /**
- * Under the caller's canonical session/turn fence, mirror accepted assistant
- * text deltas into the active delegation's durable provider-out stream. One
- * append batch becomes one or more bounded progress rows, preserving the
- * ordinary event order without making the browser's live SSE authoritative.
+ * Under the caller's canonical session/turn fence, mirror the agent's
+ * completed working notes into the active delegation's durable provider-out
+ * stream. One append batch becomes one or more bounded progress rows,
+ * preserving the ordinary event order without making the browser's live SSE
+ * authoritative.
+ *
+ * Whole messages, never streaming deltas: every progress row reaches the
+ * voice model as its own context item, so deltas arrived as word fragments
+ * ("You pic", "ked up, so…"). A final answer is not progress either: the
+ * turn's terminal result relays it once.
  */
 export async function projectSessionRealtimeDelegationProgressInTransaction(
   db: Database,
@@ -1750,15 +1773,19 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
 ): Promise<ProjectSessionRealtimeDelegationProgressResult> {
   const progressEvents = input.events.flatMap((event) => {
     if (
-      event.type !== "agent.message.delta" ||
+      event.type !== "agent.message.completed" ||
       !event.payload ||
       typeof event.payload !== "object" ||
       Array.isArray(event.payload)
     ) {
       return [];
     }
-    const text = (event.payload as Record<string, unknown>).text;
-    return typeof text === "string" && text.length > 0 ? [{ ...event, text }] : [];
+    const payload = event.payload as Record<string, unknown>;
+    if (payload.phase === "final_answer") return [];
+    const text = payload.text;
+    return typeof text === "string" && text.trim().length > 0 && !isNoReplyText(text)
+      ? [{ ...event, text }]
+      : [];
   });
   if (progressEvents.length === 0) return { entries: [] };
 
@@ -1777,7 +1804,9 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
     )
     .for("update")
     .limit(1);
-  const text = progressEvents.map((event) => event.text).join("");
+  // Clients join the progress rows they receive in one sync without a
+  // separator, so each note carries its own line end.
+  const text = progressEvents.map((event) => `${event.text}\n`).join("");
   const source = sourceEventProvenance(progressEvents.map((event) => event.id));
   const sourceEventIds = source.ids;
   const sourceEventSequences = progressEvents.map((event) => event.sequence);

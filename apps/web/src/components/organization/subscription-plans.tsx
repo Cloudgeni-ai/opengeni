@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import { planIncludesOwnSubscriptions } from "@opengeni/contracts/billing-origin";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -32,7 +33,7 @@ export function SubscriptionPlans({
   onChanged,
   supportEmail,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   accountId: string;
   returnUrl: string;
   catalog: BillingSubscriptionCatalog;

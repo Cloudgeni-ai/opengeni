@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    Rendered-hook tests for the workspace + queue + goal hooks, on the minimal
    happy-dom harness in ./render-hook. All hook tests live in this one file so
@@ -1337,8 +1338,9 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
+    // Both readers use the same compact client, as the first-party app does.
     // A non-authority consumer keeps the pre-move shared lineage request alive
     // while the authority-bearing rail is collapsed.
     const collapsedRail = await renderHook(
@@ -1417,7 +1419,7 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
     // A mounted route/header poll starts the shared request after B settles;
     // the authority-bearing rail joins only after that actual network start.
@@ -2015,7 +2017,7 @@ describe("useSessionMcpApprovalPolicy", () => {
             effectiveFrom: "next_attempt",
           };
         },
-      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
       const hook = await renderHook(
         (events: SessionEvent[]) =>
           useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2113,7 +2115,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(["write_record"]),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2193,7 +2195,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -2240,7 +2242,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       (sessionId: string) =>
         useSessionMcpApprovalPolicy(sessionId, "external_tools", {
@@ -2301,7 +2303,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const nextClient = {
       ...fakeClient({
         getSession: async () =>
@@ -2315,9 +2317,9 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(true),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
-      (client: EmbeddedSessionMcpApprovalPolicyClientLike) =>
+      (client: EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>) =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
           client,
           workspaceId: WORKSPACE_ID,
@@ -5234,9 +5236,7 @@ describe("useComposer durable draft and control binding", () => {
     const failed = hook.result.current.optimisticMessages?.find(
       (message) => message.state === "failed",
     );
-    expect(failed?.error).toBe(
-      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-    );
+    expect(failed?.error).toBe("Ask an organization owner to add credits to use your own key.");
     await hook.unmount();
   });
 

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   OpenGeniApiError,
   type ComposerDraft,
@@ -618,7 +619,7 @@ function CommandUxHarness() {
           _sessionId: string,
           options: { clientEventId?: string; expectedControlEtag?: string } = {},
         ) => await runControl("resume", options),
-      }) as unknown as SessionClientLike,
+      }) as unknown as SessionClientLike<ChatClient>,
     [recordCall, runControl, runSubmit],
   );
 
@@ -871,7 +872,7 @@ function CommandSession({
   queue,
   baseControl,
 }: {
-  client: SessionClientLike;
+  client: SessionClientLike<ChatClient>;
   sessionId: string;
   mode: WorkMode;
   events: SessionEvent[];

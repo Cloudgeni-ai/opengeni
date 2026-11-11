@@ -101,7 +101,7 @@ import {
   type RemoteOperationObservation,
 } from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
-import { isReadOnlyPathProbeMiss } from "../operation-purpose";
+import { isCallerPathRejection, isReadOnlyPathProbeMiss } from "../operation-purpose";
 import {
   clearSecretFilesCommand,
   secretEnvFileContent,
@@ -397,7 +397,10 @@ function eligibleForSupervision(args: unknown): boolean {
 export type RoutingSandboxOperationObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "not_found" | "failed";
+  /** `not_found` is a read-only probe's definite path miss; `rejected` is a
+   * caller-supplied path the SDK refused before any provider work. Neither is
+   * a provider failure. */
+  outcome: "ok" | "not_found" | "rejected" | "failed";
   durationMs: number;
   materializationFailureReason?: MaterializationFailureReason;
 };
@@ -978,8 +981,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
-  /** Attempt scopes that received secret files on this session (cleanup). */
-  private readonly secretScopes = new Set<string>();
+  /** Private cleanup follows the exact recipient, never the current route. */
+  private readonly secretScopes = new Map<RoutableBackendSession, Set<string>>();
   /** Attempt scopes already told that this sandbox could not receive a profile. */
   private readonly profileDeliveryNoted = new Set<string>();
   private readonly processControlReads = new Map<number, SharedProcessRead>();
@@ -1893,7 +1896,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       outcome = "completed";
       return result;
     } catch (error) {
-      if (isReadOnlyPathProbeMiss(op, error)) outcome = "completed";
+      if (isReadOnlyPathProbeMiss(op, error) || isCallerPathRejection(op, error)) {
+        outcome = "completed";
+      }
       throw error;
     } finally {
       try {
@@ -2107,7 +2112,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
           providerOutcome = "completed";
         } catch (error) {
-          if (isReadOnlyPathProbeMiss(op, error)) providerOutcome = "completed";
+          if (isReadOnlyPathProbeMiss(op, error) || isCallerPathRejection(op, error)) {
+            providerOutcome = "completed";
+          }
           throw error;
         } finally {
           recordFirstOperationPhase(
@@ -2466,6 +2473,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
       if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";
+      } else if (isCallerPathRejection(op, error)) {
+        outcome = "rejected";
       }
       throw error;
     } finally {
@@ -2703,7 +2712,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Secret delivery happens here, below every recorder: connected
     // machines deliver natively in their own session; every other
     // backend gets a sourced-then-deleted env file.
-    if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
+    if (backend.kind === "selfhosted") this.noteNativeSecretScope(s, args);
     const providerArgs =
       backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
     if (s.execCommand) {
@@ -2732,6 +2741,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const cmd = (args as { cmd?: unknown }).cmd;
     const carry = secretExecCarryFor(cmd);
     if (!carry || typeof cmd !== "string") return args;
+    // Record before the first write, including a partially failed delivery.
+    this.noteSecretScope(session, carry.scope);
     const writer: SecretFileWriter = async (file) =>
       await withoutProviderCommandHandle(() =>
         writeSecretFileOnBackend(session, file, backend.kind),
@@ -2756,7 +2767,6 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // backend without private writes, or a failed write) runs the command
       // without them. A profile never fails a command. Attempt-end cleanup
       // covers the scope even if a write fails part-way.
-      this.secretScopes.add(carry.scope);
       try {
         await writer({ path: envFile, content });
       } catch {
@@ -2771,7 +2781,6 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(cmd, envFile) };
     }
     await writer({ path: envFile, content });
-    this.secretScopes.add(carry.scope);
     return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(command, envFile) };
   }
 
@@ -2781,24 +2790,35 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     files: ReadonlyArray<{ path: string; content: Uint8Array }>,
   ): Promise<void> {
     await this.dispatch("writeSecretFiles", false, async (session, backend) => {
+      this.noteSecretScope(session, scope);
       for (const file of files) {
         await withoutProviderCommandHandle(() =>
           writeSecretFileOnBackend(session, file, backend.kind),
         );
       }
-      this.secretScopes.add(scope);
     });
   }
 
+  private noteSecretScope(session: RoutableBackendSession, scope: string): void {
+    let scopes = this.secretScopes.get(session);
+    if (!scopes) this.secretScopes.set(session, (scopes = new Set()));
+    scopes.add(scope);
+  }
+
   /**
-   * Remove this attempt's secret files on the current backend (attempt end,
-   * alongside run-credential cleanup). A no-op when nothing was written.
+   * Remove private files on each backend that received them. No routing,
+   * provisioning, or workspace capture admission: these paths are outside the
+   * workspace, and an ended attempt must not recover/clean a successor's route.
+   * A no-op when nothing was written; failed targets remain retryable.
    */
   async clearSecretFilesForAttempt(scope?: string): Promise<void> {
-    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
-    if (scopes.length === 0) return;
-    await this.dispatch("clearSecretFiles", false, async (session) => {
-      for (const entry of scopes) {
+    const targets = [...this.secretScopes].flatMap(([session, scopes]) =>
+      [...scopes]
+        .filter((entry) => scope === undefined || entry === scope)
+        .map((entry) => ({ session, scopes, entry })),
+    );
+    await Promise.all(
+      targets.map(async ({ session, scopes, entry }) => {
         if (session.clearSecretFilesForAttempt) {
           await session.clearSecretFilesForAttempt(entry);
         } else {
@@ -2811,14 +2831,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             if (result.exitCode !== 0) throw new Error("secret file cleanup failed");
           });
         }
-        this.secretScopes.delete(entry);
-      }
-    });
+        scopes.delete(entry);
+        if (scopes.size === 0) this.secretScopes.delete(session);
+      }),
+    );
   }
 
   /** Connected machines deliver natively (their own session writes any
    * `{{secretfile:…}}`); remember the scope so attempt-end cleanup reaches it. */
-  private noteNativeSecretScope(args: unknown): void {
+  private noteNativeSecretScope(session: RoutableBackendSession, args: unknown): void {
     const cmd = args && typeof args === "object" ? (args as { cmd?: unknown }).cmd : undefined;
     const carry = secretExecCarryFor(cmd);
     if (
@@ -2826,7 +2847,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         (token) => token.type === "reference" && token.reference.kind === "secretfile",
       )
     ) {
-      this.secretScopes.add(carry.scope);
+      this.noteSecretScope(session, carry.scope);
     }
   }
 

@@ -1,4 +1,5 @@
 import { AlertTriangleIcon } from "lucide-react";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import { Link } from "../../lib/navigation";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Button } from "../../../ui/button";
@@ -141,7 +142,7 @@ export function FailedSessionBanner({
   const headline = codexUsageFailure
     ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
     : machineAllow
-      ? `Machine access needed: this chat isn’t allowed to use “${machineAllow.machineName}” right now.`
+      ? machineAccessNeededMessage(machineAllow.machineName)
       : freeModelLimit
         ? freeModelDailyLimitReason({
             modelChanged,

@@ -35,6 +35,7 @@ import {
   signUpEmail,
   signUpPasskey,
   startManagedSocialSignIn,
+  subscribeSignInLost,
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
@@ -67,10 +68,17 @@ export {
   preserveSlackLinkForManagedAuth,
   type SlackLinkPreparePhase,
 } from "@opengeni/react/app/app-state";
+import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+// Only the desktop app has a dictation shortcut, so other pages never load it.
+const DesktopDictationRoot = lazy(() =>
+  import("@/components/desktop/dictation-host").then((module) => ({
+    default: module.DesktopDictationRoot,
   })),
 );
 
@@ -154,6 +162,7 @@ const webAppStateHost: AppStateHost = {
   startManagedSocialSignIn,
   signInPasskey,
   signUpPasskey,
+  subscribeSignInLost,
   configureManagedActorEpoch,
   getStoredAccessKey,
   setStoredAccessKey,
@@ -179,7 +188,7 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : "product",
+        : "general",
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` and
   // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
@@ -188,6 +197,7 @@ export function RootRouteComponent() {
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/own-subscription-plan" ||
       pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
@@ -478,6 +488,13 @@ export function RootRouteComponent() {
       <SiteToolConsentProvider>
         <Outlet />
       </SiteToolConsentProvider>
+      {/* The dictation shortcut works in every app, so it records here, above
+      the workspace pages: switching workspace never stops a dictation. */}
+      {desktopCapability("dictation") ? (
+        <Suspense fallback={null}>
+          <DesktopDictationRoot />
+        </Suspense>
+      ) : null}
       <CreditRequiredGate
         creditRequired={creditRequired}
         setCreditRequired={setCreditRequired}

@@ -450,6 +450,8 @@ export type SessionRealtimeModel =
   | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
+  /** This server can hold an incoming connection until Answer. Requires a gated audio device. */
+  incomingPreparation?: boolean | undefined;
   id: SessionRealtimeModel;
   label: string;
   provider:
@@ -507,7 +509,7 @@ export type RealtimeVoiceSettings = {
 export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
-export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeState = "preparing" | "active" | "ended";
 export type SessionRealtimeEndReason =
   | "user_stop"
   | "browser_unload"
@@ -535,6 +537,7 @@ export type BeginSessionRealtimeRequest = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  incomingCall?: { callId: string; device: string; answered?: boolean | undefined } | undefined;
 };
 
 export type RenewSessionRealtimeRequest = {
@@ -1932,6 +1935,14 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Full configuration, requested explicitly with sessions:control permission. */
+export type SessionConfiguration = Session;
+
+/** Chat rendering projection. Older servers may still include configuration. */
+export type ChatSession = Omit<Session, "instructions" | "skills" | "effectiveTools"> &
+  Partial<Pick<Session, "instructions" | "skills" | "effectiveTools">>;
+export type SessionResponseMode = "full" | "chat";
+
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
   reason:
@@ -1989,8 +2000,6 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
-  // Per-session agent persona/system instructions supplied at create; null when
-  // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2034,7 +2043,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Capability-level view of what a configured session can use; null for legacy. */
+  /** Capability-level catalog; absent on compact chat responses, null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -2087,6 +2096,11 @@ export type Session = {
   pinVersion?: number;
   /** Personal explicit acknowledgment state. */
   unread?: boolean;
+  /**
+   * True when this failed session's failure was consumed by its parent agent,
+   * which owns the follow-up. Absent when false and on older servers.
+   */
+  failureHandled?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -2158,7 +2172,7 @@ export type Session = {
 };
 
 /** Additive receipt returned by POST /sessions. */
-export type CreateSessionResponse = Session & {
+export type CreateSessionResponse<S extends ChatSession = Session> = S & {
   initialTurnId: string | null;
 };
 
@@ -2195,6 +2209,7 @@ export type SessionListEntry = Pick<
   | "pinnedAt"
   | "pinVersion"
   | "unread"
+  | "failureHandled"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -2289,7 +2304,7 @@ export type SiteConversationGroup = {
   pinnedAt?: string | null;
 };
 
-export type SessionListResponse = {
+export type SessionListResponse<S extends ChatSession = Session> = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
@@ -2298,7 +2313,7 @@ export type SessionListResponse = {
   mineOnly?: true;
   /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
   sessionIdsApplied?: true;
-  pinned: Session[];
+  pinned: S[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
@@ -2317,7 +2332,7 @@ export type SessionListResponse = {
   siteGroups?: SiteConversationGroup[];
   /** True when Site rows beyond the server bound were omitted. */
   siteGroupsTruncated?: true;
-  sessions: Session[];
+  sessions: S[];
   nextCursor: string | null;
 };
 
@@ -2489,21 +2504,26 @@ export type UpdateSessionArchiveRequest = {
   expectedVersion?: number;
 };
 
-export type LineageNode = {
-  session: SessionSummary;
-  children: LineageNode[];
+export type LineageNode<S extends ChatSession = Session> = {
+  session: S;
+  children: LineageNode<S>[];
 };
 
-export type SessionLineageResponse = {
+export type SessionLineageResponse<S extends ChatSession = Session> = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
   /** What the automations continuing the requested session are waiting for. */
   sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
-  ancestors: SessionSummary[];
-  children: LineageNode[];
+  ancestors: S[];
+  children: LineageNode<S>[];
   truncated: boolean;
 };
+
+export type ChatCreateSessionResponse = CreateSessionResponse<ChatSession>;
+export type ChatSessionListResponse = SessionListResponse<ChatSession>;
+export type ChatSessionLineageResponse = SessionLineageResponse<ChatSession>;
+export type ChatLineageNode = LineageNode<ChatSession>;
 
 export type SessionTurnStatus =
   | "queued"
@@ -2883,6 +2903,7 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.resources.removed",
+  "session.resources.added",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4421,6 +4442,7 @@ export type FirstPartyMcpToolName =
   | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
+  | "github_repository_attach"
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"
@@ -4698,6 +4720,12 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /**
+   * Set on the person's own subscription models while the organization's plan
+   * doesn't include them: the plan they need. Absent when the model can run,
+   * and from older servers.
+   */
+  requiredPlan?: OwnSubscriptionPlan | undefined;
+  /**
    * Exact verdict of the policy the workspace runs with (its own lists within
    * its organization's, and its credit switch), without exposing provider
    * identity.
@@ -4710,6 +4738,17 @@ export type WorkspaceModelCatalogModel = ClientModel & {
    */
   organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
+};
+
+/**
+ * The plan an organization needs before its own subscriptions run, from the
+ * plan catalog: its key, name and monthly USD price in micros (null when
+ * custom-priced).
+ */
+export type OwnSubscriptionPlan = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
@@ -4735,6 +4774,12 @@ export type WorkspaceModelCatalogResponse = {
    * Opengeni credit balance. Null when the deployment does not bill credits.
    */
   creditsSelection?: DefaultModelSelection | null | undefined;
+  /**
+   * Present while the organization's plan doesn't include its own
+   * subscriptions: the plan that does. Absent when they can run, and from
+   * older servers.
+   */
+  ownSubscriptionPlan?: OwnSubscriptionPlan | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -5905,6 +5950,9 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
 
+/** JSON content negotiation for the chat projection, using the existing CORS-safe Accept header. */
+export const OPENGENI_SESSION_CHAT_ACCEPT = "application/json; opengeni-session=chat" as const;
+
 /**
  * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
  * A host that serves the Opengeni API or its session proxy from a different origin
@@ -5930,6 +5978,8 @@ export const OPENGENI_BROWSER_REQUEST_HEADERS = [
   "x-opengeni-session-id",
 ] as const;
 
+export { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
+
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
  * `GET /v1/config/client`: which models + reasoning efforts are exposed, the
@@ -5947,6 +5997,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Connect provider offers "Claude Code (API key)". Absent when not offered. */
+  claudeCodeApiKeyEnabled?: boolean | undefined;
   /**
    * Organization admins may connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity (the operator offers it). Absent otherwise.
@@ -11510,6 +11562,7 @@ export type SwapActiveSandboxResponse = {
     | "concurrent_swap"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"
+    | "machine_access_required"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

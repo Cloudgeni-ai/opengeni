@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
@@ -21,7 +22,7 @@ function fakeClient() {
       if (path.endsWith("/allowance/state")) return { version: 0, config: null };
       return { workspace: { used: 0, limit: null, fraction: null, status: "ok" }, members: [] };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return { client, paths, maxInFlight: () => maxInFlight };
 }
 

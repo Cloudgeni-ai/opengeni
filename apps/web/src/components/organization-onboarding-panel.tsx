@@ -8,12 +8,14 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
+  AuthApiError,
   changeSignupUseCase,
   completeSelfServiceOrganizationSetup,
   getSelfServiceOrganizationOnboardingStatus,
@@ -61,6 +63,22 @@ import {
 import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
 import { personalOrganizationName } from "@/lib/personal-organization-name";
 
+/**
+ * The per-network limit on new organizations explains what to do instead
+ * (try later or ask for an invitation), so show the server's sentence.
+ * Every other failure becomes the usual advice.
+ */
+export function organizationSetupErrorText(error: unknown): string {
+  if (
+    error instanceof AuthApiError &&
+    error.code === "organization_setup_rate_limited" &&
+    error.message
+  ) {
+    return error.message;
+  }
+  return userErrorText(error);
+}
+
 export function OrganizationOnboardingPanel({
   onComplete,
   client,
@@ -81,7 +99,7 @@ export function OrganizationOnboardingPanel({
 }: {
   /** Leaves onboarding; a destination opens that chat instead of the home page. */
   onComplete: (destination?: OnboardingDestination) => void;
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
@@ -370,7 +388,7 @@ export function OrganizationOnboardingPanel({
       return true;
     } catch (error) {
       toast.error("Couldn't set up the organization", {
-        description: userErrorText(error),
+        description: organizationSetupErrorText(error),
       });
       return false;
     } finally {
@@ -830,7 +848,7 @@ export function OnboardingAccountHeader({
 }
 
 async function listAllOrganizationInvitations(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
 ): Promise<OrganizationInvitation[]> {
   const invitations: OrganizationInvitation[] = [];
   const seenCursors = new Set<string>();

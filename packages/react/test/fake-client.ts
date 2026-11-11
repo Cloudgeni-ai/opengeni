@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type {
   ComposerDraft,
@@ -30,9 +31,17 @@ export function savedComposerPolicy(
  * Structural fake for `SessionClientLike`: implement only the methods the
  * hook under test calls; everything else throws with a clear message.
  */
-const OPTIONAL_METHODS = new Set(["findGoal", "updateSessionAttention", "listEventPage"]);
+const OPTIONAL_METHODS = new Set([
+  "findGoal",
+  "updateSessionAttention",
+  "listEventPage",
+  "getToolActionReview",
+  "getToolReviewDetails",
+]);
 
-export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
+export function fakeClient(
+  partial: Partial<SessionClientLike<ChatClient>>,
+): SessionClientLike<ChatClient> {
   const emptyDraft: ComposerDraft = {
     revision: 0,
     text: "",
@@ -100,7 +109,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
       };
     },
     ...partial,
-  } as SessionClientLike;
+  } as SessionClientLike<ChatClient>;
   if (!partial.fsListBatch) {
     target.fsListBatch = async (workspaceId, sessionId, request, options) => ({
       results: await Promise.all(

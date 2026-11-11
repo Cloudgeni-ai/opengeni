@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   OpenGeniClient,
   WorkspaceArtifact,
@@ -15,7 +16,7 @@ import { useOpenGeniText } from "./messages/runtime";
 /** Implement with an authenticated host proxy. Never put an organization key
  * in browser props; replace the client object when the host actor changes. */
 export type SiteClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "listWorkspaceArtifacts"
   | "getWorkspaceArtifact"
   | "getWorkspaceArtifactHtml"

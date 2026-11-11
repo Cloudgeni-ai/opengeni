@@ -63,18 +63,27 @@ import {
   getManagedSession,
   getNativeAppManagedSession,
   NATIVE_APP_CREDENTIAL_PREFIX,
+  requestCarriesManagedSignInCookie,
 } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
-import { MissingPermissionRefusal } from "./permission-refusal";
+import { AuthenticationRequiredRefusal, MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
 import { rethrowExternalWorkspaceOperation } from "./external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 
 export * from "./permission-refusal";
 import { sha256Hex } from "@opengeni/contracts/values";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
+// Only bounded reads reuse workspace admission. Writers and explicit fresh
+// checks must observe authority changes made during their own operation.
+// No result survives its Request; permissions are checked at every call site.
+const readGrantsByRequest = new WeakMap<
+  Request,
+  WeakMap<object, Map<string, AccessGrantAuthorization>>
+>();
 const accessResolvedRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
@@ -789,9 +798,31 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   }
   const context = await pending;
   if (!context) {
-    throw new HTTPException(401, { message: "authentication required" });
+    throw await authenticationRequired(c, deps);
   }
   return context;
+}
+
+/**
+ * Why a request resolved to no one: it sent no credential at all, a sign-in
+ * cookie or app credential that is no longer valid, or another credential
+ * that was not accepted. Reads only what the request sent.
+ */
+async function authenticationRequired(
+  c: Context,
+  deps: AccessDeps,
+): Promise<AuthenticationRequiredRefusal> {
+  const bearer = bearerToken(c);
+  if (bearer) {
+    return new AuthenticationRequiredRefusal(
+      bearer.startsWith(NATIVE_APP_CREDENTIAL_PREFIX) ? "session_expired" : "credential_invalid",
+    );
+  }
+  return new AuthenticationRequiredRefusal(
+    (await requestCarriesManagedSignInCookie(c.req.raw, deps.managedAuth))
+      ? "session_expired"
+      : "session_missing",
+  );
 }
 
 export async function requireAccessGrant(
@@ -815,9 +846,10 @@ export async function requireFreshAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
+  readGrantsByRequest.delete(c.req.raw);
   const context = await resolveAccessContext(c, deps);
   if (!context) {
-    throw new HTTPException(401, { message: "authentication required" });
+    throw await authenticationRequired(c, deps);
   }
   return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
 }
@@ -1164,6 +1196,28 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  if (c.req.method === "GET" || c.req.method === "HEAD") {
+    let databases = readGrantsByRequest.get(c.req.raw);
+    if (!databases) readGrantsByRequest.set(c.req.raw, (databases = new WeakMap()));
+    let grants = databases.get(deps.db);
+    if (!grants) databases.set(deps.db, (grants = new Map()));
+    let authorization = grants.get(workspaceId);
+    if (!authorization) {
+      // Keep the first caller's permission for first-use admission: a request
+      // outside the default grant must not create a membership as a side effect.
+      authorization = await accessGrantAuthorization(context, deps, workspaceId, permission, {
+        firstUseMembership: true,
+      });
+      // Admission is permission-sensitive on first use. Share successes, not
+      // pending failures: a denied concurrent check cannot poison an allowed
+      // one. HTTP middleware admits before the route's read fan-out.
+      grants.set(workspaceId, authorization);
+    }
+    const required =
+      permission ?? (accountScopedApiKeyWorkspaceAuthority(context) ? "workspace:read" : undefined);
+    if (required) requirePermission(authorization.grant, required);
+    return authorization;
+  }
   // Request entry only: a fresh re-check of a live connection never re-creates
   // a membership that was removed while the connection was open.
   return await accessGrantAuthorization(context, deps, workspaceId, permission, {
@@ -1517,6 +1571,13 @@ async function provisionExternalMemberOnFirstUse(
         revocationWatermark: external.revocationWatermark,
       },
     );
+    if (outcome === "created") {
+      // A returning external member's saved messages may wait for this.
+      await releaseAdmissionBlocksAfterAccessChange(
+        { db: deps.db },
+        { accountId: external.identity.accountId, workspaceId, change: "membership" },
+      );
+    }
     // Removed after this request authenticated: the removal wins.
     return outcome !== "superseded";
   } catch (error) {
@@ -1606,7 +1667,7 @@ async function applyStatedMembership(
       )
         return;
       try {
-        await applyStatedExternalWorkspaceMembership(
+        const outcome = await applyStatedExternalWorkspaceMembership(
           deps.db,
           {
             organizationId: external.identity.accountId,
@@ -1619,6 +1680,13 @@ async function applyStatedMembership(
             revocationWatermark: stated.revocationWatermark,
           },
         );
+        if (outcome === "created") {
+          // The host stated a membership back: saved messages waiting for it start.
+          await releaseAdmissionBlocksAfterAccessChange(
+            { db: deps.db },
+            { accountId: external.identity.accountId, workspaceId, change: "membership" },
+          );
+        }
       } catch (error) {
         if (error instanceof StatedExternalMembershipLastAdminError)
           throw new HTTPException(409, { message: error.message, cause: error });
@@ -2096,7 +2164,10 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       // A native app account: the person approved this device from a signed-in
       // browser, so it carries the same human authority as that browser.
       if (!deps.managedAuth) return null;
-      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db);
+      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db, {
+        request: c.req.raw,
+        appendSetCookie: (cookie) => c.header("set-cookie", cookie, { append: true }),
+      });
       if (!session?.user) return null;
       const context = await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
@@ -2397,8 +2468,9 @@ async function apiKeyAccessContext(
       // A known user reads its identity under the membership fence held
       // shared: ordered against every lifecycle writer and revoke (they hold
       // it exclusively), but not against the organization's other requests,
-      // which would otherwise authenticate one at a time. Until the read is
-      // granted (a later release), every request takes the exclusive path.
+      // which would otherwise authenticate one at a time. Migration 1343
+      // activates the read; retain the prior grant-state fallback for rolling
+      // compatibility and first-use provisioning.
       const known = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
         if (!(await externalIdentityReadGranted(tx))) return null;
         await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);

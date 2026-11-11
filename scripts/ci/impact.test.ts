@@ -48,6 +48,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_RELAY_HEADERS_E2E = "test/e2e/session-relay-headers.browser.e2e.ts";
 const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
@@ -61,6 +62,22 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("relay header browser coverage follows SDK and header contracts without widening browserd plans", () => {
+    for (const path of [
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/browser-response-headers.ts",
+      SESSION_RELAY_HEADERS_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.e2eTests, path).toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      SESSION_RELAY_HEADERS_E2E,
+    );
+    expect(usesBrowserRunner(SESSION_RELAY_HEADERS_E2E)).toBe(true);
+  });
   test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
     expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
     expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
@@ -234,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toEqual([
       "format",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       "subscription-contract",
@@ -262,6 +280,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
     expect(plan.guards).toContain("migration-immutability");
+    expect(plan.guards).toContain("migration-previous-release");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
@@ -407,6 +426,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",
@@ -1022,6 +1042,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",

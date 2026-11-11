@@ -6,7 +6,12 @@ import { registerDom, renderComponent } from "../../../test/render-hook";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "../../components/open-geni-links";
 import { AppHostProvider, type AppHost } from "./app-host";
 import type { PageHost } from "./navigation";
-import { useAppLinkResolver } from "./session-artifact-navigation";
+import {
+  useAppLinkResolver,
+  useWorkspaceAppLinkResolver,
+  sessionArtifactFromHref,
+} from "./session-artifact-navigation";
+import { Markdown } from "../../components/markdown";
 import { SessionUiFeaturesProvider, type SessionUiPreset } from "./session-ui-features";
 
 registerDom();
@@ -31,12 +36,19 @@ async function resolverIn(options: {
   embedded: boolean;
   preset: SessionUiPreset;
   host?: OpenGeniLinkResolver;
+  workspace?: boolean;
 }) {
   const opened: string[] = [];
   const captured: { current: OpenGeniLinkResolver | null } = { current: null };
   function Capture() {
-    captured.current = useAppLinkResolver();
-    return null;
+    const app = useAppLinkResolver();
+    const workspace = useWorkspaceAppLinkResolver(WORKSPACE);
+    captured.current = options.workspace ? workspace : app;
+    return (
+      <Markdown resolveLink={captured.current}>
+        {"[Weekly report](artifact:0123456789abcdef0123456789abcdef)"}
+      </Markdown>
+    );
   }
   const appHost = {
     navigation: { page: pageHost(options.embedded, opened) },
@@ -51,11 +63,39 @@ async function resolverIn(options: {
     </AppHostProvider>
   );
   const rendered = await renderComponent(tree);
+  const html = rendered.container.innerHTML;
   await rendered.unmount();
-  return { resolve: captured.current!, opened };
+  return { resolve: captured.current!, opened, html };
 }
 
 describe("useAppLinkResolver", () => {
+  test("short editable links inherit the session workspace on web and in embeds", async () => {
+    const id = "0123456789abcdef0123456789abcdef";
+    const target = parseOpenGeniLink(`artifact:${id}`)!;
+    const path = `/workspaces/${WORKSPACE}/artifacts/editable/${id}`;
+    for (const options of [
+      { embedded: false, preset: "app" as const },
+      { embedded: true, preset: "companion" as const },
+      { embedded: true, preset: "embed" as const },
+    ]) {
+      const { resolve, opened, html } = await resolverIn({ ...options, workspace: true });
+      expect(html).not.toContain("unavailable");
+      const resolution = resolve(target);
+      if (options.preset === "embed") {
+        await resolution?.open?.();
+        expect(opened).toEqual([path]);
+      } else {
+        const href = options.embedded ? `https://app.example.test${path}` : path;
+        expect(resolution).toEqual({ href });
+        expect(html).toContain(`href="${href}"`);
+        expect(sessionArtifactFromHref(href, "https://app.example.test", WORKSPACE)).toEqual({
+          id,
+          editable: true,
+        });
+      }
+    }
+  });
+
   test("the web app keeps its own console path", async () => {
     const { resolve } = await resolverIn({ embedded: false, preset: "app" });
     expect(resolve(site)).toEqual({ href: `/workspaces/${WORKSPACE}/artifacts/${SITE}` });

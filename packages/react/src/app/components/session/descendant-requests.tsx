@@ -10,9 +10,10 @@ import type {
   OpenGeniClient,
   SessionEvent,
   SessionHumanInputRequest,
-  SessionSummary,
+  ChatSession as SessionSummary,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -46,7 +47,7 @@ import { cn } from "../../lib/utils";
 
 /** The exact client surface the card reads and answers through. */
 export type DescendantRequestsClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "getSession"
   | "streamEvents"
   | "listHumanInputRequests"

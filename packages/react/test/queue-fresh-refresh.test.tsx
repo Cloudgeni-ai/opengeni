@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, test } from "bun:test";
 import { useMemo } from "react";
 import {
@@ -72,7 +73,7 @@ test("reconnect and workspace-control reads do not adopt a queue read that start
     },
   });
   let reconcile: (() => Promise<void>) | undefined;
-  const context: OpenGeniContextValue = {
+  const context: OpenGeniContextValue<ChatClient> = {
     client,
     workspaceId: WORKSPACE_ID,
     workspaceControlEvent: null,

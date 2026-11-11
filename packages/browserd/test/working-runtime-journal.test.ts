@@ -9,6 +9,7 @@ import {
   assertDirectory,
   assertWorkingRuntimeReceipt,
   isAbandonedLaunchReceipt,
+  sameRecordedProfile,
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 
@@ -475,6 +476,51 @@ async function databaseSnapshot(path: string) {
 function journalPath(profile: string) {
   return join(profile, "..", "working-runtime.sqlite");
 }
+
+describe("profile identity across a reboot", () => {
+  const recordedBoot = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const laterBoot = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+  test("a reboot that renumbers the device keeps the same directory recoverable", async () => {
+    await withJournal(async ({ receipt, profile }) => {
+      const recorded = {
+        ...receipt,
+        process: { ...receipt.process!, birth: `${recordedBoot}:123456` },
+      };
+      const renumbered = { ...recorded.profile, device: recorded.profile.device + 2 };
+      const afterReboot = { profileDirectory: profile, bootId: laterBoot };
+
+      expect(sameRecordedProfile(recorded, renumbered, afterReboot)).toBe(true);
+      expect(() =>
+        assertWorkingRuntimeReceipt(recorded, authority, launchDigest, renumbered, afterReboot),
+      ).not.toThrow();
+
+      // Still refused: the same boot, an unknown boot, a birth with no boot,
+      // another inode (a copy) or another path (a move).
+      for (const [candidate, identity, restart] of [
+        [recorded, renumbered, { profileDirectory: profile, bootId: recordedBoot }],
+        [recorded, renumbered, { profileDirectory: profile, bootId: null }],
+        [recorded, renumbered, undefined],
+        [receipt, renumbered, afterReboot],
+        [recorded, { ...renumbered, inode: renumbered.inode + 1 }, afterReboot],
+        [recorded, renumbered, { profileDirectory: `${profile}-moved`, bootId: laterBoot }],
+        [{ ...recorded, process: null }, renumbered, afterReboot],
+      ] as const) {
+        expect(sameRecordedProfile(candidate, identity, restart)).toBe(false);
+        expect(() =>
+          assertWorkingRuntimeReceipt(
+            candidate as BrowserWorkingRuntimeReceipt,
+            authority,
+            launchDigest,
+            identity,
+            restart,
+          ),
+        ).toThrow(candidate.process ? "moved, copied or restored" : "preserved");
+      }
+    });
+  });
+});
+
 async function withJournal(
   fn: (fixture: {
     journal: SqliteBrowserWorkingRuntimeJournal;

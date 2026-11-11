@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps, type ReactNode } from "react";
@@ -78,7 +79,7 @@ describe("Integration Facet lifecycle state", () => {
       }
       return response(binding("active", 1));
     });
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
+    const client = { listIntegrationFacets } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -114,7 +115,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets,
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -154,7 +155,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets,
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -194,7 +195,7 @@ describe("Integration Facet lifecycle state", () => {
     const paused = binding("paused", 2);
     let listCount = 0;
     const listIntegrationFacets = mock(async () => response(listCount++ === 0 ? active : paused));
-    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
+    const client = { listIntegrationFacets } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -231,7 +232,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(active)),
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
 
     await act(async () => button(rendered.container, "Manage facets").click());
@@ -277,7 +278,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(firstActive, secondActive)),
       pauseIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client, facetCount: 2 });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -357,7 +358,7 @@ describe("Integration Facet lifecycle state", () => {
     );
     const client = {
       listIntegrationFacets: mock(async () => listed),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -374,7 +375,7 @@ describe("Integration Facet lifecycle state", () => {
     const pluginOwned = binding("active", 1, "inventory-source", "402", [pluginOwner]);
     const client = {
       listIntegrationFacets: mock(async () => response(pluginOwned)),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -407,7 +408,7 @@ describe("Integration Facet lifecycle state", () => {
     );
     const client = {
       listIntegrationFacets: mock(async () => response(externallyManaged)),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -432,7 +433,7 @@ describe("Integration Facet lifecycle state", () => {
       const configured = { ...binding("active", 1), canRemove };
       const client = {
         listIntegrationFacets: mock(async () => response(configured)),
-      } as unknown as OpenGeniBrowserClient;
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
       const rendered = await renderPanel({ client });
       try {
         await act(async () => button(rendered.container, "Manage facets").click());
@@ -463,7 +464,7 @@ describe("Integration Facet lifecycle state", () => {
     const client = {
       listIntegrationFacets: mock(async () => response(directlyShared)),
       removeIntegrationFacet,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const rendered = await renderPanel({ client });
     try {
       await act(async () => button(rendered.container, "Manage facets").click());
@@ -504,7 +505,7 @@ async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacet
     await act(async () => {
       root.render(
         <IntegrationFacetsPanel
-          client={{} as OpenGeniBrowserClient}
+          client={{} as ChatClient<OpenGeniBrowserClient>}
           workspaceId="00000000-0000-4000-8000-000000000101"
           instance={instance}
           facetCount={1}

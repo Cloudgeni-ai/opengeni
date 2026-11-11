@@ -6,6 +6,7 @@ import {
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -41,6 +42,7 @@ import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
 import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
+import { savedToolReviewLoaders } from "./saved-tool-reviews";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import {
   browserInteractiveAnswerStore,
@@ -109,7 +111,7 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
   sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
 });
 
-export type SessionConversationProps = ClientOverride &
+export type SessionConversationProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /**
      * `null` while your server is still creating the session. Render the
@@ -299,7 +301,11 @@ export type SessionConversationProps = ClientOverride &
       HumanInputSurfaceProps,
       "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
     >;
-    /** Product approval presentation; permission decisions remain stock. */
+    /**
+     * Product approval presentation; permission decisions remain stock.
+     * Where `loadReview` resolves `null` (or is omitted), the card shows the
+     * server's saved review of the action, which the conversation reads itself.
+     */
     approvalProps?: Omit<
       ComponentProps<typeof ApprovalSurface>,
       "approvals" | "onApprove" | "onReject" | "responding" | "error"
@@ -513,6 +519,30 @@ function ConversationView({
     labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
+  // Approval cards read the server's saved review of each action, after any
+  // review of the host's own: a Code Mode request carries no inline arguments.
+  // A client without saved reviews (a hand-written session client) keeps the
+  // host's loaders as they are.
+  const hostLoadReview = approvalProps?.loadReview;
+  const hostLoadDetails = approvalProps?.loadDetails;
+  const { client: reviewClient, workspaceId: reviewWorkspaceId } = context;
+  const reviewLoaders = useMemo(() => {
+    const client = reviewClient;
+    const workspaceId = reviewWorkspaceId;
+    if (!sessionId || !client.getToolActionReview || !client.getToolReviewDetails) return null;
+    return savedToolReviewLoaders({
+      readReview: async (approvalId) =>
+        await client.getToolActionReview!(workspaceId, sessionId, approvalId),
+      readDetails: async (review, path, offset) =>
+        await client.getToolReviewDetails!(workspaceId, sessionId, review.id, {
+          actionDigest: review.actionDigest,
+          path,
+          offset,
+        }),
+      loadReview: hostLoadReview,
+      loadDetails: hostLoadDetails,
+    });
+  }, [reviewClient, reviewWorkspaceId, sessionId, hostLoadReview, hostLoadDetails]);
   const transcription = useComposerTranscription(
     context.client,
     context.workspaceId,
@@ -712,6 +742,12 @@ function ConversationView({
           >
             <MessageTimeline
               renderMessageText={renderMessageText}
+              artifactScope={{
+                client: context.client,
+                workspaceId: context.workspaceId,
+                sessionId: sessionId ?? undefined,
+                override: resolveLink,
+              }}
               resolveLink={links}
               renderInteractiveBlock={
                 renderInteractiveBlock === false
@@ -777,6 +813,7 @@ function ConversationView({
                 <ApprovalSurface
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
+                  {...reviewLoaders}
                   approvals={approvals}
                   // A refusal rejects, so the card (or Approve all) names it
                   // and keeps the action waiting.
@@ -800,7 +837,15 @@ function ConversationView({
                 recovery={providerRecovery}
               />
               {/* Links in agent questions resolve like links in its replies. */}
-              <OpenGeniLinkProvider resolveLink={links}>
+              <OpenGeniLinkProvider
+                resolveLink={links}
+                artifactScope={{
+                  client: context.client,
+                  workspaceId: context.workspaceId,
+                  sessionId: sessionId ?? undefined,
+                  override: resolveLink,
+                }}
+              >
                 <HumanInputSurface
                   className="mx-auto max-w-3xl"
                   autoFocus={false}
@@ -1071,7 +1116,7 @@ function useDefaultInteractiveBlock(
 
 type RetainedLoaderClient = Partial<
   Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createRetainedArtifactDownloadUrl"
     | "downloadRetainedArtifact"
     | "downloadRetainedScreenshot"
@@ -1149,7 +1194,9 @@ export function useComposerTranscription(
     key: string;
     enabled: boolean;
   } | null>(null);
-  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const reader = client as Partial<
+    Pick<ChatClient<OpenGeniClient>, "getWorkspace" | "transcribeAudio">
+  >;
   const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
     if (!supported) return;
@@ -1181,8 +1228,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
-              Partial<Pick<OpenGeniClient, "requestJson">>,
+            client: reader as Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+              Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

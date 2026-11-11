@@ -1,0 +1,4 @@
+-- deployment-mode: rolling
+ALTER TABLE session_realtime_modes VALIDATE CONSTRAINT session_realtime_modes_state_check;
+ALTER TABLE session_realtime_modes VALIDATE CONSTRAINT session_realtime_modes_terminal_check;
+ALTER TABLE session_realtime_modes VALIDATE CONSTRAINT session_realtime_modes_incoming_call_check;

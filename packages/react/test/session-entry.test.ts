@@ -56,9 +56,14 @@ describe("session-only entry", () => {
     // Refusal copy and the controller's model labels/order are explicit pure
     // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // Source links shown without hosted-search tracking: a dependency-free leaf.
+      "@opengeni/contracts/citation-urls",
       // Claude citation tags shown as their text: a dependency-free contracts leaf.
       "@opengeni/contracts/claude-cite-tags",
       "@opengeni/contracts/claude-subscription-model-ids",
+      // The shared "Machine access needed" sentence for a refused machine move:
+      // a dependency-free contracts leaf shared with the worker and server.
+      "@opengeni/contracts/machine-access",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
       // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.

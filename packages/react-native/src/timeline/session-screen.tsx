@@ -1,10 +1,12 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   approvalsDecidable,
   conversationTimeline,
   personalMachineCopy,
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
   timelineLivePause,
   useSessionStart,
   useSessionStartupTimeline,
@@ -64,7 +66,7 @@ import type {
   ClientModel,
   OpenGeniClient,
   ResourceRef,
-  Session,
+  ChatSession as Session,
   SessionBackgroundCommand,
 } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
@@ -87,7 +89,7 @@ export interface NativeSessionScreenProps extends Omit<
   NativeMessageTimelineProps,
   "items" | "events" | "status" | "trailing"
 > {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   /** The submitted first message, until its durable history is available. */
   pendingPrompt?: PendingPrompt | null | undefined;
   /** Composer slots (products add their own actions/options here). */
@@ -124,11 +126,12 @@ export interface NativeSessionScreenProps extends Omit<
    * The review each pending approval shows, as the web `ApprovalSurface`'s
    * `loadReview`: the server's (`client.getToolActionReview`) or the host's
    * own plain title and consequence instead of the tool's raw arguments.
-   * See `ApprovalStrip`'s `loadReview`.
+   * With `client`, an approval this resolves `null` for shows the server's
+   * saved review. See `ApprovalStrip`'s `loadReview`.
    */
   loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   /**
    * Let people finish an agent's "connect your account" request in the chat,
    * with the web conversation's cards: sign-in opens the system sign-in
@@ -297,6 +300,19 @@ function SessionScreenBody({
   const m = useNativeTimelineMessages();
   const signals = resolveAgentSignals(agentSignals);
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
+  // With the full client, each approval card reads the server's saved review
+  // of its action after any review of the host's own: a Code Mode request
+  // carries no inline arguments, so without it the card can't say what it does.
+  const reviewWorkspaceId = controller.workspaceId;
+  const reviewSessionId = controller.sessionId;
+  const approvalReviews = useMemo<ApprovalStripProps["loadReview"]>(() => {
+    if (!client) return loadReview;
+    const saved = (approval: { id: string }) =>
+      client.getToolActionReview(reviewWorkspaceId, reviewSessionId, approval.id);
+    return loadReview
+      ? async (approval) => (await loadReview(approval)) ?? (await saved(approval))
+      : saved;
+  }, [loadReview, client, reviewWorkspaceId, reviewSessionId]);
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   const annotationReveal = useRef<AnnotationReveal | null>(null);
   const draftAnnotations = composer.annotations ?? [];
@@ -599,7 +615,7 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                loadReview={loadReview}
+                loadReview={approvalReviews}
                 onDecide={(id, decision, answer) =>
                   (decision === "approve"
                     ? control.approve(id, undefined, answer)
@@ -697,9 +713,9 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
 }
 
 /**
- * The runtime could not start this session's next step. It is not waiting on
- * the person, so it says so plainly and offers one recheck (Resume), which
- * starts the kept work again.
+ * The runtime could not start this session's next step. It says what is
+ * blocking it plainly; the kept work starts by itself once that is fixed. The
+ * machine's owner can allow it here, and an unknown failure offers Try again.
  */
 function StuckCard({
   session,
@@ -709,7 +725,7 @@ function StuckCard({
   onSessionChanged,
 }: {
   session: Session;
-  client: OpenGeniNativeSessionController["client"];
+  client: OpenGeniNativeSessionController<ChatClient>["client"];
   workspaceId: string;
   busy: boolean;
   onSessionChanged: () => Promise<void>;
@@ -718,7 +734,7 @@ function StuckCard({
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
   // The same state as the web notice: why the saved message didn't start, the
-  // machines this person may move the chat to, and one fenced recheck.
+  // machines this person may move the chat to, and the one action that fixes it.
   const start = useSessionStart({ session, onSessionChanged, client, workspaceId });
   const [failed, setFailed] = useState(false);
   // The recheck is one fenced Resume outside the session control runner, so
@@ -743,9 +759,34 @@ function StuckCard({
       : null;
   const runOnApprovedMachine = start.runOnApprovedMachine;
   // The web notice's words for the known refusal; the native stuck copy when
-  // the block is only known from its status event.
-  const copy = reason ? sessionAdmissionCopy(t, reason) : null;
-  const tone = approved ? c["status-waiting"] : c["status-failed"];
+  // the block is only known from its status event. Most refusals start by
+  // themselves once fixed, so they offer no button; the machine's owner gets
+  // Allow for this chat, and only an unknown failure gets Try again.
+  const copy = reason
+    ? start.needsMachineAccess && start.machineAccess
+      ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
+          canAllowHere: start.allowMachine !== undefined,
+        })
+      : sessionAdmissionCopy(t, reason)
+    : null;
+  const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;
+  const paused = session.effectiveControl.state === "paused";
+  const actionLabel = !copy
+    ? paused
+      ? null
+      : m.stuckRetry
+    : allowing
+      ? start.allowMachine
+        ? copy.action
+        : null
+      : copy.action && !paused
+        ? copy.action
+        : null;
+  const runAction = allowing ? start.allowMachine : start.recheck;
+  const tone =
+    approved || (copy && (copy.action === null || allowing))
+      ? c["status-waiting"]
+      : c["status-failed"];
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -858,6 +899,7 @@ function StuckCard({
         <>
           <Text style={textStyle}>{copy.body}</Text>
           <Text style={textStyle}>{copy.next}</Text>
+          {paused ? <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text> : null}
         </>
       ) : (
         <Text style={textStyle}>{m.stuckBody}</Text>
@@ -871,12 +913,12 @@ function StuckCard({
             color: c["status-failed"],
           }}
         >
-          {m.stuckRetryFailed}
+          {allowing ? t("sessionAdmission.allowFailed") : m.stuckRetryFailed}
         </Text>
       ) : null}
-      {machine || approved ? null : (
+      {machine || approved || actionLabel === null || !runAction ? null : (
         <Button
-          label={m.stuckRetry}
+          label={actionLabel}
           variant="primary"
           busy={busy || rechecking}
           disabled={busy || rechecking}
@@ -886,8 +928,7 @@ function StuckCard({
             recheckPending.current = true;
             setRechecking(true);
             setFailed(false);
-            start
-              .recheck()
+            runAction()
               .catch(() => setFailed(true))
               .finally(() => {
                 recheckPending.current = false;
@@ -1144,7 +1185,7 @@ function DraftConflictStrip(props: {
 
 /** Polls the session's commands only while the panel is open, as web does. */
 function NativeSessionCommands(props: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
 }) {

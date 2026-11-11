@@ -158,7 +158,7 @@ function justificationProblem(value: { first: string; full: string }): string | 
   return null;
 }
 
-function contractStepProblem(value: { first: string; full: string }): string | null {
+export function contractStepProblem(value: { first: string; full: string }): string | null {
   const placeholder = placeholderReason(value.full);
   if (placeholder) return `the ${CONTRACT_STEP_KEY} annotation ${placeholder}`;
   if (value.full.length < MIN_CONTRACT_STEP_CHARS) {

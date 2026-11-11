@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   type ComposerDraft,
@@ -17,13 +18,12 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
-  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
-  COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
   composerSubmissionCanRetry,
   composerSubmissionErrorMessage,
+  isComposerSelectionRefusalMessage,
 } from "../lib/format";
 import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
@@ -64,7 +64,7 @@ export type InitialComposerDraft = {
  */
 export type ComposerBusySend = "queue" | "steer";
 
-export type UseComposerOptions = EmbeddedSessionClientOverride &
+export type UseComposerOptions = EmbeddedSessionClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     /**
      * Whether the viewer can buy credits or upgrade the plan. When false, a
@@ -334,9 +334,8 @@ function restoredErrorReference(
   const correlationId = restoredCorrelationId(reference);
   return message &&
     correlationId &&
-    message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE &&
+    !isComposerSelectionRefusalMessage(message) &&
     message !== t("lib.format.modelUnavailable") &&
-    message !== COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE &&
     message !== t("lib.format.accountUnavailable")
     ? t("hooks.useComposer.messageReferenceCorrelationid", { message, correlationId })
     : message;
