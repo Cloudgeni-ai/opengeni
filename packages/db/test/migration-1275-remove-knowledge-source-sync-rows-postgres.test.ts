@@ -266,7 +266,9 @@ describe.skipIf(!realDatabase)("1275 removes retired Knowledge sync rows", () =>
       };
     });
 
-    await migrate(owned!.ownerUrl);
+    // Apply 1275 alone: 1281 to 1292 then drop the sync tables this checks.
+    await copyFile(join(import.meta.dir, "../drizzle", migration), join(prefix!, migration));
+    await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
 
     // The native task, its run, sync state and wake are gone.
     expect(await count("scheduled_tasks", "id", native.id)).toBe(0);

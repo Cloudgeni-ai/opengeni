@@ -1774,6 +1774,15 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1292 drops the seven retired Knowledge sync tables: five with full
+          // runtime DML and two append-only ACL evidence tables.
+          -(tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 7
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 5
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 2
+                : 0) +
           // 1106 adds the workspace-isolated external member revocation
           // markers: runtime read, insert and update, no delete.
           (tables === FORCE_RLS_TABLES ||
@@ -2417,6 +2426,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1292 drops the retired Knowledge sync tables.
           1 + // 1195 where organization Skills work.
           1 + // 1227 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
@@ -2436,6 +2446,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1292 drops the retired Knowledge sync tables.
           1 + // 1195 where organization Skills work.
           1 + // 1227 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
