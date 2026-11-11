@@ -1087,8 +1087,12 @@ async fn checkpointing(
 }
 
 /// Waits out `id`'s first checkpoint and, once its disk and memory
-/// changed, its second, and prints how long each took. Neither pauses the
-/// guest: process `pid` runs throughout.
+/// changed, one whose clone was taken after the change, and prints how
+/// long each took. None pauses the guest: process `pid` runs throughout.
+///
+/// A checkpoint that takes longer than the time between two is followed
+/// at once by the next, whose clone may then be taken before the change
+/// is written: that one does not hold it, and the one after is awaited.
 async fn checkpoint_twice(
     agent: &Agent,
     events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
@@ -1103,26 +1107,42 @@ async fn checkpoint_twice(
     )
     .await;
     assert_eq!(field(&output, "alive"), "yes", "{output}");
-    let second = checkpoint_done(events, id).await;
-    for event in [&first, &second] {
+    let written = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut later = Vec::new();
+    let checkpointed = loop {
+        later.push(checkpoint_done(events, id).await);
+        let checkpointed = status(&agent.client)
+            .await
+            .sandboxes
+            .into_iter()
+            .find(|sandbox| sandbox.id == id)
+            .unwrap();
+        if checkpointed
+            .backed_up_ms
+            .is_some_and(|cloned| u128::from(cloned) >= written)
+        {
+            break checkpointed;
+        }
+        assert!(later.len() < 4, "no checkpoint cloned after the change");
+    };
+    for event in std::iter::once(&first).chain(&later) {
         assert!(
             event.get("compute.paused_us").is_none(),
             "a checkpoint paused its guest: {event:?}"
         );
     }
     eprintln!(
-        "checkpoints took {} us and {} us",
+        "checkpoints took {} us and then {:?} us",
         micros(&first, "compute.duration_us"),
-        micros(&second, "compute.duration_us"),
+        later
+            .iter()
+            .map(|event| micros(event, "compute.duration_us"))
+            .collect::<Vec<_>>(),
     );
-    let checkpointed = status(&agent.client)
-        .await
-        .sandboxes
-        .into_iter()
-        .find(|sandbox| sandbox.id == id)
-        .unwrap();
     assert_eq!(checkpointed.level, LevelName::Running);
-    assert!(checkpointed.backed_up_ms.is_some());
 }
 
 /// Adopts `id` on `agent` under owner epoch 2, whole, and checks that its
