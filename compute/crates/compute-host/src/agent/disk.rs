@@ -222,9 +222,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     (Some(*sandbox), false)
                 }
                 Input::Finished {
-                    sandbox,
-                    outcome,
-                    ..
+                    sandbox, outcome, ..
                 } if self.core.sandbox(*sandbox).is_some_and(|view| {
                     // A pause done, or a step of a stopped disk that leaves
                     // no VM; a disk a step leaves running is read with the
