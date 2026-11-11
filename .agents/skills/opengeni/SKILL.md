@@ -385,8 +385,9 @@ When working on file flows, trace the full path end to end:
 7. Any result/artifact flow, if present in current code.
 
 The current generic sandbox-output write-back is deliberately narrow: `sandbox_file_publish`
-and the matching session API publish one current non-empty `/workspace` file of at most
-`25 MiB - 1 byte` into a permanent, integrity-addressed workspace `files` artifact. The
+and the matching session API publish one current non-empty file the session's shell can read
+(path scope in docs/artifact-library.md) of at most `25 MiB - 1 byte` into a permanent,
+integrity-addressed workspace `files` artifact. The
 closed receipt exposes only authenticated retrieval metadata. A historical raw sandbox
 link may invoke that route when selected, but publication uses the file's current bytes and
 does not rewrite message/event history. Do not generalize this into automatic retention of
