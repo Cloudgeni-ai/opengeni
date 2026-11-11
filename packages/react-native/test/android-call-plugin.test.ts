@@ -155,8 +155,7 @@ describe("Android rings through the app's own messaging service", () => {
     expect(names(application.service)).toEqual([".AppMessagingService", plugin.SERVICE]);
     expect(names(application["meta-data"])).toContain(plugin.META_APP_MESSAGING_SERVICE);
 
-    application = plugin.addSystemCallToManifest(manifest, { push: true }).manifest
-      .application[0]!;
+    application = plugin.addSystemCallToManifest(manifest, { push: true }).manifest.application[0]!;
     expect(names(application.service)).toEqual([
       ".AppMessagingService",
       plugin.SERVICE,
